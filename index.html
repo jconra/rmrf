@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Riposte Run</title>
+    <!-- oops.js MUST be first so it catches module load errors (mobile has no console). -->
+    <script src="/oops.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; overflow: hidden; background: #bfe4f5; }
+        canvas { display: block; }
+        #hud {
+            position: absolute; top: 14px; left: 14px; pointer-events: none;
+            font-family: 'Courier New', monospace; color: #2b2118;
+            text-shadow: 0 1px 2px rgba(255,255,255,0.5);
+            line-height: 1.7; letter-spacing: 1px;
+        }
+        #hud .title { font-size: 20px; font-weight: bold; letter-spacing: 5px; }
+        #hud .sub { font-size: 11px; opacity: 0.7; }
+        #perf {
+            position: absolute; bottom: 10px; left: 12px; pointer-events: none;
+            font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.5;
+            color: #1d2b33; text-shadow: 0 1px 2px rgba(255,255,255,0.6);
+            text-align: left; letter-spacing: 1px;
+        }
+        /* On-screen drive stick — revealed on touch devices (see main.js) */
+        #touch-joystick {
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            width: 132px; height: 132px; border-radius: 50%;
+            background: rgba(5, 12, 20, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            box-shadow: 0 0 12px rgba(0,0,0,0.25), inset 0 0 18px rgba(255,255,255,0.06);
+            z-index: 120; display: none; touch-action: none;
+            user-select: none; -webkit-user-select: none;
+        }
+        #touch-joystick.visible { display: block; }
+        .tj-label {
+            position: absolute; font-size: 11px; font-weight: bold; letter-spacing: 0.1em;
+            color: rgba(255, 255, 255, 0.55); pointer-events: none;
+        }
+        .tj-w { top: 6px;  left: 50%; transform: translateX(-50%); }
+        .tj-s { bottom: 6px; left: 50%; transform: translateX(-50%); }
+        .tj-a { left: 8px;  top: 50%; transform: translateY(-50%); }
+        .tj-d { right: 8px; top: 50%; transform: translateY(-50%); }
+        #touch-knob {
+            position: absolute; top: 50%; left: 50%;
+            width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%;
+            background: rgba(255, 255, 255, 0.16);
+            border: 1px solid rgba(255, 255, 255, 0.75);
+            box-shadow: 0 0 10px rgba(255,255,255,0.35);
+            transition: transform 0.05s linear;
+        }
+        /* On-screen fire button — revealed on touch devices alongside the stick */
+        #fire-btn {
+            position: fixed; bottom: 50px; right: 28px;
+            width: 92px; height: 92px; border-radius: 50%;
+            background: rgba(40, 8, 8, 0.45);
+            border: 1px solid rgba(255, 150, 150, 0.6);
+            box-shadow: 0 0 12px rgba(0,0,0,0.25), inset 0 0 18px rgba(255,90,90,0.12);
+            z-index: 120; display: none; touch-action: none;
+            user-select: none; -webkit-user-select: none;
+            font-family: 'Courier New', monospace; font-weight: bold; letter-spacing: 0.1em;
+            color: rgba(255, 200, 200, 0.85); font-size: 14px;
+            align-items: center; justify-content: center;
+        }
+        #fire-btn.visible { display: flex; }
+        #fire-btn.pressed { background: rgba(120, 20, 20, 0.6); transform: scale(0.94); }
+        /* Player health + fuel readout (top-left, under the title) */
+        #player-bars {
+            position: absolute; top: 54px; left: 16px; z-index: 60; pointer-events: none;
+            font-family: 'Courier New', monospace; font-size: 10px; letter-spacing: 2px;
+            color: #2b2118; text-shadow: 0 1px 2px rgba(255,255,255,0.5);
+        }
+        #player-bars .row { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+        #player-bars .lbl { width: 30px; }
+        #player-bars .track {
+            display: block; width: 150px; height: 9px; background: rgba(0,0,0,0.35);
+            border: 1px solid rgba(0,0,0,0.4); border-radius: 2px; overflow: hidden;
+        }
+        /* block, not the default inline — an inline span ignores width/height and
+           collapses to zero, leaving only the empty grey track showing. */
+        #player-bars .fill { display: block; height: 100%; width: 100%; transition: width 0.15s linear; }
+        #hp-fill { background: #4fd14f; }
+        #fuel-fill { background: #d9a441; }
+        #ammo-fill { background: #cf6f3a; }
+        #shield-fill { background: #46d6ff; }
+        #player-bars .ammo-txt { width: 22px; text-align: right; opacity: 0.85; }
+    </style>
+</head>
+<body>
+    <div id="hud">
+        <div class="title">RIPOSTE RUN</div>
+    </div>
+    <div id="player-bars" style="display:none">
+        <div class="row"><span class="lbl">HULL</span><span class="track"><span id="hp-fill" class="fill"></span></span></div>
+        <div class="row"><span class="lbl">FUEL</span><span class="track"><span id="fuel-fill" class="fill"></span></span></div>
+        <div class="row"><span class="lbl">AMMO</span><span class="track"><span id="ammo-fill" class="fill"></span></span><span id="ammo-txt" class="ammo-txt"></span></div>
+        <div class="row" id="shield-row" style="display:none"><span class="lbl">SHLD</span><span class="track"><span id="shield-fill" class="fill"></span></span></div>
+    </div>
+    <div id="perf"></div>
+    <div id="touch-joystick" aria-hidden="true">
+        <span class="tj-label tj-w">W</span>
+        <span class="tj-label tj-a">A</span>
+        <span class="tj-label tj-s">S</span>
+        <span class="tj-label tj-d">D</span>
+        <div id="touch-knob"></div>
+    </div>
+    <div id="fire-btn" aria-hidden="true">FIRE</div>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="js/main.js?v=35"></script>
+</body>
+</html>
