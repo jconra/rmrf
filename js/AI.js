@@ -122,7 +122,7 @@ function resolveTarget(key, view, mem) {
 // behaviors own all the steering geometry.
 const BEHAVIORS = {
   // Leaving the FOB: rotate IN PLACE until lined up on the gate, then drive straight
-  // out. No whisker wall-follow here (the graph marks this state skipWhiskers).
+  // out. No dodge overlay here (the graph marks this state skipWhiskers).
   exit(ctx) {
     const { err, mem, cfg } = ctx;
     const turn = clamp(err * cfg.exitTurnGain, -1, 1);
@@ -228,17 +228,40 @@ const BEHAVIORS = {
     return { fwd, turn, fire: false, state: ctx.mode };
   },
 
-  // Squeeze past a wall: commit to one turn direction and creep (or back out if boxed
-  // in on both sides). Runs for any non-exit state when the way ahead is blocked.
-  whisker(ctx) {
-    const { view, mem } = ctx;
-    if (!mem.avoidBias) mem.avoidBias = view.blockedLeft && !view.blockedRight ? 1
-                                      : view.blockedRight && !view.blockedLeft ? -1
-                                      : (mem.rng() < 0.5 ? -1 : 1);
-    const turn = mem.avoidBias;
-    const fwd = (view.blockedLeft && view.blockedRight) ? -0.6 : 0.3;
+  // Obstacle avoidance OVERLAY (not a standalone state): takes the behavior's intended
+  // command and, when the path ahead is blocked, steers around the obstacle while
+  // KEEPING the behavior's fire decision. The old version re-decided which way to go
+  // EVERY frame and reset the choice the instant the nose cleared — so on anything but
+  // a flat wall (a water inlet, a peninsula, a tree clump) it rocked back and forth
+  // across the edge making no progress, with its guns switched off: the "dance".
+  //
+  // The fix is COMMITMENT. Pick a way around ONCE and hold it (so the nose clearing
+  // mid-turn doesn't snap us back into the obstacle), keep holding it for `dodgeClear`
+  // seconds AFTER the path opens (so we actually get past, not re-block), and only
+  // forget the choice once we've been clear a while. If we circle one way for
+  // `dodgeFlip` seconds and stay blocked, flip — that breaks a concave trap. And we
+  // never gag the weapons: a blocked unit can still fire at whatever's in front of it.
+  // True wedges (driving but not moving) are still caught by the unstick reflex.
+  avoid(ctx, cmd) {
+    const { view, mem, cfg } = ctx;
+    if (view.blockedAhead) {
+      mem._dodgeClearT = 0;
+      if (!mem._dodgeTurn) {                       // choose a way around ONCE, then commit
+        mem._dodgeTurn = view.blockedLeft && !view.blockedRight ? 1
+                       : view.blockedRight && !view.blockedLeft ? -1
+                       : (mem.rng() < 0.5 ? -1 : 1);
+        mem._dodgeEpisodeT = 0;
+      }
+      mem._dodgeEpisodeT += view.dt;
+      if (mem._dodgeEpisodeT > cfg.dodgeFlip) { mem._dodgeTurn = -mem._dodgeTurn; mem._dodgeEpisodeT = 0; }
+    } else if (mem._dodgeTurn) {
+      mem._dodgeClearT += view.dt;                 // path clear — hold the turn a moment, then forget it
+      if (mem._dodgeClearT > cfg.dodgeClear) { mem._dodgeTurn = 0; mem._dodgeEpisodeT = 0; }
+    }
+    if (!mem._dodgeTurn) return cmd;               // no obstacle to round → behavior steers itself
+    const boxed = view.blockedLeft && view.blockedRight;   // walled on both feelers → back out, still turning
     mem._wantMove = true;
-    return { fwd, turn, fire: false, state: ctx.mode };
+    return { fwd: boxed ? -0.6 : 0.35, turn: mem._dodgeTurn, fire: cmd.fire, state: cmd.state };
   },
 };
 
@@ -246,7 +269,7 @@ const BEHAVIORS = {
 // Pure data (no functions): config knobs, latched interrupts, and an ordered
 // transition table. This reproduces the hand-written brain exactly and is what the
 // flowchart editor loads/exports. States name a BEHAVIOR + whether they skip the
-// whisker wall-follow; transitions are evaluated top-to-bottom, first match wins.
+// dodge overlay (skipWhiskers); transitions are evaluated top-to-bottom, first match wins.
 export const DEFAULT_BRAIN = {
   version: 1,
   type: 'unit-brain',
@@ -255,6 +278,8 @@ export const DEFAULT_BRAIN = {
     stillLimit: 1.8,     // seconds wedged before the unstick jolt fires
     unstickDur: 0.7,     // jolt duration (seconds)
     unstickRev: 0.7,     // reverse throttle during the jolt
+    dodgeClear: 0.6,     // seconds the path must stay clear before forgetting which way we were going round
+    dodgeFlip: 3.0,      // seconds stuck circling one way before flipping to the other (escape a trap)
     exitAlign: 0.30,     // |heading error| under which the exit state drives straight
     exitTurnGain: 2.2,   // steer gain while lining up on the gate
     bailBase: 0.45,      // hp pull-out threshold = bailBase - aggression*bailAggr
@@ -342,12 +367,11 @@ export function runBrain(graph, view, mem) {
   const ctx = { view, mem, p, cfg, mode, target, dist, err, self };
 
   const stateDef = graph.states[mode];
-  // Whisker wall-follow for any state that doesn't opt out (exit drives itself out).
-  if (!stateDef.skipWhiskers) {
-    if (view.blockedAhead) return BEHAVIORS.whisker(ctx);
-    mem.avoidBias = 0;
-  }
-  return BEHAVIORS[stateDef.behavior](ctx);
+  const out = BEHAVIORS[stateDef.behavior](ctx);
+  // Overlay obstacle avoidance on the behavior's steering (commit to one way around,
+  // keep firing) for any state that doesn't opt out — exit drives itself through the
+  // gate, so it skips this.
+  return stateDef.skipWhiskers ? out : BEHAVIORS.avoid(ctx, out);
 }
 
 export class Brain {
@@ -361,7 +385,9 @@ export class Brain {
     this.lastSeen = null;     // { x, z, t } — last confirmed enemy sighting
     this.wp = null;           // current patrol waypoint
     this.wpUntil = 0;
-    this.avoidBias = 0;       // remembered turn direction while squeezing past a wall
+    this._dodgeTurn = 0;      // committed way around an obstacle (±1, 0 = none) — held, not re-picked each frame
+    this._dodgeClearT = 0;    // seconds the path ahead has been clear (forget the dodge after dodgeClear)
+    this._dodgeEpisodeT = 0;  // seconds circling one way while still blocked (flip after dodgeFlip to escape a trap)
     this._resup = false;      // latched: heading home to rearm/refuel (don't dry-chase)
     this._hurt = false;       // latched: badly damaged → fall back to base to patch up
     this._lx = null; this._lz = null;   // last position (anti-wedge movement check)
