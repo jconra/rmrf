@@ -16,8 +16,8 @@ import { Garage, GARAGE_COUNTS } from './Garage.js';
 import { TEAM_COLORS, updateCamo, camoParams } from '../../vehicle-designer/js/CamoTexture.js';
 import { SoundManager } from '../../vehicle-designer/js/SoundManager.js';
 import { Projectiles } from '../../vehicle-designer/js/Projectiles.js';
-import { Brain, randomPersonality } from './AI.js?v=55';
-import { drawStrategy, makeDoctrine, pickArchetype, COUNTER } from './AIStrategies.js?v=55';
+import { Brain, randomPersonality } from './AI.js?v=56';
+import { drawStrategy, makeDoctrine, pickArchetype, assignArchetypes, COUNTER } from './AIStrategies.js?v=56';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
@@ -1680,10 +1680,10 @@ function steerToward(v, wx, wz) {
 }
 
 class AICommander {
-  constructor(team) {
+  constructor(team, archetype = null) {
     this.team = team;
     this.personality = randomPersonality();
-    this.archetype = pickArchetype(Math.random);      // named doctrine (Warrior/...) — drives the whole plan
+    this.archetype = archetype || pickArchetype(Math.random);   // named doctrine (Warrior/Turtle/...) — drives the whole plan
     this.colorIndex = null;
     this.started = false;
     this.unit = null;
@@ -1733,6 +1733,7 @@ class AICommander {
   }
   enemyBasePos() { return teamCenter(this.targetTeam(), 'main'); }
   enemyFobPos() { return teamCenter(this.targetTeam(), 'fob'); }   // where the enemy's units rise — the Warrior hunts here
+  homeBasePos() { return teamCenter(this.team, 'main'); }           // our own flag base — where the Turtle digs in
   flag() { return enemyFlagOf(this.team); }
   fortFrac() { return this.fortHp0 ? fortHpOf(this.targetTeam()) / this.fortHp0 : 1; }
   turretsLive() { return turretCountOf(this.targetTeam()); }
@@ -2177,7 +2178,9 @@ function setupCommanders() {
   commanders.length = 0;
   if (QS.has('noai')) return;
   const teamIds = [...new Set(camps.filter(c => c.role === 'main').map(c => c.team))];
-  for (const t of teamIds) if (TEAM_CTRL[t] === 'ai') commanders.push(new AICommander(t));
+  const aiTeams = teamIds.filter(t => TEAM_CTRL[t] === 'ai');
+  const archs = assignArchetypes(aiTeams.length);   // distinct doctrines → a real contrast each match
+  aiTeams.forEach((t, i) => commanders.push(new AICommander(t, archs[i])));
   // If no human is playing (e.g. AI-vs-AI spectate), kick everyone off immediately.
   if (!teamIds.some(t => TEAM_CTRL[t] === 'human')) startCommanders(null);
 }

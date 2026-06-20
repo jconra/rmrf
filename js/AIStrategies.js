@@ -164,14 +164,61 @@ class Warrior extends Strategy {
   }
 }
 
-// Pick a commander's archetype. Only the Warrior exists so far, so every AI is a Warrior
-// for now; as Rogue/Hunter/Turtle land this becomes a weighted choice.
-export function pickArchetype(rng = Math.random) { return 'warrior'; }
+// TURTLE doctrine — "hold the wall, bleed them, then sortie":
+//   defend — sit a Lurcher on the home base and let the turrets do the heavy lifting;
+//            kill attackers that come to grab the flag (the brain engages on sight).
+//   siege  — once a couple of attackers are beaten back (or patience runs out — so two
+//            turtles don't stalemate forever), bring up a Valkyrie and crack their base.
+//   grab   — send a Firebrat to lift the flag once the fort's breached.
+// A Turtle defending its base is exactly where an attacking Warrior is headed, so the two
+// archetypes MEET there — the contrast makes the fight the all-aggressor deck never had.
+class Turtle extends Strategy {
+  constructor(rng) { super(rng); this.step = 'defend'; }
+  tick(cmd, dt) {
+    super.tick(cmd, dt);
+    if (this.step === 'defend') {
+      if (cmd.kills >= 2 || this.t > 120) { this.step = 'siege'; this.t = 0; }   // beaten them back (or got bored) → sortie
+    } else if (this.step === 'siege') {
+      if (cmd.flagExposed() && (cmd.fortDown() || this.t > 85)) { this.step = 'grab'; this.t = 0; }
+    }
+  }
+  softenStep() { return 'siege'; }
+  wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : this.step === 'siege' ? 'valkyrie' : 'lurcher'; }
+  objective(cmd) {
+    if (this.step === 'grab') return this._flagOrHome(cmd);
+    if (this.step === 'siege') return cmd.enemyBasePos();
+    return cmd.homeBasePos();   // defend: hold on our own flag base, in our turrets' cover
+  }
+  shoot(cmd) { return this.step === 'siege'; }   // hold fire while defending (the brain still engages enemies on sight)
+  arriveDist(cmd) { return this.step === 'grab' ? 3 : this.step === 'defend' ? 6 : 10; }
+  objectiveLabel(cmd) {
+    const f = cmd.flag();
+    if (f && f.carrier === cmd.unit) return 'home with the flag';
+    if (this.step === 'grab') return 'the enemy flag';
+    if (this.step === 'siege') return 'the enemy base';
+    return 'home — holding the line';
+  }
+}
 
-// Build the strategy a commander runs: its archetype's fixed doctrine, or — until an
-// archetype is implemented — a random card off the legacy deck.
+// The roster of named doctrines. Add Rogue/Hunter here as they land.
+const ARCHETYPES = ['warrior', 'turtle'];
+function archetypeClass(name) { return name === 'turtle' ? Turtle : Warrior; }
+
+// One commander's archetype (random). Used for the lone AI in a human match.
+export function pickArchetype(rng = Math.random) { return ARCHETYPES[(rng() * ARCHETYPES.length) | 0]; }
+
+// Deal DISTINCT archetypes across N commanders so an AI-vs-AI match is a CONTRAST
+// (a Warrior vs a Turtle will actually fight). Shuffles the roster, cycles if N is bigger.
+export function assignArchetypes(n, rng = Math.random) {
+  const pool = [...ARCHETYPES];
+  for (let i = pool.length - 1; i > 0; i--) { const j = (rng() * (i + 1)) | 0; const t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+  return Array.from({ length: n }, (_, i) => pool[i % pool.length]);
+}
+
+// Build the strategy a commander runs: its archetype's fixed doctrine, or — with no
+// archetype — a random card off the legacy deck.
 export function makeDoctrine(archetype, personality, rng = Math.random, avoid = null) {
-  if (archetype === 'warrior') return new Warrior(rng);
+  if (archetype) return new (archetypeClass(archetype))(rng);
   return drawStrategy(personality, rng, avoid);
 }
 
