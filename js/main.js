@@ -16,8 +16,9 @@ import { Garage } from './Garage.js';
 import { TEAM_COLORS, updateCamo, camoParams } from '../../vehicle-designer/js/CamoTexture.js';
 import { SoundManager } from '../../vehicle-designer/js/SoundManager.js';
 import { Projectiles } from '../../vehicle-designer/js/Projectiles.js';
-import { Brain, randomPersonality } from './AI.js?v=53';
-import { drawStrategy, COUNTER } from './AIStrategies.js?v=50';
+import { Brain, randomPersonality } from './AI.js?v=54';
+import { drawStrategy, COUNTER } from './AIStrategies.js?v=54';
+import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 
@@ -1677,6 +1678,8 @@ class AICommander {
     this.fortHp0 = null;                              // enemy fort HP when this card started
     this.seenTypes = {};                              // rival vehicle types this team has spotted
     this.knownSupplies = new Set();                   // fog-of-war: resupply POIs this team has SCOUTED
+    this.explore = new ExploreMemory(map.worldW, map.worldH);   // coarse "where have we looked" grid
+    this._exploreWp = null;                           // current recon waypoint (held until reached)
     this._rising = false; this._elev = null;          // FOB-lift deploy state
     this._exit = null; this._exitT = 0;               // post-deploy "drive out through the gate" waypoint
     this._nav = { path: null, idx: 0, t: 0, dx: null, dz: null };   // A* path cache
@@ -1744,6 +1747,20 @@ class AICommander {
     let topType = null, topN = 0;
     for (const k in this.seenTypes) if (this.seenTypes[k] > topN) { topN = this.seenTypes[k]; topType = k; }
     return (topType && COUNTER[topType]) || 'lurcher';
+  }
+  // A recon waypoint into unexplored map, held until the unit reaches it, then advanced
+  // to the next — so a scout sweeps the island outward instead of beelining the base.
+  // Returns null once the map is mostly known (the card then falls back to its real goal).
+  exploreTarget() {
+    const v = this.unit; if (!v) return null;
+    if (this.explore.fraction() > 0.8) return null;        // map's mostly mapped — stop wandering
+    const px = v.holder.position.x, pz = v.holder.position.z;
+    if (this._exploreWp) {
+      const reach = this.explore.cell * 0.8;
+      if ((this._exploreWp.x - px) ** 2 + (this._exploreWp.z - pz) ** 2 < reach * reach) this._exploreWp = null;
+    }
+    if (!this._exploreWp) { const home = this.homePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z); }
+    return this._exploreWp;
   }
 
   // Draw a fresh card (on repeated losses / stalls) — keeps the AI unpredictable.
@@ -1822,8 +1839,8 @@ class AICommander {
     if (this._lastTowers == null) this._lastTowers = liveTowers;
     if (liveTowers < this._lastTowers) {
       aiLog(this.team, liveTowers === 0
-        ? `${this.personality.name}: enemy towers CLEAR — breaching HQ`
-        : `${this.personality.name}: tower down — ${liveTowers} enemy towers left`);
+        ? `${this.personality.name}: enemy turrets CLEAR — breaching HQ`
+        : `${this.personality.name}: turret down — ${liveTowers} enemy turrets left`);
       this._lastTowers = liveTowers;
     } else if (liveTowers > this._lastTowers) { this._lastTowers = liveTowers; }   // match reset
     this._dbg = {
@@ -1836,16 +1853,30 @@ class AICommander {
       towers: this.turretsLive(),   // enemy turrets still standing (tower-first ordering)
     };
     if (cmd.state !== prev) {
-      let why = '';
-      if (cmd.state === 'retreat') why = ` (hp ${Math.round(v.hp / v.maxHp * 100)}%)`;
-      else if (cmd.state === 'resupply') why = v.ammo <= 0 ? ' (out of ammo)' : ` (fuel ${Math.round(v.fuel / v.maxFuel * 100)}%)`;
-      else if (cmd.state === 'suppress') {
-        const inPos = view.threatStand && Math.hypot(view.threatStand.x - v.holder.position.x, view.threatStand.z - v.holder.position.z) <= 6;
-        why = inPos ? ` (shelling tower — ${this.turretsLive()} left)` : ' (skirting to isolate a tower)';
+      // Plain-language state line: WHAT the unit is doing and WHERE/AT-WHAT, plus the
+      // active strategy card in [brackets]. The wording deliberately distinguishes the
+      // two combat states the bare names conflate — `engage` is duelling a moving enemy
+      // VEHICLE, `suppress` is shelling a static enemy TOWER.
+      const card = (this.strategy.constructor.name || 'Card').replace('Strategy', '');
+      const dest = this.strategy.objectiveLabel ? this.strategy.objectiveLabel(this) : 'the objective';
+      const hpPct = Math.round(v.hp / v.maxHp * 100);
+      let line;
+      switch (cmd.state) {
+        case 'exit':     line = `rolling out → ${dest}`; break;
+        case 'advance':  line = `advancing → ${dest}`; break;
+        case 'pursue':   line = 'chasing the last-seen enemy'; break;
+        case 'retreat':  line = `falling back to heal (hp ${hpPct}%)`; break;
+        case 'resupply': line = v.ammo <= 0 ? 'returning to rearm (out of ammo)' : `returning to refuel (fuel ${Math.round(v.fuel / v.maxFuel * 100)}%)`; break;
+        case 'engage':   line = `engaging enemy ${view.enemy ? view.enemy.type : 'vehicle'}`; break;
+        case 'suppress': {
+          const inPos = view.threatStand && Math.hypot(view.threatStand.x - v.holder.position.x, view.threatStand.z - v.holder.position.z) <= 6;
+          line = `${inPos ? 'shelling a turret' : 'skirting to isolate a turret'} (${this.turretsLive()} left)`;
+          break;
+        }
+        case 'assault':  line = `sieging ${dest} (${this.turretsLive()} turrets left)`; break;
+        default:         line = cmd.state;
       }
-      else if (cmd.state === 'engage') why = ' (enemy in sight)';
-      else if (cmd.state === 'assault') why = ` (sieging, ${this.turretsLive()} towers left)`;
-      aiLog(this.team, `${this.personality.name} ${v.type}: ${cmd.state}${why}`);
+      aiLog(this.team, `${this.personality.name} ${v.type}: ${line} [${card}]`);
     }
   }
 
@@ -1981,6 +2012,7 @@ class AICommander {
   _view(v, dt) {
     const px = v.holder.position.x, pz = v.holder.position.z, h = v.heading;
     const flyer = v._move.ignoreWalls;
+    this.explore.mark(px, pz, AI_VISION * 0.7);   // paint this patch of map "known" for the team's recon memory
     let seesEnemy = false, enemy = null, seen = null, best = AI_VISION * AI_VISION;
     for (const o of combatants) {                       // nearest VISIBLE rival of any other team
       if (o.dead || o.team === this.team) continue;
@@ -2894,6 +2926,9 @@ window.RR = {
   navPlan: (v, x, z) => planPath(v, { x, z }),                 // debug: A* path for a unit
   navCellBlocked: (v, i, j) => cellBlocked(v, i, j),          // debug: nav passability of a cell
   get gateCells() { return [...gateCells]; },
+  get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
+  exploreFrac: (i = 0) => { const c = commanders[i]; return c && c.explore ? c.explore.fraction() : null; },   // debug: fraction of map this team has scouted
+  exploreWp: (i = 0) => { const c = commanders[i]; return c ? c._exploreWp : null; },                          // debug: current recon waypoint
   // Fast-forward the field sim by fixed steps (headless verification runs ~0.2x
   // real-time, so this advances GAME time without waiting on the slow renderer).
   stepField: (dt = 0.05, n = 1) => {

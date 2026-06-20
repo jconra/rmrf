@@ -40,6 +40,17 @@ class Strategy {
     if (f) return { x: f.group.position.x, z: f.group.position.z };
     return cmd.enemyBasePos();
   }
+  // A short, human phrase for whatever objective() currently points at — purely for
+  // the AI log so "advance" reads as "advancing → the front gate" instead of a bare
+  // verb. The open-step phrase is per-card (`_openLabel`); the grab/carry phrasing is
+  // shared. Keep these in sync with objective().
+  _openLabel(cmd) { return 'the enemy base'; }
+  objectiveLabel(cmd) {
+    const f = cmd.flag();
+    if (f && f.carrier === cmd.unit) return 'home with the flag';
+    if (this.step === 'grab') return 'the enemy flag';
+    return this._openLabel(cmd);
+  }
 }
 
 // BLITZ — roll a heavy straight at the front gate, level everything, then send a
@@ -50,6 +61,7 @@ class Blitz extends Strategy {
   wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : this._heavy; }
   objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.enemyBasePos(); }
   shoot(cmd) { return this.step !== 'grab'; }
+  _openLabel() { return 'the front gate'; }
 }
 
 // FLANK & BREACH — skirt to the enemy's WEAKEST wall, punch a hole there with a
@@ -60,6 +72,7 @@ class FlankBreach extends Strategy {
   wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : this._heavy; }
   objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.weakestApproach(); }
   shoot(cmd) { return this.step !== 'grab'; }
+  _openLabel() { return 'the weakest wall'; }
 }
 
 // AIR SNATCH — a Valkyrie ignores walls entirely: fly straight in and shell the
@@ -73,6 +86,7 @@ class AirSnatch extends Strategy {
   objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.enemyBasePos(); }
   shoot(cmd) { return this.step !== 'grab'; }   // valkyrie cracks the HQ; runner holds fire
   arriveDist(cmd) { return this.step === 'grab' ? 3 : 8; }
+  _openLabel() { return 'the HQ (flying in)'; }
 }
 
 // HUNTER — field the COUNTER to whatever the enemy keeps fielding, roam to find
@@ -83,6 +97,7 @@ class Hunter extends Strategy {
   wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : cmd.counterVehicle(); }
   objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.enemyBasePos(); }
   shoot(cmd) { return this.step !== 'grab'; }
+  _openLabel() { return 'enemy vehicles (hunting)'; }
 }
 
 // SCOUT & SNATCH — a Valkyrie flies recon to reveal the field + supply points (it
@@ -92,9 +107,11 @@ class ScoutSnatch extends Strategy {
   static weight(p) { return 0.3 + p.defensiveness * 0.8; }
   tick(cmd, dt) { super.tick(cmd, dt); if (this.step === 'open' && cmd.flagExposed() && (cmd.fortDown() || this.t > 55)) this.step = 'grab'; }
   wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : 'valkyrie'; }
-  objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.enemyBasePos(); }
+  // Open step: sweep unexplored map (recon) until it's mostly known, THEN press the base.
+  objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : (cmd.exploreTarget() || cmd.enemyBasePos()); }
   shoot(cmd) { return false; }
   arriveDist(cmd) { return this.step === 'grab' ? 3 : 30; }
+  _openLabel(cmd) { return cmd && cmd._exploreWp ? 'sweeping for recon' : 'the enemy base'; }
 }
 
 // TODO (need new game systems first, then add cards here):
