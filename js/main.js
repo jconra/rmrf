@@ -2155,8 +2155,24 @@ class AICommander {
         : `${this.personality.name}: turret down — ${liveTowers} enemy turrets left`);
       this._lastTowers = liveTowers;
     } else if (liveTowers > this._lastTowers) { this._lastTowers = liveTowers; }   // match reset
+    // MOVEMENT HEALTH — the half the log was missing: it showed INTENT ("assault turret")
+    // but not whether the unit is actually getting there. Compare real ground covered vs
+    // intent; when it wants to move but isn't, rack up stuck-time and name a likely cause.
+    const pX = v.holder.position.x, pZ = v.holder.position.z;
+    const step = this._lpx != null ? Math.hypot(pX - this._lpx, pZ - this._lpz) : 1;
+    this._lpx = pX; this._lpz = pZ;
+    const wantsMove = Math.abs(cmd.fwd) > 0.2 || Math.abs(cmd.turn) > 0.5 || cmd.state === 'engage';
+    if (wantsMove && step < view.dt * 0.8) this._stuckT = (this._stuckT || 0) + view.dt; else this._stuckT = 0;
+    let stuckWhy = '';
+    if (this._stuckT > 0.6) {
+      stuckWhy = !map.isLand(pX, pZ) ? 'in water'
+        : view.blockedAhead ? 'wall/obstacle ahead'
+        : (view.blockedLeft && view.blockedRight) ? 'boxed in'
+        : 'wedged on terrain';
+    }
     this._dbg = {
       name: this.personality.name, type: v.type, state: cmd.state,
+      stuck: this._stuckT > 0.8 ? +this._stuckT.toFixed(1) : 0, stuckWhy,
       card: (this.strategy.constructor.name || 'Card').replace('Strategy', ''),
       fwd: +cmd.fwd.toFixed(2), turn: +cmd.turn.toFixed(2),
       blk: (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'),
@@ -2714,6 +2730,7 @@ function updateAiLog() {
     if (!d) { html += `<span style="color:${col}">${cmd.team}</span> — deploying…\n`; continue; }
     html += `<span style="color:${col}">${d.name} ${d.type}</span> ${d.card}  enemyTwrs:${d.towers}\n`;
     html += `  ${d.state}  blk:${d.blk}  f/t:${d.fwd}/${d.turn}\n`;
+    if (d.stuck) html += `  <span style="color:#ff8a5a">⚠ STUCK ${d.stuck}s — ${d.stuckWhy}</span>\n`;
     html += `  hp:${d.hp}% ammo:${d.ammo} fuel:${d.fuel}  fob:${d.distFob}u\n`;
   }
   html += '<span style="opacity:0.55">────────────</span>\n';
