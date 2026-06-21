@@ -3,14 +3,14 @@
 // with a live controls panel. Garage + vehicles land in later milestones.
 
 import * as THREE from 'three';
-import { IslandMap, DEFAULTS } from './IslandMap.js?v=50';
+import { IslandMap, DEFAULTS } from './IslandMap.js?v=63';
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js';
 import { BuildGrid } from './BuildGrid.js';
 import { Camp } from './Walls.js?v=50';
-import { RoadNetwork } from './Roads.js';
-import { Foliage } from './Foliage.js';
-import { Vehicle, VEHICLE_TYPES } from './Vehicles.js';
+import { RoadNetwork } from './Roads.js?v=78';
+import { Foliage } from './Foliage.js?v=1';
+import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=65';
 import { Elevator } from './Elevator.js';
 import { Garage, GARAGE_COUNTS } from './Garage.js';
 import { TEAM_COLORS, updateCamo, camoParams } from '../../vehicle-designer/js/CamoTexture.js';
@@ -41,16 +41,54 @@ const SKY = new THREE.Color('#bfe4f5');     // bright daytime sky
 scene.background = SKY;
 scene.fog = new THREE.Fog(SKY, 220, 460);   // soft horizon haze
 
-// Warm key sun + cool sky-ground ambient = sunny beach.
-const sun = new THREE.DirectionalLight('#fff3d6', 1.7);
-sun.position.set(80, 130, 60);
+// Environment map = what shiny/metal surfaces REFLECT. A directional light gives a
+// specular highlight, but a true reflection needs something to sample — without an
+// env map, metals reflect nothing and render dark. We build a small procedural sky
+// (gradient + warm sun disc), PMREM-filter it, and hang it on the scene so every
+// MeshStandardMaterial picks it up: the metallic vehicles brighten and gain a moving
+// sky sheen, and glossy water reflects the sky + sun.
+function makeSkyEnv() {
+  const W = 512, H = 256;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0.00, '#4f93c8');   // zenith (deeper blue)
+  g.addColorStop(0.45, '#bfe4f5');   // sky
+  g.addColorStop(0.50, '#eaf5fb');   // horizon glow
+  g.addColorStop(0.56, '#cdd9d0');   // just below horizon
+  g.addColorStop(1.00, '#8fa39a');   // ground/sea bounce
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const sx = W * 0.62, sy = H * 0.30, sr = H * 0.18;   // warm sun disc up in the sky
+  const rg = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
+  rg.addColorStop(0.0, 'rgba(255,251,238,1)');
+  rg.addColorStop(0.3, 'rgba(255,244,214,0.85)');
+  rg.addColorStop(1.0, 'rgba(255,244,214,0)');
+  ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const _pmrem = new THREE.PMREMGenerator(renderer);
+const _skySrc = makeSkyEnv();
+scene.environment = _pmrem.fromEquirectangular(_skySrc).texture;
+_skySrc.dispose(); _pmrem.dispose();
+
+// Warm key sun + cool sky-ground ambient = sunny beach. A mid-low sun angle
+// (~40° up, afternoon) so light rakes across the vehicles' sides and catches
+// highlights — a high midday sun just lit their tops and left the flanks dark.
+const sun = new THREE.DirectionalLight('#fff3d6', 2.1);
+sun.position.set(0, 202, -25);   // bro's chosen specular angle (overridden per-map by scaleScene)
 scene.add(sun);
-const hemi = new THREE.HemisphereLight('#dff1ff', '#c2a86a', 0.85);
+const hemi = new THREE.HemisphereLight('#dff1ff', '#c2a86a', 0.95);
 scene.add(hemi);
 
 // --- Camera + minimal orbit control -----------------------------------
 const BASE_FOV = 55;   // landscape vertical fov
-const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.5, 1200);
+// near=3 (not 0.5): the orbit cam never gets closer than ~8u to the action, so a tiny
+// near plane just threw away depth-buffer precision (far/near went from 2500 to ~415),
+// which is what made the terrain/waterline z-fight so badly when zoomed out.
+const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 3, 1200);
 
 // Perspective fov is VERTICAL, so a tall portrait window (a phone) collapses the
 // horizontal view and feels zoomed in. In portrait, widen the vertical fov so the
@@ -78,6 +116,10 @@ const touchPan = { active: false, x: 0, y: 0, sx: 0, sy: 0, t: 0 };
 // (point-to-steer, set in the canvas touch handlers, consumed by driveInput). A quick
 // tap fires instead of steering. null = no finger steering this frame.
 let touchSteer = null;            // { x, y } screen point the vehicle should drive toward
+// A second finger HELD to one side (while the first steers) slides the hull straight
+// sideways toward it, aim unchanged — { id, x, y, t(down-time) }. A quick second tap
+// still fires; only a held finger strafes (see the dwell gate in driveInput).
+let touchStrafe = null;
 const TOUCH_STOP_R = 7;           // world radius around the vehicle that reads as "stop"
 
 function updateCamera() {
@@ -114,6 +156,7 @@ function updateCamera() {
   window.addEventListener('mouseup', e => { if (e.button === 0) fireHeld = false; else dragging = false; });
   el.addEventListener('contextmenu', e => e.preventDefault());   // right-drag look, no menu popup
   el.addEventListener('wheel', e => {
+    if (humanDriving()) return;   // zoom is a SPECTATOR control — the camera tracks the player at a fixed distance while driving
     orbit.dist = Math.max(8, Math.min(zoomMax, orbit.dist + e.deltaY * 0.12));
     updateCamera();
   }, { passive: true });
@@ -134,7 +177,11 @@ function updateCamera() {
       for (const t of e.changedTouches) {
         const s = { sx: t.clientX, sy: t.clientY, x: t.clientX, y: t.clientY, t: performance.now() };
         if (steerId === null) { steerId = t.identifier; steerStart = s; touchSteer = { x: t.clientX, y: t.clientY }; }
-        else taps[t.identifier] = s;
+        else {
+          taps[t.identifier] = s;
+          // First extra finger doubles as the strafe stick (still fires if it's a quick tap).
+          if (touchStrafe === null) touchStrafe = { id: t.identifier, x: t.clientX, y: t.clientY, t: performance.now() };
+        }
       }
       return;
     }
@@ -149,7 +196,10 @@ function updateCamera() {
     if (steerId !== null || Object.keys(taps).length) {
       for (const t of e.changedTouches) {
         if (t.identifier === steerId) { touchSteer.x = steerStart.x = t.clientX; touchSteer.y = steerStart.y = t.clientY; }
-        else if (taps[t.identifier]) { taps[t.identifier].x = t.clientX; taps[t.identifier].y = t.clientY; }
+        else if (taps[t.identifier]) {
+          taps[t.identifier].x = t.clientX; taps[t.identifier].y = t.clientY;
+          if (touchStrafe && touchStrafe.id === t.identifier) { touchStrafe.x = t.clientX; touchStrafe.y = t.clientY; }
+        }
       }
       return;
     }
@@ -169,6 +219,7 @@ function updateCamera() {
         steerId = null; steerStart = null; touchSteer = null;
       } else if (taps[t.identifier]) {
         const s = taps[t.identifier]; delete taps[t.identifier];
+        if (touchStrafe && touchStrafe.id === t.identifier) touchStrafe = null;
         if (isTap(s) && onField && player && !player.dead) fireAt(s.x, s.y);
       }
     }
@@ -223,17 +274,47 @@ const _spec = new THREE.Vector3();
 // Spectator focus: null = auto (track a flag carrier, else the first living unit);
 // otherwise a unit the viewer pinned with Tab/[/] (see the keydown handler).
 let spectateTarget = null;
+let spectateFree = false;      // viewer is roaming the island freely; don't chase units until FOLLOW
 function cycleSpectate(dir) {
+  spectateFree = false;        // picking a unit means follow it again
   const list = combatants.filter(v => !v.dead);
   if (!list.length) { spectateTarget = null; return; }
   let i = list.indexOf(spectateTarget);
   if (i < 0) i = dir > 0 ? -1 : 0;     // land on the first (fwd) / last (back) unit
   spectateTarget = list[(i + dir + list.length) % list.length];
 }
+// Watch a specific team: each tap advances to the next living unit of that team (so the
+// two spectate buttons each flip through their own side's units).
+function cycleSpectateTeam(team) {
+  spectateFree = false;
+  const list = combatants.filter(v => !v.dead && v.team === team);
+  if (!list.length) { spectateTarget = null; return; }
+  const i = list.indexOf(spectateTarget);   // not on this team → i = -1 → starts at 0
+  spectateTarget = list[(i + 1) % list.length];
+}
+// Is the viewer actively panning the camera (WASD, or a touch-drag past the deadzone)?
+// Mirrors panUpdate's own movement test so a stray tap doesn't trip free-look.
+function spectatePanning() {
+  if (keys['w'] || keys['a'] || keys['s'] || keys['d'] ||
+      keys['arrowup'] || keys['arrowdown'] || keys['arrowleft'] || keys['arrowright']) return true;
+  if (touchPan.active && performance.now() - touchPan.t > 120) {
+    const scale = window.innerHeight * 0.32;
+    const dx = (touchPan.x - window.innerWidth / 2) / scale;
+    const dy = (touchPan.y - window.innerHeight / 2) / scale;
+    if (Math.hypot(dx, dy) > 0.14) return true;
+  }
+  return false;
+}
 function spectateUpdate(dt) {
   if (TEAM_CTRL[PLAYER_TEAM] === 'human') return false;
-  ensureSpectateControls();   // on-screen prev/auto/next/log buttons (touch + click)
+  ensureSpectateControls();   // on-screen team1 / follow / team2 / log buttons (touch + click)
+  updateSpectateTeamButtons();   // keep the side buttons coloured + labelled per team
   if (spectateTarget && spectateTarget.dead) spectateTarget = null;   // pinned unit died → back to auto
+  // Free-look: once the viewer starts panning, let them roam the island — stop yanking
+  // the camera back to a unit until they hit FOLLOW. Returning false hands the camera to
+  // panUpdate (which moves orbit.target from the same WASD / touch-pan input).
+  if (spectatePanning()) spectateFree = true;
+  if (spectateFree) { if (spectateTagEl) spectateTagEl.style.display = 'none'; return false; }
   let focus = spectateTarget;
   if (!focus) for (const f of flags) if (f.carried && f.carrier && !f.carrier.dead) { focus = f.carrier; break; }
   if (!focus) for (const cmd of commanders) if (cmd.unit && !cmd.unit.dead) { focus = cmd.unit; break; }
@@ -273,28 +354,50 @@ function ensureSpectateControls() {
   bar.id = 'spectate-ctrl';
   bar.style.cssText = 'position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:160;' +
     'display:flex;gap:10px;pointer-events:auto;';
-  const mk = (label, fn) => {
+  const BASE = 'font-family:"Courier New",monospace;font-size:15px;font-weight:bold;letter-spacing:1px;' +
+    'border:1px solid rgba(255,255,255,0.35);border-radius:9px;' +
+    'padding:13px 17px;min-width:52px;text-align:center;user-select:none;-webkit-user-select:none;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,0.3);touch-action:manipulation;cursor:pointer;';
+  // A side button: tap to flip through that TEAM's units. Its colour/label track the
+  // live team colour (updateSpectateTeamButtons); _team is set there too.
+  const mkTeam = () => {
     const btn = document.createElement('div');
-    btn.textContent = label;
-    btn.style.cssText = 'font-family:"Courier New",monospace;font-size:15px;font-weight:bold;letter-spacing:1px;' +
-      'color:#eef4f8;background:rgba(8,12,18,0.7);border:1px solid rgba(255,255,255,0.35);border-radius:9px;' +
-      'padding:13px 17px;min-width:52px;text-align:center;user-select:none;-webkit-user-select:none;' +
-      'box-shadow:0 2px 8px rgba(0,0,0,0.3);touch-action:manipulation;cursor:pointer;';
-    const press = (ev) => {
+    btn.style.cssText = BASE + 'color:#eef4f8;background:rgba(8,12,18,0.7);';
+    btn._team = null;
+    btn.addEventListener('pointerdown', (ev) => {
       ev.preventDefault(); ev.stopPropagation();
-      btn.style.background = 'rgba(60,90,120,0.85)';
-      setTimeout(() => { btn.style.background = 'rgba(8,12,18,0.7)'; }, 130);
-      fn();
-    };
-    btn.addEventListener('pointerdown', press);   // covers touch + mouse, fires once
+      if (btn._team) cycleSpectateTeam(btn._team);
+    });
     bar.appendChild(btn);
+    return btn;
   };
-  mk('◀', () => cycleSpectate(-1));
-  mk('AUTO', () => { spectateTarget = null; });
-  mk('▶', () => cycleSpectate(1));
-  mk('LOG', () => { aiLogOn = !aiLogOn; updateAiLog(); });
+  // Two side buttons, one per team: tap to follow that team (cycle its units). There's
+  // no FOLLOW button — selecting a team IS following; panning (WASD / drag) drops to
+  // free-look. The LOG lives top-right now (see ensureLogToggle), not down here.
+  const tA = mkTeam();
+  const tB = mkTeam();
+  spectateTeamBtns = [tA, tB];
   document.body.appendChild(bar);
   spectateControlsEl = bar;
+}
+// Keep the two side buttons coloured + labelled by the live team colours, and light up
+// whichever team is currently being watched.
+let spectateTeamBtns = [];
+function updateSpectateTeamButtons() {
+  if (!spectateTeamBtns.length) return;
+  const teams = [...new Set(commanders.map(c => c.team))];
+  for (let i = 0; i < spectateTeamBtns.length; i++) {
+    const btn = spectateTeamBtns[i], team = teams[i];
+    if (!team) { btn.style.display = 'none'; continue; }
+    btn.style.display = '';
+    btn._team = team;
+    const hex = teamColor(team);
+    btn.textContent = colorName(hex);
+    const on = !spectateFree && spectateTarget && spectateTarget.team === team;
+    btn.style.background = on ? hex : 'rgba(8,12,18,0.7)';
+    btn.style.borderColor = hex;
+    btn.style.color = on ? '#0a0e14' : '#eef4f8';   // dark text on the lit swatch
+  }
 }
 
 // --- Shot mode ---------------------------------------------------------
@@ -321,6 +424,10 @@ const GEN_OPTS = (wantSize || MAP_SEED != null) ? {
 const SPECTATE = QS.has('aivsai') || QS.has('spectate') || QS.has('ai');
 const FIELD_DIRECT = SHOT || QS.has('field') || SPECTATE;
 const GARAGE = QS.has('garage') || !FIELD_DIRECT;   // render the hangar as the entry view
+// Start screen: the default interactive entry opens a game menu over the hangar
+// (pick PLAYER VS AI / AI VS AI). ?play jumps straight to the deploy garage (the menu
+// navigates here), and the headless/dev/spectate query flags bypass it entirely.
+const START_MENU = !FIELD_DIRECT && !SHOT && !QS.has('play') && !QS.has('garage');
 // Attrition preview: ?losses=firebrat:3,jotun:1 — until match results feed this.
 const LOSSES = (() => {
   const raw = QS.get('losses');
@@ -417,10 +524,12 @@ let resupplies = [];  // neutral fuel/ammo/shield points of interest
 let onField = false;  // true while the island is on screen (false = hangar view)
 let fieldBuilt = false; // the island is generated once, then reused across deploys
 let matchOver = false;  // a flag was captured — freeze the action, show the result
+let matchWon = false;   // last match's result for the PLAYER team (VICTORY vs DEFEAT on the end menu)
 let flagsCaptured = 0;  // enemy flags the player has extracted into the garage (score)
 let deploy = null;    // { type, colorIndex } captured when a deploy is confirmed
 let fieldFadeT = 0;   // counts up after handoff to fade the black deploy overlay out
 let garageFadeT = null; // when set, fades the garage in from black (on return)
+let waterT = 0;         // elapsed seconds driving the animated water ripples (pauses with the game)
 let victoryReturn = false; // the current lift descent is a winning flag extraction (run the cinematic)
 let victoryHoldT = 0;      // beat held at the bottom of a victory descent before fading out
 const VICT_HOLD = 1.9;     // seconds to linger on the celebration at the bottom
@@ -1291,6 +1400,18 @@ function blockedFor(move, avoidWater) {
   };
 }
 
+// Deck height of a BRIDGE (a road cell that runs over water) at a world point, or null
+// if (x,z) isn't on one. A land road follows the terrain normally; only the over-water
+// span is a raised deck — vehicles ride it instead of wading/sinking beneath it. Must
+// match the grade Roads.js builds the deck at (bridgeY there).
+function bridgeDeckY(x, z) {
+  if (!roadNet || !roadNet.cells) return null;
+  const cx = Math.round(x / grid.cell), cz = Math.round(z / grid.cell);
+  if (!roadNet.cells.has(cx + ',' + cz)) return null;
+  if (map.isLand(x, z)) return null;
+  return (map.params.flatLand ? map.params.beachHeight + 0.8 : map.params.beachHeight + 0.5) + 0.08;
+}
+
 // Resolve altitude + water flooding for a vehicle, and crush/bump trees it touches.
 function applyAltitude(veh, dt) {
   const m = veh._move; if (!m) return;
@@ -1301,7 +1422,11 @@ function applyAltitude(veh, dt) {
   const deepWater = !deck && map.isDeepWater(x, z);   // only the deep part drowns a sinker
   let target;
   if (m.water === 'sink') {
-    if (deepWater) {
+    const bridgeY = deck ? null : bridgeDeckY(x, z);   // on a bridge → ride the deck across the water
+    if (bridgeY != null) {
+      veh._sink = Math.max(0, veh._sink - dt * SINK_RATE * 1.6);
+      target = bridgeY - veh._sink;
+    } else if (deepWater) {
       veh._sink += dt * SINK_RATE;
       target = -veh._sink;
       if (veh._sink >= SINK_KILL) { destroyVehicle(veh, 'sank'); return; }
@@ -1333,11 +1458,12 @@ function applyAltitude(veh, dt) {
 // "limps" at reduced power (LIMP). Idle sips a quarter of the full-throttle rate.
 const LIMP = 0.35;
 function burnFuel(veh, inp, dt) {
-  if (veh.fuel <= 0) return { fwd: inp.fwd * LIMP, turn: inp.turn * (LIMP + 0.25) };
-  const load = (Math.abs(inp.fwd) + Math.abs(inp.turn) * 0.5);
+  const st = inp.strafe || 0;
+  if (veh.fuel <= 0) return { fwd: inp.fwd * LIMP, turn: inp.turn * (LIMP + 0.25), strafe: st * LIMP };
+  const load = (Math.abs(inp.fwd) + Math.abs(inp.turn) * 0.5 + Math.abs(st) * 0.6);
   veh.fuel = Math.max(0, veh.fuel - veh.burn * (0.25 + 0.75 * Math.min(1, load)) * dt);
   if (veh.isPlayer) updatePlayerHud();
-  if (veh.fuel <= 0) return { fwd: inp.fwd * LIMP, turn: inp.turn * (LIMP + 0.25) };
+  if (veh.fuel <= 0) return { fwd: inp.fwd * LIMP, turn: inp.turn * (LIMP + 0.25), strafe: st * LIMP };
   return inp;
 }
 
@@ -2254,6 +2380,7 @@ class AICommander {
       const reach = 16;
       let best = null, bestD = reach * reach, ty = 2.0;
       for (const o of obstacles) {
+        if (o.team === this.team) continue;            // never shoot our OWN base walls (the trigger-happy own-flag-shredding bug)
         const ox = o.x - px, oz = o.z - pz;
         if (ox * fx + oz * fz <= 0) continue;          // behind the nose
         const d = ox * ox + oz * oz;
@@ -2337,9 +2464,13 @@ function showBanner(text, opts = {}) {
 // a rival capture pops DEFEAT instead. Pure DOM overlay — no extra render passes.
 // TEAM_COLORS[i].hex is already a CSS string ('#rrggbb').
 function teamColor(team) {
-  if (team === PLAYER_TEAM) return TEAM_COLORS[playerColorIndex] ? TEAM_COLORS[playerColorIndex].hex : '#ffffff';
+  // An AI commander wears the colour IT picked — only the human's team reads
+  // playerColorIndex. (Without the ctrl check, an AI 'red' team always showed RED,
+  // since PLAYER_TEAM === 'red' and playerColorIndex defaults to the red slot.)
   const cmd = commanders.find(c => c.team === team && c.colorIndex != null);
-  return cmd && TEAM_COLORS[cmd.colorIndex] ? TEAM_COLORS[cmd.colorIndex].hex : '#ffffff';
+  if (TEAM_CTRL[team] === 'human') return TEAM_COLORS[playerColorIndex] ? TEAM_COLORS[playerColorIndex].hex : '#ffffff';
+  if (cmd && TEAM_COLORS[cmd.colorIndex]) return TEAM_COLORS[cmd.colorIndex].hex;
+  return team === PLAYER_TEAM && TEAM_COLORS[playerColorIndex] ? TEAM_COLORS[playerColorIndex].hex : '#ffffff';
 }
 // Name flag messages after the flag's ACTUAL colour, not its internal team id —
 // a team painted SNOW shouldn't read "RED FLAG TAKEN". Nearest palette swatch by
@@ -2409,32 +2540,72 @@ function playDefeat() { clearCeleb(); showCelebTitle('DEFEAT', '#ff6a6a', 'FLAG 
 // An on-screen window into what each AI commander is THINKING — live per-unit
 // status + a rolling event feed. Built for phone debugging (no console). Toggle
 // with the 'L' key or ?ailog; on by default while spectating AI-vs-AI.
-let aiLogOn = QS.has('ailog') || SPECTATE;
+// Three states: 'hidden' (just the top-right LOG button), 'brief' (top info + the
+// single latest event — small, phone-friendly) and 'full' (whole window, scrollable
+// through every event, with the game PAUSED). The box's own – / + header switches
+// between them; – collapses (full→brief→hidden), + expands to full.
+let aiLogMode = (QS.has('ailog') || SPECTATE) ? 'brief' : 'hidden';
+let paused = false;    // game frozen while the log is expanded full-screen
 const aiEvents = [];   // rolling [{t, team, msg}]
 const _t0 = performance.now();
 function aiLog(team, msg) {
   aiEvents.push({ t: (performance.now() - _t0) / 1000, team, msg });
-  while (aiEvents.length > 18) aiEvents.shift();
+  while (aiEvents.length > 80) aiEvents.shift();   // deep enough to scroll back in full view
+}
+function setLogMode(mode) {
+  aiLogMode = mode;
+  paused = (mode === 'full');
+  updateLogToggle();
+  updateAiLog();
+}
+function ensureLogStyle() {
+  if (document.getElementById('ai-log-style')) return;
+  const s = document.createElement('style'); s.id = 'ai-log-style';
+  s.textContent = `
+    #ai-log { position:fixed; z-index:150; pointer-events:none; font-family:"Courier New",monospace;
+      color:#dfe8ef; background:rgba(8,12,18,0.8); border:1px solid rgba(255,255,255,0.18);
+      border-radius:6px; text-shadow:0 1px 2px rgba(0,0,0,0.8); font-variant-numeric:tabular-nums; }
+    #ai-log.brief { top:12px; right:12px; width:330px; max-width:82vw; }
+    #ai-log.full  { inset:10px; pointer-events:auto; display:flex; flex-direction:column; }
+    #ai-log-head { display:flex; align-items:center; justify-content:space-between; pointer-events:auto;
+      padding:6px 6px 6px 9px; border-bottom:1px solid rgba(255,255,255,0.14); }
+    #ai-log-title { font-weight:bold; font-size:12px; letter-spacing:2px; }
+    #ai-log-btns { display:flex; gap:6px; }
+    #ai-log .lg-btn { width:26px; height:26px; line-height:24px; text-align:center; cursor:pointer;
+      border:1px solid rgba(255,255,255,0.3); border-radius:5px; background:rgba(255,255,255,0.07);
+      font-weight:bold; font-size:16px; user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+    #ai-log .lg-btn:active { background:rgba(255,255,255,0.22); }
+    #ai-log-body { padding:8px 10px; font-size:11px; line-height:1.45; letter-spacing:0.5px; white-space:pre; }
+    #ai-log.brief #ai-log-body { overflow:hidden; }
+    #ai-log.full  #ai-log-body { overflow-y:auto; flex:1; -webkit-overflow-scrolling:touch; }`;
+  document.head.appendChild(s);
 }
 function ensureAiLogEl() {
   let el = document.getElementById('ai-log');
   if (el) return el;
+  ensureLogStyle();
   el = document.createElement('div'); el.id = 'ai-log';
-  // Fixed width (not max-width) so the box doesn't resize/jitter as the text changes;
-  // overflow clipped + tabular digits keep the columns from dancing.
-  el.style.cssText = 'position:fixed;top:14px;right:12px;z-index:150;pointer-events:none;' +
-    'font-family:"Courier New",monospace;font-size:11px;line-height:1.45;letter-spacing:0.5px;' +
-    'color:#dfe8ef;background:rgba(8,12,18,0.72);padding:8px 10px;border:1px solid rgba(255,255,255,0.18);' +
-    'border-radius:5px;width:330px;max-width:80vw;max-height:90vh;overflow:hidden;white-space:pre;' +
-    'font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.8);';
+  el.innerHTML =
+    '<div id="ai-log-head"><span id="ai-log-title">AI LOG</span>' +
+    '<span id="ai-log-btns"><span class="lg-btn" data-act="minus">–</span>' +
+    '<span class="lg-btn" data-act="plus">+</span></span></div>' +
+    '<div id="ai-log-body"></div>';
+  el.addEventListener('pointerdown', e => {
+    const b = e.target.closest('.lg-btn'); if (!b) return;
+    e.preventDefault(); e.stopPropagation();
+    if (b.dataset.act === 'minus') setLogMode(aiLogMode === 'full' ? 'brief' : 'hidden');
+    else setLogMode('full');
+  });
   document.body.appendChild(el);
   return el;
 }
 function updateAiLog() {
   const el = document.getElementById('ai-log');
-  if (!aiLogOn) { if (el) el.style.display = 'none'; return; }
+  if (aiLogMode === 'hidden') { if (el) el.style.display = 'none'; return; }
   const box = ensureAiLogEl(); box.style.display = '';
-  let html = '<b>AI LOG</b>  (L to hide)\n';
+  box.className = aiLogMode;
+  document.getElementById('ai-log-title').textContent = aiLogMode === 'full' ? 'AI LOG · PAUSED' : 'AI LOG';
+  let html = '';
   for (const cmd of commanders) {
     const d = cmd._dbg;
     const col = TEAM_ACCENT[cmd.team] || '#aaa';
@@ -2444,11 +2615,19 @@ function updateAiLog() {
     html += `  hp:${d.hp}% ammo:${d.ammo} fuel:${d.fuel}  fob:${d.distFob}u\n`;
   }
   html += '<span style="opacity:0.55">────────────</span>\n';
-  for (let i = aiEvents.length - 1; i >= 0; i--) {
-    const e = aiEvents[i], col = TEAM_ACCENT[e.team] || '#aaa';
-    html += `<span style="opacity:0.8">${e.t.toFixed(0)}s</span> <span style="color:${col}">${e.msg}</span>\n`;
+  const line = e => `<span style="opacity:0.8">${e.t.toFixed(0)}s</span> <span style="color:${TEAM_ACCENT[e.team] || '#aaa'}">${e.msg}</span>\n`;
+  if (aiLogMode === 'brief') {
+    // Brief: the single most-recent event from EACH team (one line per commander),
+    // shown in team order so it doesn't flip around as events come in.
+    for (const cmd of commanders) {
+      for (let i = aiEvents.length - 1; i >= 0; i--) {
+        if (aiEvents[i].team === cmd.team) { html += line(aiEvents[i]); break; }
+      }
+    }
+  } else {
+    for (let i = aiEvents.length - 1; i >= 0; i--) html += line(aiEvents[i]);
   }
-  box.innerHTML = html;
+  document.getElementById('ai-log-body').innerHTML = html;
 }
 
 // A flag was carried home → that team wins. Freeze the field, announce, then reset
@@ -2458,6 +2637,7 @@ function endMatch(winner) {
   matchOver = true;
   const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
   const won = winner === PLAYER_TEAM;
+  matchWon = won;
   if (!human) { playVictory(winner); showCelebTitle(`${winner.toUpperCase()} WINS`, teamColor(winner)); }
   else if (won) playVictory(PLAYER_TEAM);   // a non-extraction win (e.g. AI ally caps) still celebrates
   else playDefeat();
@@ -2465,7 +2645,9 @@ function endMatch(winner) {
   setTimeout(() => {
     const el = document.getElementById('banner'); if (el) el.style.opacity = '0';
     if (human) { if (player && playerElev) { leftPad = true; beginReturn(); } else returnToGarage(); }
-    else { clearCeleb(); for (const f of flags) f.group.position.set(f.home.x, f.home.y, f.home.z); matchOver = false; }   // AI-vs-AI plays on
+    // AI-vs-AI: the match is decided — open the play-again menu over the frozen field
+    // (reload starts a fresh game; nothing rebuilds in place).
+    else showGameMenu({ header: `${winner.toUpperCase()} WINS`, sub: 'MATCH OVER', reload: true });
   }, 5000);
 }
 
@@ -2506,7 +2688,7 @@ function buildObstacles() {
       for (let k = -2; k <= 2; k++) gateCells.add((gi + sx * k) + ',' + (gj + sz * k));
       continue;
     }
-    obstacles.push({ x: w.group.position.x, z: w.group.position.z,
+    obstacles.push({ x: w.group.position.x, z: w.group.position.z, team: c.team,
                      r: w.type === 'CORNER' ? grid.cell * 0.7 : grid.cell * 0.5 });
   }
   // Soft world edge: a ring ~70u beyond the outermost base. Keeps flyers (which
@@ -2591,15 +2773,30 @@ function driveInput() {
       const aim = Math.atan2(-dx, -dz);                 // heading whose front (-Z) points at the finger
       const err = wrapPi(aim - player.heading);
       const turn = Math.max(-1, Math.min(1, err * 2.4));
+      // Two-finger strafe: a second finger HELD to one side slides the hull straight
+      // sideways toward that finger while the first keeps aiming — no forward drive. The
+      // strafe sign is the second finger's offset projected onto the hull's right axis,
+      // so "finger on the right" = strafe right regardless of camera angle. Jotun can't.
+      if (touchStrafe && player.type !== 'jotun' && performance.now() - touchStrafe.t > 140) {
+        const b = pickWorldPoint(touchStrafe.x, touchStrafe.y);
+        if (b) {
+          const h = player.heading, rx = Math.cos(h), rz = -Math.sin(h);   // hull right axis
+          let bx = b.point.x - hp.x, bz = b.point.z - hp.z;
+          const bl = Math.hypot(bx, bz) || 1;
+          const strafe = Math.max(-1, Math.min(1, ((bx / bl) * rx + (bz / bl) * rz) * 1.5));
+          return { fwd: 0, turn, strafe };
+        }
+      }
       // Pivot in place when badly mis-aimed (>~75°) so we don't arc wide; otherwise
       // drive forward, easing to a stop once the finger sits on the vehicle.
       const fwd = Math.abs(err) > 1.3 ? 0 : (distXZ < TOUCH_STOP_R ? 0 : 1);
       return { fwd, turn };
     }
   }
-  const fwd  = (keys['w'] || keys['arrowup']   ? 1 : 0) - (keys['s'] || keys['arrowdown']  ? 1 : 0);
-  const turn = (keys['a'] || keys['arrowleft'] ? 1 : 0) - (keys['d'] || keys['arrowright'] ? 1 : 0);
-  return { fwd, turn };
+  const fwd    = (keys['w'] || keys['arrowup']   ? 1 : 0) - (keys['s'] || keys['arrowdown']  ? 1 : 0);
+  const turn   = (keys['a'] || keys['arrowleft'] ? 1 : 0) - (keys['d'] || keys['arrowright'] ? 1 : 0);
+  const strafe = (keys['e'] ? 1 : 0) - (keys['q'] ? 1 : 0);   // Q/E slide sideways (no turn)
+  return { fwd, turn, strafe };
 }
 
 // Drive the player vehicle and track the camera on it. Returns true if it drove
@@ -2611,9 +2808,10 @@ function driveUpdate(dt) {
     driving = true;
   }
   if (!driving || !player || player.dead) return false;
-  const inp = matchOver ? { fwd: 0, turn: 0 } : driveInput();   // controls freeze on win
+  const inp = matchOver ? { fwd: 0, turn: 0, strafe: 0 } : driveInput();   // controls freeze on win
   const out = burnFuel(player, inp, dt);    // no fuel → engine dead, can't move
-  player.drive(dt, out.fwd, out.turn, null, player._blocked);
+  const strafe = player.type === 'jotun' ? 0 : (out.strafe || 0);   // the Jotun is a fortress — no sidestep
+  player.drive(dt, out.fwd, out.turn, null, player._blocked, strafe);
   applyAltitude(player, dt);                // altitude / water flooding / tree crush
   if (!player || player.dead) return true;  // sank/destroyed this frame → bail before touching it
   aimPlayerTurret(player, dt);              // turret continuously follows the aim cursor
@@ -2658,7 +2856,10 @@ function scaleScene() {
   scene.fog.far = span * 1.6;
   camera.far = span * 3 + 200;
   camera.updateProjectionMatrix();
-  sun.position.set(span * 0.25, span * 0.5, span * 0.2);
+  // Sun nearly overhead, tilted slightly toward -Z — the specular look bro dialled in
+  // (x:0, z:-25 on the default 480 map). Kept proportional to span so any map size gets
+  // the same light DIRECTION, not just the default one.
+  sun.position.set(0, span * 0.42, -span * 0.052);
 }
 
 // Initial camera framing — only used once, on load.
@@ -2750,23 +2951,27 @@ function setFieldUI(show) {
     const el = document.getElementById(id);
     if (el) el.classList.remove('visible');
   }
-  const tog = ensureLogToggle(); tog.style.display = show ? 'flex' : 'none';   // phone-friendly AI-log toggle
+  ensureLogToggle(); updateLogToggle();   // phone-friendly AI-log button (top-right)
   if (!show) fireHeld = false;   // don't carry a held shot back into the garage
 }
-// A small always-reachable button to flip the AI decision log (no keyboard on a phone).
+// Top-right LOG button (where the old map ⚙ sat) — reveals the log from hidden. It
+// only shows while the field is up and the log is hidden; once open, the box's own
+// – button re-hides it.
 function ensureLogToggle() {
   let b = document.getElementById('ailog-toggle');
   if (b) return b;
-  b = document.createElement('div'); b.id = 'ailog-toggle'; b.textContent = 'AI';
-  b.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:160;width:46px;height:46px;border-radius:50%;' +
-    'display:flex;align-items:center;justify-content:center;font-family:"Courier New",monospace;font-weight:bold;' +
-    'font-size:13px;letter-spacing:1px;color:#dfe8ef;background:rgba(8,12,18,0.6);border:1px solid rgba(255,255,255,0.3);' +
-    'box-shadow:0 2px 8px rgba(0,0,0,0.3);user-select:none;-webkit-user-select:none;touch-action:manipulation;cursor:pointer;';
-  b.style.opacity = aiLogOn ? '1' : '0.55';
-  const toggle = e => { e.preventDefault(); e.stopPropagation(); aiLogOn = !aiLogOn; b.style.opacity = aiLogOn ? '1' : '0.55'; updateAiLog(); };
-  b.addEventListener('pointerdown', toggle);
+  b = document.createElement('div'); b.id = 'ailog-toggle'; b.textContent = 'LOG';
+  b.style.cssText = 'position:fixed;top:12px;right:12px;z-index:151;padding:7px 12px;border-radius:7px;' +
+    'font-family:"Courier New",monospace;font-weight:bold;font-size:13px;letter-spacing:2px;color:#dfe8ef;' +
+    'background:rgba(8,12,18,0.7);border:1px solid rgba(255,255,255,0.3);box-shadow:0 2px 8px rgba(0,0,0,0.3);' +
+    'user-select:none;-webkit-user-select:none;touch-action:manipulation;cursor:pointer;';
+  b.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); setLogMode('brief'); });
   document.body.appendChild(b);
   return b;
+}
+function updateLogToggle() {
+  const b = document.getElementById('ailog-toggle');
+  if (b) b.style.display = (onField && aiLogMode === 'hidden') ? 'block' : 'none';
 }
 
 // Build the garage scene + its UI/handlers. Called once via ensureGarage() — at
@@ -2801,11 +3006,10 @@ function setupGarageUI() {
     else if (k >= '1' && k <= '4') { garage.selectType(garage.types[+k - 1]); }
   });
 
-  // Field hotkeys. L toggles the AI log in any field mode; the camera-cycle keys
-  // (Tab/]/[ to pin next/prev unit, backtick to auto-follow) are spectate-only.
+  // Field hotkeys. The AI log is toggled by the on-screen LOG button (no keyboard on a
+  // phone). Camera-cycle keys (Tab/]/[ to pin next/prev unit) are spectate-only.
   window.addEventListener('keydown', (e) => {
     if (!onField) return;
-    if (e.key === 'l' || e.key === 'L') { aiLogOn = !aiLogOn; updateAiLog(); return; }
     if (TEAM_CTRL[PLAYER_TEAM] === 'human') return;
     if (e.key === 'Tab' || e.key === ']') { cycleSpectate(e.shiftKey ? -1 : 1); e.preventDefault(); }
     else if (e.key === '[') { cycleSpectate(-1); e.preventDefault(); }
@@ -2850,7 +3054,77 @@ function ensureGarage() {
   setupGarageUI();
 }
 
+// --- Game menu (start screen + play-again) ------------------------------
+// A win/loss can't just keep playing the same world — towers, walls and foliage are
+// gone for good. The clean reset is a full page RELOAD: a fresh load regenerates the
+// map (new random seed) and every bit of state. So the menu's mode buttons just
+// navigate (PLAYER VS AI -> ?play, AI VS AI -> ?aivsai), which reloads into a brand
+// new game. The one exception is PLAYER VS AI on the very first screen (nothing's
+// dirty yet): it just reveals the deploy hangar in place, no reload needed.
+const MENU_BASE = location.pathname;
+function ensureMenuStyle() {
+  if (document.getElementById('menu-style')) return;
+  const s = document.createElement('style'); s.id = 'menu-style';
+  s.textContent = `
+    #gamemenu { position:fixed; inset:0; z-index:400; display:none;
+      flex-direction:column; align-items:center; justify-content:center; gap:16px;
+      background:radial-gradient(ellipse at center, rgba(6,10,16,0.55), rgba(4,7,12,0.85));
+      font-family:"Courier New",monospace; -webkit-user-select:none; user-select:none; }
+    #gamemenu.show { display:flex; }
+    #gamemenu .gm-title { color:#eef3f8; font-size:40px; font-weight:bold; letter-spacing:10px;
+      text-shadow:0 3px 16px rgba(0,0,0,0.85); text-align:center; }
+    #gamemenu .gm-sub { color:#9fb1c0; font-size:12px; letter-spacing:5px; margin-bottom:20px; }
+    #gamemenu button { width:262px; padding:15px 0; font-family:inherit; font-size:15px;
+      letter-spacing:3px; font-weight:bold; color:#dfe8ef; cursor:pointer;
+      background:rgba(20,30,42,0.88); border:1px solid rgba(255,255,255,0.28); border-radius:6px;
+      box-shadow:0 2px 10px rgba(0,0,0,0.4); transition:background .12s, transform .06s; }
+    #gamemenu button:hover { background:rgba(40,58,80,0.96); }
+    #gamemenu button:active { transform:scale(0.97); }
+    #gamemenu .gm-help { width:262px; color:#aebecd; font-size:11px; line-height:1.75; letter-spacing:1px;
+      background:rgba(8,12,18,0.72); border:1px solid rgba(255,255,255,0.15); border-radius:6px;
+      padding:12px 16px; display:none; white-space:pre; margin-top:4px; }`;
+  document.head.appendChild(s);
+}
+function ensureGameMenu() {
+  let m = document.getElementById('gamemenu');
+  if (m) return m;
+  ensureMenuStyle();
+  m = document.createElement('div'); m.id = 'gamemenu';
+  m.innerHTML =
+    '<div class="gm-title" id="gm-title">RIPOSTE RUN</div>' +
+    '<div class="gm-sub" id="gm-sub">ISLAND CTF</div>' +
+    '<button data-act="pva">PLAYER VS AI</button>' +
+    '<button data-act="ava">AI VS AI</button>' +
+    '<button data-act="help">HELP</button>' +
+    '<div class="gm-help" id="gm-help">MOVE    W A S D  /  drag\n' +
+    'FIRE    click  /  tap\nSTRAFE  Q E  /  two-finger\nAIM     toward the cursor / touch\n\n' +
+    'Grab the enemy flag and ride it down\nyour own lift to win the match.</div>';
+  document.body.appendChild(m);
+  m.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const act = b.dataset.act;
+    if (act === 'help') { const h = document.getElementById('gm-help'); h.style.display = h.style.display === 'block' ? 'none' : 'block'; return; }
+    if (act === 'ava') { location.href = MENU_BASE + '?aivsai'; return; }
+    // PLAYER VS AI: reload into a fresh game after a match; on the first screen just open the hangar.
+    if (m.dataset.reload === '1') { location.href = MENU_BASE + '?play'; return; }
+    hideGameMenu();
+    setGarageOverlays(true);
+  });
+  return m;
+}
+function showGameMenu(opts = {}) {
+  const m = ensureGameMenu();
+  document.getElementById('gm-title').textContent = opts.header || 'RIPOSTE RUN';
+  document.getElementById('gm-sub').textContent = opts.sub || 'ISLAND CTF';
+  document.getElementById('gm-help').style.display = 'none';
+  m.dataset.reload = opts.reload ? '1' : '0';
+  m.classList.add('show');
+  setGarageOverlays(false);   // hide the deploy HUD behind the menu
+}
+function hideGameMenu() { const m = document.getElementById('gamemenu'); if (m) m.classList.remove('show'); }
+
 if (GARAGE) ensureGarage();
+if (START_MENU) showGameMenu();   // open the start screen over the hangar
 
 // Garage → island handoff. Fired once the garage rise has fully faded to black
 // (garage.phase === 'done'). Builds the island ONCE (behind the black overlay), then
@@ -2917,6 +3191,9 @@ function returnToGarage() {
     flagsCaptured++;   // the VICTORY cinematic already played over the descent (playVictory)
   }
   clearCeleb();        // tidy any confetti/title before the hangar shows
+  // Match decided (not a mid-match death/redeploy) → open the play-again menu. A pick
+  // reloads into a brand new world; the deploy hangar stays hidden behind it.
+  if (matchOver) showGameMenu({ header: matchWon ? 'VICTORY' : 'DEFEAT', sub: 'MATCH OVER', reload: true });
 }
 
 // Security-camera overlay for the garage: vignette + scanlines + REC + clock.
@@ -3054,9 +3331,10 @@ function mountHelp() {
     ['Swatches', 'choose team color'],
   ] : [
     ['W A S D', 'drive'],
-    ['Touch joystick', 'drive (drag from anywhere)'],
-    ['Scroll / pinch', 'zoom'],
-    ['⚙', 'tune the map'],
+    ['Q E', 'strafe'],
+    ['Click / tap', 'fire'],
+    ['Scroll / pinch', 'zoom (spectate)'],
+    ['LOG', 'AI decision log'],
   ];
   const btn = document.createElement('button');
   btn.id = 'helpbtn'; btn.textContent = '?';
@@ -3070,7 +3348,9 @@ function mountHelp() {
 }
 
 // Live controls -> regenerate.
-if (!GARAGE) new Controls(DEFAULTS, rebuild);
+// Map-gen tuning panel (the ⚙ MAP button + sliders) is dialled in — keep it out of
+// normal play, available on demand with ?mapgen for tuning sessions.
+if (!GARAGE && QS.has('mapgen')) new Controls(DEFAULTS, rebuild);
 
 // --- Tap-to-damage test (temporary, until vehicles can shoot) ----------
 // A quick tap (not an orbit drag) fires a damage burst at whatever it hits,
@@ -3227,25 +3507,28 @@ function animate() {
     // Rise finished + screen fully black → build the island and switch to it.
     if (garage.phase === 'done') enterField();
   } else {
-    if (!driveUpdate(dt)) spectateUpdate(dt) || panUpdate(dt);   // player, else follow the action / free cam
-    trackVelocities(dt);                   // per-vehicle velocity for AI aim-leading
-    if (!matchOver) updateCommanders(dt);  // AI teams (fog-of-war) + flag carry/capture — frozen on win
-    for (const c of camps) c.update(dt);
-    for (const e of elevators) e.update(dt);
-    for (const v of vehicles) v.idle(dt);
-    projectiles.update(dt);
-    updateProjectileHits();
-    if (foliage) foliage.update(dt);       // tree topple animations
-    destructibles.update(dt);
-    updateFx(dt);
-    updateHealthBars();
-    updateLock(dt);                        // Valkyrie target box: track + colour the lock
-    updateAimReticle();                    // cursor crosshair (other vehicles) + aim point
-    updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
-    updateWallTurrets(dt);                 // base corner turrets fire on intruders in range
-    updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
-    updateAiLog();                         // AI decision overlay (spectate / ?ailog)
-    updateEngineSounds();                  // spatial enemy/AI engine noise (distance-based)
+    if (!paused) {                         // full-screen log freezes the whole sim
+      if (!driveUpdate(dt)) spectateUpdate(dt) || panUpdate(dt);   // player, else follow the action / free cam
+      trackVelocities(dt);                 // per-vehicle velocity for AI aim-leading
+      if (!matchOver) updateCommanders(dt);  // AI teams (fog-of-war) + flag carry/capture — frozen on win
+      for (const c of camps) c.update(dt);
+      for (const e of elevators) e.update(dt);
+      for (const v of vehicles) v.idle(dt);
+      projectiles.update(dt);
+      updateProjectileHits();
+      if (foliage) foliage.update(dt);       // tree topple animations
+      waterT += dt; map.tickWater(waterT);   // animate the water-surface ripples
+      destructibles.update(dt);
+      updateFx(dt);
+      updateHealthBars();
+      updateLock(dt);                        // Valkyrie target box: track + colour the lock
+      updateAimReticle();                    // cursor crosshair (other vehicles) + aim point
+      updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
+      updateWallTurrets(dt);                 // base corner turrets fire on intruders in range
+      updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
+      updateEngineSounds();                  // spatial enemy/AI engine noise (distance-based)
+    }
+    updateAiLog();                         // AI decision overlay (renders even while paused)
     renderer.render(scene, camera);
     if (fade) {
       if (returning && victoryReturn) {

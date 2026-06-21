@@ -8,22 +8,53 @@ import * as THREE from 'three';
 import { astarGrid } from './astar.js';
 import { TILE } from './IslandMap.js';
 
+const ROAD_T = 0.5;   // road slab thickness — buried in the flat land, its side covers the drop at rough shore cells
+const ROAD_REUSE = 0.1;   // A* cost of a cell that already has road — near-free so new roads merge onto it instead of running parallel
 const ASPHALT = new THREE.MeshStandardMaterial({ color: '#5b5e63', roughness: 0.92, flatShading: true });
 const DECK = new THREE.MeshStandardMaterial({ color: '#7a6e57', roughness: 0.9, flatShading: true });
 const RAIL = new THREE.MeshStandardMaterial({ color: '#544c3b', roughness: 0.9, flatShading: true });
 
-// Straight road-tile texture: white side stripes + one dashed centre mark.
-function makeTileTexture() {
-  const s = 64;
+// Road-tile texture for ANY junction, keyed by which sides connect (n/s/e/w). One
+// generator so every piece shares the orientation convention: canvas +x = world east,
+// canvas +y = world south, so the markings line up tile-to-tile. The solid white
+// lines trace the road's OUTLINE: they border open ground and break open wherever an
+// arm connects — so a side road's edges stop at the junction instead of running into
+// the through road. A dashed centre line runs out along each connected arm.
+function makeRoadTexture(n, s, e, w) {
+  // dash period (0.5*S) divides the tile, so the centre dashes carry across seams;
+  // 2 dashes per tile reads as a proper centre line instead of a row of dots.
+  const S = 128, c = S / 2, edge = S * 0.09, lw = Math.max(2, S * 0.05), dash = [S * 0.16, S * 0.34];
   const cv = document.createElement('canvas');
-  cv.width = cv.height = s;
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#5b5e63'; ctx.fillRect(0, 0, s, s);
-  for (let i = 0; i < 400; i++) { const v = 70 + Math.random() * 36 | 0; ctx.fillStyle = `rgb(${v},${v},${v + 4})`; ctx.fillRect(Math.random() * s, Math.random() * s, 1, 1); }
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(0, 0, s * 0.07, s);
-  ctx.fillRect(s * 0.93, 0, s * 0.07, s);
-  ctx.fillRect(s * 0.46, s * 0.28, s * 0.08, s * 0.44);   // one centre dash
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#5b5e63'; g.fillRect(0, 0, S, S);
+  for (let i = 0; i < 520; i++) { const v = 70 + (Math.random() * 36 | 0); g.fillStyle = `rgb(${v},${v},${v + 4})`; g.fillRect(Math.random() * S, Math.random() * S, 1, 1); }
+  g.strokeStyle = '#e8e8e8'; g.lineWidth = lw; g.lineCap = 'butt';
+
+  // a/b = the road's inner edges (offset `edge` from the tile border). The central
+  // square is [a,b]x[a,b]; each connected arm is a strip from that square to the edge.
+  const a = edge, b = S - edge;
+  const seg = (x1, y1, x2, y2) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); };
+  g.setLineDash([]);
+  // For each side: if an arm connects, draw the arm's two SIDE edges out to the tile
+  // border; if not, cap that side of the central square (closing the outline).
+  if (n) { seg(a, 0, a, a); seg(b, 0, b, a); } else { seg(a, a, b, a); }
+  if (s) { seg(a, b, a, S); seg(b, b, b, S); } else { seg(a, b, b, b); }
+  if (e) { seg(b, a, S, a); seg(b, b, S, b); } else { seg(b, a, b, b); }
+  if (w) { seg(0, a, a, a); seg(0, b, a, b); } else { seg(a, a, a, b); }
+  // Dashed centre line. Every arm is drawn from the tile EDGE inward (phased from the
+  // edge, and the period divides S, so the dashes carry across seams). At a corner or
+  // junction each arm stops a little short of the centre, leaving a clear box so no two
+  // arms' dashes touch; a straight through-road (or a lone stub) runs to the centre.
+  g.setLineDash(dash);
+  const count = (n ? 1 : 0) + (s ? 1 : 0) + (e ? 1 : 0) + (w ? 1 : 0);
+  const straight = count <= 1 || (n && s && !e && !w) || (e && w && !n && !s);
+  const gap = straight ? 0 : edge * 1.4;   // clear radius around the centre at junctions
+  if (n) seg(c, 0, c, c - gap);
+  if (s) seg(c, S, c, c + gap);
+  if (e) seg(S, c, c + gap, c);
+  if (w) seg(0, c, c - gap, c);
+  g.setLineDash([]);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
@@ -35,7 +66,7 @@ class RoadTiles {
     this.group = new THREE.Group();
     this.width = cell;
     this.heightFn = heightFn;   // (x,z) -> terrain height, for draping
-    this.straightMat = new THREE.MeshStandardMaterial({ map: makeTileTexture(), roughness: 0.92 });
+    this._mats = new Map();     // junction-pattern (4-bit n/s/e/w) -> material, built on demand
   }
 
   clear() {
@@ -43,24 +74,39 @@ class RoadTiles {
     this.group.clear();
   }
 
-  // One road tile DRAPED onto the terrain: a subdivided quad whose vertices are
-  // pulled down to the ground height, so the road hugs slopes instead of a flat
-  // plane clipping through. orient: 'ns' | 'ew' (textured) or null (plain).
-  tile(x, z, orient) {
-    const SUB = 4;
-    const geo = new THREE.PlaneGeometry(this.width, this.width, SUB, SUB);
-    geo.rotateX(-Math.PI / 2);                          // lie flat in XZ (default => 'ns')
-    if (orient === 'ew') geo.rotateY(Math.PI / 2);      // turn stripes across X
-    const p = geo.attributes.position;
-    for (let i = 0; i < p.count; i++) {
-      p.setY(i, this.heightFn(x + p.getX(i), z + p.getZ(i)) + 0.07);   // drape + tiny lift
+  // Material for a tile by which sides connect — cached so each of the ~14 junction
+  // patterns bakes its texture once. A cell with no neighbours falls back to plain asphalt.
+  matFor(n, s, e, w) {
+    const key = (n ? 1 : 0) | (s ? 2 : 0) | (e ? 4 : 0) | (w ? 8 : 0);
+    let m = this._mats.get(key);
+    if (!m) {
+      m = key === 0 ? ASPHALT
+        : new THREE.MeshStandardMaterial({ map: makeRoadTexture(n, s, e, w), roughness: 0.92 });
+      this._mats.set(key, m);
     }
-    p.needsUpdate = true;
-    geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, orient ? this.straightMat : ASPHALT);
-    mesh.position.set(x, 0, z);
-    mesh.receiveShadow = true;
-    this.group.add(mesh);
+    return m;
+  }
+
+  // One road tile: a flat asphalt BOX at a constant grade (not draped onto the terrain),
+  // with a textured marking plane laid on top. All tiles share one height — a thin slab
+  // just above the (flat) ground. The slab's THICKNESS is the point: where the terrain
+  // dips below the grade (rough shore cells), its side face covers the gap so the road
+  // reads as a solid edge instead of a thin ribbon floating / showing dirt through it.
+  // The top plane carries the lane markings chosen from the connected sides (corners and
+  // junctions get the right lines, not bare asphalt); a draped plane's rotateX(-90) UVs
+  // map canvas-top→north / canvas-right→east, matching makeRoadTexture's convention.
+  tile(x, z, gradeY, n, s, e, w) {
+    const topY = gradeY + 0.06;
+    const box = new THREE.Mesh(new THREE.BoxGeometry(this.width, ROAD_T, this.width), ASPHALT);
+    box.position.set(x, topY - ROAD_T / 2, z);
+    box.receiveShadow = true;
+    this.group.add(box);
+    const surfGeo = new THREE.PlaneGeometry(this.width, this.width);
+    surfGeo.rotateX(-Math.PI / 2);
+    const surf = new THREE.Mesh(surfGeo, this.matFor(n, s, e, w));
+    surf.position.set(x, topY + 0.012, z);   // hair above the slab top, no z-fight
+    surf.receiveShadow = true;
+    this.group.add(surf);
   }
 
   // Raised plank bridge deck tile (over water), with rails on the across sides.
@@ -74,7 +120,10 @@ class RoadTiles {
       grp.add(rail);
     }
     if (orient === 'ew') grp.rotation.y = Math.PI / 2;
-    grp.position.set(x, y + 0.35, z);
+    // Plank is 0.16 thick (top sits ~0.08 above the centre); seat it AT the road grade
+    // so the deck surface is flush with the draped road tiles (which lift ~0.07), instead
+    // of floating a third of a unit over them.
+    grp.position.set(x, y, z);
     this.group.add(grp);
   }
 }
@@ -128,6 +177,10 @@ export class RoadNetwork {
   _isWater(i, j) { const t = this._tileAt(i, j); return t === TILE.SHALLOW || t === TILE.DEEP; }
   _cost(i, j) {
     const k = i + ',' + j;
+    // Already-laid road → nearly free, so a later connection reuses it instead of running
+    // a parallel road alongside. (Roads are only painted on passable cells, so this is
+    // always safe to take — it can even share a bridge another road already built.)
+    if (this._roadCells && this._roadCells.has(k)) return ROAD_REUSE;
     if (!this._open.has(k)) {
       if (this._blocked.has(k)) return Infinity;   // wall / interior — impassable
       if (this._buffer.has(k)) return 5000;        // moat ring — avoid unless truly forced
@@ -142,7 +195,11 @@ export class RoadNetwork {
   build(connections) {
     this.tiles.clear();
     const cells = new Map();   // key -> { i, j, y }
-    const add = (i, j, y) => { const k = i + ',' + j; if (!cells.has(k)) cells.set(k, { i, j, y }); };
+    // Cells already carrying road. _cost charges almost nothing for these, so each new
+    // connection's A* would rather detour onto an existing road and follow it than lay a
+    // fresh path running parallel — the roads MERGE into a shared network.
+    this._roadCells = new Set();
+    const add = (i, j, y) => { const k = i + ',' + j; if (!cells.has(k)) cells.set(k, { i, j, y }); this._roadCells.add(k); };
 
     // Each gate gets a forced STRAIGHT exit: the road runs out from the gate's
     // centre cell along its outward normal for 2 cells before A* takes over. This
@@ -180,13 +237,21 @@ export class RoadNetwork {
     // Render: classify each cell by its road neighbours -> straight/corner/etc.
     // Land tiles follow the terrain; bridge decks ride a level grade over water.
     const has = (i, j) => cells.has(i + ',' + j);
-    const bridgeY = this.map.params.beachHeight + 0.5;
+    // Bridge decks ride at the land/road grade so they meet the road flush, not hovering
+    // above it. With flat land that's the plateau height (beachHeight + 0.8 — see padFor);
+    // otherwise the old raised grade over the uneven terrain.
+    const bridgeY = this.map.params.flatLand
+      ? this.map.params.beachHeight + 0.8
+      : this.map.params.beachHeight + 0.5;
+    // Land roads are flat slabs at ONE grade (the flat land height); on the legacy hilly
+    // map there's no single grade, so fall back to each cell's own terrain height.
+    const roadGrade = this.map.params.flatLand ? this.map.params.beachHeight + 0.8 : null;
     for (const { i, j, y } of cells.values()) {
       const wx = i * this.cell, wz = j * this.cell;
       const n = has(i, j - 1), s = has(i, j + 1), e = has(i + 1, j), w = has(i - 1, j);
       const orient = (n && s && !e && !w) ? 'ns' : (e && w && !n && !s) ? 'ew' : null;
       if (this._isWater(i, j)) this.tiles.deck(wx, wz, Math.max(y, bridgeY), orient || 'ns');
-      else this.tiles.tile(wx, wz, orient);
+      else this.tiles.tile(wx, wz, roadGrade != null ? roadGrade : y, n, s, e, w);
     }
   }
 }

@@ -32,6 +32,10 @@ export const VEHICLE_TYPES = {
     stat: { speed: 1, armor: 5, firepower: 5 }, role: 'Rolling fortress. Devastating at long range. Nearly indestructible.' },
 };
 
+// Sideways (strafe) speed as a fraction of forward speed — slower, so driving forward
+// is still the quick way around and strafing is for fine repositioning.
+const STRAFE_FRAC = 0.7;
+
 // A drivable instance: outer holder (world transform) + inner animated model.
 export class Vehicle {
   constructor(typeKey) {
@@ -84,12 +88,19 @@ export class Vehicle {
   // forward/turn in [-1,1]. groundFn: terrain height under the new position.
   // blockedFn(x,z) (optional): true where the vehicle can't go — the move is tried
   // whole, then per-axis, so it slides along walls/shoreline instead of stopping dead.
-  drive(dt, forward, turn, groundFn, blockedFn) {
+  // forward/turn/strafe in [-1,1]. strafe slides the hull along its own right axis
+  // (Q/E for the player) WITHOUT changing heading — handy to peek around a wall or
+  // line up a shot; a touch slower than driving forward (STRAFE_FRAC).
+  drive(dt, forward, turn, groundFn, blockedFn, strafe = 0) {
     this.heading += turn * this.turnRate * dt;
     this.holder.rotation.y = this.heading;
-    const d = forward * this.speed * dt;     // model front is local -Z
-    const dx = -Math.sin(this.heading) * d;
-    const dz = -Math.cos(this.heading) * d;
+    const h = this.heading;
+    const fx = -Math.sin(h), fz = -Math.cos(h);   // forward (local -Z)
+    const rx =  Math.cos(h), rz = -Math.sin(h);   // right   (local +X)
+    const d = forward * this.speed * dt;
+    const s = strafe * this.speed * STRAFE_FRAC * dt;
+    const dx = fx * d + rx * s;
+    const dz = fz * d + rz * s;
     const px = this.holder.position.x, pz = this.holder.position.z;
     let nx = px + dx, nz = pz + dz;
     if (blockedFn && blockedFn(nx, nz)) {

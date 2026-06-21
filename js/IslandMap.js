@@ -6,9 +6,10 @@
 
 import * as THREE from 'three';
 import { Noise2D } from './noise.js';
-import { makeTerrainMaterial } from './TerrainMaterial.js';
+import { makeTerrainMaterial } from './TerrainMaterial.js?v=9';
 
 const CHUNK = 48;   // cells per chunk edge
+const EDGE_APRON = 8;   // outer cells deepened to open sea so the map border reads as deep blue (no shallow water at the boundary) and the mesh edge blends into the ocean plane
 
 // Default generation params. Every one of these is exposed to the controls panel.
 export const DEFAULTS = {
@@ -23,12 +24,15 @@ export const DEFAULTS = {
   heightScale: 6.0,  // vertical exaggeration of terrain (Return Fire reads fairly flat)
   beachHeight: 1.0,  // world-height band (above water) that stays sand
   grassAmount: 0.6,  // 0 = no grass blobs, 1 = grass everywhere on land
+  flatLand: true,    // level ALL land to one flat plateau (no hills) — keeps roads flush, no dirt poking through
+  shoreSteep: 1.0,   // underwater beach-face steepening (×depth). Was 1.6 to narrow a z-fighting shallow band vs the old water plane; the plane is gone, so 1.0 (off) gives a gentler shore + a wider, prettier shallow→deep gradient and softer coastline corners
 };
 
 // Return Fire-ish bright beach palette.
 const C = {
-  deep:    new THREE.Color('#15709c'),
-  shallow: new THREE.Color('#3fb4d8'),
+  deep:    new THREE.Color('#0e4f78'),   // dark open-sea blue (reached at the sea floor now)
+  shallow: new THREE.Color('#3bb2ba'),   // green-leaning turquoise coastal water (halfway off the old bright #3fb4d8)
+  wetdark: new THREE.Color('#8a784a'),   // dark wet sand right at the waterline
   wetsand: new THREE.Color('#c9b884'),
   sand:    new THREE.Color('#dcc88c'),
   grass:   new THREE.Color('#6f8f3a'),
@@ -104,21 +108,33 @@ export class IslandMap {
 
   // Derive a vertex's colour, land flag, and grass field from its current
   // height (this._H[vi]). Used by pass 1 and by the flatten pass.
-  _setAttribs(vi, u, v) {
+  // yColor keys the colour + grass-splat fields; it defaults to the FINAL height, so the
+  // sand/grass/water bands follow the smoothed terrain (the beach ramp), not the raw
+  // noise — which kept the splat banding from making angular "steep" corners on the coast.
+  _setAttribs(vi, u, v, yColor = this._H[vi]) {
     const p = this.params;
-    const y = this._H[vi];
-    const col = this._colorFor(y, u, v);
+    const y = this._H[vi];                       // real (geometry) height drives the land flag
+    const col = this._colorFor(yColor, u, v);
     this._col[vi * 3] = col.r;
     this._col[vi * 3 + 1] = col.g;
     this._col[vi * 3 + 2] = col.b;
     this._land[vi] = y > 0 ? 1 : 0;
-    const gMacro = this._grassNoise.fbm(u * p.noiseScale * 1.5, v * p.noiseScale * 1.5, 3);
-    this._grass[vi] = gMacro * smoothstep(0.05, 0.7, y);
+    // Raw macro grassiness only — the beach height-gate (sand low / grass high) and the
+    // wet-sand band are applied PER-PIXEL in the shader now, so the coast isn't faceted.
+    this._grass[vi] = this._grassNoise.fbm(u * p.noiseScale * 1.5, v * p.noiseScale * 1.5, 3);
   }
 
   // Colour for a vertex given its world height + grass-noise sample.
   _colorFor(y, u, v) {
-    if (y <= 0) return y < -2.5 ? C.deep : (y < -0.6 ? C.shallow : C.wetsand);
+    if (y <= 0) {
+      // Smooth depth gradient over the REAL underwater range [0 .. floor]: dark wet
+      // sand at the waterline → turquoise shallows → dark blue at the sea floor. (The
+      // old discrete bands gated 'deep' behind y<-2.5, which the -2.4 floor never hit,
+      // so the whole sea read as flat 'shallow'.)
+      const depth = -y, floor = this.params.seaLevel * this.params.heightScale;
+      if (depth < 0.55) return C.wetdark.clone().lerp(C.shallow, smoothstep(0, 0.55, depth));
+      return C.shallow.clone().lerp(C.deep, smoothstep(0.55, floor, depth));
+    }
     if (y < this.params.beachHeight) return C.sand;
     const g = this._grassNoise.fbm(u * this.params.noiseScale * 2.0, v * this.params.noiseScale * 2.0, 4);
     if (g < 1 - this.params.grassAmount) return C.sand;
@@ -141,11 +157,14 @@ export class IslandMap {
     this._col = new Float32Array(VX * VZ * 3);
     this._grass = new Float32Array(VX * VZ);
     this._land = new Float32Array(VX * VZ);
-    this._terrainMat = makeTerrainMaterial(p.seed, p.grassAmount);
+    this._terrainMat = makeTerrainMaterial(p.seed, p.grassAmount, 7,
+      { wetdark: C.wetdark, shallow: C.shallow, deep: C.deep, floor: p.seaLevel * p.heightScale });
 
     // Pass 1: per-vertex world height, water/land colour, and a SMOOTH macro
     // grassiness field. The crisp grass/sand edge is carved later in the shader
     // from a noise mask — keeping this field smooth is what makes that work.
+    const flatLevel = p.beachHeight + 0.8;          // matches the camp pad height (padFor) → land sits flush with bases
+    const floor = -p.seaLevel * p.heightScale;      // deepest terrain; the ocean match depends on water never going past this
     let vi = 0;
     for (let gz = 0; gz < VZ; gz++) {
       for (let gx = 0; gx < VX; gx++, vi++) {
@@ -154,7 +173,25 @@ export class IslandMap {
         const dx = (u - 0.5) * 2, dz = (v - 0.5) * 2;
         const edge = smoothstep(0.35, 1.0, Math.min(1, Math.sqrt(dx * dx + dz * dz)));
         nh = Math.max(0, nh - p.edgeFalloff * edge);
-        this._H[vi] = (nh - p.seaLevel) * p.heightScale;
+        let h = (nh - p.seaLevel) * p.heightScale;
+        if (h > 0) {
+          // LAND → one flat plateau inland (no hills: roads stay flush), but RAMP up to
+          // it from the waterline across the natural beach band instead of snapping flat
+          // — so the coast is a sloped beach, not a cliff ringing the whole island.
+          if (p.flatLand) h = flatLevel * smoothstep(0, p.beachHeight, h);
+        } else if (p.shoreSteep > 1) {
+          h = Math.max(floor, h * p.shoreSteep);    // steepen the underwater shore (narrows the z-fighting shallow band), capped at the floor
+        }
+        // Border apron: deepen + sink the outermost cells below the ocean plane so the
+        // terrain-mesh edge hides under it and the map border reads as deep open sea.
+        const bd = Math.min(gx, gz, p.cols - gx, p.rows - gz);
+        if (bd < EDGE_APRON) {
+          const t = Math.max(0, (bd - 2) / (EDGE_APRON - 2)), sink = floor - 0.25;
+          h = sink + (h - sink) * t;
+        }
+        this._H[vi] = h;
+        // Splat keys off the FINAL (smoothed) height, so the sand/grass/water bands
+        // follow the gentle beach — not the steep raw noise, which made angular corners.
         this._setAttribs(vi, u, v);
       }
     }
@@ -237,33 +274,29 @@ export class IslandMap {
     return mesh;
   }
 
+  // Advance the animated water ripples — call each frame with elapsed seconds.
+  tickWater(t) {
+    const sh = this._terrainMat && this._terrainMat.userData.shader;
+    if (sh) sh.uniforms.uTime.value = t;
+  }
+
   _buildWater() {
-    // Two huge planes so the ocean reaches the horizon at any map size with no
-    // visible edge. (1) An OPAQUE sea floor just below the deepest terrain — this
-    // is what kills the visible square: beyond the terrain mesh the floor reads as
-    // open ocean exactly like the deepest in-island water, instead of showing the
-    // sky background through the transparent surface. (2) The transparent, shiny
-    // surface at y=0 that islands poke through.
+    // The sea is now the terrain surface itself (texture-splatting): underwater
+    // vertices carry the depth gradient (wet sand → turquoise → deep blue), so there's
+    // no separate water plane — which also removes the shoreline z-fight it caused.
+    // All that remains is ONE opaque floor that fills the open ocean to the horizon
+    // beyond the terrain square. It sits just under the deepest terrain and wears the
+    // SAME deep blue the sea floor reaches in-island, so the mesh boundary vanishes.
     const size = Math.max(this.worldW, this.worldH) * 12 + 6000;
-    const deepY = -this.params.seaLevel * this.params.heightScale - 0.2;   // just under the deepest floor
+    const deepY = -this.params.seaLevel * this.params.heightScale - 0.1;   // below the deepest in-island water, above the sunk apron edge (-floor-0.25)
     const floorGeo = new THREE.PlaneGeometry(size, size);
-    // Match the colour the terrain actually shows at its submerged edge (C.shallow
-    // #3fb4d8 — the deepest terrain only reaches y=-2.4, so it never hits C.deep).
-    // Matching it means beyond the mesh reads identically to the in-island water,
-    // so the square mesh boundary disappears under the 82%-opaque surface.
-    const floorMat = new THREE.MeshStandardMaterial({ color: '#3fb4d8', roughness: 0.9, metalness: 0.0 });
+    // Same deep blue + same roughness (0.58) as the in-island deep water, so the two
+    // reflect the sky env identically and the mesh-edge boundary stays invisible.
+    const floorMat = new THREE.MeshStandardMaterial({ color: '#' + C.deep.getHexString(), roughness: 0.58, metalness: 0.0 });
     this.seaFloor = new THREE.Mesh(floorGeo, floorMat);
     this.seaFloor.rotation.x = -Math.PI / 2;
     this.seaFloor.position.y = deepY;
     this.group.add(this.seaFloor);
-
-    const geo = new THREE.PlaneGeometry(size, size);
-    const mat = new THREE.MeshStandardMaterial({
-      color: '#2ea6cf', transparent: true, opacity: 0.82, roughness: 0.25, metalness: 0.1,
-    });
-    this.water = new THREE.Mesh(geo, mat);
-    this.water.rotation.x = -Math.PI / 2;
-    this.group.add(this.water);
   }
 
   // FINISHING PASS: level a flat, dry pad under each camp so walls share one

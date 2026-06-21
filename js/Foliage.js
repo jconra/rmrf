@@ -10,9 +10,10 @@ import { makeTree, makeDeadTree, makeBush, makePlant, makeRock } from './Foliage
 // Procedural prop makers per category, and how many randomized variants to bake.
 // Kept simple by design: a couple grasses + a couple bushes, plus beach palms.
 const MAKERS = {
-  plant: { make: makePlant, variants: 2 },  // "grasses"
+  plant: { make: makePlant, variants: 2 },              // "grasses"
   bush:  { make: makeBush,  variants: 2 },
-  palm:  { make: makePalm,  variants: 2 },
+  palm:  { make: makePalm,  variants: 2 },               // beach trees (on sand)
+  tree:  { make: makeTree,  variants: 3, scale: 1.7 },   // inland trees (on grass) — native model is small, so size it up
 };
 
 const _m = new THREE.Matrix4();
@@ -93,15 +94,19 @@ export class Foliage {
       if (skip) continue;
       if (opts.avoid && opts.avoid(x, z)) continue;   // e.g. keep clear of roads
 
-      // Choose a category by terrain: grass is lush, sand is sparse.
+      // Choose a category by terrain. Trees scatter EVERYWHERE on land — through the
+      // grass inland and creeping down onto the sand — alongside grasses/bushes and
+      // the beach palms.
       let cat;
       const r = Math.random();
       if (t === TILE.GRASS) {
-        if (r > 0.45) continue;             // lush but not crowded
-        cat = r < 0.30 ? 'plant' : 'bush';  // mostly grasses, some bushes
+        if (r > 0.55) continue;             // lush but not crowded
+        cat = r < 0.18 ? 'tree'             // inland trees
+            : r < 0.38 ? 'plant'            // grasses
+            : 'bush';                       // some bushes
       } else {
-        if (r > 0.13) continue;             // beaches: scattered palms
-        cat = 'palm';
+        if (r > 0.22) continue;             // beaches: sparser
+        cat = r < 0.09 ? 'tree' : 'palm';   // mostly palms, a few trees down on the sand
       }
       const list = this.props[cat];
       if (!list || !list.length) continue;
@@ -110,10 +115,11 @@ export class Foliage {
       const key = cat + ':' + idx;
       let arr = buckets.get(key);
       if (!arr) buckets.set(key, arr = []);
+      const sMul = MAKERS[cat].scale || 1;   // per-category size boost (trees run small natively)
       arr.push({
         x, z, y: map.heightAt(x, z),
         yaw: Math.random() * Math.PI * 2,
-        scale: list[idx].baseScale * (0.8 + Math.random() * 0.5),
+        scale: list[idx].baseScale * sMul * (0.8 + Math.random() * 0.5),
       });
     }
 
@@ -137,9 +143,11 @@ export class Foliage {
         this.group.add(inst);
         partMeshes.push(inst);
       }
-      // Palms are shootable/crushable: register each instance as a tree, keeping a
-      // reference to its slot in every part mesh so a fell can move/hide it.
-      if (cat === 'palm') {
+      // Palms AND trees are shootable/crushable: register each instance, keeping a
+      // reference to its slot in every part mesh so a fell can move/hide it. (Grasses
+      // and bushes stay pure cosmetic instancing.)
+      if (cat === 'palm' || cat === 'tree') {
+        const radPer = cat === 'palm' ? 2.0 : 0.7;   // collision radius per unit scale (trees are narrower)
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           const parts = partMeshes.map(inst => {
@@ -148,7 +156,7 @@ export class Foliage {
             return { inst, i, orig };
           });
           this.trees.push({
-            x: it.x, y: it.y, z: it.z, r: 2.0 * it.scale,
+            x: it.x, y: it.y, z: it.z, r: radPer * it.scale,
             hp: 30, dead: false, fell: 0, axis: null, parts,
           });
         }
