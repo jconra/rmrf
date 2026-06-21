@@ -187,7 +187,7 @@ class Turtle extends Strategy {
   objective(cmd) {
     if (this.step === 'grab') return this._flagOrHome(cmd);
     if (this.step === 'siege') return cmd.enemyBasePos();
-    return cmd.ambushSpot();   // defend: hold to the SIDE in tower cover, ready to flank — not on the flag HQ
+    return cmd.patrolSpot();   // defend: pace the base perimeter (tower cover), ready to flank — not parked on one spot
   }
   shoot(cmd) { return this.step === 'siege'; }   // hold fire while defending (the brain still engages enemies on sight)
   arriveDist(cmd) { return this.step === 'grab' ? 3 : this.step === 'defend' ? 8 : 10; }
@@ -200,9 +200,60 @@ class Turtle extends Strategy {
   }
 }
 
-// The roster of named doctrines. Add Rogue/Hunter here as they land.
-const ARCHETYPES = ['warrior', 'turtle'];
-function archetypeClass(name) { return name === 'turtle' ? Turtle : Warrior; }
+// ROGUE doctrine — "snatch the flag before they know you're there":
+//   soften — a Valkyrie takes a wide approach to the enemy FLAG base and quietly knocks
+//            the towers down. It avoids brawls (the brain still defends itself) and works
+//            fast: short patience, no attrition phase.
+//   grab   — the instant the fort's open, a Firebrat races in, lifts the flag, and runs.
+// The race archetype: speed + stealth over a stand-up fight (contrast to the Warrior).
+class Rogue extends Strategy {
+  constructor(rng) { super(rng); this.step = 'soften'; }
+  tick(cmd, dt) {
+    super.tick(cmd, dt);
+    if (this.step === 'soften' && cmd.flagExposed() && (cmd.fortDown() || this.t > 55)) { this.step = 'grab'; this.t = 0; }
+  }
+  softenStep() { return 'soften'; }   // runner died → bring the Valkyrie back to finish the towers
+  wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : 'valkyrie'; }
+  objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.enemyBasePos(); }
+  shoot(cmd) { return this.step !== 'grab'; }
+  arriveDist(cmd) { return this.step === 'grab' ? 3 : 28; }   // Valkyrie shells towers from range; runner goes in tight
+  objectiveLabel(cmd) {
+    const f = cmd.flag();
+    if (f && f.carrier === cmd.unit) return 'home with the flag';
+    if (this.step === 'grab') return 'snatching the flag';
+    return 'the flag-base towers';
+  }
+}
+
+// HUNTER doctrine — "own the field, ambush the weak, then snatch":
+//   hunt — field the COUNTER to whatever the enemy keeps deploying and roam toward their
+//          elevator to pick off vehicles (the brain's engage + finish-him do the dueling).
+//   grab — once they're thinned out (a few kills) and the fort's open, a Firebrat runs the flag.
+// Unlike the WARRIOR it never commits a Jotun to a formal siege — it wins by killing
+// vehicles until the base falls open under the pressure.
+class HunterDoctrine extends Strategy {
+  constructor(rng) { super(rng); this.step = 'hunt'; }
+  tick(cmd, dt) {
+    super.tick(cmd, dt);
+    if (this.step === 'hunt' && cmd.flagExposed() && (cmd.fortDown() || (cmd.kills >= 3 && this.t > 60) || this.t > 110)) { this.step = 'grab'; this.t = 0; }
+  }
+  softenStep() { return 'hunt'; }
+  wantVehicle(cmd) { return this.step === 'grab' ? 'firebrat' : cmd.counterVehicle(); }
+  objective(cmd) { return this.step === 'grab' ? this._flagOrHome(cmd) : cmd.enemyFobPos(); }
+  shoot(cmd) { return this.step !== 'grab'; }
+  arriveDist(cmd) { return this.step === 'grab' ? 3 : 12; }
+  objectiveLabel(cmd) {
+    const f = cmd.flag();
+    if (f && f.carrier === cmd.unit) return 'home with the flag';
+    if (this.step === 'grab') return 'snatching the flag';
+    return 'hunting their vehicles';
+  }
+}
+
+// The roster of named doctrines (the four from ai_behavior).
+const ARCHETYPE_CLASS = { warrior: Warrior, turtle: Turtle, rogue: Rogue, hunter: HunterDoctrine };
+const ARCHETYPES = Object.keys(ARCHETYPE_CLASS);
+function archetypeClass(name) { return ARCHETYPE_CLASS[name] || Warrior; }
 
 // One commander's archetype (random). Used for the lone AI in a human match.
 export function pickArchetype(rng = Math.random) { return ARCHETYPES[(rng() * ARCHETYPES.length) | 0]; }

@@ -16,8 +16,8 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=1';
 import { TEAM_COLORS, updateCamo, camoParams } from '../../vehicle-designer/js/CamoTexture.js';
 import { SoundManager } from '../../vehicle-designer/js/SoundManager.js';
 import { Projectiles } from '../../vehicle-designer/js/Projectiles.js';
-import { Brain, randomPersonality } from './AI.js?v=64';
-import { drawStrategy, makeDoctrine, pickArchetype, assignArchetypes, COUNTER } from './AIStrategies.js?v=57';
+import { Brain, randomPersonality } from './AI.js?v=66';
+import { drawStrategy, makeDoctrine, pickArchetype, assignArchetypes, COUNTER } from './AIStrategies.js?v=59';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
@@ -1523,6 +1523,7 @@ function updatePlayerHud() {
 // HUMAN team is run by the player drive/deploy code instead. Perception is
 // team-relative (a unit only knows rivals it actually sees), so nothing cheats.
 const AI_VISION = 66;
+const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to top up at a known shield generator
 const commanders = [];          // one AICommander per AI-controlled team
 
 function teamCamp(team, role) { return camps.find(c => c.team === team && c.role === role); }
@@ -1674,20 +1675,47 @@ function neutralSite(targetR) {
   return null;
 }
 
+// A neutral site on the PERPENDICULAR BISECTOR of the two FOBs: every point on it is
+// equidistant from both elevators (fair — favours neither team), and we push out along
+// it to a flank so the shield is a contested, hard-to-reach prize rather than sitting in
+// one team's lap. Sweeps from far-flank inward, alternating sides, until it hits clear
+// land; falls back to the radial neutralSite if the geometry doesn't cooperate.
+function bisectorSite(reach) {
+  const fobs = camps.filter(c => c.role === 'fob');
+  if (fobs.length < 2) return neutralSite(reach);
+  const a = fobs[0].center, b = fobs[1].center;
+  const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
+  let dx = b.x - a.x, dz = b.z - a.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+  const px = -dz, pz = dx;                          // perpendicular to the base-to-base line
+  const baseOff = Math.min(d * 0.45, reach * 1.4);  // how far out to the flank to try first
+  for (let t = 0; t < 80; t++) {
+    const sign = (t % 2 === 0) ? 1 : -1;            // try both flanks
+    const off = baseOff * (1 - (t / 80) * 0.75) * (0.9 + Math.random() * 0.2);
+    const x = mx + px * off * sign, z = mz + pz * off * sign;
+    if (!map.isLand(x, z) || blockedAt(x, z)) continue;
+    let ok = true;
+    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 28) { ok = false; break; }
+    if (ok) for (const rp of resupplies) if (Math.hypot(x - rp.pos.x, z - rp.pos.z) < 24) { ok = false; break; }
+    if (ok) return { x, z };
+  }
+  return neutralSite(reach);
+}
+
 function placeResupplies() {
   for (const r of resupplies) scene.remove(r.group);
   resupplies = [];
   if (QS.has('nopoi')) return;
   const span = Math.min(map.worldW, map.worldH) / 2;
   const cell = grid.cell;
-  // fuel + ammo near the contested middle; shield generator out toward the edge.
+  // fuel + ammo near the contested middle; the shield generator sits out on the FLANK,
+  // on the bisector between the two elevators — equidistant + hard to grab (see bisectorSite).
   const specs = [
     { kind: 'fuel',   r: span * 0.26, make: makeFuelTank,        hp: 130 },
     { kind: 'ammo',   r: span * 0.32, make: makeAmmoDepot,       hp: 150 },
-    { kind: 'shield', r: span * 0.52, make: makeShieldGenerator, hp: 110 },
+    { kind: 'shield', r: span * 0.52, make: makeShieldGenerator, hp: 110, bisect: true },
   ];
   for (const sp of specs) {
-    const site = neutralSite(sp.r);
+    const site = sp.bisect ? bisectorSite(sp.r) : neutralSite(sp.r);
     if (!site) continue;
     const g = sp.make(cell);
     const gy = map.heightAt(site.x, site.z);
@@ -1927,7 +1955,55 @@ class AICommander {
     const FWD = 18, SIDE = 26;                                      // forward a touch, well to the side, still in tower range
     return { x: base.x + dx * FWD + px * SIDE * side, z: base.z + dz * FWD + pz * SIDE * side };
   }
+  // A patrol LOOP around our flag base so a defending Turtle paces its perimeter
+  // instead of parking on one ambush spot. Points sit across the enemy-facing edge
+  // (in tower cover) plus a sweep behind; the index advances as the unit nears the
+  // current waypoint, so it never settles. The brain still drops into engage the
+  // moment it spots an attacker — this only fills the idle "nothing in sight" time.
+  patrolSpot() {
+    const base = this.homeBasePos(), enemy = this.enemyBasePos();
+    let dx = enemy.x - base.x, dz = enemy.z - base.z;
+    const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;            // toward the threat
+    const px = -dz, pz = dx;                                        // perpendicular = "to the side"
+    if (!this._patrol) {
+      const FWD = 16, SIDE = 24;
+      this._patrol = [
+        { x: base.x + dx * FWD + px * SIDE,        z: base.z + dz * FWD + pz * SIDE        }, // forward, one flank
+        { x: base.x + dx * (FWD + 8),              z: base.z + dz * (FWD + 8)              }, // forward, centre (toward threat)
+        { x: base.x + dx * FWD - px * SIDE,        z: base.z + dz * FWD - pz * SIDE        }, // forward, other flank
+        { x: base.x - dx * 4 - px * SIDE * 0.7,    z: base.z - dz * 4 - pz * SIDE * 0.7    }, // sweep back across the base
+      ];
+      this._patrolI = 0;
+    }
+    const wp = this._patrol[this._patrolI];
+    if (this.unit) {
+      const u = this.unit.holder.position;
+      if (Math.hypot(u.x - wp.x, u.z - wp.z) < 12) this._patrolI = (this._patrolI + 1) % this._patrol.length;
+    }
+    return this._patrol[this._patrolI];
+  }
   flag() { return enemyFlagOf(this.team); }
+  // Our OWN flag (the one a rival steals). ourFlagStolen → a live enemy is carrying it.
+  ourFlag() { return flags.find(f => f.team === this.team) || null; }
+  ourFlagStolen() { const f = this.ourFlag(); return !!(f && f.carried && f.carrier && !f.carrier.dead && f.carrier.team !== this.team); }
+  // DEFEND intercept point (ai_behavior): chase the carrier directly; if it's somehow
+  // out of play fall back to the enemy's elevator — where they must take it to score.
+  interceptSpot() {
+    const f = this.ourFlag();
+    if (f && f.carried && f.carrier && !f.carrier.dead) { const c = f.carrier.holder.position; return { x: c.x, z: c.z }; }
+    return this.enemyFobPos();
+  }
+  // Nearest KNOWN, live shield generator to (x,z) — only POIs this team has discovered
+  // (fog-of-war), so a commander won't beeline to a generator it's never seen.
+  nearestKnownShield(x, z) {
+    let best = null, bd = Infinity;
+    for (const rp of this.knownSupplies) {
+      if (rp.dead || rp.kind !== 'shield') continue;
+      const d = (rp.pos.x - x) ** 2 + (rp.pos.z - z) ** 2;
+      if (d < bd) { bd = d; best = rp; }
+    }
+    return best;
+  }
   fortFrac() { return this.fortHp0 ? fortHpOf(this.targetTeam()) / this.fortHp0 : 1; }
   turretsLive() { return turretCountOf(this.targetTeam()); }
   // Tower-first: the enemy fort is "breached" (safe to send a Firebrat runner) once
@@ -2094,12 +2170,15 @@ class AICommander {
       // two combat states the bare names conflate — `engage` is duelling a moving enemy
       // VEHICLE, `suppress` is shelling a static enemy TOWER.
       const card = (this.strategy.constructor.name || 'Card').replace('Strategy', '');
-      const dest = this.strategy.objectiveLabel ? this.strategy.objectiveLabel(this) : 'the objective';
+      const dest = this._intercepting ? 'to intercept the flag runner!'
+        : this._shielding ? 'to grab a shield'
+        : (this.strategy.objectiveLabel ? this.strategy.objectiveLabel(this) : 'the objective');
       const hpPct = Math.round(v.hp / v.maxHp * 100);
       let line;
       switch (cmd.state) {
         case 'exit':     line = `rolling out → ${dest}`; break;
         case 'advance':  line = `advancing → ${dest}`; break;
+        case 'flee':     line = `dodging the enemy → ${dest}`; break;
         case 'pursue':   line = 'chasing the last-seen enemy'; break;
         case 'retreat':  line = `falling back to heal (hp ${hpPct}%)`; break;
         case 'resupply': line = v.ammo <= 0 ? 'returning to rearm (out of ammo)' : `returning to refuel (fuel ${Math.round(v.fuel / v.maxFuel * 100)}%)`; break;
@@ -2234,9 +2313,9 @@ class AICommander {
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
     this._logTick(v, view, cmd);
-    const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn }, dt);
-    v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6);   // for spatial engine RPM
-    v.drive(dt, out.fwd, out.turn, null, v._blocked);
+    const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn, strafe: cmd.strafe || 0 }, dt);
+    v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
+    v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
     applyAltitude(v, dt);
     decayAim(v, dt);
     if (v.dead) { this.unit = null; this.respawnT = 4; this._rising = false; return; }
@@ -2282,7 +2361,27 @@ class AICommander {
       const d2 = (rp.pos.x - px) ** 2 + (rp.pos.z - pz) ** 2;
       if (d2 < AI_VISION * AI_VISION && (flyer || hasLOS(px, pz, rp.pos.x, rp.pos.z))) this.knownSupplies.add(rp);
     }
-    const goal = this.strategy.objective(this);
+    let goal = this.strategy.objective(this);
+    // DEFEND override (ai_behavior): if a rival is running off with OUR flag, abandon the
+    // plan and chase the carrier toward its delivery point — so a stolen flag is always
+    // contested. Skip it if WE'RE carrying the enemy flag (don't blow a winning run).
+    this._intercepting = false;
+    if (this.ourFlagStolen() && !(this.flag() && this.flag().carrier === v)) {
+      const ip = this.interceptSpot();
+      if (ip) { goal = ip; this._intercepting = true; }
+    }
+    // ATTACK prep (ai_behavior): a Lurcher/Valkyrie rolling out with little shield swings
+    // by a KNOWN, nearby shield generator to armour up first. (Firebrats run — speed is
+    // their armour; Jotuns siege — too slow to detour. Intercept always outranks this.)
+    this._shielding = false;
+    if (!this._intercepting && (v.type === 'lurcher' || v.type === 'valkyrie')
+        && v.maxShield > 0 && v.shield < v.maxShield * 0.6
+        && !(this.flag() && this.flag().carrier === v)) {
+      const gen = this.nearestKnownShield(px, pz);
+      if (gen && Math.hypot(gen.pos.x - px, gen.pos.z - pz) < SHIELD_GRAB_RANGE) {
+        goal = { x: gen.pos.x, z: gen.pos.z }; this._shielding = true;
+      }
+    }
     // Where to rearm/refuel: the NEAREST valid source for what we need — own base
     // (always restocks fuel + ammo) OR a DISCOVERED neutral depot. A neutral depot
     // gives just ONE resource, but the brain only clears the resupply latch when BOTH
@@ -2406,7 +2505,7 @@ class AICommander {
       mustGo,
       resupply: supply ? { x: supply.center.x, z: supply.center.z } : goal,
       home: healHome || goal,
-      shootGoal: this.strategy.shoot(this), arriveDist: this.strategy.arriveDist(this),
+      shootGoal: this.strategy.shoot(this), arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),
       blockedAhead,
       blockedLeft: v._blocked(px + lx * P, pz + lz * P),
       blockedRight: v._blocked(px + rx * P, pz + rz * P),

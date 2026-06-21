@@ -87,6 +87,13 @@ const CONDITIONS = {
   always:       () => true,
   mustGo:       (v) => !!v.mustGo,                         // still inside the gate
   hurtLatched:  (v, m) => m._hurt,                         // pulled out to patch up
+  // Runner evasion: a Firebrat is too fragile to duel — when an enemy is close it flees
+  // (curving toward its goal) instead of engaging. Only firebrats; only a near threat.
+  runnerFlee: (v) => {
+    if (v.self.type !== 'firebrat' || !v.seesEnemy || !v.enemy) return false;
+    const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
+    return dx * dx + dz * dz < 60 * 60;
+  },
   // "Finish him": we're hurt enough to bail, BUT the rival we see is even worse off
   // (lower hp) or is itself running — and we still have ammo. Don't both limp away;
   // turn and put it down. Overrides the hurt retreat only (evaluated just above it).
@@ -123,6 +130,21 @@ function resolveTarget(key, view, mem) {
     case 'resupplyOrGoal': return view.resupply || view.goal;
     default: return view.goal;
   }
+}
+
+// Per-duel lateral movement, distilled from the ai_behavior matchup notes: should this
+// unit orbit/strafe to stay out of the enemy's kill arc, or plant and trade blows?
+// Returns a strafe intensity 0..1 (0 = no sidestep). Facing the enemy + strafing =
+// orbiting it, which naturally works the attacker toward the target's flank/rear.
+function duelStrafe(selfType, enemyType) {
+  if (selfType === 'valkyrie') return 1.0;          // missile skirmisher: always circle-strafe (vs Jotun especially)
+  if (selfType === 'lurcher') {
+    if (enemyType === 'jotun')    return 1.0;        // flank out of the Jotun's deadly 30° front arc, get behind
+    if (enemyType === 'valkyrie') return 0.85;       // jink so the rockets lead onto empty ground
+    if (enemyType === 'firebrat') return 0.5;        // sidestep its narrow laser arc
+    return 0.2;                                      // Lurcher mirror: mostly stand and trade
+  }
+  return 0;                                          // Jotun plants (it WANTS them in its arc); Firebrat runs, doesn't duel
 }
 
 // --- BEHAVIORS ----------------------------------------------------------
@@ -219,8 +241,22 @@ const BEHAVIORS = {
     let fire = false;
     const gate = mode === 'suppress' ? aimGate + 0.05 : aimGate;
     if (los && Math.abs(err) < gate && dist < range * 1.3) fire = mem.rng() < (0.65 + p.aggression * 0.35) * AI_HANDICAP.fireProb;
-    mem._wantMove = Math.abs(fwd) > 0.3;
-    return { fwd, turn, fire, state: mode };
+    // DUEL FOOTWORK (ai_behavior micro-tactics): in a real duel, orbit/strafe to flank
+    // out of the enemy's kill arc instead of standing still. Direction flips on a
+    // jittered timer (≈ the "switch directions to dodge the rocket" reflex). Engage
+    // only — siege/suppress keeps its planted standoff above.
+    let strafe = 0;
+    if (mode === 'engage' && view.enemy && los && dist < range * 1.6) {
+      const intensity = duelStrafe(self.type, view.enemy.type);
+      if (intensity > 0) {
+        if (mem._strafeT == null || (mem.t - mem._strafeT) > (2.2 + mem.rng() * 2.2)) {
+          mem._strafeDir = mem.rng() < 0.5 ? -1 : 1; mem._strafeT = mem.t;
+        }
+        strafe = mem._strafeDir * intensity;
+      }
+    }
+    mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
+    return { fwd, turn, fire, strafe, state: mode };
   },
 
   // Pound a fortification from the type's reach — heavies shell it from outside the
@@ -251,6 +287,25 @@ const BEHAVIORS = {
     const fwd = dist < arrive ? 0 : 1;
     mem._wantMove = Math.abs(fwd) > 0.3;
     return { fwd, turn, fire: false, state: ctx.mode };
+  },
+
+  // RUNNER EVASION (ai_behavior Capture): a Firebrat doesn't trade shots — it runs. Steer
+  // toward the goal (the flag, or home with it) but BEND away from the nearby enemy, harder
+  // the closer it is, so the dash curves around the threat instead of straight into it.
+  flee(ctx) {
+    const { view, mem, self } = ctx;
+    const e = view.enemy;
+    let gx = view.goal.x - self.x, gz = view.goal.z - self.z;       // toward the objective
+    const gl = Math.hypot(gx, gz) || 1; gx /= gl; gz /= gl;
+    let ax = self.x - e.x, az = self.z - e.z;                       // away from the threat
+    const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
+    const close = clamp(1 - al / 60, 0, 1);                         // 1 right on top of us → 0 by 60u
+    const w = 0.5 + close * 1.7;                                    // bend harder the closer the enemy
+    const fx = gx + ax * w, fz = gz + az * w;
+    const desired = Math.atan2(-fx, -fz);                          // model front is local -Z
+    const turn = clamp(wrapPi(desired - self.heading) * 2.4, -1, 1);
+    mem._wantMove = true;
+    return { fwd: 1, turn, fire: false, state: ctx.mode };          // run flat out, hold fire
   },
 
   // Obstacle avoidance OVERLAY (not a standalone state): takes the behavior's intended
@@ -344,6 +399,7 @@ export const DEFAULT_BRAIN = {
   ],
   states: {
     exit:     { behavior: 'exit', skipWhiskers: true },
+    flee:     { behavior: 'flee' },
     retreat:  { behavior: 'seek' },
     resupply: { behavior: 'seek' },
     engage:   { behavior: 'combat' },
@@ -357,6 +413,7 @@ export const DEFAULT_BRAIN = {
   // then the objective. `target` says what the chosen behavior aims at.
   transitions: [
     { when: 'mustGo',       mode: 'exit',     target: 'goal' },
+    { when: 'runnerFlee',   mode: 'flee',     target: 'goal' },
     { when: 'finishHim',    mode: 'engage',   target: 'enemy' },
     { when: 'hurtLatched',  mode: 'retreat',  target: 'home' },
     { when: 'resupLatched', mode: 'resupply', target: 'resupplyOrGoal' },
