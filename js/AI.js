@@ -88,9 +88,13 @@ const CONDITIONS = {
   mustGo:       (v) => !!v.mustGo,                         // still inside the gate
   hurtLatched:  (v, m) => m._hurt,                         // pulled out to patch up
   // Runner evasion: a Firebrat is too fragile to duel — when an enemy is close it flees
-  // (curving toward its goal) instead of engaging. Only firebrats; only a near threat.
+  // (curving toward its goal) instead of engaging. Only firebrats; only a near threat; and
+  // only on a RUNNER mission (grabbing the flag / scouting). When the commander has sent it
+  // out to FIGHT (attack/siege/defend/intercept), it must NOT flee at the first sight of an
+  // enemy — that left it dodging out at 60u, never closing to its 24u gun range, so it never
+  // attacked. There it engages instead (see the 'engaging' transition below).
   runnerFlee: (v) => {
-    if (v.self.type !== 'firebrat' || !v.seesEnemy || !v.enemy) return false;
+    if (v.self.type !== 'firebrat' || !v.runnerMode || !v.seesEnemy || !v.enemy) return false;
     const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
     return dx * dx + dz * dz < 60 * 60;
   },

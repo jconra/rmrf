@@ -6,10 +6,13 @@
 
 import * as THREE from 'three';
 import { Destructible } from './Destructible.js';
-import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js';
-import { concreteTexture } from './BuildingTextures.js';
+import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=2';
+import { concreteTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
+// Shared neutral plate map for every team-colour piece — built once, tinted per material
+// by the team accent (setAccent only touches .color, so the map rides along).
+const ACCENT_TEX = accentPlateTexture();
 const RUBBLE = new THREE.MeshStandardMaterial({ color: '#5b554c', roughness: 1.0, flatShading: true });
 
 // A low debris pile left where a building is destroyed.
@@ -67,8 +70,8 @@ export class Wall {
   }
 
   _accentMat() {
-    const m = new THREE.MeshStandardMaterial({ color: this.accent, roughness: 0.6, metalness: 0.2, flatShading: true });
-    m.userData.accent = true;   // so Camp.setAccent can recolour the team band
+    const m = new THREE.MeshStandardMaterial({ color: this.accent, map: ACCENT_TEX, roughness: 0.6, metalness: 0.2, flatShading: true });
+    m.userData.accent = true;   // so Camp.setAccent can recolour the team band (map rides along)
     return m;
   }
 

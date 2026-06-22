@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { Noise2D } from './noise.js';
-import { makeTerrainMaterial } from './TerrainMaterial.js?v=9';
+import { makeTerrainMaterial } from './TerrainMaterial.js?v=13';
 
 const CHUNK = 48;   // cells per chunk edge
 const EDGE_APRON = 8;   // outer cells deepened to open sea so the map border reads as deep blue (no shallow water at the boundary) and the mesh edge blends into the ocean plane
@@ -157,6 +157,7 @@ export class IslandMap {
     this._col = new Float32Array(VX * VZ * 3);
     this._grass = new Float32Array(VX * VZ);
     this._land = new Float32Array(VX * VZ);
+    this._shore = new Float32Array(VX * VZ);   // wave strength 0..1: 1 at the shore, 0 far out to sea
     this._terrainMat = makeTerrainMaterial(p.seed, p.grassAmount, 7,
       { wetdark: C.wetdark, shallow: C.shallow, deep: C.deep, floor: p.seaLevel * p.heightScale });
 
@@ -196,10 +197,58 @@ export class IslandMap {
       }
     }
 
+    this._buildShoreField(VX, VZ);
     this._buildChunks(VX, VZ);
     this._buildWater();
     this._classify(VX, VZ);
     return this;
+  }
+
+  // Wave-strength field: 1 at the shoreline, fading to 0 far out to sea. The water
+  // ripple in TerrainMaterial scales by this, so the animated waves hug the islands
+  // and calm with distance from land — meeting the flat open-ocean plane seamlessly
+  // (no rippled "square" at the mesh edge). Distance to the nearest land vertex comes
+  // from a cheap 2-pass chamfer distance transform over the land/water mask.
+  _buildShoreField(VX, VZ) {
+    const n = VX * VZ, L = this._land, d = this._shore;
+    const INF = 1e9, D1 = 1, D2 = Math.SQRT2;
+    for (let i = 0; i < n; i++) d[i] = L[i] > 0 ? 0 : INF;
+    // forward pass (top-left → bottom-right)
+    for (let z = 0; z < VZ; z++) {
+      for (let x = 0; x < VX; x++) {
+        const i = z * VX + x; let v = d[i];
+        if (x > 0)            v = Math.min(v, d[i - 1] + D1);
+        if (z > 0)            v = Math.min(v, d[i - VX] + D1);
+        if (x > 0 && z > 0)   v = Math.min(v, d[i - VX - 1] + D2);
+        if (x < VX - 1 && z > 0) v = Math.min(v, d[i - VX + 1] + D2);
+        d[i] = v;
+      }
+    }
+    // backward pass (bottom-right → top-left)
+    for (let z = VZ - 1; z >= 0; z--) {
+      for (let x = VX - 1; x >= 0; x--) {
+        const i = z * VX + x; let v = d[i];
+        if (x < VX - 1)              v = Math.min(v, d[i + 1] + D1);
+        if (z < VZ - 1)              v = Math.min(v, d[i + VX] + D1);
+        if (x < VX - 1 && z < VZ - 1) v = Math.min(v, d[i + VX + 1] + D2);
+        if (x > 0 && z < VZ - 1)     v = Math.min(v, d[i + VX - 1] + D2);
+        d[i] = v;
+      }
+    }
+    // Convert distance (in cells) → wave strength: full at the shore, fading to 0 by FAR
+    // units out. Then multiply by an edge fade that calms the outer band of the mesh, so
+    // waves are guaranteed flat by the time they reach the open-ocean plane — even where
+    // an island sits near the map border (distance-from-land alone wouldn't calm those).
+    const tile = this.params.tile, FAR = 40, EDGE_FADE = 36;   // FAR = how far waves reach from land; EDGE_FADE in cells
+    const cols = this.params.cols, rows = this.params.rows;
+    for (let z = 0; z < VZ; z++) {
+      for (let x = 0; x < VX; x++) {
+        const i = z * VX + x;
+        const shoreF = 1 - smoothstep(0, FAR, d[i] * tile);
+        const bd = Math.min(x, z, cols - x, rows - z);          // cells to the nearest mesh edge
+        d[i] = shoreF * smoothstep(0, EDGE_FADE, bd);
+      }
+    }
   }
 
   // Build one mesh per CHUNK×CHUNK block of cells.
@@ -218,7 +267,7 @@ export class IslandMap {
   _makeChunk(cx0, cz0, VX, VZ) {
     const p = this.params;
     const halfW = this.worldW / 2, halfH = this.worldH / 2;
-    const H = this._H, COL = this._col, GRA = this._grass, LND = this._land;
+    const H = this._H, COL = this._col, GRA = this._grass, LND = this._land, SHO = this._shore;
     const invTile2 = 1 / (2 * p.tile);
     const cw = Math.min(CHUNK, p.cols - cx0);
     const ch = Math.min(CHUNK, p.rows - cz0);
@@ -228,6 +277,7 @@ export class IslandMap {
     const nor = new Float32Array(cvx * cvz * 3);
     const gra = new Float32Array(cvx * cvz);
     const lnd = new Float32Array(cvx * cvz);
+    const sho = new Float32Array(cvx * cvz);
 
     for (let lz = 0; lz < cvz; lz++) {
       for (let lx = 0; lx < cvx; lx++) {
@@ -242,6 +292,7 @@ export class IslandMap {
         col[li * 3 + 2] = COL[gi * 3 + 2];
         gra[li] = GRA[gi];
         lnd[li] = LND[gi];
+        sho[li] = SHO[gi];
         const xl = gx > 0 ? H[gi - 1] : H[gi];
         const xr = gx < VX - 1 ? H[gi + 1] : H[gi];
         const zl = gz > 0 ? H[gi - VX] : H[gi];
@@ -266,6 +317,7 @@ export class IslandMap {
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     geo.setAttribute('aGrass', new THREE.BufferAttribute(gra, 1));
     geo.setAttribute('aLand', new THREE.BufferAttribute(lnd, 1));
+    geo.setAttribute('aShore', new THREE.BufferAttribute(sho, 1));
     geo.setIndex(idx);
     const mesh = new THREE.Mesh(geo, this._terrainMat);
     mesh.receiveShadow = true;
@@ -290,9 +342,10 @@ export class IslandMap {
     const size = Math.max(this.worldW, this.worldH) * 12 + 6000;
     const deepY = -this.params.seaLevel * this.params.heightScale - 0.1;   // below the deepest in-island water, above the sunk apron edge (-floor-0.25)
     const floorGeo = new THREE.PlaneGeometry(size, size);
-    // Same deep blue + same roughness (0.58) as the in-island deep water, so the two
-    // reflect the sky env identically and the mesh-edge boundary stays invisible.
-    const floorMat = new THREE.MeshStandardMaterial({ color: '#' + C.deep.getHexString(), roughness: 0.58, metalness: 0.0 });
+    // Same deep blue + same gloss (0.12 / metal 0.15) as the now-uniformly-glossy
+    // in-island water, so the two reflect the sky env identically and the mesh-edge
+    // boundary stays invisible (the apron sinks under this plane to hide the seam).
+    const floorMat = new THREE.MeshStandardMaterial({ color: '#' + C.deep.getHexString(), roughness: 0.12, metalness: 0.15 });
     this.seaFloor = new THREE.Mesh(floorGeo, floorMat);
     this.seaFloor.rotation.x = -Math.PI / 2;
     this.seaFloor.position.y = deepY;

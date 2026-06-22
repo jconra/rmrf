@@ -3,7 +3,10 @@
 // Each maker returns a THREE.Group with its base at y=0. Team accent passed in.
 
 import * as THREE from 'three';
-import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture } from './BuildingTextures.js';
+import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
+
+// Shared neutral plate map tinted per-material by the team accent (matches Walls.js).
+const ACCENT_TEX = accentPlateTexture();
 
 // Textured materials (white base so the canvas texture reads at true value).
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
@@ -20,8 +23,8 @@ function box(w, h, d, mat) {
   return m;
 }
 function accentMat(accent) {
-  const m = new THREE.MeshStandardMaterial({ color: accent, roughness: 0.6, metalness: 0.2, flatShading: true });
-  m.userData.accent = true;   // so Camp.setAccent can recolour building bands too
+  const m = new THREE.MeshStandardMaterial({ color: accent, map: ACCENT_TEX, roughness: 0.6, metalness: 0.2, flatShading: true });
+  m.userData.accent = true;   // so Camp.setAccent can recolour building bands too (map rides along)
   return m;
 }
 

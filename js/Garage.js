@@ -222,14 +222,24 @@ export class Garage {
   _buildCeiling() {
     const R = FLOOR_HALF, f = 0.42, L = FLOOR_HALF * 2;
     const ceilMat = new THREE.MeshStandardMaterial({
-      color: '#5c636b', map: concreteTexture('#565c64'), roughness: 0.97, side: THREE.DoubleSide });
-    const vault = new THREE.Mesh(
-      new THREE.CylinderGeometry(R, R, L, 48, 1, true, Math.PI / 2, Math.PI), ceilMat);
-    vault.rotation.x = Math.PI / 2;   // axis runs along Z
-    vault.scale.y = f;                // squash the semicircle into a shallow ellipse
-    vault.position.y = WALL_H;
-    vault.receiveShadow = true;
-    this.group.add(vault);
+      color: '#9aa0a4', map: concreteTexture('#9aa0a4'), roughness: 0.95, side: THREE.DoubleSide });
+    // Roof = a WIDE concrete arch slab built from the SAME arch curve the ribs use
+    // (cos/sin half-circle, squashed by f) so it seats exactly on them, just at a slightly
+    // larger radius — the ribs read as spars tucked under a solid concrete roof. One piece
+    // extruded the full room depth (L) along Z. (Replaces the old thin half-cylinder shell,
+    // whose separate parameterisation left a visible gap behind the spars.)
+    const Ro = R + 1.6, Ri = R + 0.4;          // outer/inner arch radii (~1.2 thick), just outside the ribs (R-0.5)
+    const SEG = 48, arch = new THREE.Shape();
+    arch.moveTo(-Ro, 0);
+    for (let i = 0; i <= SEG; i++) { const a = Math.PI - (i / SEG) * Math.PI; arch.lineTo(Ro * Math.cos(a), Ro * Math.sin(a)); }   // outer arc: -X → apex → +X
+    for (let i = 0; i <= SEG; i++) { const a = (i / SEG) * Math.PI;          arch.lineTo(Ri * Math.cos(a), Ri * Math.sin(a)); }   // inner arc: +X → apex → -X (closes the band)
+    const roofGeo = new THREE.ExtrudeGeometry(arch, { depth: L, bevelEnabled: false, steps: 1 });
+    roofGeo.translate(0, 0, -L / 2);           // centre the extrusion on Z
+    const roof = new THREE.Mesh(roofGeo, ceilMat);
+    roof.scale.y = f;                          // squash the semicircle into the shallow vault
+    roof.position.y = WALL_H;
+    roof.receiveShadow = true;
+    this.group.add(roof);
 
     // Transverse steel ribs hugging the inner surface.
     const ribMat = new THREE.MeshStandardMaterial({ color: '#33373d', roughness: 0.55, metalness: 0.45 });

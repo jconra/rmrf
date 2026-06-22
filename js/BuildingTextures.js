@@ -82,6 +82,29 @@ export function crateTexture(base = '#6f6a61') {
   return finish(cv, 1);
 }
 
+// Painted-armour plate, NEUTRAL (near-white) so a coloured material tints it through a
+// multiply (map × color). Used for the team-colour caps / gate lintels / turret stripes
+// so they read as bolted painted plate instead of a flat cartoony block — the material
+// keeps the team accent as its colour (setAccent still recolours), this only adds the
+// darker bolts/seams/grime the colour multiplies down.
+export function accentPlateTexture() {
+  const { cv, ctx, s } = canvas(128);
+  ctx.fillStyle = '#f4f4f4'; ctx.fillRect(0, 0, s, s);
+  speckle(ctx, s, 30, 1400);
+  ctx.strokeStyle = 'rgba(0,0,0,0.26)'; ctx.lineWidth = 2;        // inset panel border
+  ctx.strokeRect(s * 0.07, s * 0.07, s * 0.86, s * 0.86);
+  ctx.strokeStyle = 'rgba(0,0,0,0.14)'; ctx.lineWidth = 1;        // centre division seam
+  ctx.beginPath(); ctx.moveTo(0, s / 2); ctx.lineTo(s, s / 2); ctx.stroke();
+  const bolts = [[0.15, 0.15], [0.85, 0.15], [0.15, 0.85], [0.85, 0.85]];
+  ctx.fillStyle = 'rgba(0,0,0,0.34)';                            // corner bolts
+  for (const [bx, by] of bolts) { ctx.beginPath(); ctx.arc(s * bx, s * by, 2.3, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';                      // bolt highlight
+  for (const [bx, by] of bolts) { ctx.beginPath(); ctx.arc(s * bx - 0.7, s * by - 0.7, 0.9, 0, Math.PI * 2); ctx.fill(); }
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)';                          // faint grime streaks
+  for (let i = 0; i < 8; i++) { const x = Math.random() * s; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + (Math.random() - 0.5) * 5, s); ctx.stroke(); }
+  return finish(cv, 1);
+}
+
 // Flat roof / panel: darker with horizontal seams.
 export function roofTexture(base = '#6f6a61') {
   const { cv, ctx, s } = canvas(64);

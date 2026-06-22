@@ -3,20 +3,20 @@
 // with a live controls panel. Garage + vehicles land in later milestones.
 
 import * as THREE from 'three';
-import { IslandMap, DEFAULTS } from './IslandMap.js?v=63';
+import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp } from './Walls.js?v=51';
-import { RoadNetwork } from './Roads.js?v=78';
+import { Camp } from './Walls.js?v=52';
+import { RoadNetwork } from './Roads.js?v=79';
 import { Foliage } from './Foliage.js?v=2';
-import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=65';
-import { Elevator } from './Elevator.js';
-import { Garage, GARAGE_COUNTS } from './Garage.js?v=1';
+import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=66';
+import { Elevator } from './Elevator.js?v=2';
+import { Garage, GARAGE_COUNTS } from './Garage.js?v=4';
 import { TEAM_COLORS, updateCamo, camoParams } from '../../vehicle-designer/js/CamoTexture.js';
-import { SoundManager } from '../../vehicle-designer/js/SoundManager.js';
+import { SoundManager } from '../../vehicle-designer/js/SoundManager.js?v=2';
 import { Projectiles } from '../../vehicle-designer/js/Projectiles.js';
-import { Brain, randomPersonality } from './AI.js?v=75';
+import { Brain, randomPersonality } from './AI.js?v=76';
 import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER } from './AIStrategies.js?v=64';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js';
@@ -491,14 +491,19 @@ const playerLosses = LOSSES ? { ...LOSSES } : {};
 // On-screen fire button (touch) — holds fireHeld, the same flag SPACE sets.
 // Revealed by setFieldUI on touch devices; field-only.
 (function setupFireButton() {
-  const btn = document.getElementById('fire-btn');
-  if (!btn) return;
-  const press = e => { fireHeld = true; btn.classList.add('pressed'); e.preventDefault(); };
-  const lift  = () => { fireHeld = false; btn.classList.remove('pressed'); };
-  btn.addEventListener('pointerdown', press);
-  btn.addEventListener('pointerup', lift);
-  btn.addEventListener('pointercancel', lift);
-  btn.addEventListener('pointerleave', lift);
+  // A FIRE button in each bottom corner (left + right) so either thumb can fire while the
+  // other steers on the field. Press holds fireHeld (same flag SPACE / mouse uses); the
+  // driveUpdate cadence loop turns that into repeat shots.
+  for (const id of ['fire-btn', 'fire-btn-l']) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    const press = e => { fireHeld = true; btn.classList.add('pressed'); e.preventDefault(); };
+    const lift  = () => { fireHeld = false; btn.classList.remove('pressed'); };
+    btn.addEventListener('pointerdown', press);
+    btn.addEventListener('pointerup', lift);
+    btn.addEventListener('pointercancel', lift);
+    btn.addEventListener('pointerleave', lift);
+  }
 })();
 
 // Reveal the on-screen touch controls only AFTER a real touch — capability flags
@@ -946,6 +951,11 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
     if (!muzzle) return;
     veh.group.updateMatrixWorld(true);
     const mpos = muzzle.getWorldPosition(_muzzleWorld);
+    // Remote/AI shot → a positioned report so you HEAR enemies fire (player matches +
+    // AI-vs-AI observation). The player's own gun already sounded via fireGun() above.
+    if (!playSound && sound && sound.spatialReady) {
+      try { sound.fireGunAt(idx, mpos.x, mpos.y, mpos.z); } catch (e) { /* best-effort */ }
+    }
     const aim = muzzle.parent || veh.group;
     const dir = _fireDir.set(0, 0, -1).applyQuaternion(aim.getWorldQuaternion(_gunQuat)).normalize();
     const hex = TEAM_COLORS[veh.colorIndex] ? TEAM_COLORS[veh.colorIndex].hex : 0xffffff;
@@ -1516,7 +1526,10 @@ function applyAltitude(veh, dt) {
     const base = roadY != null ? roadY : (overWater ? 0 : terrain);
     target = base + m.cruise;
   }
-  veh.holder.position.y += (target - veh.holder.position.y) * Math.min(1, dt * 5);
+  // Flyers (the Valkyrie) ease to altitude GENTLY so they float up off the lift instead of
+  // popping to cruise height; ground craft snap to the grade so they don't sink visibly.
+  const altRate = m.ignoreWalls ? 1.8 : 5;
+  veh.holder.position.y += (target - veh.holder.position.y) * Math.min(1, dt * altRate);
 
   // Wake: while a ground (sinker) vehicle fords open water and is actually moving, trail
   // expanding white foam puffs behind it on the water surface.
@@ -2054,6 +2067,9 @@ class AICommander {
     this.fortHp0 = null;                              // enemy fort HP when this card started
     this.seenTypes = {};                              // rival vehicle types this team has spotted
     this.knownSupplies = new Set();                   // fog-of-war: resupply POIs this team has SCOUTED
+    this.knownElev = false;                           // scouted the enemy FOB/elevator yet?
+    this.knownFlag = false;                           // scouted the enemy flag HQ yet?
+    this._knownSig = '';                              // last logged known-POI signature (log only on change)
     this.explore = new ExploreMemory(map.worldW, map.worldH);   // coarse "where have we looked" grid
     this._exploreWp = null;                           // current recon waypoint (held until reached)
     this.roster = { ...GARAGE_COUNTS };               // finite fleet, same numbers as the player's garage; a death removes one
@@ -2094,6 +2110,19 @@ class AICommander {
   enemyBasePos() { return teamCenter(this.targetTeam(), 'main'); }
   enemyFobPos() { return teamCenter(this.targetTeam(), 'fob'); }   // where the enemy's units rise — the Warrior hunts here
   homeBasePos() { return teamCenter(this.team, 'main'); }           // our own flag base
+  // Comma-list of the points this team has SCOUTED (for the known-POI log readout):
+  // discovered supply depots by kind + the enemy elevator/flag once seen.
+  _knownSummary() {
+    const kinds = new Set();
+    for (const rp of this.knownSupplies) if (!rp.dead) kinds.add(rp.kind);
+    const parts = [];
+    if (kinds.has('shield')) parts.push('Shield');
+    if (kinds.has('ammo')) parts.push('Ammo');
+    if (kinds.has('fuel')) parts.push('Fuel');
+    if (this.knownElev) parts.push('E_Elv');
+    if (this.knownFlag) parts.push('E_Flag');
+    return parts.length ? parts.join(', ') : 'none';
+  }
   // Have we ever laid eyes on an enemy vehicle? (drives Hunter scout → attack)
   knowsEnemy() { return Object.keys(this.seenTypes).length > 0; }
   // The enemy's last-known position, if seen recently (else null → fall back to the
@@ -2464,7 +2493,9 @@ class AICommander {
     const want = this._pickAvailableType(this.strategy.wantVehicle(this));
     this._stepAtDeploy = this.strategy.step;                        // consume the step change either way
     if (!want || this.unit.type === want) return;                  // new beat wants the same vehicle → carry on
-    this._recalling = true; this._recallT = 22;                    // backstop: give up the trip after 22s
+    this._recalling = true;
+    this._recallBestD = Infinity;                                  // closest we've gotten to home so far
+    this._recallStallT = 0;                                        // time since we last made headway toward home
     this._nav.path = null;                                          // replan toward home
     aiLog(this.team, `${this.cname} pulls ${this.unit.type} home to swap for ${want}`);
   }
@@ -2479,9 +2510,16 @@ class AICommander {
     const home = teamCenter(this.team, 'fob');
     const d = Math.hypot(v.holder.position.x - home.x, v.holder.position.z - home.z);
     const reach = (this._elev ? this._elev.padHalf : 8) + 5;
-    this._recallT -= dt;
-    if (d < reach || this._recallT <= 0) {
-      aiLog(this.team, `${this.cname} ${v.type} ${d < reach ? 'home — swapping' : 'recall timed out — swapping'}`);
+    // PROGRESS-based recall: a unit gets as long as it needs to crawl home (a slow Jotun
+    // from across the map is fine — that's the game). We only give up if it makes NO
+    // headway toward home for a while = TRULY wedged (the nav stuck-escalation couldn't
+    // free it). Any new closest-to-home distance resets the stall clock.
+    const RECALL_STALL = 10;                                       // s of zero progress = stuck
+    if (d < this._recallBestD - 0.5) { this._recallBestD = d; this._recallStallT = 0; }
+    else this._recallStallT += dt;
+    const stuck = this._recallStallT > RECALL_STALL;
+    if (d < reach || stuck) {
+      aiLog(this.team, `${this.cname} ${v.type} ${d < reach ? 'home — swapping' : 'stuck, no progress home — swapping'}`);
       removeCombatant(v); scene.remove(v.group); this.unit = null; this._recalling = false; this.respawnT = 1.0;
       return;
     }
@@ -2606,6 +2644,18 @@ class AICommander {
       const d2 = (rp.pos.x - px) ** 2 + (rp.pos.z - pz) ** 2;
       if (d2 < sight * sight && (flyer || hasLOS(px, pz, rp.pos.x, rp.pos.z))) this.knownSupplies.add(rp);
     }
+    // Same fog-of-war for the enemy's key STRUCTURES (its FOB/elevator + flag HQ): the
+    // team only "knows" one once a unit has come within sight of it (tall towers carry, so
+    // a wider sight than a crate; LOS for ground). Tracked for the known-POI log readout.
+    {
+      const bSight = AI_VISION * 2.0;
+      if (!this.knownElev) { const e = this.enemyFobPos(); const d2 = (e.x - px) ** 2 + (e.z - pz) ** 2; if (d2 < bSight * bSight && (flyer || hasLOS(px, pz, e.x, e.z))) this.knownElev = true; }
+      if (!this.knownFlag) { const e = this.enemyBasePos(); const d2 = (e.x - px) ** 2 + (e.z - pz) ** 2; if (d2 < bSight * bSight && (flyer || hasLOS(px, pz, e.x, e.z))) this.knownFlag = true; }
+    }
+    // Log the set of points this team is aware of — only when it CHANGES (a new discovery
+    // or a known supply destroyed), so it reads as intel updates, not spam. Shows in ?ailog.
+    const ks = this._knownSummary();
+    if (ks !== this._knownSig) { this._knownSig = ks; aiLog(this.team, `${this.cname} knows: ${ks}`); }
     let goal = this.strategy.objective(this);
     // DEFEND override (ai_behavior): if a rival is running off with OUR flag, abandon the
     // plan and chase the carrier toward its delivery point — so a stolen flag is always
@@ -2770,6 +2820,11 @@ class AICommander {
       supplyHeals,   // the chosen resupply point is an own base → hold until ammo+fuel+hp are all maxed
       home: healHome || goal,
       shootGoal: this.strategy.shoot(this), arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),
+      // Is this unit on a flee-contact RUNNER mission (grab the flag / scout — avoid fights)
+      // vs one the commander sent it out to FIGHT on (attack/siege/defend/intercept)? Gates
+      // the Firebrat's runnerFlee reflex so an ordered-to-engage Firebrat actually closes +
+      // shoots instead of dodging the instant an enemy is near.
+      runnerMode: this.strategy.step === 'capture' || this.strategy.step === 'scout',
       blockedAhead,
       blockedLeft: feeler(lx, lz),
       blockedRight: feeler(rx, rz),
@@ -3181,12 +3236,21 @@ function deployToFOB(type, colorIndex, rise) {
 // Forward/turn in [-1, 1]. Touch: steer toward the held finger (point-to-steer).
 // Keyboard (desktop): WASD/arrows, the classic tank turn + throttle.
 function driveInput() {
+  // The Lurcher has NO front (omni-directional): it moves along whatever world vector you
+  // push, and the hull auto-faces its travel. The other three keep their tank steering.
+  const omni = !!(player && player.type === 'lurcher');
   if (touchSteer && player && !player.dead) {
     const t = pickWorldPoint(touchSteer.x, touchSteer.y);
     if (t) {
       const hp = player.holder.position;
       const dx = t.point.x - hp.x, dz = t.point.z - hp.z;
       const distXZ = Math.hypot(dx, dz);
+      if (omni) {
+        // Move straight toward the finger — no turn-then-drive — easing to a stop on arrival.
+        if (distXZ < TOUCH_STOP_R) return { omni: true, mx: 0, mz: 0 };
+        const inv = 1 / distXZ;
+        return { omni: true, mx: dx * inv, mz: dz * inv };
+      }
       const aim = Math.atan2(-dx, -dz);                 // heading whose front (-Z) points at the finger
       const err = wrapPi(aim - player.heading);
       const turn = Math.max(-1, Math.min(1, err * 2.4));
@@ -3210,6 +3274,19 @@ function driveInput() {
       return { fwd, turn };
     }
   }
+  if (omni) {
+    // Camera-relative 8-way: W/S move into/out of the screen, A/D move screen-left/right,
+    // independent of which way the hull happens to be facing.
+    const sy = Math.sin(orbit.yaw), cy = Math.cos(orbit.yaw);
+    const fX = -sy, fZ = -cy;        // camera forward on the ground (into the screen)
+    const rX = cy,  rZ = -sy;        // camera right on the ground
+    const wv = (keys['w'] || keys['arrowup']   ? 1 : 0) - (keys['s'] || keys['arrowdown']  ? 1 : 0);
+    const rv = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
+    let mx = fX * wv + rX * rv, mz = fZ * wv + rZ * rv;
+    const m = Math.hypot(mx, mz);
+    if (m > 1) { mx /= m; mz /= m; }
+    return { omni: true, mx, mz };
+  }
   const fwd    = (keys['w'] || keys['arrowup']   ? 1 : 0) - (keys['s'] || keys['arrowdown']  ? 1 : 0);
   const turn   = (keys['a'] || keys['arrowleft'] ? 1 : 0) - (keys['d'] || keys['arrowright'] ? 1 : 0);
   const strafe = (keys['e'] ? 1 : 0) - (keys['q'] ? 1 : 0);   // Q/E slide sideways (no turn)
@@ -3226,13 +3303,25 @@ function driveUpdate(dt) {
   }
   if (!driving || !player || player.dead) return false;
   const inp = matchOver ? { fwd: 0, turn: 0, strafe: 0 } : driveInput();   // controls freeze on win
-  const out = burnFuel(player, inp, dt);    // no fuel → engine dead, can't move
-  const strafe = player.type === 'jotun' ? 0 : (out.strafe || 0);   // the Jotun is a fortress — no sidestep
-  player.drive(dt, out.fwd, out.turn, null, player._blocked, strafe);
+  let revFwd, revTurn, stopped;
+  if (inp.omni) {
+    // Omni Lurcher: burnFuel for the accounting (+ LIMP scaling when dry), then drive the
+    // world vector. The fuel call's fwd-out / fwd-in ratio gives the LIMP factor (1 fueled).
+    const mag = Math.hypot(inp.mx, inp.mz);
+    const fuelOut = burnFuel(player, { fwd: mag, turn: 0, strafe: 0 }, dt);
+    const k = mag > 0.0001 ? fuelOut.fwd / mag : 1;
+    player.driveOmni(dt, inp.mx * k, inp.mz * k, null, player._blocked);
+    revFwd = mag; revTurn = 0; stopped = mag < 0.01;
+  } else {
+    const out = burnFuel(player, inp, dt);  // no fuel → engine dead, can't move
+    const strafe = player.type === 'jotun' ? 0 : (out.strafe || 0);   // the Jotun is a fortress — no sidestep
+    player.drive(dt, out.fwd, out.turn, null, player._blocked, strafe);
+    revFwd = out.fwd; revTurn = out.turn; stopped = inp.fwd === 0 && inp.turn === 0;
+  }
   applyAltitude(player, dt);                // altitude / water flooding / tree crush
   if (!player || player.dead) return true;  // sank/destroyed this frame → bail before touching it
   aimPlayerTurret(player, dt);              // turret continuously follows the aim cursor
-  if (sound) sound.update(out.fwd, out.turn);   // rev the engine RPM with throttle (idle ↔ max)
+  if (sound) sound.update(revFwd, revTurn);   // rev the engine RPM with throttle (idle ↔ max)
   fireCooldown -= dt;
   if (!matchOver && fireHeld && fireCooldown <= 0) firePlayer();   // hold to auto-fire at the crosshair
   _follow.set(player.holder.position.x, 0, player.holder.position.z);
@@ -3245,7 +3334,7 @@ function driveUpdate(dt) {
     const dist = Math.hypot(player.holder.position.x - playerElev.center.x,
                             player.holder.position.z - playerElev.center.z);
     if (dist > playerElev.padHalf * 1.3) leftPad = true;
-    if (leftPad && dist < playerElev.padHalf * 0.7 && inp.fwd === 0 && inp.turn === 0) {
+    if (leftPad && dist < playerElev.padHalf * 0.7 && stopped) {
       parkT += dt;
       if (parkT > 0.5) beginReturn();
     } else {
@@ -3362,11 +3451,13 @@ function setGarageOverlays(show) {
 function setFieldUI(show) {
   const hud = document.getElementById('hud');
   if (hud) hud.style.display = show ? '' : 'none';
-  // The old drive stick + fire button are retired: touch now steers toward the finger
-  // and taps to fire (see the canvas touch handlers). Keep them hidden either way.
-  for (const id of ['touch-joystick', 'fire-btn']) {
+  // Touch controls: the drive STICK stays retired (touch steers toward the finger on the
+  // field), but the corner FIRE buttons are revealed on touch devices so firing is reliable
+  // — one thumb steers, the other fires (tapping the field for a shot was too fiddly).
+  document.getElementById('touch-joystick')?.classList.remove('visible');
+  for (const id of ['fire-btn', 'fire-btn-l']) {
     const el = document.getElementById(id);
-    if (el) el.classList.remove('visible');
+    if (el) el.classList.toggle('visible', show && touchUsed);
   }
   ensureLogToggle(); updateLogToggle();   // phone-friendly AI-log button (top-right)
   if (!show) fireHeld = false;   // don't carry a held shot back into the garage
@@ -3484,7 +3575,8 @@ function ensureMenuStyle() {
   const s = document.createElement('style'); s.id = 'menu-style';
   s.textContent = `
     #gamemenu { position:fixed; inset:0; z-index:400; display:none;
-      flex-direction:column; align-items:center; justify-content:center; gap:16px;
+      flex-direction:column; align-items:center; justify-content:center; gap:12px;
+      overflow:auto; padding:24px 0;
       background:radial-gradient(ellipse at center, rgba(6,10,16,0.55), rgba(4,7,12,0.85));
       font-family:"Courier New",monospace; -webkit-user-select:none; user-select:none; }
     #gamemenu.show { display:flex; }
@@ -3497,9 +3589,13 @@ function ensureMenuStyle() {
       box-shadow:0 2px 10px rgba(0,0,0,0.4); transition:background .12s, transform .06s; }
     #gamemenu button:hover { background:rgba(40,58,80,0.96); }
     #gamemenu button:active { transform:scale(0.97); }
-    #gamemenu .gm-help { width:262px; color:#aebecd; font-size:11px; line-height:1.75; letter-spacing:1px;
+    #gamemenu .gm-help { width:min(86vw,340px); color:#aebecd; font-size:11px; line-height:1.6; letter-spacing:0.5px;
       background:rgba(8,12,18,0.72); border:1px solid rgba(255,255,255,0.15); border-radius:6px;
-      padding:12px 16px; display:none; white-space:pre; margin-top:4px; }`;
+      padding:12px 16px; white-space:normal; text-align:left; margin-top:6px;
+      max-height:40vh; overflow-y:auto; }
+    #gamemenu .gm-help h4 { color:#e6eef5; font-size:10px; letter-spacing:2px; margin:10px 0 3px; font-weight:bold; }
+    #gamemenu .gm-help h4:first-child { margin-top:0; }
+    #gamemenu .gm-help b { color:#dfe8ef; }`;
   document.head.appendChild(s);
 }
 function ensureGameMenu() {
@@ -3512,15 +3608,23 @@ function ensureGameMenu() {
     '<div class="gm-sub" id="gm-sub">ISLAND CTF</div>' +
     '<button data-act="pva">PLAYER VS AI</button>' +
     '<button data-act="ava">AI VS AI</button>' +
-    '<button data-act="help">HELP</button>' +
-    '<div class="gm-help" id="gm-help">MOVE    W A S D  /  drag\n' +
-    'FIRE    click  /  tap\nSTRAFE  Q E  /  two-finger\nAIM     toward the cursor / touch\n\n' +
-    'Grab the enemy flag and ride it down\nyour own lift to win the match.</div>';
+    '<div class="gm-help" id="gm-help">' +
+      '<h4>GOAL</h4>' +
+      'Destroy the enemy flag HQ, then send a <b>Firebrat</b> to grab the exposed flag and ride it down your own lift to win.' +
+      '<h4>CONTROLS</h4>' +
+      '<b>Move</b> WASD / drag toward a point &nbsp; <b>Fire</b> click / FIRE button &nbsp; <b>Strafe</b> Q E / two fingers &nbsp; <b>Aim</b> toward the cursor' +
+      '<h4>VEHICLES</h4>' +
+      '<b>Lurcher</b> — fast omni scout, 360° turret.<br>' +
+      '<b>Firebrat</b> — fragile flag runner, fixed gun.<br>' +
+      '<b>Valkyrie</b> — flying missile gunship.<br>' +
+      '<b>Jotun</b> — slow railgun siege tank.' +
+      '<h4>SUPPLIES</h4>' +
+      'Drive over neutral pads to refill <b>fuel</b> &amp; <b>ammo</b>. Find the hidden <b>shield</b> generator for armour.' +
+    '</div>';
   document.body.appendChild(m);
   m.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     const act = b.dataset.act;
-    if (act === 'help') { const h = document.getElementById('gm-help'); h.style.display = h.style.display === 'block' ? 'none' : 'block'; return; }
     if (act === 'ava') { location.href = MENU_BASE + '?aivsai'; return; }
     // PLAYER VS AI: reload into a fresh game after a match; on the first screen just open the hangar.
     if (m.dataset.reload === '1') { location.href = MENU_BASE + '?play'; return; }
@@ -3533,7 +3637,6 @@ function showGameMenu(opts = {}) {
   const m = ensureGameMenu();
   document.getElementById('gm-title').textContent = opts.header || 'RIPOSTE RUN';
   document.getElementById('gm-sub').textContent = opts.sub || 'ISLAND CTF';
-  document.getElementById('gm-help').style.display = 'none';
   m.dataset.reload = opts.reload ? '1' : '0';
   m.classList.add('show');
   setGarageOverlays(false);   // hide the deploy HUD behind the menu
@@ -3614,6 +3717,11 @@ function returnToGarage() {
     captured.carried = false; captured.carrier = null; captured.returnT = 0;
     captured.group.position.set(captured.home.x, captured.home.y, captured.home.z);   // flag back on its post
     flagsCaptured++;   // the VICTORY cinematic already played over the descent (playVictory)
+    // The player extraction is the WIN, but it never routes through endMatch (that
+    // path only handles AI captures). Mark the match decided here so the block below
+    // runs the victory cinematic + play-again menu instead of dropping back into a
+    // live garage and letting the match continue.
+    matchOver = true; matchWon = true;
   }
   clearCeleb();        // tidy any field confetti/title before the hangar shows
   // Match decided (not a mid-match death/redeploy) → celebrate, then open the
@@ -3863,6 +3971,7 @@ window.RR = {
   get resupplies() { return resupplies; },
   get playerLosses() { return playerLosses; },
   get matchOver() { return matchOver; },
+  get matchWon() { return matchWon; },
   tickFlags: (dt = 0.1) => updateFlags(dt),
   tickResupply: (dt = 0.1) => updateResupplies(dt),
   fireUnit: (v) => fireVehicle(v, false),
@@ -3995,6 +4104,29 @@ function updateNavOverlay() {
   }
 }
 
+// Firebrat aim aid: a thin reference beam down the centreline of its fixed forward gun, so
+// the player can see exactly where the narrow (5°) gun points — it's hard to aim otherwise.
+// Player-driven Firebrat only; the beam draws over terrain (depthWrite off) so it always reads.
+let _aimBeam = null;
+function updateFirebratAimBeam() {
+  const show = onField && driving && player && !player.dead && player.type === 'firebrat';
+  if (!show) { if (_aimBeam) _aimBeam.visible = false; return; }
+  if (!_aimBeam) {
+    const len = 34;
+    const geo = new THREE.CylinderGeometry(0.06, 0.06, len, 6);
+    geo.rotateX(Math.PI / 2);          // cylinder axis Y → Z
+    geo.translate(0, 0, -len / 2 - 2); // extend forward (local -Z), starting just ahead of the nose
+    const hex = TEAM_COLORS[player.colorIndex] ? TEAM_COLORS[player.colorIndex].hex : 0xffffff;
+    const mat = new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false });
+    _aimBeam = new THREE.Mesh(geo, mat); _aimBeam.renderOrder = 4; scene.add(_aimBeam);
+  }
+  _aimBeam.visible = true;
+  const hp = player.holder.position;
+  _aimBeam.position.set(hp.x, hp.y + 1.3, hp.z);   // ≈ gun height
+  _aimBeam.rotation.y = player.heading;
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
@@ -4031,6 +4163,7 @@ function animate() {
       updateHealthBars();
       updateLock(dt);                        // Valkyrie target box: track + colour the lock
       updateAimReticle();                    // cursor crosshair (other vehicles) + aim point
+      updateFirebratAimBeam();               // centreline reference beam for the fixed-gun Firebrat
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateWallTurrets(dt);                 // base corner turrets fire on intruders in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events

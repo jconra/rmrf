@@ -113,6 +113,34 @@ export class Vehicle {
     this.model.update(dt, forward, turn);
   }
 
+  // OMNI-directional drive (the Lurcher under player control): move along an arbitrary
+  // world vector (mx, mz) ∈ unit disc, no input-driven turning — the hull has no "front"
+  // to manage, it just goes where you push. The body eases to FACE its travel direction
+  // (purely cosmetic; the turret aims independently via its full 360° arc). Same blocked-
+  // slide as drive(). Used only for the player Lurcher; the AI still uses drive().
+  driveOmni(dt, mx, mz, groundFn, blockedFn) {
+    const mag = Math.hypot(mx, mz);
+    if (mag > 0.001) {
+      const want = Math.atan2(-mx, -mz);                 // heading whose forward (-Z) points at (mx,mz)
+      const turn = ((want - this.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;   // wrap to [-π,π]
+      const slew = 6 * dt;                               // cosmetic catch-up; tight enough to read as "facing where it goes"
+      this.heading += Math.max(-slew, Math.min(slew, turn));
+      this.holder.rotation.y = this.heading;
+    }
+    const d = this.speed * dt;
+    const dx = mx * d, dz = mz * d;
+    const px = this.holder.position.x, pz = this.holder.position.z;
+    let nx = px + dx, nz = pz + dz;
+    if (blockedFn && blockedFn(nx, nz)) {
+      nx = blockedFn(px + dx, pz) ? px : px + dx;        // slide on whichever axis is clear
+      nz = blockedFn(px, pz + dz) ? pz : pz + dz;
+    }
+    this.holder.position.x = nx;
+    this.holder.position.z = nz;
+    if (groundFn) this.holder.position.y = groundFn(nx, nz);
+    this.model.update(dt, mag, 0);                       // animate as forward motion at this magnitude
+  }
+
   // Idle tick (animation only, no movement) — for parked/garage vehicles.
   idle(dt) { this.model.update(dt, 0, 0); }
 

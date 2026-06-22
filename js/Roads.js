@@ -11,8 +11,36 @@ import { TILE } from './IslandMap.js';
 const ROAD_T = 0.5;   // road slab thickness — buried in the flat land, its side covers the drop at rough shore cells
 const ROAD_REUSE = 0.1;   // A* cost of a cell that already has road — near-free so new roads merge onto it instead of running parallel
 const ASPHALT = new THREE.MeshStandardMaterial({ color: '#5b5e63', roughness: 0.92, flatShading: true });
-const DECK = new THREE.MeshStandardMaterial({ color: '#7a6e57', roughness: 0.9, flatShading: true });
+const DECK = new THREE.MeshStandardMaterial({ color: '#5f5640', roughness: 0.95, flatShading: true });   // dark structural slab under the planks
 const RAIL = new THREE.MeshStandardMaterial({ color: '#544c3b', roughness: 0.9, flatShading: true });
+
+// Plank decking texture — cross-planks (seam lines run along the canvas X axis, so
+// after the top plane's rotateX(-90) they read as boards running EAST-WEST, i.e.
+// across a north-south span). Per-plank shade + a faint lengthwise grain so the deck
+// isn't a flat colour. Built once, shared by every bridge tile.
+let _deckTex = null, _deckTopMat = null;
+function deckTopMaterial() {
+  if (_deckTopMat) return _deckTopMat;
+  const S = 64, planks = 5, pw = S / planks;
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#7a6e57'; ctx.fillRect(0, 0, S, S);
+  for (let i = 0; i < planks; i++) {
+    const k = 0.86 + Math.random() * 0.22;                       // per-board tone
+    ctx.fillStyle = `rgb(${Math.min(255, 122 * k) | 0},${Math.min(255, 110 * k) | 0},${Math.min(255, 87 * k) | 0})`;
+    ctx.fillRect(0, i * pw, S, pw - 1);
+    ctx.fillStyle = 'rgba(38,32,22,0.55)';                       // dark seam between boards
+    ctx.fillRect(0, i * pw, S, 1.5);
+  }
+  ctx.globalAlpha = 0.07; ctx.fillStyle = '#332d20';             // faint lengthwise grain
+  for (let x = 0; x < S; x += 3) ctx.fillRect(x, 0, 1, S);
+  ctx.globalAlpha = 1;
+  _deckTex = new THREE.CanvasTexture(cv);
+  _deckTex.colorSpace = THREE.SRGBColorSpace;
+  _deckTex.anisotropy = 4;
+  _deckTopMat = new THREE.MeshStandardMaterial({ map: _deckTex, roughness: 0.92, flatShading: false });
+  return _deckTopMat;
+}
 
 // Road-tile texture for ANY junction, keyed by which sides connect (n/s/e/w). One
 // generator so every piece shares the orientation convention: canvas +x = world east,
@@ -109,17 +137,34 @@ class RoadTiles {
     this.group.add(surf);
   }
 
-  // Raised plank bridge deck tile (over water), with rails on the across sides.
-  deck(x, z, y, orient) {
+  // Raised plank bridge deck tile (over water). A rail runs along every side that is
+  // NOT connected to more road — so a STRAIGHT gets rails on its two flanks and a
+  // CORNER gets the L of rails on its two outer edges (the open-water sides), instead
+  // of reusing the straight piece's fixed across-rails. n/s/e/w = a road continues
+  // that way (land tile or another deck).
+  deck(x, z, y, n, s, e, w) {
     const grp = new THREE.Group();
-    const d = new THREE.Mesh(new THREE.BoxGeometry(this.width, 0.16, this.width), DECK);
-    grp.add(d);
-    for (const s of [-1, 1]) {
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.45, this.width), RAIL);
-      rail.position.set(s * this.width / 2, 0.3, 0);
-      grp.add(rail);
-    }
-    if (orient === 'ew') grp.rotation.y = Math.PI / 2;
+    const W = this.width;
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(W, 0.16, W), DECK);
+    slab.receiveShadow = true;
+    grp.add(slab);
+    // Textured plank top, just above the slab. Boards run across the N-S axis by
+    // default; on an E-W run turn them a quarter so they still cross the lane.
+    const topGeo = new THREE.PlaneGeometry(W, W);
+    topGeo.rotateX(-Math.PI / 2);
+    const top = new THREE.Mesh(topGeo, deckTopMaterial());
+    top.position.y = 0.082;            // a hair above the 0.16-thick slab's top (0.08)
+    if ((e || w) && !(n || s)) top.rotation.y = Math.PI / 2;   // E-W lane → turn the boards
+    top.receiveShadow = true;
+    grp.add(top);
+    // Rail on each open-water (unconnected) side.
+    const railX = () => new THREE.Mesh(new THREE.BoxGeometry(W, 0.45, 0.14), RAIL);   // runs east-west (caps a N/S edge)
+    const railZ = () => new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.45, W), RAIL);   // runs north-south (caps an E/W edge)
+    const addRail = (m, px, pz) => { m.position.set(px, 0.3, pz); grp.add(m); };
+    if (!n) addRail(railX(), 0, -W / 2);
+    if (!s) addRail(railX(), 0,  W / 2);
+    if (!e) addRail(railZ(),  W / 2, 0);
+    if (!w) addRail(railZ(), -W / 2, 0);
     // Plank is 0.16 thick (top sits ~0.08 above the centre); seat it AT the road grade
     // so the deck surface is flush with the draped road tiles (which lift ~0.07), instead
     // of floating a third of a unit over them.
@@ -249,8 +294,7 @@ export class RoadNetwork {
     for (const { i, j, y } of cells.values()) {
       const wx = i * this.cell, wz = j * this.cell;
       const n = has(i, j - 1), s = has(i, j + 1), e = has(i + 1, j), w = has(i - 1, j);
-      const orient = (n && s && !e && !w) ? 'ns' : (e && w && !n && !s) ? 'ew' : null;
-      if (this._isWater(i, j)) this.tiles.deck(wx, wz, Math.max(y, bridgeY), orient || 'ns');
+      if (this._isWater(i, j)) this.tiles.deck(wx, wz, Math.max(y, bridgeY), n, s, e, w);
       else this.tiles.tile(wx, wz, roadGrade != null ? roadGrade : y, n, s, e, w);
     }
   }

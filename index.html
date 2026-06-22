@@ -51,9 +51,10 @@
             box-shadow: 0 0 10px rgba(255,255,255,0.35);
             transition: transform 0.05s linear;
         }
-        /* On-screen fire button — revealed on touch devices alongside the stick */
-        #fire-btn {
-            position: fixed; bottom: 50px; right: 28px;
+        /* On-screen FIRE buttons — one in each bottom corner (touch devices). One thumb
+           steers on the field, the other fires from whichever corner is comfortable. */
+        #fire-btn, #fire-btn-l {
+            position: fixed; bottom: 50px;
             width: 92px; height: 92px; border-radius: 50%;
             background: rgba(40, 8, 8, 0.45);
             border: 1px solid rgba(255, 150, 150, 0.6);
@@ -64,8 +65,10 @@
             color: rgba(255, 200, 200, 0.85); font-size: 14px;
             align-items: center; justify-content: center;
         }
-        #fire-btn.visible { display: flex; }
-        #fire-btn.pressed { background: rgba(120, 20, 20, 0.6); transform: scale(0.94); }
+        #fire-btn { right: 28px; }
+        #fire-btn-l { left: 28px; }
+        #fire-btn.visible, #fire-btn-l.visible { display: flex; }
+        #fire-btn.pressed, #fire-btn-l.pressed { background: rgba(120, 20, 20, 0.6); transform: scale(0.94); }
         /* Player health + fuel readout (top-left, under the title) */
         #player-bars {
             position: absolute; top: 54px; left: 16px; z-index: 60; pointer-events: none;
@@ -106,6 +109,7 @@
         <span class="tj-label tj-d">D</span>
         <div id="touch-knob"></div>
     </div>
+    <div id="fire-btn-l" aria-hidden="true">FIRE</div>
     <div id="fire-btn" aria-hidden="true">FIRE</div>
     <script type="importmap">
     {
@@ -115,6 +119,6 @@
         }
     }
     </script>
-    <script type="module" src="js/main.js?v=156"></script>
+    <script type="module" src="js/main.js?v=172"></script>
 </body>
 </html>

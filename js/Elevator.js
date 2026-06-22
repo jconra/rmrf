@@ -4,7 +4,10 @@
 // hazard collar + telescoping ram, plus an optional rider Vehicle whose Y we drive.
 
 import * as THREE from 'three';
-import { concreteTexture } from './BuildingTextures.js';
+import { concreteTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
+
+// Shared neutral plate map tinted by the team accent (matches Walls.js / Buildings.js).
+const ACCENT_TEX = accentPlateTexture();
 
 const RISE_TIME = 3.2;    // seconds for a full bottom→top travel
 const HOLD_TOP  = 2.2;    // pause at the surface before lowering (loop mode)
@@ -94,8 +97,8 @@ export class Elevator {
     pad.position.y = -0.5;                    // top face at lift origin (y=0)
     this.lift.add(pad);
     // Team-colour border framing the deck on ALL FOUR edges.
-    const am = new THREE.MeshStandardMaterial({ color: accent, roughness: 0.6, metalness: 0.2 });
-    am.userData.accent = true;   // recoloured by setAccent on team-colour lock
+    const am = new THREE.MeshStandardMaterial({ color: accent, map: ACCENT_TEX, roughness: 0.6, metalness: 0.2 });
+    am.userData.accent = true;   // recoloured by setAccent on team-colour lock (map rides along)
     const bw = 0.7;                              // border bar width
     const inset = this.padHalf - bw / 2 - 0.15;  // sit just inside the deck edge
     const len = this.padHalf * 2 - 0.3;

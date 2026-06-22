@@ -100,19 +100,18 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
     // (so the fragment can tilt the normal along the wave slope without the normal matrix).
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>',
-        '#include <common>\nattribute float aGrass;\nvarying float vGrass;\nvarying float vHeight;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;')
+        '#include <common>\nattribute float aGrass;\nattribute float aShore;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;')
       .replace('#include <begin_vertex>',
-        '#include <begin_vertex>\nvGrass = aGrass;\nvHeight = position.y;\nvTerrUV = position.xz;\nvWaveX = normalMatrix * vec3(1.0, 0.0, 0.0);\nvWaveZ = normalMatrix * vec3(0.0, 0.0, 1.0);');
+        '#include <begin_vertex>\nvGrass = aGrass;\nvShore = aShore;\nvHeight = position.y;\nvTerrUV = position.xz;\nvWaveX = normalMatrix * vec3(1.0, 0.0, 0.0);\nvWaveZ = normalMatrix * vec3(0.0, 0.0, 1.0);\nvWaveY = normalMatrix * vec3(0.0, 1.0, 0.0);');
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nvarying float vGrass;\nvarying float vHeight;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;')
+        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;')
       // color_fragment runs first: build the whole surface colour per-pixel and stash the
       // depth / water-mask / gloss terms for the roughness + normal stages below.
       .replace('#include <color_fragment>', `#include <color_fragment>
         float vDepth = max(0.0, -vHeight);
         float vWaterF = 1.0 - smoothstep(-0.06, 0.06, vHeight);    // 1 on water (smooth per-pixel waterline)
-        float vGloss = 1.0 - smoothstep(0.5, 1.7, vDepth);          // shallow glossy → deep matte (matches the flat ocean plane, no seam)
         {
           vec2 uv = vTerrUV * uTexScale;
           vec3 sandC  = mix(texture2D(uSand,  uv).rgb, texture2D(uSand,  uv * 0.37 + 11.3).rgb, 0.5);
@@ -138,24 +137,34 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
           vec3 waterC = vDepth < 0.15
             ? mix(uWetDark, uShallow, vDepth / 0.15)
             : mix(uShallow, uDeep, smoothstep(0.15, 0.7, vDepth));
+          // Away from shore (vShore→0) settle to a UNIFORM deep blue, so the bumpy seabed
+          // no longer traces "ghost" colour patches in open water (the depth gradient would
+          // otherwise reveal every underwater hump even though the surface is shaded flat).
+          // Near shore keeps the full wet-sand→turquoise→deep gradient.
+          waterC = mix(uDeep, waterC, vShore);
           diffuseColor.rgb = mix(landC, waterC, vWaterF);
         }`)
-      // Water is glossy so it reflects the sky env + the overhead sun as a glint:
-      // shallow is near-mirror (0.10), deep settles to 0.58 — still smooth enough to
-      // catch the sun, but matte enough to read as open sea (and to match the flat
-      // ocean plane, which is set to the same 0.58 → no seam).
+      // ALL water is glossy (near-mirror 0.12) so the whole sea reflects the sky env +
+      // the overhead sun as a glint — matched by the open-ocean floor plane (set to the
+      // same gloss in IslandMap._buildWater). Land (vWaterF=0) keeps its own roughness.
       .replace('#include <roughnessmap_fragment>',
-        '#include <roughnessmap_fragment>\n  roughnessFactor = mix(roughnessFactor, mix(0.58, 0.10, vGloss), vWaterF);')
+        '#include <roughnessmap_fragment>\n  roughnessFactor = mix(roughnessFactor, 0.12, vWaterF);')
       .replace('#include <metalnessmap_fragment>',
-        '#include <metalnessmap_fragment>\n  metalnessFactor = mix(metalnessFactor, 0.15 * vGloss, vWaterF);')
-      // Animated ripples on SHALLOW water only (vGloss→0 in the deep keeps it calm + matte
-      // so it matches the static plane); land (vWaterF=0) is untouched.
+        '#include <metalnessmap_fragment>\n  metalnessFactor = mix(metalnessFactor, 0.15, vWaterF);')
+      // Water normal: IGNORE the bumpy sea-floor geometry normal — it shaded the
+      // underwater noise humps as visible "bulges". For water pixels use a FLAT upward
+      // surface (vWaveY = world up) and let only the animated wave ripple tilt it, so the
+      // whole sea reads as one smooth glossy animated sheet regardless of the floor under
+      // it. The ripple amplitude scales by vShore (1 at the shoreline → 0 far out to sea)
+      // so the waves hug the islands and calm to flat by the time they reach the open-ocean
+      // plane — no rippled square at the mesh edge. Land (vWaterF=0) is untouched.
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         {
           float wt = uTime; vec2 wp = vTerrUV;
           float gx = 0.30 * cos(wp.x * 0.20 + wt * 1.4) + 0.16 * cos((wp.x * 0.52 + wp.y * 0.40) + wt * 1.9);
           float gz = 0.30 * cos(wp.y * 0.18 - wt * 1.2) + 0.16 * cos((wp.x * 0.40 - wp.y * 0.52) - wt * 1.7);
-          normal = normalize(normal - (vWaveX * gx + vWaveZ * gz) * (0.18 * vWaterF * vGloss));
+          vec3 flatN = normalize(vWaveY);
+          normal = normalize(mix(normal, flatN, vWaterF) - (vWaveX * gx + vWaveZ * gz) * (0.18 * vWaterF * vShore));
         }`);
   };
   return mat;
