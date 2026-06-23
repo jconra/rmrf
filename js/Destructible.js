@@ -190,14 +190,18 @@ export class DestructibleManager {
   // Recompute all bounds (after bases/props are placed in the scene).
   refreshAll() { for (const d of this.items) d.refresh(); }
 
-  // Radial/splash damage at a world point.
+  // Radial/splash damage at a world point. Splash caps at SPLASH_MAX of the round's damage
+  // even at point-blank: a round that lands a DIRECT hit (full damage, applied separately by
+  // the caller) can't also splash itself for a near-full second hit. So a Valkyrie missile
+  // does 90 direct + ≤72 splash = ≤162 to a 180hp turret — two missiles to kill, not one.
   damageAt(point, radius, amount) {
+    const SPLASH_MAX = 0.8;
     for (const d of this.items) {
       if (d.dead) continue;
       const dist = d.worldCenter.distanceTo(point);
       const reach = radius + d.radius;
       if (dist <= reach) {
-        const falloff = 1 - Math.min(1, dist / reach);
+        const falloff = Math.min(SPLASH_MAX, 1 - Math.min(1, dist / reach));
         d.damage(amount * falloff, point);
       }
     }

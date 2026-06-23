@@ -5,7 +5,7 @@
 // and the corner gun are separately destructible.
 
 import * as THREE from 'three';
-import { Destructible } from './Destructible.js?v=1';
+import { Destructible } from './Destructible.js?v=2';
 import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=2';
 import { concreteTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
 
@@ -188,29 +188,34 @@ export class Wall {
     return { group, head, dead: false, falling: false, vel: new THREE.Vector3(), ang: new THREE.Vector3(), sweep: Math.random() * 6.28 };
   }
 
-  // Damage crossed a stage threshold -> shed from the TOP down. The corner gun rides
-  // highest, so it's the first thing to topple; then the parapet and stone layers peel
-  // off top-to-bottom. (Sequence: gun, top layer, … , bottom layer.)
+  // Damage crossed a stage threshold -> the stone LAYERS peel off top-to-bottom as the
+  // tower crumbles. The corner gun has its OWN hp (turretDest) and only topples when that's
+  // spent (_killTurret) or the tower fully collapses (_collapseAll) — so a splash that just
+  // chips the tower can't knock it off for free (one Valkyrie missile ≠ a dead gun; see
+  // Destructible.damageAt's splash cap). And while the gun is STILL UP we shed NOTHING: it
+  // sits on the top course, so dropping any layer would leave it defying gravity. The tower
+  // still shows damage via scorch/cracks; it physically crumbles only once the gun is gone,
+  // at which point _killTurret re-runs this to catch the stack up to the body's real HP.
   _restage() {
+    if (this.turret && !this.turret.dead) return;   // keep the gun's support intact while it lives
     const frac = Math.max(0, this.body.hp / this.maxHp);
-    const denom = this.layers.length + (this.turret ? 1 : 0);
-    const lost = Math.floor((1 - frac) * denom);
-    let k = 0;
-    if (this.turret) { if (k < lost) this._killTurret(); k++; }   // gun goes first
-    for (let i = this.layers.length - 1; i >= 0; i--, k++) {
+    const lost = Math.floor((1 - frac) * this.layers.length);
+    for (let i = this.layers.length - 1, k = 0; i >= 0; i--, k++) {
       if (k < lost && !this.layers[i].falling) this._fall(this.layers[i]);
     }
   }
 
   // Topple the corner gun off the tower (whether knocked loose by body damage or shot
   // out directly). Re-attach the head if the Destructible detached it, so the whole gun
-  // tumbles instead of just vanishing.
+  // tumbles instead of just vanishing. With the gun gone, let the tower crumble to match
+  // whatever damage its body has already taken (no longer held intact for the gun's sake).
   _killTurret() {
     if (!this.turret || this.turret.dead) return;
     this.turret.dead = true;
     if (this.turretDest && !this.turretDest.dead) this.turretDest.damage(1e9);
     if (this.turret.head && this.turret.head.parent !== this.turret.group) this.turret.group.add(this.turret.head);
     if (!this.turret.falling) this._fall(this.turret);
+    this._restage();   // gun's down → catch the stack up to the body's accumulated damage
   }
 
   _collapseAll() {

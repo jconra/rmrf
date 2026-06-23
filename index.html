@@ -24,9 +24,9 @@
             color: #1d2b33; text-shadow: 0 1px 2px rgba(255,255,255,0.6);
             text-align: left; letter-spacing: 1px;
         }
-        /* On-screen DRIVE stick (left) — revealed on touch devices (see main.js) */
+        /* On-screen NAV stick (right) — directional "go this way" pad (see main.js) */
         #touch-joystick {
-            position: fixed; bottom: 34px; left: 26px; transform: none;
+            position: fixed; bottom: 34px; right: 26px; transform: none;
             width: 132px; height: 132px; border-radius: 50%;
             background: rgba(5, 12, 20, 0.45);
             border: 1px solid rgba(255, 255, 255, 0.4);
@@ -35,10 +35,10 @@
             user-select: none; -webkit-user-select: none;
         }
         #touch-joystick.visible { display: block; }
-        /* On-screen AIM stick (right) — tilt to aim within the vehicle's firing arc
+        /* On-screen AIM stick (left) — tilt to aim within the vehicle's firing arc
            (the lit wedge), push to the rim to FIRE. Aim-assist snaps to a nearby enemy. */
         #touch-aim {
-            position: fixed; bottom: 34px; right: 26px;
+            position: fixed; bottom: 34px; left: 26px;
             width: 132px; height: 132px; border-radius: 50%;
             background: rgba(20, 6, 6, 0.42);
             border: 1px solid rgba(255, 160, 160, 0.55);
@@ -123,9 +123,8 @@
     </style>
 </head>
 <body>
-    <div id="hud">
-        <div class="title">RIPOSTE RUN</div>
-    </div>
+    <!-- In-game top-left title removed — the title lives on the menu screen now. -->
+    <div id="hud"></div>
     <div id="player-bars" style="display:none">
         <div class="row"><span class="lbl">HULL</span><span class="track"><span id="hp-fill" class="fill"></span></span></div>
         <div class="row"><span class="lbl">FUEL</span><span class="track"><span id="fuel-fill" class="fill"></span></span></div>
@@ -134,10 +133,7 @@
     </div>
     <div id="perf"></div>
     <div id="touch-joystick" aria-hidden="true">
-        <span class="tj-label tj-w">W</span>
-        <span class="tj-label tj-a">A</span>
-        <span class="tj-label tj-s">S</span>
-        <span class="tj-label tj-d">D</span>
+        <span class="tj-label tj-s">MOVE</span>
         <div id="touch-knob"></div>
     </div>
     <div id="fire-btn-l" aria-hidden="true">FIRE</div>
@@ -155,6 +151,6 @@
         }
     }
     </script>
-    <script type="module" src="js/main.js?v=191"></script>
+    <script type="module" src="js/main.js?v=203"></script>
 </body>
 </html>

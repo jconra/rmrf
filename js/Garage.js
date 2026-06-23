@@ -504,7 +504,7 @@ export class Garage {
       d.veh.holder.position.y = this.liftY;
       this._updateRam();
       this.riseProgress = k;               // main fades to black over this
-      d.veh.model.update(dt, 0.4, 0);
+      d.veh.model.update(dt, 0, 0);        // idle on the lift — it's standing still, so tracks/legs shouldn't roll
       if (k >= 1) this.phase = 'done';
     }
   }

@@ -5,8 +5,14 @@
 
 // opts: { start:{i,j}, goal:{i,j}, cost(i,j)->number|Infinity,
 //         inBounds(i,j)->bool, turnPenalty }. Returns [{i,j}...] or null.
-export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4 }) {
-  const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false }) {
+  // Default is 4-connected (orthogonal) — road LAYOUT needs clean right-angle, connected
+  // grids. allowDiagonal adds the 4 diagonals so UNIT NAV can cut straight across open
+  // ground instead of staircasing. A diagonal step travels √2 as far, so it costs √2× the
+  // cell — otherwise A* would over-prefer diagonals.
+  const CARD = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const DIRS = allowDiagonal ? CARD.concat([[1, 1], [1, -1], [-1, 1], [-1, -1]]) : CARD;
+  const SQRT2 = Math.SQRT2;
   const key = (i, j, d) => i + ',' + j + ',' + d;
   const h = (i, j) => Math.hypot(i - goal.i, j - goal.j);
 
@@ -40,12 +46,17 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4 }) {
       while (node) { path.push({ i: node.i, j: node.j }); node = from.get(key(node.i, node.j, node.d)) || null; }
       return path.reverse();
     }
-    for (let di = 0; di < 4; di++) {
-      const ni = cur.i + DIRS[di][0], nj = cur.j + DIRS[di][1];
+    for (let di = 0; di < DIRS.length; di++) {
+      const ddi = DIRS[di][0], ddj = DIRS[di][1];
+      const ni = cur.i + ddi, nj = cur.j + ddj;
       if (!inBounds(ni, nj)) continue;
       const tc = cost(ni, nj);
       if (!isFinite(tc)) continue;
-      const step = tc + (cur.d !== -1 && di !== cur.d ? turnPenalty : 0);
+      const diag = ddi !== 0 && ddj !== 0;
+      // No corner-cutting: a diagonal step is only allowed if both orthogonally-adjacent
+      // cells are passable, so units don't clip the corner of a wall/building.
+      if (diag && (!isFinite(cost(cur.i, nj)) || !isFinite(cost(ni, cur.j)))) continue;
+      const step = (diag ? tc * SQRT2 : tc) + (cur.d !== -1 && di !== cur.d ? turnPenalty : 0);
       const ng = cur.g + step;
       const nk = key(ni, nj, di);
       if (ng < (g.get(nk) ?? Infinity)) {

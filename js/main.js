@@ -5,21 +5,21 @@
 import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
 import { Controls } from './Controls.js';
-import { DestructibleManager, Destructible } from './Destructible.js?v=1';
+import { DestructibleManager, Destructible } from './Destructible.js?v=2';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp } from './Walls.js?v=53';
-import { RoadNetwork } from './Roads.js?v=79';
+import { Camp } from './Walls.js?v=55';
+import { RoadNetwork } from './Roads.js?v=80';
 import { Foliage } from './Foliage.js?v=2';
-import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=66';
+import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=67';
 import { Elevator } from './Elevator.js?v=2';
-import { Garage, GARAGE_COUNTS } from './Garage.js?v=4';
-import { TEAM_COLORS, updateCamo, camoParams } from '../../vehicle-designer/js/CamoTexture.js';
-import { SoundManager } from '../../vehicle-designer/js/SoundManager.js?v=2';
-import { Projectiles } from '../../vehicle-designer/js/Projectiles.js';
+import { Garage, GARAGE_COUNTS } from './Garage.js?v=5';
+import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
+import { SoundManager } from './SoundManager.js?v=3';
+import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality } from './AI.js?v=80';
 import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER } from './AIStrategies.js?v=66';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
-import { astarGrid } from './astar.js';
+import { astarGrid } from './astar.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 
 // --- Renderer ----------------------------------------------------------
@@ -121,7 +121,11 @@ let touchSteer = null;            // { x, y } screen point the vehicle should dr
 // still fires; only a held finger strafes (see the dwell gate in driveInput).
 let touchStrafe = null;
 const TOUCH_STOP_R = 7;           // world radius around the vehicle that reads as "stop"
-// Touch AIM stick (right thumb): tilt sets the desired turret offset from the hull
+// Touch NAV stick (right thumb): "go in this direction" — the knob's offset is a
+// camera-relative compass heading; the vehicle drives that world direction (tank types
+// turn to face it, the omni Lurcher slides there). { nx, ny, mag } in stick space.
+let touchNav = null;
+// Touch AIM stick (left thumb): tilt sets the desired turret offset from the hull
 // forward (clamped to the vehicle's arc), push to the rim FIRES. { nx, ny, mag } in
 // stick space (nx right, ny down, mag 0..>1). touchAiming = a finger is on it now.
 let touchAim = null;
@@ -271,6 +275,7 @@ function panUpdate(dt) {
 // a flag carrier if there is one, otherwise the nearest pair of rivals. Returns
 // true if it took the camera (so the free-pan is skipped).
 const _spec = new THREE.Vector3();
+let _specFocus = null;          // the unit the spectate camera is currently following (the sound HUD's "ears")
 // Spectator focus: null = auto (track a flag carrier, else the first living unit);
 // otherwise a unit the viewer pinned with Tab/[/] (see the keydown handler).
 let spectateTarget = null;
@@ -314,36 +319,21 @@ function spectateUpdate(dt) {
   // the camera back to a unit until they hit FOLLOW. Returning false hands the camera to
   // panUpdate (which moves orbit.target from the same WASD / touch-pan input).
   if (spectatePanning()) spectateFree = true;
-  if (spectateFree) { if (spectateTagEl) spectateTagEl.style.display = 'none'; return false; }
+  if (spectateFree) { _specFocus = null; if (spectateTagEl) spectateTagEl.style.display = 'none'; return false; }
   let focus = spectateTarget;
   if (!focus) for (const f of flags) if (f.carried && f.carrier && !f.carrier.dead) { focus = f.carrier; break; }
   if (!focus) for (const cmd of commanders) if (cmd.unit && !cmd.unit.dead) { focus = cmd.unit; break; }
+  _specFocus = focus || null;     // the watched unit = the sound HUD's listener in spectate
   if (!focus) { if (spectateTagEl) spectateTagEl.style.display = 'none'; return false; }
   _spec.set(focus.holder.position.x, 0, focus.holder.position.z);
   orbit.target.lerp(_spec, 0.04);
   updateCamera();
-  updateSpectateTag(focus);
   return true;
 }
-// Small "now watching" banner along the top — names the focused unit + its team
-// colour, and reminds the viewer of the cycle keys.
+// The old top-centre "now watching" banner is gone — the bottom spectate buttons
+// already show which team you're following, so it was redundant. spectateTagEl stays
+// null; the style.display guards above are now no-ops.
 let spectateTagEl = null;
-function updateSpectateTag(focus) {
-  if (!spectateTagEl) {
-    spectateTagEl = document.createElement('div');
-    spectateTagEl.id = 'spectate-tag';
-    spectateTagEl.style.cssText = 'position:absolute;top:14px;left:50%;transform:translateX(-50%);' +
-      'font-family:"Courier New",monospace;font-size:13px;letter-spacing:2px;text-align:center;' +
-      'text-shadow:0 1px 2px rgba(255,255,255,0.65);pointer-events:none;z-index:80;';
-    document.body.appendChild(spectateTagEl);
-  }
-  spectateTagEl.style.display = 'block';
-  const col = TEAM_COLORS[focus.colorIndex] ? '#' + TEAM_COLORS[focus.colorIndex].hex.toString(16).padStart(6, '0') : '#2b2118';
-  const name = teamLabel(focus.colorIndex);   // identify by team COLOUR, not a callsign
-  const pin = spectateTarget ? '📌' : '▶';
-  spectateTagEl.innerHTML = `<span style="color:${col};font-weight:bold">${pin} ${name.toUpperCase()}</span>` +
-    `<span style="color:#1d2b33"> · ${focus.type.toUpperCase()}</span>`;
-}
 // Touch-friendly spectator controls (phone has no keyboard): prev / auto-follow /
 // next unit, plus a LOG toggle. Built once on the first spectate frame; the buttons
 // take pointer events so a tap doesn't fall through to the orbit camera.
@@ -440,16 +430,17 @@ const LOSSES = (() => {
 // from the garage roster (seeded by the ?losses preview). Fed to garage.applyRoster.
 const playerLosses = LOSSES ? { ...LOSSES } : {};
 
-// On-screen drive stick (touch) — sets the SAME `keys` WASD does, so all the drive
-// logic downstream is unchanged. Migrated from the Vehicle Designer. Field only;
-// revealed on touch devices (window.showJoystick() forces it on for desktop tests).
+// On-screen NAV stick (touch) — a "go in this direction" pad: the knob's offset is a
+// camera-relative compass heading, consumed by driveInput (which turns the hull to face
+// it and throttles by how far the knob is pushed). Field only; revealed on touch devices
+// (window.showJoystick() forces it on for desktop tests).
 (function setupJoystick() {
   const joystick = document.getElementById('touch-joystick');
   const knob = document.getElementById('touch-knob');
-  // Wire it unconditionally (incl. ?garage flow): it only sets `keys`, which is
+  // Wire it unconditionally (incl. ?garage flow): it only sets touchNav, which is
   // read while driving, and the widget itself is hidden until setFieldUI(true).
   if (!joystick || !knob) return;
-  const DEADZONE = 0.30, MAX_TRAVEL = 42;
+  const MAX_TRAVEL = 42;
   let joyId = null;
   // Visibility is driven by setFieldUI (gated on a real touch — see touchUsed);
   // reveal() stays only as a manual override for desktop testing.
@@ -460,16 +451,16 @@ const playerLosses = LOSSES ? { ...LOSSES } : {};
     const r = joystick.getBoundingClientRect();
     let dx = cx - (r.left + r.width / 2), dy = cy - (r.top + r.height / 2);
     const d = Math.hypot(dx, dy);
-    if (d > MAX_TRAVEL) { dx *= MAX_TRAVEL / d; dy *= MAX_TRAVEL / d; }
-    knob.style.transform = `translate(${dx}px, ${dy}px)`;
-    const nx = dx / MAX_TRAVEL, ny = dy / MAX_TRAVEL;   // ny screen-down positive
-    keys['w'] = ny < -DEADZONE; keys['s'] = ny > DEADZONE;
-    keys['a'] = nx < -DEADZONE; keys['d'] = nx > DEADZONE;
+    const mag = d / MAX_TRAVEL;                          // 0..>1 push toward the rim = throttle
+    let kx = dx, ky = dy;
+    if (d > MAX_TRAVEL) { kx *= MAX_TRAVEL / d; ky *= MAX_TRAVEL / d; }
+    knob.style.transform = `translate(${kx}px, ${ky}px)`;
+    touchNav = { nx: dx / MAX_TRAVEL, ny: dy / MAX_TRAVEL, mag };   // ny screen-down positive
   };
   const release = () => {
     joyId = null;
     knob.style.transform = 'translate(0px, 0px)';
-    keys['w'] = keys['a'] = keys['s'] = keys['d'] = false;
+    touchNav = null;
   };
   joystick.addEventListener('pointerdown', e => {
     if (joyId !== null) return;
@@ -558,6 +549,15 @@ function refreshAimArc() {
   const deg = Math.max(16, arc * 180 / Math.PI);   // min 16°/side so a fixed gun still shows
   el.style.background = `conic-gradient(${hi} 0 ${deg}deg, transparent ${deg}deg ${360 - deg}deg, ${hi} ${360 - deg}deg 360deg)`;
 }
+// Rotate the lit wedge so its CENTRE points where the vehicle's nose appears ON SCREEN
+// (θ = camera yaw − hull heading). With the input now screen-relative, this keeps the arc
+// pointing the way the vehicle's headed, so pushing the knob toward an on-screen target
+// aims at it. Cheap per-frame DOM write; a full-ring (Lurcher) arc looks the same rotated.
+function orientAimArc() {
+  const el = document.getElementById('aim-arc');
+  if (!el || !player || player.dead) return;
+  el.style.transform = `rotate(${(orbit.yaw - player.heading) * 180 / Math.PI}deg)`;
+}
 
 // Per-frame: turn the aim stick's tilt into a world aim point (with aim-assist) so the
 // existing turret-tracking + fire pipeline (aimPlayerTurret / firePlayer) just works on
@@ -569,11 +569,16 @@ function updateTouchAim() {
   touchAiming = true;
   const hp = player.holder.position;
   const arc = SHOT_ARC[player.type] ?? Math.PI / 5;
-  // Stick → desired offset from the hull forward: up = 0, pushing right swings the
-  // turret to the vehicle's right (negative rel, matching wrapPi(targetAng - heading)).
-  const stickAng = Math.atan2(-touchAim.nx, -touchAim.ny);
-  const desired = Math.max(-arc, Math.min(arc, stickAng));
-  const rawWorld = player.heading + stickAng;       // where the thumb points, pre-clamp
+  // SCREEN-RELATIVE aim: push the knob toward where the target sits ON SCREEN and the gun
+  // aims that way (your instinct is screen space, not hull space — pushing "down" when the
+  // vehicle faces down should fire down, not backward). Convert the knob offset to a
+  // camera-relative world direction (same basis as the drive pad), then express it as an
+  // offset from the hull so the arc clamp + aim-assist stay hull-relative.
+  const sy = Math.sin(orbit.yaw), cy = Math.cos(orbit.yaw);
+  const wx = (-sy) * (-touchAim.ny) + cy * touchAim.nx;        // camForward·(up) + camRight·(right)
+  const wz = (-cy) * (-touchAim.ny) + (-sy) * touchAim.nx;
+  const rawWorld = Math.atan2(-wx, -wz);                       // world heading the thumb points at
+  const desired = Math.max(-arc, Math.min(arc, wrapPi(rawWorld - player.heading)));
   // Aim-assist (the touch "handicap"): snap to the nearest enemy within a cone of where
   // you point AND inside the vehicle's arc, so a human doesn't have to nail the angle.
   let best = null, bestErr = ASSIST_CONE;
@@ -1068,6 +1073,7 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
     if (!playSound && sound && sound.spatialReady) {
       try { sound.fireGunAt(idx, mpos.x, mpos.y, mpos.z); } catch (e) { /* best-effort */ }
     }
+    emitSoundPing(mpos.x, mpos.y, mpos.z, idx, veh.team);   // sound-awareness HUD: a loud, far-carrying gun report
     const aim = muzzle.parent || veh.group;
     const dir = _fireDir.set(0, 0, -1).applyQuaternion(aim.getWorldQuaternion(_gunQuat)).normalize();
     const hex = TEAM_COLORS[veh.colorIndex] ? TEAM_COLORS[veh.colorIndex].hex : 0xffffff;
@@ -1105,11 +1111,39 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
   veh.cooldown = FIRE_INTERVALS[idx] || 0.3;
 }
 
+// Nearest enemy inside the player's forward gun arc (+ range). Gives the fixed-gun Firebrat
+// a way to hit ELEVATED targets: firing AT the vehicle's position pitches the beam up, so a
+// player who points the nose at a swooping Valkyrie auto-elevates onto it (no manual pitch).
+function acquireForwardTarget() {
+  if (!player || player.dead) return null;
+  const hp = player.holder.position;
+  const arc = SHOT_ARC[player.type] ?? Math.PI / 5;
+  let best = null, bestErr = arc + 1e-3;
+  for (const v of combatants) {
+    if (v.dead || v === player || v.team === player.team || vehicleHidden(v)) continue;
+    const dx = v.holder.position.x - hp.x, dz = v.holder.position.z - hp.z;
+    if (dx * dx + dz * dz > ASSIST_RANGE * ASSIST_RANGE) continue;
+    const err = Math.abs(wrapPi(Math.atan2(-dx, -dz) - player.heading));   // off the gun centreline
+    if (err < bestErr) { bestErr = err; best = v; }                         // most-centred target wins
+  }
+  return best;
+}
+
 // Player convenience wrapper (cadence handled by driveUpdate's fireHeld loop).
 // Fires at the aim crosshair if the cursor's over the field, else straight ahead.
 function firePlayer() {
   if (!player || player.dead) return;
   if (playerIsValkyrie()) { fireVehicle(player, true, null); fireCooldown = player.cooldown; return; }
+  // Firebrat has a fixed forward gun — clicking fires straight ahead (no crosshair gating).
+  // But if an enemy sits in the forward arc, fire AT it so the beam auto-pitches onto it —
+  // the only way to hit a Valkyrie overhead. Touch routes through the aim stick (touchAiming).
+  if (player.type === 'firebrat' && !touchAiming) {
+    const tgt = acquireForwardTarget();
+    if (tgt) fireVehicle(player, true, tgt.holder.position.clone(), tgt, true);
+    else fireVehicle(player, true, null);
+    fireCooldown = player.cooldown;
+    return;
+  }
   if (_cursor || touchAiming) {
     // Mouse / aim-stick: only spend a shot when there's a valid firing solution. On touch
     // updateTouchAim sets _aimPoint (+ _aimTargetVeh from aim-assist) and _aimValid.
@@ -1249,7 +1283,9 @@ function updateAimReticle() {
   // leave it be and hide the desktop crosshair.
   if (touchAiming) { if (aimReticle) aimReticle.visible = false; return; }
   _aimPoint = null; _aimValid = false; _aimTargetVeh = null;
-  if (!onField || !player || player.dead || playerIsValkyrie() || !_cursor) { if (aimReticle) aimReticle.visible = false; return; }
+  // Firebrat fires straight forward and just clicks to shoot, so it gets no crosshair
+  // helper — having it follow the mouse all the time was more clutter than aid.
+  if (!onField || !player || player.dead || playerIsValkyrie() || player.type === 'firebrat' || !_cursor) { if (aimReticle) aimReticle.visible = false; return; }
   const t = pickWorldPoint(_cursor.x, _cursor.y);
   if (!t) { if (aimReticle) aimReticle.visible = false; return; }
   ensureAimReticle();
@@ -1353,9 +1389,12 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null) {
 // March a hitscan beam; damage the first solid/tree/vehicle it meets.
 function raycastDamage(origin, dir, maxDist, dmg, blast, team, shooter) {
   const STEP = 1.2;
+  // Forgiving beam: a fat detection pad so the Firebrat's laser connects even when the
+  // shot is a touch off — aiming it precisely with a fixed forward gun is the hard part.
+  const PAD = 4.0;
   for (let d = 1.0; d <= maxDist; d += STEP) {
     _vtmp.copy(dir).multiplyScalar(d).add(origin);
-    const hv = nearestEnemyVehicle(_vtmp, 2.5, team, shooter);
+    const hv = nearestEnemyVehicle(_vtmp, PAD, team, shooter);
     if (hv) {
       // Hit the DETECTED vehicle directly — the detection pad (2.5) is wider than
       // the tiny splash reach, so a point-blast here would miss what the beam met.
@@ -1739,6 +1778,11 @@ function updatePlayerHud() {
 // HUMAN team is run by the player drive/deploy code instead. Perception is
 // team-relative (a unit only knows rivals it actually sees), so nothing cheats.
 const AI_VISION = 66;
+// AI HEARING: how loud (same 0..1 audibility scale as the sound HUD) an unseen rival must
+// be before a unit investigates the noise. A heard contact only steers navigation — it is
+// NEVER a firing solution (enemy/seesEnemy stay line-of-sight). Gunfire easily clears this;
+// a moving Jotun's drone clears it at range; an idling unit barely makes a whisper.
+const AI_HEARD_MIN = 0.18;
 const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to top up at a known shield generator
 const commanders = [];          // one AICommander per AI-controlled team
 
@@ -2108,7 +2152,7 @@ function planPath(v, dest) {
     if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
     return onRoad(i, j) ? 0.5 : 1;   // Warrior + default: roads are the cheap lane
   };
-  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3 });
+  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true });
   if (!path || path.length < 2) return null;
   return path.map(n => ({ x: n.i * c, z: n.j * c }));
 }
@@ -2765,6 +2809,20 @@ class AICommander {
     // Remember WHERE the enemy was last seen (team-shared) so the Attack mission can recall
     // their last-known position instead of only marching to the fixed elevator (ai_behavior).
     if (seen) this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() };
+    // HEARING: if it can't SEE a rival, it may still HEAR one — engine drone from movers +
+    // gunfire reports, damped by its own engine noise (same model as the player's sound HUD).
+    // A heard contact is intel, NOT a firing solution — it only updates the team's last-known
+    // enemy position so the unit investigates the noise instead of staying blind. enemy/
+    // seesEnemy stay line-of-sight, so it still has to round the corner to actually shoot.
+    let heard = null;
+    if (!seesEnemy) {
+      let loudest = null;
+      for (const s of soundSources(v)) if (!loudest || s.loud > loudest.loud) loudest = s;
+      if (loudest && loudest.loud > AI_HEARD_MIN) {
+        heard = { x: loudest.pos.x, z: loudest.pos.z, loud: loudest.loud };
+        this._lastEnemyPos = { x: heard.x, z: heard.z, t: performance.now(), heard: true };
+      }
+    }
     // Fog-of-war intel: remember what the enemy keeps fielding so counterVehicle() works.
     if (seen) this.seenTypes[seen.type] = (this.seenTypes[seen.type] || 0) + 1;
     // DISCOVER nearby supply points — the team only "knows" a depot once one of its
@@ -2946,7 +3004,7 @@ class AICommander {
     return {
       dt,
       self: { x: px, z: pz, heading: h, type: v.type, shield: v.shield, hpFrac: v.hp / v.maxHp, fuelFrac: v.fuel / v.maxFuel, ammoFrac: v.ammo / v.maxAmmo },
-      seesEnemy, enemy, enemiesNear, alliesNear, flyer, shotArc: SHOT_ARC[v.type] ?? Math.PI / 5,
+      seesEnemy, enemy, heard, enemiesNear, alliesNear, flyer, shotArc: SHOT_ARC[v.type] ?? Math.PI / 5,
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
       // the enemy → the firing lane is blocked; the combat brain sidesteps to clear it.
       shotBlocked: (v._blockedShots || 0) >= 2 && (performance.now() - (v._lastBlockT || 0)) < 2000,
@@ -3498,6 +3556,28 @@ function driveInput() {
   // The Lurcher has NO front (omni-directional): it moves along whatever world vector you
   // push, and the hull auto-faces its travel. The other three keep their tank steering.
   const omni = !!(player && player.type === 'lurcher');
+  // Touch NAV stick: "go in this direction." The stick offset is a camera-relative
+  // compass point — up = into the screen, right = screen-right — so the vehicle heads
+  // that WORLD direction regardless of which way the hull faces. Tank types turn to face
+  // it then drive; the omni Lurcher just slides there. Push distance = throttle.
+  if (touchNav && player && !player.dead) {
+    const sy = Math.sin(orbit.yaw), cy = Math.cos(orbit.yaw);
+    const fX = -sy, fZ = -cy;            // camera forward on the ground (into the screen)
+    const rX = cy,  rZ = -sy;            // camera right on the ground
+    let mx = fX * (-touchNav.ny) + rX * touchNav.nx;
+    let mz = fZ * (-touchNav.ny) + rZ * touchNav.nx;
+    const len = Math.hypot(mx, mz);
+    let mag = (touchNav.mag - 0.20) / 0.80;             // deadzone, then linear 0..1 throttle
+    mag = Math.max(0, Math.min(1, mag));
+    if (len < 1e-4 || mag <= 0) return omni ? { omni: true, mx: 0, mz: 0 } : { fwd: 0, turn: 0 };
+    mx /= len; mz /= len;                                // unit world heading
+    if (omni) return { omni: true, mx: mx * mag, mz: mz * mag };
+    const aim = Math.atan2(-mx, -mz);                   // heading whose front (-Z) faces the push
+    const err = wrapPi(aim - player.heading);
+    const turn = Math.max(-1, Math.min(1, err * 2.4));
+    const fwd = Math.abs(err) > 1.3 ? 0 : mag;          // pivot in place if badly mis-aimed, else throttle
+    return { fwd, turn };
+  }
   if (touchSteer && player && !player.dead) {
     const t = pickWorldPoint(touchSteer.x, touchSteer.y);
     if (t) {
@@ -3581,6 +3661,7 @@ function driveUpdate(dt) {
   applyAltitude(player, dt);                // altitude / water flooding / tree crush
   if (!player || player.dead) return true;  // sank/destroyed this frame → bail before touching it
   aimPlayerTurret(player, dt);              // turret continuously follows the aim cursor
+  player._throttle = Math.min(1, Math.abs(revFwd) + Math.abs(revTurn) * 0.6);   // own-noise floor for the sound HUD's masking
   if (sound) sound.update(revFwd, revTurn);   // rev the engine RPM with throttle (idle ↔ max)
   fireCooldown -= dt;
   if (!matchOver && fireHeld && fireCooldown <= 0) firePlayer();   // hold to auto-fire at the crosshair
@@ -3700,20 +3781,26 @@ function updateEngineSounds() {
   }
 }
 
+// Team colour is global and locks the instant the first vehicle deploys — after that
+// the garage's colour swatches stay gone for the rest of the match (you've committed).
+let teamColorLocked = false;
 // Toggle the garage overlays (CCTV / HUD / team selector) and the field UI (title +
 // touch joystick) when switching between the hangar view and the island.
 function setGarageOverlays(show) {
   for (const id of ['cctv', 'hud-name', 'hud-stats', 'teamsel']) {
     const el = document.getElementById(id);
-    if (el) el.style.display = show ? '' : 'none';
+    if (!el) continue;
+    // Once locked, never re-reveal the colour swatches on later garage visits.
+    const vis = show && !(id === 'teamsel' && teamColorLocked);
+    el.style.display = vis ? '' : 'none';
   }
 }
 function setFieldUI(show) {
   const hud = document.getElementById('hud');
   if (hud) hud.style.display = show ? '' : 'none';
-  // Touch controls: two fixed sticks — LEFT drives (WASD), RIGHT aims+fires within the
-  // vehicle's arc with aim-assist. The old corner FIRE buttons + field point-to-steer are
-  // retired (firing-by-cursor was unreliable; getting exact angles by thumb was too hard).
+  // Touch controls: two fixed sticks — RIGHT is the directional NAV pad ("go this way"),
+  // LEFT aims+fires within the vehicle's arc with aim-assist. The old corner FIRE buttons +
+  // field point-to-steer are retired (firing-by-cursor was unreliable; thumb angles too hard).
   const onTouch = show && touchUsed;
   document.getElementById('touch-joystick')?.classList.toggle('visible', onTouch);
   document.getElementById('touch-aim')?.classList.toggle('visible', onTouch);
@@ -3761,8 +3848,9 @@ function setupGarageUI() {
       sound.setVehicle(VEHICLE_TYPES[type].soundIndex);
       if (!sound.enabled) sound.toggle();
     } catch (e) { /* audio is best-effort */ }
+    teamColorLocked = true;              // team colour locked at first deploy — swatches gone for good
     const ts = document.getElementById('teamsel');
-    if (ts) ts.style.display = 'none';   // team colour locked at deploy
+    if (ts) ts.style.display = 'none';
     deploy = { type, colorIndex: camoParams.colorIndex };   // carried over to the island
   });
 
@@ -4213,6 +4301,11 @@ window.RR = {
   get obstacles() { return obstacles; },
   get grid() { return grid; },
   fire: () => firePlayer(),
+  acquireForwardTarget: () => { const t = acquireForwardTarget(); return t ? t.type : null; },
+  // --- sound-awareness HUD hooks ---
+  soundListenerType: () => { const l = soundListener(); return l ? l.type : null; },
+  soundSources: () => { const l = soundListener(); return soundSources(l).map(s => ({ type: s.type, loud: +s.loud.toFixed(3) })); },
+  emitSoundPing: (x, y, z, idx, team) => emitSoundPing(x, y, z, idx, team),
   get projectiles() { return projectiles; },
   get combatants() { return combatants; },
   get commanders() { return commanders; },
@@ -4249,6 +4342,10 @@ window.RR = {
   setAimStick: (nx, ny, mag) => { touchAim = { nx, ny, mag: mag == null ? Math.hypot(nx, ny) : mag }; },
   clearAimStick: () => { touchAim = null; touchAiming = false; fireHeld = false; },
   tickTouchAim: () => updateTouchAim(),
+  // --- touch nav-stick test hooks ---
+  setNav: (nx, ny, mag) => { touchNav = nx == null ? null : { nx, ny, mag: mag == null ? Math.hypot(nx, ny) : mag }; },
+  navInput: () => (player && !player.dead ? driveInput() : null),
+  orbitYaw: () => orbit.yaw,
   get touchAimState() { return { aiming: touchAiming, fireHeld, aimPoint: _aimPoint ? { x: _aimPoint.x, y: _aimPoint.y, z: _aimPoint.z } : null, target: _aimTargetVeh ? _aimTargetVeh.type : null, valid: _aimValid }; },
   showTouchControls: () => { touchUsed = true; if (onField) setFieldUI(true); },
   // --- targeting test hooks ---
@@ -4372,27 +4469,109 @@ function updateNavOverlay() {
   }
 }
 
-// Firebrat aim aid: a thin reference beam down the centreline of its fixed forward gun, so
-// the player can see exactly where the narrow (5°) gun points — it's hard to aim otherwise.
-// Player-driven Firebrat only; the beam draws over terrain (depthWrite off) so it always reads.
-let _aimBeam = null;
-function updateFirebratAimBeam() {
-  const show = onField && driving && player && !player.dead && player.type === 'firebrat';
-  if (!show) { if (_aimBeam) _aimBeam.visible = false; return; }
-  if (!_aimBeam) {
-    const len = 34;
-    const geo = new THREE.CylinderGeometry(0.06, 0.06, len, 6);
-    geo.rotateX(Math.PI / 2);          // cylinder axis Y → Z
-    geo.translate(0, 0, -len / 2 - 2); // extend forward (local -Z), starting just ahead of the nose
-    const hex = TEAM_COLORS[player.colorIndex] ? TEAM_COLORS[player.colorIndex].hex : 0xffffff;
-    const mat = new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0.3,
-      blending: THREE.AdditiveBlending, depthWrite: false });
-    _aimBeam = new THREE.Mesh(geo, mat); _aimBeam.renderOrder = 4; scene.add(_aimBeam);
+// --- Sound-awareness HUD ----------------------------------------------------
+// Lets the player HEAR opponents they can't see: a soft glow on the screen edge points
+// toward an off-screen enemy's noise. Loudness = the enemy's engine (louder while moving)
+// or a gunfire burst, scaled by distance + engine SIZE, and DAMPED by the player's own
+// engine noise (you hear less while driving hard). Works with the volume muted — it's the
+// visual twin of the spatial audio (mirrors SoundManager's ENGINE_SPATIAL tuning).
+const ACOUSTIC = [
+  { ref: 18, max: 125, gain: 0.95 },   // 0 Lurcher
+  { ref: 12, max: 78,  gain: 0.60 },   // 1 Firebrat
+  { ref: 16, max: 112, gain: 0.85 },   // 2 Valkyrie
+  { ref: 26, max: 175, gain: 1.15 },   // 3 Jotun
+];
+const GUN_RANGE = 700;                 // gunfire carries far (matches SoundManager.fireGunAt)
+const SND = { idleEmit: 0.30, gunLoud: 1.6, gunDecay: 1.2, selfMask: 0.6, minAudible: 0.10 };
+const soundPings = [];                 // recent gun reports: { x, y, z, idx, team, life }
+function emitSoundPing(x, y, z, idx, team) {
+  soundPings.push({ x, y, z, idx, team, life: 1 });
+  if (soundPings.length > 48) soundPings.shift();
+}
+function acFall(dist, ref, max) {
+  if (dist <= ref) return 1;
+  if (dist >= max) return 0;
+  return (max - dist) / (max - ref);
+}
+let soundHudCanvas = null, soundHudCtx = null;
+function ensureSoundHud() {
+  if (soundHudCanvas) return;
+  const c = document.createElement('canvas');
+  c.id = 'sound-hud';
+  c.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:55;';
+  document.body.appendChild(c);
+  soundHudCanvas = c; soundHudCtx = c.getContext('2d');
+}
+// Whose "ears" the HUD uses: the human player while driving, else the unit being spectated
+// (so AvA / spectate shows what the watched unit hears). null = nobody to listen for.
+function soundListener() {
+  if (onField && player && !player.dead && TEAM_CTRL[PLAYER_TEAM] === 'human') return player;
+  if (onField && _specFocus && !_specFocus.dead) return _specFocus;
+  return null;
+}
+// Enemy sound sources currently audible to `listener` (for drawing + headless test).
+function soundSources(listener) {
+  const out = [];
+  if (!listener || listener.dead) return out;
+  const hp = listener.holder.position;
+  const pa = ACOUSTIC[listener.def.soundIndex] || ACOUSTIC[0];
+  const selfNoise = pa.gain * (SND.idleEmit + (1 - SND.idleEmit) * (listener._throttle || 0)) * SND.selfMask;
+  for (const v of combatants) {
+    if (v.dead || v === listener || v.team === listener.team || vehicleHidden(v)) continue;
+    const a = ACOUSTIC[v.def.soundIndex] || ACOUSTIC[0];
+    const dist = Math.hypot(v.holder.position.x - hp.x, v.holder.position.z - hp.z);
+    const emit = a.gain * (SND.idleEmit + (1 - SND.idleEmit) * (v._throttle || 0));
+    const loud = emit * acFall(dist, a.ref, a.max) - selfNoise;
+    if (loud > SND.minAudible) out.push({ pos: v.holder.position, loud, type: 'engine' });
   }
-  _aimBeam.visible = true;
-  const hp = player.holder.position;
-  _aimBeam.position.set(hp.x, hp.y + 1.3, hp.z);   // ≈ gun height
-  _aimBeam.rotation.y = player.heading;
+  for (const p of soundPings) {
+    if (p.team === listener.team) continue;
+    const a = ACOUSTIC[p.idx] || ACOUSTIC[0];
+    const dist = Math.hypot(p.x - hp.x, p.z - hp.z);
+    const loud = SND.gunLoud * a.gain * acFall(dist, a.ref, GUN_RANGE) * p.life - selfNoise;
+    if (loud > SND.minAudible) out.push({ pos: { x: p.x, y: p.y, z: p.z }, loud, type: 'gun' });
+  }
+  return out;
+}
+const _shv = new THREE.Vector3();
+// True if this source got drawn as an EDGE glow (i.e. it's off-screen / behind you).
+function drawEdgeGlow(g, W, H, s) {
+  _shv.set(s.pos.x, s.pos.y, s.pos.z).project(camera);
+  let nx = _shv.x, ny = _shv.y;
+  const behind = _shv.z > 1;
+  if (behind) { nx = -nx; ny = -ny; }
+  if (!behind && nx >= -0.96 && nx <= 0.96 && ny >= -0.96 && ny <= 0.96) return false;   // on-screen → you can see it
+  let dx = nx, dy = -ny;                                   // NDC → screen space (y down)
+  const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+  const cx = W / 2, cy = H / 2, pad = 48;
+  const sc = Math.min(dx !== 0 ? (W / 2 - pad) / Math.abs(dx) : Infinity,
+                      dy !== 0 ? (H / 2 - pad) / Math.abs(dy) : Infinity);
+  const ex = cx + dx * sc, ey = cy + dy * sc;
+  const loud = Math.max(0, Math.min(1.2, s.loud));
+  const R = 50 + loud * 95;
+  const alpha = Math.max(0.12, Math.min(0.85, loud * 0.9));
+  const col = s.type === 'gun' ? '255,80,55' : '255,190,110';
+  const grad = g.createRadialGradient(ex, ey, 0, ex, ey, R);
+  grad.addColorStop(0, `rgba(${col},${alpha})`);
+  grad.addColorStop(1, `rgba(${col},0)`);
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(ex, ey, R, 0, Math.PI * 2); g.fill();
+  return true;
+}
+function updateSoundHud(dt) {
+  for (let i = soundPings.length - 1; i >= 0; i--) {          // decay gun reports (always, so they don't pile up)
+    soundPings[i].life -= dt * SND.gunDecay;
+    if (soundPings[i].life <= 0) soundPings.splice(i, 1);
+  }
+  const listener = soundListener();
+  if (!listener) { if (soundHudCanvas) soundHudCanvas.style.display = 'none'; return; }
+  ensureSoundHud();
+  soundHudCanvas.style.display = '';
+  const W = window.innerWidth, H = window.innerHeight;
+  if (soundHudCanvas.width !== W) soundHudCanvas.width = W;
+  if (soundHudCanvas.height !== H) soundHudCanvas.height = H;
+  const g = soundHudCtx; g.clearRect(0, 0, W, H);
+  for (const s of soundSources(listener)) drawEdgeGlow(g, W, H, s);
 }
 
 function animate() {
@@ -4432,7 +4611,8 @@ function animate() {
       updateHealthBars();
       updateLock(dt);                        // Valkyrie target box: track + colour the lock
       updateAimReticle();                    // cursor crosshair (other vehicles) + aim point
-      updateFirebratAimBeam();               // centreline reference beam for the fixed-gun Firebrat
+      updateSoundHud(dt);                    // edge-glow cue toward off-screen enemy noise (sound awareness)
+      if (touchUsed) orientAimArc();         // keep the touch aim wedge pointing the way the vehicle faces (screen-relative)
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateWallTurrets(dt);                 // base corner turrets fire on intruders in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events

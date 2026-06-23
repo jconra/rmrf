@@ -1,7 +1,8 @@
 // Vehicles.js — brings the four designer vehicles into the game. The classes
-// live in ../vehicle-designer/js/ and stay the single source of truth, so edits
-// made in the designer flow straight into the game. They only depend on `three` (resolved via
-// this page's importmap) + CamoTexture.js + GunFX.js, which sit beside them.
+// were authored in the vehicle-designer app and are vendored here (copied into
+// this js/ folder) so the game is a self-contained, deployable repo. When a
+// model changes in the designer, re-copy it here. They only depend on `three`
+// (resolved via this page's importmap) + CamoTexture.js + GunFX.js, which sit beside them.
 //
 // A vehicle class owns ONLY its local animation: update(dt, forward, turn)
 // plays the gait/tracks, body bob (writes group.position.y) and turret sweep —
@@ -10,11 +11,11 @@
 // does its own bob & roll inside it.
 
 import * as THREE from 'three';
-import { Lurcher } from '../../vehicle-designer/js/Lurcher.js';
-import { Firebrat } from '../../vehicle-designer/js/Firebrat.js';
-import { Valkyrie } from '../../vehicle-designer/js/Valkyrie.js';
-import { Jotun } from '../../vehicle-designer/js/Jotun.js';
-import { getCamoTextures } from '../../vehicle-designer/js/CamoTexture.js';
+import { Lurcher } from './Lurcher.js';
+import { Firebrat } from './Firebrat.js';
+import { Valkyrie } from './Valkyrie.js';
+import { Jotun } from './Jotun.js';
+import { getCamoTextures } from './CamoTexture.js';
 
 // scale tuned so models read right against the 5-unit grid (native lengths are
 // ~2.2-4.0): Firebrat smallest, Jotun biggest; all widths clear the ~12u gate.
