@@ -1,4 +1,4 @@
-// main.js — Riposte Run bootstrap (fresh build).
+// main.js — RMRF bootstrap (fresh build).
 // Bright Return Fire look: light sky, warm sun, tone mapping. Procedural islands
 // with a live controls panel. Garage + vehicles land in later milestones.
 
@@ -3384,7 +3384,7 @@ function buildLogExport() {
   const ver = (((document.querySelector('script[src*="main.js"]') || {}).src || '').match(/v=(\d+)/) || [])[1] || '?';
   const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
   const t = ((performance.now() - _t0) / 1000).toFixed(0);
-  let s = `=== RIPOSTE RUN LOG (v${ver}) ===\nmode: ${human ? 'Player vs AI' : 'AI vs AI'}   t: ${t}s\n`;
+  let s = `=== RMRF LOG (v${ver}) ===\nmode: ${human ? 'Player vs AI' : 'AI vs AI'}   t: ${t}s\n`;
   if (player && !player.dead) {
     const pp = player.holder.position;
     s += `player: ${player.type} hp ${Math.round(player.hp / player.maxHp * 100)}% ammo ${player.ammo} @ (${Math.round(pp.x)},${Math.round(pp.z)})\n`;
@@ -4008,9 +4008,17 @@ function ensureMenuStyle() {
       background:radial-gradient(ellipse at center, rgba(6,10,16,0.55), rgba(4,7,12,0.85));
       font-family:"Courier New",monospace; -webkit-user-select:none; user-select:none; }
     #gamemenu.show { display:flex; }
-    #gamemenu .gm-title { color:#eef3f8; font-size:40px; font-weight:bold; letter-spacing:10px;
-      text-shadow:0 3px 16px rgba(0,0,0,0.85); text-align:center; }
-    #gamemenu .gm-sub { color:#9fb1c0; font-size:12px; letter-spacing:5px; margin-bottom:20px; }
+    #gamemenu .gm-title { color:#e9fff1; font-size:clamp(40px,12vw,56px); font-weight:bold; letter-spacing:18px;
+      text-shadow:0 0 22px rgba(80,255,150,0.55), 0 3px 16px rgba(0,0,0,0.85);
+      text-align:center; padding-left:18px; }
+    /* the joke as a live shell line — persistent brand mark, never overridden */
+    #gamemenu .gm-cmd { color:#7fe7a3; font-size:15px; letter-spacing:1px; margin-top:4px;
+      text-shadow:0 0 8px rgba(80,255,150,0.35); white-space:nowrap; }
+    #gamemenu .gm-cmd .pr { color:#4ad968; font-weight:bold; }
+    #gamemenu .gm-cmd .fl { color:#e9fff1; }
+    #gamemenu .gm-cmd .ct { color:#9bffc4; animation:gm-blink 1.05s steps(1) infinite; }
+    @keyframes gm-blink { 0%,50% { opacity:1; } 50.01%,100% { opacity:0; } }
+    #gamemenu .gm-sub { color:#7f9a8b; font-size:11px; letter-spacing:5px; margin:6px 0 20px; }
     #gamemenu button { width:262px; padding:15px 0; font-family:inherit; font-size:15px;
       letter-spacing:3px; font-weight:bold; color:#dfe8ef; cursor:pointer;
       background:rgba(20,30,42,0.88); border:1px solid rgba(255,255,255,0.28); border-radius:6px;
@@ -4032,7 +4040,8 @@ function ensureGameMenu() {
   ensureMenuStyle();
   m = document.createElement('div'); m.id = 'gamemenu';
   m.innerHTML =
-    '<div class="gm-title" id="gm-title">RIPOSTE RUN</div>' +
+    '<div class="gm-title" id="gm-title">RMRF</div>' +
+    '<div class="gm-cmd"><span class="pr">$</span> rm <span class="fl">-rf</span> /their/base | grep flag<span class="ct">&#9608;</span></div>' +
     '<div class="gm-sub" id="gm-sub">ISLAND CTF</div>' +
     '<button data-act="pva">PLAYER VS AI</button>' +
     '<button data-act="ava">AI VS AI</button>' +
@@ -4063,7 +4072,7 @@ function ensureGameMenu() {
 }
 function showGameMenu(opts = {}) {
   const m = ensureGameMenu();
-  document.getElementById('gm-title').textContent = opts.header || 'RIPOSTE RUN';
+  document.getElementById('gm-title').textContent = opts.header || 'RMRF';
   document.getElementById('gm-sub').textContent = opts.sub || 'ISLAND CTF';
   m.dataset.reload = opts.reload ? '1' : '0';
   m.classList.add('show');
