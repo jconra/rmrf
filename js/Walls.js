@@ -6,8 +6,8 @@
 
 import * as THREE from 'three';
 import { Destructible } from './Destructible.js?v=2';
-import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=2';
-import { concreteTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
+import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=3';
+import { concreteTexture, accentPlateTexture } from './Textures.js?v=1';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
 // Shared neutral plate map for every team-colour piece — built once, tinted per material

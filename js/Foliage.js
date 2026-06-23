@@ -4,8 +4,7 @@
 
 import * as THREE from 'three';
 import { TILE } from './IslandMap.js';
-import { makePalm } from './Palm.js?v=2';
-import { makeTree, makeDeadTree, makeBush, makePlant, makeRock } from './FoliageModels.js?v=2';
+import { makeTree, makeDeadTree, makeBush, makePlant, makeRock, makePalm } from './Plants.js?v=1';
 
 // Procedural prop makers per category, and how many randomized variants to bake.
 // Kept simple by design: a couple grasses + a couple bushes, plus beach palms.

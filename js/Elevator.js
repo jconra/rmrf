@@ -4,7 +4,7 @@
 // hazard collar + telescoping ram, plus an optional rider Vehicle whose Y we drive.
 
 import * as THREE from 'three';
-import { concreteTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
+import { concreteTexture, accentPlateTexture } from './Textures.js?v=1';
 
 // Shared neutral plate map tinted by the team accent (matches Walls.js / Buildings.js).
 const ACCENT_TEX = accentPlateTexture();

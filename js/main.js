@@ -7,12 +7,12 @@ import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=2';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp } from './Walls.js?v=55';
+import { Camp } from './Walls.js?v=56';
 import { RoadNetwork } from './Roads.js?v=80';
-import { Foliage } from './Foliage.js?v=2';
+import { Foliage } from './Foliage.js?v=3';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=67';
-import { Elevator } from './Elevator.js?v=2';
-import { Garage, GARAGE_COUNTS } from './Garage.js?v=5';
+import { Elevator } from './Elevator.js?v=3';
+import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
@@ -22,6 +22,7 @@ import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
+import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
 
 // --- Renderer ----------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -4031,7 +4032,11 @@ function ensureMenuStyle() {
       max-height:40vh; overflow-y:auto; }
     #gamemenu .gm-help h4 { color:#e6eef5; font-size:10px; letter-spacing:2px; margin:10px 0 3px; font-weight:bold; }
     #gamemenu .gm-help h4:first-child { margin-top:0; }
-    #gamemenu .gm-help b { color:#dfe8ef; }`;
+    #gamemenu .gm-help b { color:#dfe8ef; }
+    #gamemenu .gm-help .supply-row { display:flex; align-items:center; gap:10px; margin:7px 0; }
+    #gamemenu .gm-help .supply-row img { width:48px; height:48px; flex-shrink:0; object-fit:contain;
+      background:rgba(120,210,150,0.06); border:1px solid #1d3850; border-radius:5px; }
+    #gamemenu .gm-help .supply-row span { color:#9fb2c2; }`;
   document.head.appendChild(s);
 }
 function ensureGameMenu() {
@@ -4056,7 +4061,10 @@ function ensureGameMenu() {
       '<b>Valkyrie</b> — flying missile gunship.<br>' +
       '<b>Jotun</b> — slow railgun siege tank.' +
       '<h4>SUPPLIES</h4>' +
-      'Drive over neutral pads to refill <b>fuel</b> &amp; <b>ammo</b>. Find the hidden <b>shield</b> generator for armour.' +
+      'Neutral points — either team can use them, or blow one up to deny it.' +
+      SUPPLY_ASSETS.map(a =>
+        `<div class="supply-row"><img src="thumbnails/${a.id}.png" alt="${a.name}" loading="lazy"><div><b>${a.name}</b><br><span>${a.desc}</span></div></div>`
+      ).join('') +
     '</div>';
   document.body.appendChild(m);
   m.addEventListener('click', e => {

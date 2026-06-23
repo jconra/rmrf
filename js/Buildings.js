@@ -3,7 +3,7 @@
 // Each maker returns a THREE.Group with its base at y=0. Team accent passed in.
 
 import * as THREE from 'three';
-import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture } from './BuildingTextures.js?v=2';
+import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture } from './Textures.js?v=1';
 
 // Shared neutral plate map tinted per-material by the team accent (matches Walls.js).
 const ACCENT_TEX = accentPlateTexture();

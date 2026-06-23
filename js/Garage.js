@@ -10,7 +10,7 @@
 
 import * as THREE from 'three';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js';
-import { concreteTexture } from './BuildingTextures.js';
+import { concreteTexture } from './Textures.js?v=1';
 
 export const GARAGE_COUNTS = { firebrat: 6, lurcher: 3, valkyrie: 2, jotun: 2 };
 

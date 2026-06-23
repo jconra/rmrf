@@ -1,5 +1,8 @@
-// BuildingTextures.js — small procedural CanvasTextures so the camp buildings
-// read as concrete / corrugated metal / canvas / crates instead of flat blocks.
+// Textures.js — shared procedural CanvasTextures for ANY asset (buildings,
+// props, future plant bark/leaf, etc.): concrete / corrugated metal / canvas /
+// crates / roof / accent plate. One home so no asset type duplicates texture
+// code. (Formerly BuildingTextures.js — generalised, since these are material
+// textures, not building-specific.)
 // Colours are drawn as CSS strings (already sRGB) and the texture is tagged
 // SRGBColorSpace, so there's no double-linearise darkening (the bug that bit the
 // terrain grass — see TerrainMaterial.js).
