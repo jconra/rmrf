@@ -24,6 +24,7 @@ import {
   makeQuonset, makeTent, makeElevator,
 } from './Buildings.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
+import { makeWall, makeTower, makeGate } from './Walls.js?v=59';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
 
 export const ASSETS = [
   // ── Structures ─────────────────────────────────────────────────────────────
@@ -75,6 +76,29 @@ export const ASSETS = [
     destructible: null,    // functional rig, not shot to rubble
     category: 'special',
     desc: 'Vehicles rise onto the island here from the garage below.',
+  },
+
+  // ── Perimeter kit (the Camp class auto-rings a base with these) ──────────────
+  {
+    id: 'wall', name: 'Wall', make: makeWall,
+    footprint: { w: 1, d: 1 }, accent: true,
+    destructible: { type: 'wall', hp: 200 },
+    category: 'structure',
+    desc: 'A stone perimeter wall segment; the top course wears the team colour.',
+  },
+  {
+    id: 'tower', name: 'Corner Tower', make: makeTower,
+    footprint: { w: 1, d: 1 }, accent: true,
+    destructible: { type: 'wall', hp: 340 },
+    category: 'structure',
+    desc: 'A corner bastion that mounts an auto-turret (guns live only on corners).',
+  },
+  {
+    id: 'gate', name: 'Gate', make: makeGate,
+    footprint: { w: 2, d: 1 }, accent: true,
+    destructible: { type: 'wall', hp: 300 },
+    category: 'structure',
+    desc: 'A drive-through gateway: two posts under a team-colour lintel.',
   },
 
   // ── Supply POIs (neutral; either team can use them, or blow one to deny it) ──

@@ -5,9 +5,10 @@
 import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
 import { Controls } from './Controls.js';
-import { DestructibleManager, Destructible } from './Destructible.js?v=2';
+import { DestructibleManager, Destructible } from './Destructible.js?v=5';
+import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp } from './Walls.js?v=56';
+import { Camp } from './Walls.js?v=59';
 import { RoadNetwork } from './Roads.js?v=80';
 import { Foliage } from './Foliage.js?v=3';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=67';
@@ -178,11 +179,15 @@ function updateCamera() {
   //   DRIVING — the FIRST finger steers (the vehicle heads toward it); release it as a
   //     quick tap and it fires instead. Any EXTRA finger is a tap-to-fire, so you can
   //     shoot without lifting the steering thumb. (No pinch-zoom while driving.)
-  //   SPECTATING — one finger pans the camera, two fingers pinch-zoom.
-  let pinchD = 0;
+  //   SPECTATING (AI-vs-AI) — one finger pans the camera, two fingers pinch-zoom.
+  //   PvA — pinch-zoom is OFF (two thumbs on the sticks would trip a global 2-touch
+  //     zoom); it's gated to spectator games where there are no sticks to conflict.
   let steerId = null, steerStart = null;   // the steering finger's id + its down pos/time
   const taps = {};                         // extra fingers being watched for a tap (by identifier)
   const humanDriving = () => onField && player && !player.dead;
+  const spectatorGame = () => TEAM_CTRL[PLAYER_TEAM] !== 'human';   // true AI-vs-AI watch (no human sticks)
+  let pinchD = 0;
+  const touchDist = (e) => Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
   const fireAt = (x, y) => { if (playerIsValkyrie()) acquireLock(x, y); else fireAtPoint(x, y); };
   const isTap = s => Math.hypot(s.x - s.sx, s.y - s.sy) < 12 && performance.now() - s.t < 300;
 
@@ -195,7 +200,9 @@ function updateCamera() {
       const t = e.touches[0];
       touchPan.active = true; touchPan.x = touchPan.sx = t.clientX; touchPan.y = touchPan.sy = t.clientY;
       touchPan.t = performance.now();
-    } else if (e.touches.length === 2) { touchPan.active = false; pinchD = touchDist(e); }
+    } else if (e.touches.length === 2 && spectatorGame()) {
+      touchPan.active = false; pinchD = touchDist(e);   // spectator pinch-zoom
+    }
   }, { passive: true });
 
   el.addEventListener('touchmove', e => {
@@ -211,10 +218,10 @@ function updateCamera() {
     }
     if (e.touches.length === 1 && touchPan.active) {
       touchPan.x = e.touches[0].clientX; touchPan.y = e.touches[0].clientY;
-    } else if (e.touches.length === 2) {
+    } else if (e.touches.length === 2 && spectatorGame()) {
       const d = touchDist(e);
-      orbit.dist = Math.max(8, Math.min(zoomMax, orbit.dist + (pinchD - d) * 0.5));
-      pinchD = d; updateCamera();
+      if (pinchD) { orbit.dist = Math.max(8, Math.min(zoomMax, orbit.dist + (pinchD - d) * 0.5)); updateCamera(); }
+      pinchD = d;
     }
   }, { passive: true });
 
@@ -234,11 +241,6 @@ function updateCamera() {
       touchPan.active = false;
     }
   });
-  function touchDist(e) {
-    const dx = e.touches[0].clientX - e.touches[1].clientX;
-    const dy = e.touches[0].clientY - e.touches[1].clientY;
-    return Math.hypot(dx, dy);
-  }
 })();
 
 // --- WASD pan (stands in for the future vehicle-follow camera) ---------
@@ -894,7 +896,7 @@ const VEH_MOVE = {
 const VEH_STATS = {
   lurcher:  { hp: 220, fuel: 200, burn: 2.4, ammo: 68, shield: 110 },
   firebrat: { hp: 90,  fuel: 200, burn: 3.0, ammo: 90, shield: 45  },
-  valkyrie: { hp: 140, fuel: 260, burn: 4.2, ammo: 12, shield: 75  },
+  valkyrie: { hp: 190, fuel: 260, burn: 4.2, ammo: 12, shield: 75  },   // 190 (was 140) so it survives ONE Jotun slug (flat 180 to vehicles)
   jotun:    { hp: 320, fuel: 200, burn: 2.0, ammo: 16, shield: 160 },
 };
 const SINK_RATE = 1.2;     // units/sec a land vehicle floods when over water
@@ -1989,7 +1991,8 @@ function placeResupplies() {
     g.position.set(site.x, gy, site.z);
     scene.add(g);
     const rp = { kind: sp.kind, group: g, pos: new THREE.Vector3(site.x, gy, site.z), radius: cell * 2.2, dead: false };
-    destructibles.add(new Destructible(g, { type: 'structure', hp: sp.hp, blocks: true,
+    applyStaging(g, sp.kind);   // authored fallAt/dmgStyle (if any) before the Destructible reads them
+    destructibles.add(new Destructible(g, { type: 'structure', hp: sp.hp, blocks: true, staged: true,
       onDestroyed: () => { rp.dead = true; } }));
     resupplies.push(rp);
   }
@@ -3767,10 +3770,10 @@ function scaleScene() {
   sun.position.set(0, span * 0.42, -span * 0.052);
 }
 
-// Initial camera framing — only used once, on load.
+// Initial camera framing — only used once, on load (the spectator start view).
 function frameMap() {
   scaleScene();
-  orbit.dist = Math.max(map.worldW, map.worldH) * 0.85;
+  orbit.dist = Math.max(map.worldW, map.worldH) * 0.425;   // closer start (was 0.85 — felt very far)
   updateCamera();
 }
 
@@ -4322,7 +4325,7 @@ function mountHelp() {
     ['W A S D', 'drive'],
     ['Q E', 'strafe'],
     ['Click / tap', 'fire'],
-    ['Scroll / pinch', 'zoom (spectate)'],
+    ['Scroll', 'zoom (spectate)'],
     ['LOG', 'AI decision log'],
   ];
   const btn = document.createElement('button');

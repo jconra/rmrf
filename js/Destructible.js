@@ -46,6 +46,17 @@ function drawCracks(ctx, w, h, frac) {
   }
 }
 
+// Nearest authored staging entry to a piece's local position (for fallStages overrides).
+function _nearestStage(stages, pos) {
+  let best = null, bd = Infinity;
+  for (const s of stages) {
+    const dx = s.pos[0] - pos.x, dy = s.pos[1] - pos.y, dz = s.pos[2] - pos.z;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+
 export class Destructible {
   // mesh: the intact THREE.Object3D (already positioned in its parent).
   // opts.hp        — hit points
@@ -65,6 +76,12 @@ export class Destructible {
     this.onDamage = opts.onDamage || null;   // called after each hit (for staged crumble)
     this.dead = false;
     this.rubble = null;
+
+    // Generic STAGED CRUMBLE (opt-in): each child piece lets go as HP falls and tumbles
+    // or squishes to rubble — top-down by default, or per-piece if its userData carries
+    // fallAt / dmgStyle (authored in the asset designer). Walls keep their own system.
+    this.staged = !!opts.staged;
+    if (this.staged) this._initStaged();
 
     // Damage feedback state. Materials are cloned per-object on first hit so scarring
     // THIS prop never bleeds onto others sharing the same material/texture.
@@ -95,8 +112,69 @@ export class Destructible {
     this.hp -= amount;
     this._flash = 1;        // white-hot flash on hit
     this._applyWear();      // deepen scorch + cracks for the new HP level
+    if (this.staged) this._restageFall();   // shed any pieces whose threshold the hit crossed
     if (this.onDamage) this.onDamage(this);
     if (this.hp <= 0) this._destroy();
+  }
+
+  // ── Staged crumble ──────────────────────────────────────────────────────────
+  _initStaged() {
+    this._pieces = [];
+    const kids = this.mesh.children.filter(o => o.isMesh || o.isGroup);
+    let minY = Infinity, maxY = -Infinity;
+    for (const k of kids) { minY = Math.min(minY, k.position.y); maxY = Math.max(maxY, k.position.y); }
+    const span = Math.max(1e-3, maxY - minY);
+    const stages = this.mesh.userData.fallStages || null;   // authored overrides (applyStaging)
+    for (const k of kids) {
+      const u = k.userData || {};
+      const hNorm = (k.position.y - minY) / span;                        // 0 bottom .. 1 top
+      const def = 0.15 + hNorm * 0.65;                                   // height default: taller lets go first
+      const a = stages ? _nearestStage(stages, k.position) : null;       // authored, matched by position
+      const fallAt = a && a.fallAt != null ? a.fallAt : (u.fallAt != null ? u.fallAt : def);
+      const style = (a && a.dmgStyle) || u.dmgStyle || 'tumble';
+      this._pieces.push({ obj: k, fallAt, style, turret: !!u.turret, sweep: Math.random() * 6.283,
+        falling: false, settled: false, t: 0,
+        vel: new THREE.Vector3(), ang: new THREE.Vector3(), y0: k.position.y, s0: k.scale.clone() });
+    }
+    this._hasTurret = this._pieces.some(p => p.turret);
+  }
+  _restageFall() {
+    const frac = Math.max(0, this.hp / this.maxHp);
+    if (this._hasTurret) {
+      // Gravity coherence: a turret/keystone piece sits on top, so while one still stands
+      // it holds everything below up — nothing else sheds. The keystone falls at its OWN
+      // threshold; once it's down, the rest crumble to catch up to the damage.
+      for (const p of this._pieces) if (p.turret && !p.falling && !p.settled && p.fallAt >= frac) this._kickPiece(p);
+      if (this._pieces.some(p => p.turret && !p.falling && !p.settled)) return;
+    }
+    for (const p of this._pieces) if (!p.falling && !p.settled && p.fallAt >= frac) this._kickPiece(p);
+  }
+  _kickPiece(p) {
+    p.falling = true;
+    if (p.style === 'squish') return;        // squish = a flatten lerp (see _tickStaged)
+    const a = Math.random() * Math.PI * 2;
+    p.vel.set(Math.cos(a) * 2.2, 2.6, Math.sin(a) * 2.2);
+    p.ang.set((Math.random() - 0.5) * 6, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 6);
+  }
+  _tickStaged(dt) {
+    for (const p of this._pieces) {
+      if (p.turret && !p.falling && !p.settled) {   // idle scan-sweep while the gun still stands
+        p.sweep += dt * 0.6; p.obj.rotation.y = Math.sin(p.sweep) * 0.8; continue;
+      }
+      if (!p.falling || p.settled) continue;
+      const o = p.obj;
+      if (p.style === 'squish') {
+        p.t = Math.min(1, p.t + dt * 2.4);
+        o.scale.set(p.s0.x * (1 + 0.3 * p.t), p.s0.y * (1 - 0.9 * p.t), p.s0.z * (1 + 0.3 * p.t));
+        o.position.y = p.y0 * (1 - 0.92 * p.t);
+        if (p.t >= 1) p.settled = true;
+      } else {
+        p.vel.y -= 14 * dt;
+        o.position.x += p.vel.x * dt; o.position.y += p.vel.y * dt; o.position.z += p.vel.z * dt;
+        o.rotation.x += p.ang.x * dt; o.rotation.y += p.ang.y * dt; o.rotation.z += p.ang.z * dt;
+        if (o.position.y <= 0.25) { o.position.y = 0.25; p.settled = true; }
+      }
+    }
   }
 
   // Clone this object's materials (and any texture maps) so progressive damage marks
@@ -140,6 +218,11 @@ export class Destructible {
 
   _destroy() {
     this.dead = true;
+    if (this.staged) {           // pieces ARE the rubble — drop whatever's still standing, keep them in place
+      this._restageFall();
+      if (this.onDestroyed) this.onDestroyed(this);
+      return;
+    }
     const parent = this.mesh.parent;
     if (this.makeRubble && parent) {
       const r = this.makeRubble();
@@ -158,6 +241,7 @@ export class Destructible {
   // no coloured ember glow (a damaged prop should just look charred, not lit red). Only
   // touches materials while the flash is live (by then they've been cloned).
   update(dt) {
+    if (this.staged) this._tickStaged(dt);   // keep tumbling/squishing even after death
     if (this.dead || this._flash <= 0) return;
     this._flash = Math.max(0, this._flash - dt * 3.2);
     const k = this._flash;

@@ -5,9 +5,10 @@
 // and the corner gun are separately destructible.
 
 import * as THREE from 'three';
-import { Destructible } from './Destructible.js?v=2';
+import { Destructible } from './Destructible.js?v=5';
+import { applyStaging } from './AssetStaging.js?v=1';
 import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=3';
-import { concreteTexture, accentPlateTexture } from './Textures.js?v=1';
+import { concreteTexture, accentPlateTexture } from './Textures.js?v=2';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
 // Shared neutral plate map for every team-colour piece — built once, tinted per material
@@ -355,18 +356,19 @@ export class Camp {
     const inLo = -h + 1, inHi = h - 1;     // interior (non-edge) cell range
     const centreX = this.center.x, centreZ = this.center.z;   // odd camp: centred on a cell
 
-    const addAt = (obj, wx, wz, hp, yaw = 0) => {
+    const addAt = (obj, wx, wz, hp, id, yaw = 0) => {
       obj.position.set(wx, groundY, wz);
       obj.rotation.y = yaw;
       this.group.add(obj);
-      const d = new Destructible(obj, { type: 'building', hp, makeRubble: rubblePile(cell) });
+      applyStaging(obj, id);   // authored crumble (if any) before the Destructible reads it
+      const d = new Destructible(obj, { type: 'building', hp, staged: true });   // pieces crumble (was: vanish→rubblePile)
       manager.add(d);
       this.buildings.push(obj);
       return d;
     };
-    const addCell = (obj, ix, iz, hp, yaw = 0) => {
+    const addCell = (obj, ix, iz, hp, id, yaw = 0) => {
       const w = grid.cellToWorld(centerCell.cx + ix, centerCell.cz + iz);
-      addAt(obj, w.x, w.z, hp, yaw);
+      addAt(obj, w.x, w.z, hp, id, yaw);
     };
 
     if (this.role === 'fob') {
@@ -377,11 +379,11 @@ export class Camp {
       // The HQ wears the team flag on its roof. The capturable flag (main.js) is
       // hidden inside until this building falls — so we keep a handle to its
       // Destructible for the reveal check.
-      this.flagHQ = addAt(makeFlagHQ(cell, accent), centreX, centreZ, 600);   // centre; ring around = road
-      addCell(makeAdmin(cell, accent), inLo, inHi, 160);
-      addCell(makeQuonset(cell, accent), inHi, inHi, 140, Math.PI / 2);
-      addCell(makeBarracks(cell, accent), inLo, inLo, 120);
-      addCell(makeTent(cell, accent), inHi, inLo, 50);
+      this.flagHQ = addAt(makeFlagHQ(cell, accent), centreX, centreZ, 600, 'flagHQ');   // centre; ring around = road
+      addCell(makeAdmin(cell, accent), inLo, inHi, 160, 'admin');
+      addCell(makeQuonset(cell, accent), inHi, inHi, 140, 'quonset', Math.PI / 2);
+      addCell(makeBarracks(cell, accent), inLo, inLo, 120, 'barracks');
+      addCell(makeTent(cell, accent), inHi, inLo, 50, 'tent');
     }
   }
 
@@ -398,4 +400,76 @@ export class Camp {
   }
 
   update(dt) { for (const w of this.walls) w.update(dt); }
+}
+
+// ── Standalone mesh makers (for the manifest / asset designer / map-designer) ──
+// Just the VISUAL meshes of a wall segment, corner tower, and gate, as a plain Group —
+// no Destructible/combat wiring (that stays in the Wall class above). The mesh layout
+// mirrors the live pieces so the designer's per-piece damage staging lines up.
+function accentMat(accent) {
+  return new THREE.MeshStandardMaterial({ color: accent, map: ACCENT_TEX, roughness: 0.6, metalness: 0.2, flatShading: true });
+}
+function parapetMesh(layerH, capW, capD) {
+  const lipH = layerH * 0.35;
+  const lip = box(capW, lipH, capD, STONE);
+  lip.position.y = lipH / 2;
+  const g = new THREE.Group(); g.add(lip); return g;
+}
+function turretMesh(cell, accent, y) {
+  const group = new THREE.Group(); group.position.y = y;
+  const body = box(cell * 0.42, cell * 0.24, cell * 0.5, METAL); body.position.y = cell * 0.12; group.add(body);
+  const stripe = box(cell * 0.44, cell * 0.08, cell * 0.4, accentMat(accent)); stripe.position.y = cell * 0.26; group.add(stripe);
+  for (const sx of [-0.16, 0.16]) {
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(cell * 0.04, cell * 0.04, cell * 0.55, 6), METAL);
+    barrel.rotation.x = Math.PI / 2; barrel.position.set(sx * cell, cell * 0.12, cell * 0.35); group.add(barrel);
+  }
+  return group;
+}
+// A tapered stone layer stack + parapet; the top course is the team-colour band.
+function wallStack(cell, accent, isCorner) {
+  const g = new THREE.Group();
+  const nLayers = isCorner ? 5 : 4;
+  const height = cell * (isCorner ? 1.0 : 0.78);
+  const layerH = height / nLayers;
+  const baseThick = cell * 0.30, taper = 0.30;
+  let capW = cell, capD = cell;
+  for (let i = 0; i < nLayers; i++) {
+    const t = i / (nLayers - 1), shrink = 1 - t * taper;
+    let w, d;
+    if (isCorner) { const side = cell * (1 - t * 0.15); w = d = side; }
+    else { w = cell; d = baseThick * shrink; }       // EW run (length along X)
+    const mat = (!isCorner && i === nLayers - 1) ? accentMat(accent) : STONE;
+    const m = box(w, layerH, d, mat);
+    m.position.y = 0.1 + i * layerH + layerH / 2;
+    g.add(m);
+    if (i === nLayers - 1) { capW = w; capD = d; }
+  }
+  const batt = parapetMesh(layerH, capW, capD); batt.position.y = 0.1 + height; g.add(batt);
+  return { group: g, height, layerH };
+}
+export function makeWall(cell = 5, accent = new THREE.Color('#c0392b')) {
+  return wallStack(cell, accent, false).group;
+}
+export function makeTower(cell = 5, accent = new THREE.Color('#c0392b')) {
+  const { group, height, layerH } = wallStack(cell, accent, true);
+  const t = turretMesh(cell, accent, 0.1 + height + layerH * 0.5);
+  t.userData.turret = true;   // keystone: holds the bastion up + idle-sweeps under the generic crumble
+  t.userData.fallAt = 0.3;    // bastion stays intact until the gun is knocked out (~30% HP)
+  group.add(t);
+  return group;
+}
+export function makeGate(cell = 5, accent = new THREE.Color('#c0392b'), span = 2) {
+  const g = new THREE.Group();
+  const thick = cell * 0.30, postW = cell * 0.30, postH = cell * 1.15;
+  const runLen = span * cell, off = runLen / 2 - postW / 2;
+  for (const s of [-1, 1]) {                          // posts flank the drive-through opening
+    const post = box(postW, postH, thick, STONE);
+    post.position.set(s * off, 0.1 + postH / 2, 0);
+    g.add(post);
+  }
+  const lintelH = cell * 0.2;
+  const lintel = box(runLen, lintelH, thick * 1.05, accentMat(accent));
+  lintel.position.y = 0.1 + postH + lintelH / 2;
+  g.add(lintel);
+  return g;
 }

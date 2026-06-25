@@ -108,6 +108,24 @@ export function accentPlateTexture() {
   return finish(cv, 1);
 }
 
+// Diagonal yellow/black caution stripes. Tileable (the 45° bands repeat seamlessly
+// across the square), so it works for the elevator shaft collar AND flat "interact
+// here" floor markings flanking the supply points. Set .repeat on a clone to scale
+// the stripe size to a strip's length.
+export function hazardTexture(yellow = '#e8c84a', dark = '#16181c') {
+  const { cv, ctx, s } = canvas(64);
+  ctx.fillStyle = yellow; ctx.fillRect(0, 0, s, s);
+  ctx.fillStyle = dark;
+  const band = s / 4;   // stripe width; period = 2·band divides s, so the diagonal tiles
+  for (let x = -s; x < s * 2; x += band * 2) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0); ctx.lineTo(x + band, 0);
+    ctx.lineTo(x + band + s, s); ctx.lineTo(x + s, s);
+    ctx.closePath(); ctx.fill();
+  }
+  return finish(cv, 1);
+}
+
 // Flat roof / panel: darker with horizontal seams.
 export function roofTexture(base = '#6f6a61') {
   const { cv, ctx, s } = canvas(64);

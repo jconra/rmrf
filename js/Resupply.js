@@ -9,12 +9,30 @@
 // Buildings.js. `s` is the build-grid cell size, so props scale with the map.
 
 import * as THREE from 'three';
+import { hazardTexture } from './Textures.js?v=2';
 
 // kind → the colour that reads its function (tank bands, depot trim, emitter glow)
 export const RESUPPLY_TINT = { fuel: 0xff8a3d, ammo: 0x7fd44b, shield: 0x46d6ff };
 
 const STEEL = () => new THREE.MeshStandardMaterial({ color: 0x6c7178, roughness: 0.7, metalness: 0.6 });
 const DARK  = () => new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.8, metalness: 0.4 });
+
+// Shared yellow/black caution map for the "drive up here" floor strips.
+const HAZARD_TEX = hazardTexture();
+
+// A flat hazard-striped ground strip — a "pull up here to use me" cue laid on the
+// ground flanking each supply point. `len` runs along local Z; the texture tiles
+// along the length so the stripe size stays consistent whatever the strip's size.
+function hazardStrip(s, len) {
+  const w = s * 0.22;
+  const tex = HAZARD_TEX.clone();
+  tex.repeat.set(1, Math.max(2, Math.round(len / (s * 0.4))));   // even stripes down the length
+  tex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8, metalness: 0.05 });
+  const strip = new THREE.Mesh(new THREE.BoxGeometry(w, s * 0.04, len), mat);
+  strip.position.y = s * 0.02;   // just above the ground so it doesn't z-fight terrain
+  return strip;
+}
 
 // Horizontal pressure tank on short legs, with painted hazard bands.
 export function makeFuelTank(s = 5) {
@@ -47,6 +65,12 @@ export function makeFuelTank(s = 5) {
   const pipe = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.05, s * 0.05, s * 0.5, 8), DARK());
   pipe.position.set(len * 0.5, s * 0.45, 0);
   g.add(pipe);
+  // "drive up here" hazard strips flanking the tank
+  for (const sx of [-1, 1]) {
+    const strip = hazardStrip(s, s * 0.8);
+    strip.position.set(sx * (len * 0.5 + s * 0.2), s * 0.02, 0);
+    g.add(strip);
+  }
   return g;
 }
 
@@ -71,6 +95,12 @@ export function makeAmmoDepot(s = 5) {
   crate(cw * 0.6, s * 0.5 + cw * 0.35, -cw * 0.1, cw);
   crate(0, s * 0.5 + cw * 0.35, cw * 0.5, cw);
   crate(0, s * 0.5 + cw * 1.05, cw * 0.1, cw * 0.9);
+  // "drive up here" hazard strips flanking the bunker
+  for (const sx of [-1, 1]) {
+    const strip = hazardStrip(s, s * 0.85);
+    strip.position.set(sx * (s * 0.475 + s * 0.2), s * 0.02, 0);
+    g.add(strip);
+  }
   return g;
 }
 
@@ -95,6 +125,12 @@ export function makeShieldGenerator(s = 5) {
   g.add(ring);
   g.userData.spin = ring;      // main.js rotates this each frame while alive
   g.userData.core = core;
+  // "drive up here" hazard strips flanking the generator
+  for (const sx of [-1, 1]) {
+    const strip = hazardStrip(s, s * 0.9);
+    strip.position.set(sx * (s * 0.55 + s * 0.2), s * 0.02, 0);
+    g.add(strip);
+  }
   return g;
 }
 

@@ -4,7 +4,7 @@
 // hazard collar + telescoping ram, plus an optional rider Vehicle whose Y we drive.
 
 import * as THREE from 'three';
-import { concreteTexture, accentPlateTexture } from './Textures.js?v=1';
+import { concreteTexture, accentPlateTexture, hazardTexture } from './Textures.js?v=2';
 
 // Shared neutral plate map tinted by the team accent (matches Walls.js / Buildings.js).
 const ACCENT_TEX = accentPlateTexture();
@@ -14,21 +14,8 @@ const HOLD_TOP  = 2.2;    // pause at the surface before lowering (loop mode)
 const HOLD_BOT  = 1.2;    // pause in the pit before rising again (loop mode)
 const easeInOut = (k) => k * k * (3 - 2 * k);
 
-// Diagonal yellow/black caution stripes for the hazard collar (tileable).
-function hazardTexture() {
-  const N = 64, c = document.createElement('canvas');
-  c.width = c.height = N;
-  const x = c.getContext('2d');
-  for (let i = 0; i < N; i++)
-    for (let j = 0; j < N; j++) {
-      x.fillStyle = ((i + j) % 32) < 16 ? '#e8c84a' : '#16181c';
-      x.fillRect(i, j, 1, 1);
-    }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
+// Diagonal yellow/black caution stripes for the hazard collar (shared — also used
+// by the supply points; see Textures.js).
 const HAZARD_TEX = hazardTexture();
 
 const PAD_MAT   = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
