@@ -31,16 +31,18 @@ function speckle(ctx, s, amt, n = 2200) {
   }
 }
 
-// Poured concrete: base fill + speckle + faint panel seams + corner weathering.
+// Poured concrete: base fill + speckle + soft weathering MOTTLE. No straight panel
+// seams — those skew badly once a face is distorted into a trapezoid (a designer note);
+// soft blobs read as weathered concrete from any shape and tile seamlessly.
 export function concreteTexture(base = '#9a948a') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 60);
-  ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 1;
-  for (const f of [0.5]) { ctx.beginPath(); ctx.moveTo(0, s * f); ctx.lineTo(s, s * f); ctx.moveTo(s * f, 0); ctx.lineTo(s * f, s); ctx.stroke(); }
-  // soft weather streaks
-  ctx.strokeStyle = 'rgba(0,0,0,0.06)';
-  for (let i = 0; i < 10; i++) { const x = Math.random() * s; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + (Math.random() - 0.5) * 6, s); ctx.stroke(); }
+  for (let i = 0; i < 22; i++) {
+    const x = Math.random() * s, y = Math.random() * s, r = 6 + Math.random() * 22;
+    const dark = Math.random() < 0.6;
+    wrapBlob(ctx, s, x, y, r, dark ? '74,70,63' : '184,179,170', 0.04 + Math.random() * 0.08);
+  }
   return finish(cv, 1);
 }
 
