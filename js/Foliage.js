@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { TILE } from './IslandMap.js';
 import { makeTree, makeDeadTree, makeBush, makePlant, makeRock, makePalm } from './Plants.js?v=1';
+import { makeBlobShadowInstanced } from './BlobShadow.js?v=1';
 
 // Procedural prop makers per category, and how many randomized variants to bake.
 // Kept simple by design: a couple grasses + a couple bushes, plus beach palms.
@@ -147,6 +148,8 @@ export class Foliage {
       // and bushes stay pure cosmetic instancing.)
       if (cat === 'palm' || cat === 'tree') {
         const radPer = cat === 'palm' ? 2.0 : 0.7;   // collision radius per unit scale (trees are narrower)
+        const shadPer = cat === 'palm' ? 2.6 : 1.4;  // blob-shadow radius per unit scale (a touch wider than the trunk)
+        const sInst = makeBlobShadowInstanced(items.length);   // one draw call for this bucket's tree shadows
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           const parts = partMeshes.map(inst => {
@@ -154,11 +157,16 @@ export class Foliage {
             inst.getMatrixAt(i, orig);
             return { inst, i, orig };
           });
+          const sr = shadPer * it.scale;
+          _pos.set(it.x, it.y + 0.05, it.z); _q.identity(); _scl.set(sr * 2, 1, sr * 2);
+          _m.compose(_pos, _q, _scl); sInst.setMatrixAt(i, _m);
           this.trees.push({
             x: it.x, y: it.y, z: it.z, r: radPer * it.scale,
-            hp: 30, dead: false, fell: 0, axis: null, parts,
+            hp: 30, dead: false, fell: 0, axis: null, parts, shadow: { inst: sInst, i },
           });
         }
+        sInst.instanceMatrix.needsUpdate = true;
+        this.group.add(sInst);
       }
     }
   }
@@ -217,9 +225,10 @@ export class Foliage {
         pr.inst.setMatrixAt(pr.i, _m);
         pr.inst.instanceMatrix.needsUpdate = true;
       }
-      if (p >= 1) {   // fully down → hide the instance (zero scale)
+      if (p >= 1) {   // fully down → hide the instance (zero scale) + drop its shadow
         _m.makeScale(0, 0, 0);
         for (const pr of t.parts) { pr.inst.setMatrixAt(pr.i, _m); pr.inst.instanceMatrix.needsUpdate = true; }
+        if (t.shadow) { t.shadow.inst.setMatrixAt(t.shadow.i, _m); t.shadow.inst.instanceMatrix.needsUpdate = true; }
         t.dead = true;
       }
     }

@@ -11,7 +11,8 @@ import { BuildGrid } from './BuildGrid.js';
 import { Camp } from './Walls.js?v=59';
 import { makeFlagHQ } from './Buildings.js?v=3';   // decoy HQ buildings on designed maps
 import { RoadNetwork } from './Roads.js?v=80';
-import { Foliage } from './Foliage.js?v=3';
+import { Foliage } from './Foliage.js?v=4';
+import { makeVehicleShadow, vehicleSilhouette } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=67';
 import { Elevator } from './Elevator.js?v=3';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
@@ -1011,6 +1012,25 @@ let fireCooldown = 0;
 let fireHeld = false;          // SPACE / on-screen fire button held
 let playerColorIndex = 4;      // team colour index for the player's projectile tint
 const combatants = [];         // every live, damageable Vehicle (player + AI)
+const vehShadows = new THREE.Group(); scene.add(vehShadows);   // ground-projected vehicle silhouette shadows
+// Drape each vehicle's baked silhouette shadow flat on the terrain beneath it, turned to
+// its heading and faded/shrunk a little with altitude (flyers cast a fainter, lower shadow).
+function updateShadows() {
+  for (const v of combatants) {
+    if (!v.model) continue;
+    if (!v._shadow) { v._shadow = makeVehicleShadow(vehicleSilhouette(renderer, v.type, v.model.group)); vehShadows.add(v._shadow); }
+    const s = v._shadow;
+    if (v.dead) { s.visible = false; continue; }
+    const x = v.holder.position.x, z = v.holder.position.z, gy = map.heightAt(x, z);
+    const alt = Math.max(0, v.holder.position.y - gy);
+    const f = 1 / (1 + alt * 0.14);   // 1 on the ground → fainter/smaller as it climbs
+    s.visible = true;
+    s.position.set(x, gy + 0.07, z);
+    s.rotation.y = v.holder.rotation.y;
+    s.scale.setScalar(0.7 + 0.3 * f);
+    s.material.opacity = 0.5 * f;
+  }
+}
 const fx = [];                 // transient hit sparks / explosions ({obj,life,update})
 const _muzzleWorld = new THREE.Vector3();
 const _fireDir = new THREE.Vector3();
@@ -1114,6 +1134,7 @@ function removeCombatant(veh) {
   if (veh.bar) { scene.remove(veh.bar.group); veh.bar = null; }
   if (veh._engineId != null && sound) { sound.dropSpatialEngine(veh._engineId); veh._engineId = null; }
   if (veh._shieldFx) { veh.holder.remove(veh._shieldFx); veh._shieldFx.geometry.dispose(); veh._shieldFx.material.dispose(); veh._shieldFx = null; }
+  if (veh._shadow) { vehShadows.remove(veh._shadow); veh._shadow.geometry.dispose(); veh._shadow.material.dispose(); veh._shadow = null; }
 }
 
 // Fire a vehicle's gun: sound (player only), muzzle flash + recoil, and a damaging
@@ -4878,6 +4899,7 @@ function animate() {
       for (const c of camps) c.update(dt);
       for (const e of elevators) e.update(dt);
       for (const v of vehicles) v.idle(dt);
+      updateShadows();                       // ground-projected vehicle silhouette shadows
       projectiles.update(dt);
       updateProjectileHits();
       if (foliage) foliage.update(dt);       // tree topple animations
