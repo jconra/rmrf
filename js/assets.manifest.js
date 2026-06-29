@@ -95,7 +95,7 @@ export const ASSETS = [
   },
   {
     id: 'gate', name: 'Gate', make: makeGate,
-    footprint: { w: 2, d: 1 }, accent: true,
+    footprint: { w: 3, d: 1 }, accent: true,   // 3-wide: a 1-cell road threads its centre (matches the in-game wall gate)
     destructible: { type: 'wall', hp: 300 },
     category: 'structure',
     desc: 'A drive-through gateway: two posts under a team-colour lintel.',

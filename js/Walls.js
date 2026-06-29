@@ -458,7 +458,7 @@ export function makeTower(cell = 5, accent = new THREE.Color('#c0392b')) {
   group.add(t);
   return group;
 }
-export function makeGate(cell = 5, accent = new THREE.Color('#c0392b'), span = 2) {
+export function makeGate(cell = 5, accent = new THREE.Color('#c0392b'), span = 3) {
   const g = new THREE.Group();
   const thick = cell * 0.30, postW = cell * 0.30, postH = cell * 1.15;
   const runLen = span * cell, off = runLen / 2 - postW / 2;
