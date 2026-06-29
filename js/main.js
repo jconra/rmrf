@@ -9,6 +9,7 @@ import { DestructibleManager, Destructible } from './Destructible.js?v=5';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
 import { Camp } from './Walls.js?v=59';
+import { makeFlagHQ } from './Buildings.js?v=3';   // decoy HQ buildings on designed maps
 import { RoadNetwork } from './Roads.js?v=80';
 import { Foliage } from './Foliage.js?v=3';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=67';
@@ -789,6 +790,90 @@ function placeCamps() {
 
   buildFlags();        // capturable flag at each main base
   placeResupplies();   // neutral fuel/ammo/shield points of interest
+}
+
+// World site (with ground height) of a build cell.
+function siteOfCell(cx, cz) {
+  const w = grid.cellToWorld(cx, cz);
+  const s = new THREE.Vector3(w.x, 0, w.z); s.y = map.heightAt(w.x, w.z); return s;
+}
+// PHASE 2 — build the bases from a DESIGNED map (MAP_CFG.overrides.assets) instead of
+// procedural sites: each team's MAIN camp centres on its REAL flag HQ, its FOB on its
+// placed elevator; the team's OTHER flag HQs (and any neutral ones) become identical-
+// looking DECOY buildings with no capturable flag inside (a flagless HQ keeps which one
+// is real a mystery). Reuses Camp/Elevator/buildFlags so the AI, capture, deploy, and
+// win conditions work unchanged. Walls/towers/gates/roads placements are NOT consumed
+// yet (the camp brings its own walls) — a later slice. Gated: only runs when a map has
+// placed assets, so normal procedural play is untouched. Falls back if a base is missing.
+function placeCampsFromConfig(assets) {
+  const TEAMS = [['a', 'red'], ['b', 'blue']];
+  const hqs = assets.filter(a => a.id === 'flagHQ');
+  const elevs = assets.filter(a => a.id === 'elevator');
+  const ok = TEAMS.every(([dt]) =>
+    hqs.some(h => (h.team || 'neutral') === dt) && elevs.some(e => (e.team || 'neutral') === dt));
+  if (!ok) { console.warn('mapcfg: each team needs a flag HQ + an elevator — falling back to procedural bases'); placeCamps(); return; }
+
+  for (const c of camps) scene.remove(c.group);
+  for (const e of elevators) { scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
+  camps = []; elevators = []; destructibles = new DestructibleManager();
+
+  const items = [];   // { cell, site, size, role, team }  (parallel to camps[])
+  const pads = [];
+  const decoys = [];  // { cx, cz, team }  (gameTeam or null)
+
+  for (const [dt, gt] of TEAMS) {
+    const teamHQs = hqs.filter(h => (h.team || 'neutral') === dt);
+    const realHQ = teamHQs.find(h => h.real) || teamHQs[0];
+    const site = siteOfCell(realHQ.cx, realHQ.cz);
+    items.push({ cell: { cx: realHQ.cx, cz: realHQ.cz }, site, size: CAMP_SIZE, role: 'main', team: gt });
+    pads.push(padFor(site, CAMP_SIZE));
+    for (const h of teamHQs) if (h !== realHQ) decoys.push({ cx: h.cx, cz: h.cz, team: gt });
+
+    const elev = elevs.find(e => (e.team || 'neutral') === dt);
+    const fobSite = siteOfCell(elev.cx, elev.cz);
+    items.push({ cell: { cx: elev.cx, cz: elev.cz }, site: fobSite, size: FOB_SIZE, role: 'fob', team: gt });
+    pads.push(padFor(fobSite, FOB_SIZE));
+  }
+  for (const h of hqs.filter(h => (h.team || 'neutral') === 'neutral')) decoys.push({ cx: h.cx, cz: h.cz, team: null });
+
+  map.flattenPads(pads);
+
+  for (const it of items) {
+    const groundY = map.heightAt(it.site.x, it.site.z);
+    const c = new Camp(grid, it.cell, it.size, it.team, destructibles, groundY, it.role);
+    scene.add(c.group); camps.push(c);
+  }
+  // Decoy HQs — same maker as the real one, registered as plain destructibles (no flag).
+  for (const d of decoys) {
+    const accentHex = d.team ? (TEAM_ACCENT[d.team] || '#8a8f8a') : '#8a8f8a';
+    const g = makeFlagHQ(grid.cell, new THREE.Color(accentHex));
+    const s = siteOfCell(d.cx, d.cz);
+    g.position.set(s.x, map.heightAt(s.x, s.z), s.z);
+    scene.add(g);
+    applyStaging(g, 'flagHQ');
+    destructibles.add(new Destructible(g, { type: 'structure', hp: 600, blocks: true, staged: true }));
+  }
+  scene.updateMatrixWorld(true);
+  destructibles.refreshAll();
+  buildObstacles();
+
+  items.forEach((it, i) => {
+    if (it.role !== 'fob') return;
+    const camp = camps[i];
+    const accent = TEAM_ACCENT[it.team] || '#c0392b';
+    const elev = new Elevator(map, { x: camp.center.x, z: camp.center.z }, accent);
+    elev.team = it.team; elev.phase = 'top'; elev.lift.position.y = elev.groundY;
+    scene.add(elev.group); elevators.push(elev);
+  });
+
+  buildFlags();
+  placeResupplies();
+}
+// Use the designed bases when a map carries placed assets; else procedural placement.
+function placeCampsAuto() {
+  const assets = MAP_CFG && MAP_CFG.overrides && MAP_CFG.overrides.assets;
+  if (assets && assets.length) placeCampsFromConfig(assets);
+  else placeCamps();
 }
 
 // Foliage (procedural low-poly props; scattered on load and on every rebuild).
@@ -3795,7 +3880,7 @@ function driveUpdate(dt) {
 
 function rebuild(patch) {
   map.generate(patch);
-  placeCamps();
+  placeCampsAuto();
   buildRoads();
   scatterFoliage();
   scaleScene();      // keep fog/far in sync, but DON'T move the camera
@@ -3829,7 +3914,7 @@ let sound = null;   // procedural engine/gun synth; declared before the field-in
 if (!GARAGE) {
   map.generate(GEN_OPTS);
   scene.add(map.group);
-  placeCamps();
+  placeCampsAuto();
   buildRoads();
   if (!SHOT || SHOT_FOL) scatterFoliage();
   frameMap();
@@ -4198,7 +4283,7 @@ function enterField() {
   if (!fieldBuilt) {
     map.generate(GEN_OPTS);
     scene.add(map.group);
-    placeCamps();
+    placeCampsAuto();
     buildRoads();
     if (!SHOT || SHOT_FOL) scatterFoliage();
     scaleScene();
