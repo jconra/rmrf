@@ -135,3 +135,75 @@ export function roofTexture(base = '#6f6a61') {
   for (const f of [0.33, 0.66]) { ctx.beginPath(); ctx.moveTo(0, s * f); ctx.lineTo(s, s * f); ctx.stroke(); }
   return finish(cv, 1);
 }
+
+// ── Grungy / "dirty" textures (also handy as BUMP or SPEC maps) ──────────────
+const _clamp255 = v => v < 0 ? 0 : v > 255 ? 255 : v;
+// A soft radial blob fading to transparent — drawn as a square fill of the gradient.
+function softBlob(ctx, x, y, r, rgb, alpha) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, `rgba(${rgb},${alpha})`);
+  g.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+}
+// Same blob drawn at every edge-wrapped offset so it tiles seamlessly.
+function wrapBlob(ctx, s, x, y, r, rgb, alpha) {
+  for (const dx of [-s, 0, s]) for (const dy of [-s, 0, s]) softBlob(ctx, x + dx, y + dy, r, rgb, alpha);
+}
+
+// Fine value-noise grain — gritty static. Per-pixel, so it tiles perfectly. Great as a
+// BUMP map for a rough, dirty surface.
+export function noiseTexture(base = '#8a8782') {
+  const { cv, ctx, s } = canvas(128);
+  ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
+  const img = ctx.getImageData(0, 0, s, s), d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 78;
+    d[i] = _clamp255(d[i] + n); d[i + 1] = _clamp255(d[i + 1] + n); d[i + 2] = _clamp255(d[i + 2] + n);
+  }
+  ctx.putImageData(img, 0, 0);
+  return finish(cv, 1);
+}
+
+// Dirt / grime: a muddy base with soft dark smudges + a few pale dusty patches.
+export function grimeTexture(base = '#6b675e') {
+  const { cv, ctx, s } = canvas(128);
+  ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
+  speckle(ctx, s, 50, 1900);
+  for (let i = 0; i < 30; i++) {
+    const x = Math.random() * s, y = Math.random() * s, r = 5 + Math.random() * 18;
+    const dark = Math.random() < 0.72;
+    wrapBlob(ctx, s, x, y, r, dark ? '24,20,13' : '210,205,190', 0.05 + Math.random() * 0.13);
+  }
+  return finish(cv, 1);
+}
+
+// Rust: corroded brown with mottled patches of lighter/darker oxide.
+export function rustTexture(base = '#7a4a30') {
+  const { cv, ctx, s } = canvas(128);
+  ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
+  speckle(ctx, s, 46, 1700);
+  const cols = ['92,52,28', '56,33,20', '120,74,40', '38,28,22', '150,96,52'];
+  for (let i = 0; i < 38; i++) {
+    const x = Math.random() * s, y = Math.random() * s, r = 3 + Math.random() * 15;
+    wrapBlob(ctx, s, x, y, r, cols[(Math.random() * cols.length) | 0], 0.1 + Math.random() * 0.18);
+  }
+  return finish(cv, 1);
+}
+
+// Scuffed metal: light/dark hairline scratches at random angles. Scratches are drawn at
+// the wrapped offsets too, so any that cross an edge continue on the far side (tiles).
+export function scratchedTexture(base = '#8d9094') {
+  const { cv, ctx, s } = canvas(128);
+  ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
+  speckle(ctx, s, 30, 1100);
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 64; i++) {
+    const x = Math.random() * s, y = Math.random() * s, a = Math.random() * Math.PI, len = 4 + Math.random() * 24;
+    const ex = Math.cos(a) * len, ey = Math.sin(a) * len;
+    ctx.strokeStyle = `rgba(${Math.random() < 0.5 ? '255,255,255' : '0,0,0'},${0.04 + Math.random() * 0.11})`;
+    for (const dx of [-s, 0, s]) for (const dy of [-s, 0, s]) {
+      ctx.beginPath(); ctx.moveTo(x + dx, y + dy); ctx.lineTo(x + dx + ex, y + dy + ey); ctx.stroke();
+    }
+  }
+  return finish(cv, 1);
+}
