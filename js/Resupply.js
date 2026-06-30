@@ -10,6 +10,8 @@
 
 import * as THREE from 'three';
 import { hazardTexture } from './Textures.js?v=2';
+import { buildAssetGroup } from './AssetBuilder.js?v=1';
+import AMMO_SUPPLY_CFG from './ammo_supply.config.js?v=1';
 
 // kind → the colour that reads its function (tank bands, depot trim, emitter glow)
 export const RESUPPLY_TINT = { fuel: 0xff8a3d, ammo: 0x7fd44b, shield: 0x46d6ff };
@@ -74,34 +76,11 @@ export function makeFuelTank(s = 5) {
   return g;
 }
 
-// Low concrete bunker with a stack of shell crates on top.
+// Ammo supply depot — Jacob's asset-designer build (js/ammo_supply.config.js): a
+// hazard-striped pad of shell crates, lying/standing shells (finned like the Valkyrie
+// missiles), green ammo cases and dark crates. Assembled by the shared AssetBuilder.
 export function makeAmmoDepot(s = 5) {
-  const g = new THREE.Group();
-  const bunker = new THREE.Mesh(new THREE.BoxGeometry(s * 0.95, s * 0.5, s * 0.7),
-    new THREE.MeshStandardMaterial({ color: 0x5a5e52, roughness: 0.95, metalness: 0.1 }));
-  bunker.position.y = s * 0.25;
-  g.add(bunker);
-  // sloped roof slab
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(s * 1.0, s * 0.08, s * 0.78), DARK());
-  roof.position.y = s * 0.5;
-  g.add(roof);
-  const crateMat = new THREE.MeshStandardMaterial({ color: RESUPPLY_TINT.ammo, roughness: 0.85, emissive: RESUPPLY_TINT.ammo, emissiveIntensity: 0.12 });
-  const crate = (x, y, z, w) => {
-    const c = new THREE.Mesh(new THREE.BoxGeometry(w, w * 0.7, w), crateMat);
-    c.position.set(x, y, z); g.add(c);
-  };
-  const cw = s * 0.26;
-  crate(-cw * 0.6, s * 0.5 + cw * 0.35, -cw * 0.3, cw);
-  crate(cw * 0.6, s * 0.5 + cw * 0.35, -cw * 0.1, cw);
-  crate(0, s * 0.5 + cw * 0.35, cw * 0.5, cw);
-  crate(0, s * 0.5 + cw * 1.05, cw * 0.1, cw * 0.9);
-  // "drive up here" hazard strips flanking the bunker
-  for (const sx of [-1, 1]) {
-    const strip = hazardStrip(s, s * 0.85);
-    strip.position.set(sx * (s * 0.475 + s * 0.2), s * 0.02, 0);
-    g.add(strip);
-  }
-  return g;
+  return buildAssetGroup(AMMO_SUPPLY_CFG, RESUPPLY_TINT.ammo, { cell: s });
 }
 
 // A squat machine with a glowing emitter orb on a pylon + spinning collar.
