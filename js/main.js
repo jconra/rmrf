@@ -698,8 +698,32 @@ function nearestGate(camp, point) {
 }
 
 // Build the road network: each main base -> its FOB, and the two FOBs across.
+// Render the designer's PAINTED roads (MAP_CFG.overrides.roads) with the game's own
+// RoadTiles at the flat grade — same tiles/textures the map designer previews. Populates
+// roadNet.cells so vehicles ride the road tops (roadDeckY), A* treats them as drivable,
+// and foliage avoids them. No A* auto-routing on custom maps (the author drew the roads).
+function buildConfigRoads() {
+  const cells = (MAP_CFG && MAP_CFG.overrides && MAP_CFG.overrides.roads) || [];
+  roadNet.tiles.clear();
+  const p = map.params, beach = p.beachHeight || 1;
+  const grade = p.flatLand ? beach + 0.8 : null;        // RoadTiles.tile() lifts the surface 0.06 above this
+  const bridgeY = p.flatLand ? beach + 0.8 : beach + 0.5;
+  const set = new Set(cells.map(([cx, cz]) => cx + ',' + cz));
+  const has = (cx, cz) => set.has(cx + ',' + cz);
+  const cellMap = new Map();
+  for (const [cx, cz] of cells) {
+    const wx = cx * grid.cell, wz = cz * grid.cell;
+    const n = has(cx, cz - 1), s = has(cx, cz + 1), e = has(cx + 1, cz), w = has(cx - 1, cz);
+    const y = grade != null ? grade : map.heightAt(wx, wz);
+    if (!map.isLand(wx, wz)) roadNet.tiles.deck(wx, wz, Math.max(y, bridgeY), n, s, e, w);
+    else roadNet.tiles.tile(wx, wz, y, n, s, e, w);
+    cellMap.set(cx + ',' + cz, { i: cx, j: cz, y });
+  }
+  roadNet.cells = cellMap;
+  if (!roadNet.group.parent) scene.add(roadNet.group);
+}
 function buildRoads() {
-  if (configBases) return;   // designed/custom maps don't auto-route procgen roads (bare camps have no gates)
+  if (configBases) { buildConfigRoads(); return; }   // custom map → the painted roads, not A* auto-routing
   const byTeam = {};
   for (const c of camps) (byTeam[c.team] ??= {})[c.role] = c;
   const conns = [];
@@ -2142,10 +2166,37 @@ function bisectorSite(reach) {
   return neutralSite(reach);
 }
 
+const RESUPPLY_MAKE = { fuel: makeFuelTank, ammo: makeAmmoDepot, shield: makeShieldGenerator };
+const RESUPPLY_HP = { fuel: 130, ammo: 150, shield: 110 };
+// Build one resupply POI at a world site and register it (shared by auto + placed).
+function addResupply(kind, site) {
+  const g = RESUPPLY_MAKE[kind](grid.cell);
+  const gy = map.heightAt(site.x, site.z);
+  g.position.set(site.x, gy, site.z);
+  scene.add(g);
+  const rp = { kind, group: g, pos: new THREE.Vector3(site.x, gy, site.z), radius: grid.cell * 2.2, dead: false };
+  applyStaging(g, kind);   // authored fallAt/dmgStyle (if any) before the Destructible reads them
+  destructibles.add(new Destructible(g, { type: 'structure', hp: RESUPPLY_HP[kind] || 130, blocks: true, staged: true,
+    onDestroyed: () => { rp.dead = true; } }));
+  resupplies.push(rp);
+  return rp;
+}
 function placeResupplies() {
   for (const r of resupplies) scene.remove(r.group);
   resupplies = [];
   if (QS.has('nopoi')) return;
+  // Custom map: use the DESIGNER-placed fuel/ammo/shield points (not auto-scatter). A map
+  // that places none simply has no resupply — the author's call.
+  if (configBases) {
+    const assets = (MAP_CFG && MAP_CFG.overrides && MAP_CFG.overrides.assets) || [];
+    for (const a of assets) {
+      if (!RESUPPLY_MAKE[a.id]) continue;
+      addResupply(a.id, siteOfCell(a.cx, a.cz));
+    }
+    scene.updateMatrixWorld(true);
+    destructibles.refreshAll();
+    return;
+  }
   const span = Math.min(map.worldW, map.worldH) / 2;
   const cell = grid.cell;
   // fuel + ammo near the contested middle; the shield generator sits out on the FLANK,
