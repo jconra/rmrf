@@ -10,9 +10,9 @@
 import * as THREE from 'three';
 import {
   concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture,
-  accentPlateTexture, hazardTexture, noiseTexture, grimeTexture, rustTexture, scratchedTexture,
+  accentPlateTexture, hazardTexture, noiseTexture, grimeTexture, woodTexture, scratchedTexture,
   toNormalTexture,
-} from './Textures.js?v=5';
+} from './Textures.js?v=6';
 
 const DESIGN_CELL = 5;   // the designer builds on a CELL=5 grid; configs are in those units
 
@@ -23,7 +23,7 @@ const MAT_DEF = { color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading:
 const TEX_FN = {
   concrete: concreteTexture, metal: ribbedMetalTexture, fabric: fabricTexture, crate: crateTexture,
   roof: roofTexture, accent: accentPlateTexture, hazard: hazardTexture, noise: noiseTexture,
-  grime: grimeTexture, rust: rustTexture, scratched: scratchedTexture,
+  grime: grimeTexture, wood: woodTexture, scratched: scratchedTexture,
 };
 // One texture per kind+tiling, shared across every asset (a handful of small canvases).
 const _texCache = new Map();

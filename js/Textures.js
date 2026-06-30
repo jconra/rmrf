@@ -255,6 +255,34 @@ export function rustTexture(base = '#cac6c0') {
 
 // Scuffed metal: light/dark hairline scratches at random angles. Scratches are drawn at
 // the wrapped offsets too, so any that cross an edge continue on the far side (tiles).
+// Procedural WOOD: warm grain running top-to-bottom, gently waved by low-freq noise so
+// the lines aren't ruler-straight, lerped between a light and dark plank brown, with fine
+// streak jitter and a couple of knots. Grain count is an integer across the width so it
+// tiles horizontally; the wave + jitter come from wrapping lattices so it tiles vertically.
+export function woodTexture(light = '#a87a4a', dark = '#5f3c20') {
+  const { cv, ctx, s } = canvas(128);
+  const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const L = hex(light), D = hex(dark), TAU = Math.PI * 2;
+  const warp = tileLattice(4), fine = tileLattice(8), cl = v => v < 0 ? 0 : v > 1 ? 1 : v;
+  const rings = 7;                                   // grain bands across the width (integer → tiles)
+  const img = ctx.createImageData(s, s), d = img.data;
+  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+    const u = x / s, v = y / s;
+    const w = (sampleLattice(warp, 4, u, v) - 0.5) * 2.2;             // horizontal wobble of the grain
+    let g = Math.sin(u * rings * TAU + w) * 0.5 + 0.5;               // soft bands
+    g = g * 0.68 + Math.pow(Math.abs(Math.sin(u * rings * TAU * 2 + w * 1.3)), 3) * 0.32;  // + thin hard lines
+    const t = cl(g + (sampleLattice(fine, 8, u, v) - 0.5) * 0.28);   // streak jitter
+    const i = (y * s + x) * 4;
+    d[i] = L[0] + (D[0] - L[0]) * t; d[i + 1] = L[1] + (D[1] - L[1]) * t; d[i + 2] = L[2] + (D[2] - L[2]) * t; d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  for (let i = 0; i < 3; i++) {                                       // knots
+    const x = Math.random() * s, y = Math.random() * s, r = 3 + Math.random() * 4;
+    wrapBlob(ctx, s, x, y, r * 2.2, '70,44,24', 0.22); wrapBlob(ctx, s, x, y, r, '40,24,12', 0.5);
+  }
+  speckle(ctx, s, 12, 600);
+  return finish(cv, 1, "wood");
+}
 export function scratchedTexture(base = '#dcdde0') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
