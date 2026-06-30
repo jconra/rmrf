@@ -38,7 +38,7 @@ function speckle(ctx, s, amt, n = 2200) {
 // Poured concrete: base fill + speckle + soft weathering MOTTLE. No straight panel
 // seams — those skew badly once a face is distorted into a trapezoid (a designer note);
 // soft blobs read as weathered concrete from any shape and tile seamlessly.
-export function concreteTexture(base = '#9a948a') {
+export function concreteTexture(base = '#dad6d0') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 60);
@@ -51,7 +51,7 @@ export function concreteTexture(base = '#9a948a') {
 }
 
 // Corrugated metal: vertical light/dark ribs (for the quonset shell).
-export function ribbedMetalTexture(base = '#b9bdc0') {
+export function ribbedMetalTexture(base = '#e0e2e4') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   const ribs = 16, w = s / ribs;
@@ -66,21 +66,25 @@ export function ribbedMetalTexture(base = '#b9bdc0') {
   return finish(cv, 1, "metal");
 }
 
-// Canvas tent fabric: woven weave + vertical seam lines.
-export function fabricTexture(base = '#5f7a37') {
+// Worn, sun-baked canvas: NO lines or weave — just soft, irregular bleached/shaded
+// patches over a light base, so it reads as faded weathered cloth. Light neutral so the
+// material colour tints it (the in-game tent passes its own olive base).
+export function fabricTexture(base = '#d8d4cc') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
-  ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1;
-  for (let i = 0; i < s; i += 3) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(s, i); ctx.stroke(); }
-  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-  for (let i = 0; i < s; i += 3) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, s); ctx.stroke(); }
-  ctx.strokeStyle = 'rgba(0,0,0,0.16)'; ctx.lineWidth = 2;   // ridge seams
-  for (const f of [0.25, 0.5, 0.75]) { ctx.beginPath(); ctx.moveTo(s * f, 0); ctx.lineTo(s * f, s); ctx.stroke(); }
+  // broad sun-bleached blotches (lighter) and soft shaded hollows (darker), layered
+  // big→small for a cloudy, weathered look; all tileable.
+  for (let i = 0; i < 16; i++) {
+    const x = Math.random() * s, y = Math.random() * s, r = 14 + Math.random() * 34;
+    const sun = Math.random() < 0.55;   // mostly bleaching, some shade
+    wrapBlob(ctx, s, x, y, r, sun ? '255,252,244' : '78,74,66', 0.04 + Math.random() * 0.07);
+  }
+  speckle(ctx, s, 16, 700);   // fine fibre grain
   return finish(cv, 1, "fabric");
 }
 
 // Wooden crate: plank lines + grain (for the depot).
-export function crateTexture(base = '#6f6a61') {
+export function crateTexture(base = '#d4d1ca') {
   const { cv, ctx, s } = canvas(64);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 40, 500);
@@ -133,7 +137,7 @@ export function hazardTexture(yellow = '#e8c84a', dark = '#16181c') {
 }
 
 // Flat roof / panel: darker with horizontal seams.
-export function roofTexture(base = '#6f6a61') {
+export function roofTexture(base = '#cdc9c2') {
   const { cv, ctx, s } = canvas(64);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 30, 400);
@@ -156,22 +160,42 @@ function wrapBlob(ctx, s, x, y, r, rgb, alpha) {
   for (const dx of [-s, 0, s]) for (const dy of [-s, 0, s]) softBlob(ctx, x + dx, y + dy, r, rgb, alpha);
 }
 
-// Fine value-noise grain — gritty static. Per-pixel, so it tiles perfectly. Great as a
-// BUMP map for a rough, dirty surface.
-export function noiseTexture(base = '#8a8782') {
+// Smooth fractal (Perlin-style) value noise — soft cloudy blobs, not gritty static.
+// Light neutral base so it tints (map × colour); also a soft weathering BUMP map.
+// Tileable: each octave's random lattice WRAPS, so the seams line up.
+function tileLattice(cells) {
+  const g = [];
+  for (let y = 0; y < cells; y++) { g[y] = []; for (let x = 0; x < cells; x++) g[y][x] = Math.random(); }
+  return g;
+}
+function sampleLattice(g, cells, u, v) {
+  const smooth = t => t * t * (3 - 2 * t);   // smoothstep for rounded blobs
+  const fx = u * cells, fy = v * cells;
+  const x0 = Math.floor(fx) % cells, y0 = Math.floor(fy) % cells;
+  const x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;   // wrap → seamless
+  const tx = smooth(fx - Math.floor(fx)), ty = smooth(fy - Math.floor(fy));
+  const top = g[y0][x0] * (1 - tx) + g[y0][x1] * tx;
+  const bot = g[y1][x0] * (1 - tx) + g[y1][x1] * tx;
+  return top * (1 - ty) + bot * ty;
+}
+export function noiseTexture(base = '#d7d4cf', amp = 118) {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
+  // fBm: a few octaves of value noise, halving amplitude as frequency doubles.
+  const octaves = [[3, 0.52], [6, 0.26], [12, 0.14], [24, 0.08]].map(([c, a]) => [tileLattice(c), c, a]);
   const img = ctx.getImageData(0, 0, s, s), d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const n = (Math.random() - 0.5) * 78;
-    d[i] = _clamp255(d[i] + n); d[i + 1] = _clamp255(d[i + 1] + n); d[i + 2] = _clamp255(d[i + 2] + n);
+  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+    let n = 0;
+    for (const [g, c, a] of octaves) n += (sampleLattice(g, c, x / s, y / s) - 0.5) * a;
+    const k = (n * amp) | 0, i = (y * s + x) * 4;
+    d[i] = _clamp255(d[i] + k); d[i + 1] = _clamp255(d[i + 1] + k); d[i + 2] = _clamp255(d[i + 2] + k);
   }
   ctx.putImageData(img, 0, 0);
   return finish(cv, 1, "noise");
 }
 
 // Dirt / grime: a muddy base with soft dark smudges + a few pale dusty patches.
-export function grimeTexture(base = '#6b675e') {
+export function grimeTexture(base = '#cecbc4') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 50, 1900);
@@ -183,12 +207,14 @@ export function grimeTexture(base = '#6b675e') {
   return finish(cv, 1, "grime");
 }
 
-// Rust: corroded brown with mottled patches of lighter/darker oxide.
-export function rustTexture(base = '#7a4a30') {
+// Corrosion / pitting: NEUTRAL light grey base with mottled darker/lighter oxide
+// patches and no baked hue — so the material colour tints it (rust + reddish = rust,
+// rust + any colour = patina variety). Pick the colour in the material panel.
+export function rustTexture(base = '#cac6c0') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 46, 1700);
-  const cols = ['92,52,28', '56,33,20', '120,74,40', '38,28,22', '150,96,52'];
+  const cols = ['150,146,140', '104,100,95', '186,182,176', '78,75,71', '206,202,196'];
   for (let i = 0; i < 38; i++) {
     const x = Math.random() * s, y = Math.random() * s, r = 3 + Math.random() * 15;
     wrapBlob(ctx, s, x, y, r, cols[(Math.random() * cols.length) | 0], 0.1 + Math.random() * 0.18);
@@ -198,7 +224,7 @@ export function rustTexture(base = '#7a4a30') {
 
 // Scuffed metal: light/dark hairline scratches at random angles. Scratches are drawn at
 // the wrapped offsets too, so any that cross an edge continue on the far side (tiles).
-export function scratchedTexture(base = '#8d9094') {
+export function scratchedTexture(base = '#dcdde0') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
   speckle(ctx, s, 30, 1100);
