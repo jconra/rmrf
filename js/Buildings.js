@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture } from './Textures.js?v=2';
 import { buildAssetGroup } from './AssetBuilder.js?v=1';
 import FLAGHQ_CFG from './flaghq.config.js?v=1';
+import TENT_CFG from './tent.config.js?v=1';
 
 // Shared neutral plate map tinted per-material by the team accent (matches Walls.js).
 const ACCENT_TEX = accentPlateTexture();
@@ -92,19 +93,7 @@ export function makeQuonset(cell, accent) {
 
 // Canvas ridge tent (Return Fire style): a green triangular-prism A-frame.
 export function makeTent(cell, accent) {
-  const g = new THREE.Group();
-  const w = cell * 0.5, h = cell * 0.55, L = cell * 1.1;
-  const shape = new THREE.Shape();
-  shape.moveTo(-w, 0); shape.lineTo(w, 0); shape.lineTo(0, h); shape.closePath();
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false });
-  geo.translate(0, 0, -L / 2);   // centre the ridge along Z
-  geo.computeVertexNormals();
-  const tent = new THREE.Mesh(geo, TENT);
-  tent.castShadow = true;
-  g.add(tent);
-  const flap = box(cell * 0.18, cell * 0.3, cell * 0.04, accentMat(accent));
-  flap.position.set(0, cell * 0.15, L / 2 + 0.01); g.add(flap);
-  return g;
+  return buildAssetGroup(TENT_CFG, accent, { cell });
 }
 
 // Surface elevator: a framed platform that vehicles rise onto (the underground

@@ -26,6 +26,28 @@ function finish(cv, repeat = 1, kind = '') {
   if (kind) tex.userData.kind = kind;
   return tex;
 }
+// Derive a tangent-space NORMAL map from any procedural texture (its canvas luminance =
+// height). Lets a height-style texture light up crisply via mat.normalMap — sharper and
+// cheaper at runtime than the old mat.bumpMap. Returns a data texture (NoColorSpace).
+export function toNormalTexture(srcTex, repeat = 1, strength = 2) {
+  const img = srcTex.image, s = img.width;
+  const sd = img.getContext('2d').getImageData(0, 0, s, s).data;
+  const { cv, ctx } = canvas(s);
+  const out = ctx.createImageData(s, s);
+  const H = (x, y) => { const i = (((y + s) % s) * s + ((x + s) % s)) * 4; return (sd[i] * 0.299 + sd[i + 1] * 0.587 + sd[i + 2] * 0.114) / 255; };
+  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+    let nx = (H(x - 1, y) - H(x + 1, y)) * strength, ny = (H(x, y + 1) - H(x, y - 1)) * strength, nz = 1;
+    const inv = 1 / Math.hypot(nx, ny, nz); nx *= inv; ny *= inv; nz *= inv;
+    const i = (y * s + x) * 4;
+    out.data[i] = (nx * 0.5 + 0.5) * 255; out.data[i + 1] = (ny * 0.5 + 0.5) * 255; out.data[i + 2] = (nz * 0.5 + 0.5) * 255; out.data[i + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat, repeat); t.anisotropy = 4;
+  if (srcTex.userData && srcTex.userData.kind) t.userData.kind = srcTex.userData.kind;
+  return t;
+}
 // Fine value-noise speckle to break up a flat fill.
 function speckle(ctx, s, amt, n = 2200) {
   for (let i = 0; i < n; i++) {
@@ -66,20 +88,29 @@ export function ribbedMetalTexture(base = '#e0e2e4') {
   return finish(cv, 1, "metal");
 }
 
-// Worn, sun-baked canvas: NO lines or weave — just soft, irregular bleached/shaded
-// patches over a light base, so it reads as faded weathered cloth. Light neutral so the
-// material colour tints it (the in-game tent passes its own olive base).
+// A soft radial shade over the whole canvas. darkInside=true → dark centre fading out
+// (a shadow pool); false → clear centre darkening outward + beyond the radius (a
+// vignette). Centre is horizontal-centred at `heightF` (0=top,1=bottom; may sit
+// off-canvas), radius `radiusF`, both as a fraction of the canvas size.
+function radialShade(ctx, s, radiusF, heightF, strength, darkInside) {
+  if (strength <= 0 || radiusF <= 0) return;
+  const cx = s / 2, cy = s * heightF, r = s * radiusF;
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  if (darkInside) { g.addColorStop(0, `rgba(0,0,0,${strength})`); g.addColorStop(1, 'rgba(0,0,0,0)'); }
+  else { g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(0,0,0,${strength})`); }
+  ctx.fillStyle = g; ctx.fillRect(0, 0, s, s);
+}
+
+// Tent canvas: a lit, draped look built from two positionable radial gradients (tuned
+// in the Texture Lab) — a dark-inside pool up top + a dark-outside vignette around a
+// bright spot — plus fibre grain. NO lines. The in-game tent passes a vivid base and
+// keeps its olive material colour, which multiplies down to a Return-Fire green.
 export function fabricTexture(base = '#d8d4cc') {
   const { cv, ctx, s } = canvas(128);
   ctx.fillStyle = base; ctx.fillRect(0, 0, s, s);
-  // broad sun-bleached blotches (lighter) and soft shaded hollows (darker), layered
-  // big→small for a cloudy, weathered look; all tileable.
-  for (let i = 0; i < 16; i++) {
-    const x = Math.random() * s, y = Math.random() * s, r = 14 + Math.random() * 34;
-    const sun = Math.random() < 0.55;   // mostly bleaching, some shade
-    wrapBlob(ctx, s, x, y, r, sun ? '255,252,244' : '78,74,66', 0.04 + Math.random() * 0.07);
-  }
-  speckle(ctx, s, 16, 700);   // fine fibre grain
+  radialShade(ctx, s, 0.72, -0.24, 1.0, true);    // ◐ inner-dark pool (high)
+  radialShade(ctx, s, 0.72, 0.10, 0.63, false);   // ◑ outer-dark vignette
+  speckle(ctx, s, 40, 500);                        // fibre grain
   return finish(cv, 1, "fabric");
 }
 

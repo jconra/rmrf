@@ -11,13 +11,14 @@ import * as THREE from 'three';
 import {
   concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture,
   accentPlateTexture, hazardTexture, noiseTexture, grimeTexture, rustTexture, scratchedTexture,
-} from './Textures.js?v=2';
+  toNormalTexture,
+} from './Textures.js?v=5';
 
 const DESIGN_CELL = 5;   // the designer builds on a CELL=5 grid; configs are in those units
 
 // Material defaults — MUST match the designer's MAT_DEF / new-part material so an export
 // that OMITS a default field reconstructs to the same value.
-const MAT_DEF = { color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, opacity: 1, bumpScale: 0.4 };
+const MAT_DEF = { color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, opacity: 1, normalScale: 1 };
 
 const TEX_FN = {
   concrete: concreteTexture, metal: ribbedMetalTexture, fabric: fabricTexture, crate: crateTexture,
@@ -31,6 +32,15 @@ function tex(kind, tile) {
   const key = kind + '|' + tile[0] + '|' + tile[1];
   let t = _texCache.get(key);
   if (!t) { t = fn(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(tile[0], tile[1]); _texCache.set(key, t); }
+  return t;
+}
+// A NORMAL map derived from a kind's procedural texture, cached per kind+tiling.
+const _normCache = new Map();
+function ntex(kind, tile) {
+  if (!TEX_FN[kind]) return null;
+  const key = kind + '|n|' + tile[0] + '|' + tile[1];
+  let t = _normCache.get(key);
+  if (!t) { t = toNormalTexture(tex(kind, [1, 1]), 1); t.repeat.set(tile[0], tile[1]); _normCache.set(key, t); }
   return t;
 }
 
@@ -63,7 +73,7 @@ function buildMat(u = {}, accent) {
   }
   const tile = u.tile || [1, 1];
   if (u.mapKind) mat.map = tex(u.mapKind, tile);
-  if (u.bumpKind) { mat.bumpMap = tex(u.bumpKind, tile); mat.bumpScale = u.bumpScale ?? MAT_DEF.bumpScale; }
+  if (u.normalKind) { const nm = ntex(u.normalKind, tile); if (nm) { mat.normalMap = nm; const ns = u.normalScale ?? MAT_DEF.normalScale; mat.normalScale.set(ns, ns); } }
   if (u.specKind && mat.isMeshStandardMaterial) mat.roughnessMap = tex(u.specKind, tile);
   if (team) mat.userData.accent = true;                  // lets Camp.setAccent recolour it (map rides along)
   mat.needsUpdate = true;
