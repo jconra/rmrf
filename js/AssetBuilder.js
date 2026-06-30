@@ -27,20 +27,35 @@ const TEX_FN = {
 };
 // One texture per kind+tiling, shared across every asset (a handful of small canvases).
 const _texCache = new Map();
-function tex(kind, tile) {
-  const fn = TEX_FN[kind]; if (!fn) return null;
-  const key = kind + '|' + tile[0] + '|' + tile[1];
-  let t = _texCache.get(key);
-  if (!t) { t = fn(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(tile[0], tile[1]); _texCache.set(key, t); }
+// Bake a multiple-of-90° rotation into a texture's canvas (keeps a derived normal map's
+// vectors correct, unlike a plain tex.rotation UV spin).
+function rotTex(srcTex, deg) {
+  deg = ((deg % 360) + 360) % 360;
+  const src = srcTex.image, swap = deg === 90 || deg === 270;
+  const cv = document.createElement('canvas');
+  cv.width = swap ? src.height : src.width; cv.height = swap ? src.width : src.height;
+  const ctx = cv.getContext('2d');
+  ctx.translate(cv.width / 2, cv.height / 2); ctx.rotate(deg * Math.PI / 180);
+  ctx.drawImage(src, -src.width / 2, -src.height / 2);
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = srcTex.colorSpace; t.anisotropy = 4;
+  if (srcTex.userData && srcTex.userData.kind) t.userData.kind = srcTex.userData.kind;
   return t;
 }
-// A NORMAL map derived from a kind's procedural texture, cached per kind+tiling.
+function tex(kind, tile, rot = 0) {
+  const fn = TEX_FN[kind]; if (!fn) return null;
+  const key = kind + '|' + tile[0] + '|' + tile[1] + '|' + rot;
+  let t = _texCache.get(key);
+  if (!t) { t = rot ? rotTex(fn(), rot) : fn(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(tile[0], tile[1]); _texCache.set(key, t); }
+  return t;
+}
+// A NORMAL map derived from a kind's procedural texture, cached per kind+tiling+rotation.
 const _normCache = new Map();
-function ntex(kind, tile) {
+function ntex(kind, tile, rot = 0) {
   if (!TEX_FN[kind]) return null;
-  const key = kind + '|n|' + tile[0] + '|' + tile[1];
+  const key = kind + '|n|' + tile[0] + '|' + tile[1] + '|' + rot;
   let t = _normCache.get(key);
-  if (!t) { t = toNormalTexture(tex(kind, [1, 1]), 1); t.repeat.set(tile[0], tile[1]); _normCache.set(key, t); }
+  if (!t) { t = toNormalTexture(tex(kind, [1, 1], rot), 1); t.repeat.set(tile[0], tile[1]); _normCache.set(key, t); }
   return t;
 }
 
@@ -71,10 +86,10 @@ function buildMat(u = {}, accent) {
     });
     if (u.emissive && u.emissive !== '#000000') { mat.emissive = new THREE.Color(u.emissive); mat.emissiveIntensity = u.emissiveIntensity ?? 1; }
   }
-  const tile = u.tile || [1, 1];
-  if (u.mapKind) mat.map = tex(u.mapKind, tile);
-  if (u.normalKind) { const nm = ntex(u.normalKind, tile); if (nm) { mat.normalMap = nm; const ns = u.normalScale ?? MAT_DEF.normalScale; mat.normalScale.set(ns, ns); } }
-  if (u.specKind && mat.isMeshStandardMaterial) mat.roughnessMap = tex(u.specKind, tile);
+  const tile = u.tile || [1, 1], rot = u.rot || 0;
+  if (u.mapKind) mat.map = tex(u.mapKind, tile, rot);
+  if (u.normalKind) { const nm = ntex(u.normalKind, tile, rot); if (nm) { mat.normalMap = nm; const ns = u.normalScale ?? MAT_DEF.normalScale; mat.normalScale.set(ns, ns); } }
+  if (u.specKind && mat.isMeshStandardMaterial) mat.roughnessMap = tex(u.specKind, tile, rot);
   if (team) mat.userData.accent = true;                  // lets Camp.setAccent recolour it (map rides along)
   mat.needsUpdate = true;
   return mat;
