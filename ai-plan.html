@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF — AI Decision-Making Improvement Plan</title>
+<style>
+  :root { --bg:#0c1410; --panel:#111d17; --ink:#d6e8dc; --dim:#8fae9c; --accent:#5dff9f; --line:#26543c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;
+    padding:22px 16px 80px; max-width:820px; margin:0 auto; -webkit-text-size-adjust:100%; }
+  h1 { font-size:23px; letter-spacing:1px; color:var(--accent); margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:13px; margin:0 0 22px; }
+  h2 { font-size:18px; color:var(--accent); margin:30px 0 8px; border-bottom:1px solid var(--line); padding-bottom:5px; }
+  h3 { font-size:15px; color:#bfe9cf; margin:20px 0 4px; }
+  p, li { margin:8px 0; }
+  ul, ol { padding-left:22px; }
+  code { background:#0a2418; color:#8fe6b4; padding:1px 5px; border-radius:4px; font-size:0.88em; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:14px 0; }
+  .tag { display:inline-block; font-size:11px; letter-spacing:1px; color:var(--bg); background:var(--accent);
+    border-radius:4px; padding:2px 8px; margin-right:8px; vertical-align:middle; font-weight:700; }
+  .cheap { background:#7fffb8; } .mid { background:#ffd27f; } .big { background:#ff9d7f; }
+  .note { color:var(--dim); font-style:italic; }
+  strong { color:#eafff2; }
+  a { color:var(--accent); }
+  hr { border:none; border-top:1px solid var(--line); margin:26px 0; }
+  .foot { color:var(--dim); font-size:12px; margin-top:34px; }
+</style>
+</head>
+<body>
+
+<h1>RMRF — Making the AI Decide Like a Human</h1>
+<p class="sub">Plan drafted 2026-07-01 · lives at rmrfbase.com/ai-plan.html · from the AI-audit session</p>
+
+<div class="panel">
+<strong>The honest starting point:</strong> Claude does <em>not</em> currently see all the AI's reasoning.
+<code>aiEvents</code> is a rolling 80-entry log that only fires on <em>changes</em> (deploys, kills, mission
+switches) — it's the <em>narrative</em>, not every decision. The real per-tick reasoning (the <code>view</code> a
+unit sees — threat, line-of-sight, <code>canBear</code>, bail-HP — and the <code>think()</code> output) is
+<strong>not logged at all</strong>. Findings this session came from <em>inference</em> over ~1&nbsp;Hz state
+samples ("ammo barely moved + HP dropping → ineffective siege"), not from reading the transcript. That blind
+spot is why fixes came slowly.
+</div>
+
+<h2>Layer 1 — See the real reasoning <span class="tag cheap">CHEAP · HIGH VALUE</span></h2>
+<p>Add a debug-gated <strong>"flight recorder"</strong> to the AI. When a unit's decision <em>changes</em>, emit a
+structured record: the inputs that drove it (<code>threat / LOS / canBear / bailHP / enemyEliminated…</code>) and
+the exact branch that fired. Then analysis reads <em>why</em> a unit froze instead of guessing.</p>
+<p class="note">This alone would have turned the multi-hour "why is the jotun idle at the wall" hunt into a single glance.</p>
+
+<h2>Layer 2 — A systematic tuning loop <span class="tag mid">TRACTABLE TODAY</span></h2>
+<p>Today: change a rule by hand → run a batch → eyeball it. Make it a <strong>closed loop</strong>: change a knob →
+auto-run N matches → <code>agg.cjs</code> scores it → keep if better. The headless sim harness
+(<code>~/pw/ai-sim.cjs</code>) is already a <strong>training / evaluation gym</strong> — thousands of fast,
+faithful matches. With it we can auto-tune the personality + threshold knobs (grid / evolutionary search) against a
+fitness score: decisive-win-rate, time-to-breach, army preserved. No neural nets required.</p>
+
+<h2>Layer 3 — A better decision <em>architecture</em> <span class="tag mid">THE "LIKE A HUMAN" PART</span></h2>
+<p>The brain today is a hand-written <strong>if-else ladder</strong> of tuned thresholds. Its ceiling is however many
+rules we can enumerate — every gap we found (the frozen jotun, the un-closed match) was a rule we hadn't written.
+Two structural upgrades close that gap the way judgment does:</p>
+<ol>
+<li><strong>Utility scoring</strong> instead of the ladder: each candidate action gets a score from weighted
+considerations (danger, opportunity, self-preservation, objective-progress); pick the max. It <em>degrades
+gracefully</em> — when no rule "matches," it still picks the least-bad option instead of freezing. Would have
+prevented the idle-at-the-wall bug structurally.</li>
+<li><strong>Goal chaining / planning</strong> at the commander level: "to win → flag → HQ down → turrets down → I
+have a jotun → go kill turret A." A human plans backward from the win; the AI mostly reacts to the instant. This is
+what the <strong>AI-Lab / BrainGraph</strong> groundwork was heading toward — a data-driven brain you can
+restructure without rewriting code.</li>
+</ol>
+
+<h2>Layer 4 — Actual learning (RL) <span class="tag big">LONG HORIZON</span></h2>
+<p>The aspirational <code>~/todo</code> item. The harness is the missing prerequisite (can't train without a fast
+sim), so it's now <em>possible</em> — but it's a big project (state encoding, reward shaping, training infra). Reach
+for it only after Layers 1–3, which get most of the benefit for a fraction of the effort.</p>
+
+<hr>
+
+<h2>One honest caveat</h2>
+<p>"Better decisions" ≠ "optimal." RMRF is built for fun, and the <strong>personalities</strong> — imperfect aim,
+distinct doctrines, a Rogue that sneaks vs a Turtle that holds — are a <strong>feature</strong>, not something to
+optimize away. Aim the machinery at <strong>"no dumb / frozen moments,"</strong> not "unbeatable." A perfectly
+efficient AI would probably be <em>less</em> fun than a characterful, occasionally-flawed one.</p>
+
+<h2>Recommended next step</h2>
+<p>Build <strong>Layer 1 (flight recorder) + Layer 2 (auto-A/B loop)</strong>. Together they turn AI work from
+"Claude guesses and hand-patches" into "the game tells us exactly what it was thinking, and the harness proves
+whether a change helped." That's the process upgrade that makes everything after it faster — including the eventual
+utility refactor or RL.</p>
+
+<div class="panel">
+<strong>Where things stand (commit 161df0d):</strong> four AI fixes shipped — HQ-as-siege-target, the Closer
+(eliminated enemy → field a Jotun), the Finisher (unopposed sieger closes in instead of idling), and Preservation
+(a losing commander turtles under tower cover). Data-identified next bottleneck: <strong>reliable base breach</strong>
+(attacker grinds turrets to the last 1–2 / HQ, then stalls).
+</div>
+
+<p class="foot">Reference docs: sim harness at <code>~/pw/ai-sim.cjs</code> · classifier <code>~/pw/agg.cjs</code> ·
+doctrine layer <code>js/AIStrategies.js</code> · per-unit brain <code>js/AI.js</code>.</p>
+
+</body>
+</html>
