@@ -25,6 +25,7 @@ import {
 } from './Buildings.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
 import { makeWall, makeTower, makeGate } from './Walls.js?v=60';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
+import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';   // the designed corner tower, as shared data (designer + game read this one file)
 
 export const ASSETS = [
   // ── Structures ─────────────────────────────────────────────────────────────
@@ -87,7 +88,7 @@ export const ASSETS = [
     desc: 'A stone perimeter wall segment; the top course wears the team colour.',
   },
   {
-    id: 'tower', name: 'Corner Tower', make: makeTower,
+    id: 'tower', name: 'Corner Tower', make: makeTower, config: CORNER_TOWER_CFG,
     footprint: { w: 1, d: 1 }, accent: true,
     destructible: { type: 'wall', hp: 340 },
     category: 'structure',
