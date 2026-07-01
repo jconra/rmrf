@@ -9,6 +9,8 @@ import { Destructible } from './Destructible.js?v=5';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=3';
 import { concreteTexture, accentPlateTexture } from './Textures.js?v=2';
+import { buildAssetGroup } from './AssetBuilder.js?v=1';
+import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
 // Shared neutral plate map for every team-colour piece — built once, tinted per material
@@ -76,14 +78,15 @@ export class Wall {
     return m;
   }
 
-  _layerEntry(mesh) {
-    return { mesh, falling: false, settled: false, vel: new THREE.Vector3(), ang: new THREE.Vector3() };
+  _layerEntry(mesh, fallAt = null) {
+    return { mesh, fallAt, falling: false, settled: false, vel: new THREE.Vector3(), ang: new THREE.Vector3() };
   }
 
   _build() {
     this.bodyGroup = new THREE.Group();
     this.group.add(this.bodyGroup);
     if (this.type === 'GATE_EW' || this.type === 'GATE_NS') return this._buildGate();
+    if (this.type === 'CORNER') return this._buildCornerTower();
 
     const cell = this.cell;
     const isCorner = this.type === 'CORNER';
@@ -129,6 +132,35 @@ export class Wall {
     }
   }
 
+  // The corner bastion is Jacob's asset-designer tower (corner_tower.config.js). The
+  // structure crumbles by its authored per-part fallAt; parts flagged turret form the gun
+  // head that spins + fires. It keeps the SAME turret interface (group/head/aimYaw) the
+  // procedural corners used, so main.js's tickWallTurret + the AI/siege code need no change.
+  _buildCornerTower() {
+    const tower = buildAssetGroup(CORNER_TOWER_CFG, this.accent, { cell: this.cell });
+    // AssetBuilder folds the "gun" role group into a pre-pivoted sub-group (barrels authored
+    // to point +Z, the engine's aim convention); everything else is loose structure meshes.
+    let head = null;
+    for (const child of tower.children.slice()) {
+      if (child.isGroup && child.userData.role === 'gun') { head = child; continue; }
+      this.bodyGroup.add(child);                                    // structure → crumble layer
+      this.layers.push(this._layerEntry(child, child.userData.fallAt ?? 0));
+    }
+    this._authoredCrumble = true;
+
+    if (head) {
+      // The sub-group already pivots at the gun's base centre, so head.rotation.y swings the
+      // barrels. Wrap it so `group` (the toppling unit that _animate moves) and `head` (what
+      // aims + can detach on destroy) stay distinct objects. Gun sheds at its own threshold.
+      const group = new THREE.Group();
+      group.add(head);
+      this.group.add(group);
+      const thr = head.children.map(m => m.userData.fallAt ?? 0).filter(v => v > 0);
+      this._turretFallAt = thr.length ? Math.min(...thr) : 0.5;
+      this.turret = { group, head, dead: false, falling: false, vel: new THREE.Vector3(), ang: new THREE.Vector3(), sweep: Math.random() * 6.28 };
+    }
+  }
+
   // A clean capstone lip the same footprint as the top layer (no overhang),
   // so the team-colour band underneath stays visible.
   _buildParapet(layerH, capW, capD) {
@@ -166,7 +198,28 @@ export class Wall {
     lintel.position.y = 0.1 + postH + lintelH / 2;
     this.bodyGroup.add(lintel);
     this.layers.push(this._layerEntry(lintel));
+
+    // Two door leaves that fill the opening when CLOSED (block enemies) and slide apart
+    // toward the posts when a friendly is near (main.js drives setGateTarget). They crumble
+    // with the gate, so breaching it destroys the doors too.
+    const inner = runLen - postW * 2;         // clear span between the posts
+    const half = inner / 2, doorH = postH * 0.9, doorTh = thick * 0.7;
+    this._doors = [];
+    for (const s of [-1, 1]) {                // meet at centre when closed
+      const leaf = box(isEW ? half : doorTh, doorH, isEW ? doorTh : half, this._accentMat());
+      const closed = s * half / 2, open = s * (half + postW * 0.5);   // slide out behind the post
+      leaf.position.set(isEW ? closed : 0, 0.1 + doorH / 2, isEW ? 0 : closed);
+      this.bodyGroup.add(leaf);
+      this.layers.push(this._layerEntry(leaf));
+      this._doors.push({ mesh: leaf, axis: isEW ? 'x' : 'z', closed, open });
+    }
+    this._gateTarget = 0;   // 0 = closed, 1 = open (set by main.js proximity check)
+    this._doorT = 0;        // animated position, lerps toward _gateTarget
   }
+  // Logical open state used for blocking: a gate counts as OPEN the instant a friendly is
+  // in range (target = open), so units never path into a door that's about to lift.
+  get gateOpen() { return this._gateTarget === 1; }
+  setGateTarget(open) { this._gateTarget = open ? 1 : 0; }
 
   _makeTurret(y) {
     const cell = this.cell;
@@ -198,11 +251,21 @@ export class Wall {
   // still shows damage via scorch/cracks; it physically crumbles only once the gun is gone,
   // at which point _killTurret re-runs this to catch the stack up to the body's real HP.
   _restage() {
-    if (this.turret && !this.turret.dead) return;   // keep the gun's support intact while it lives
     const frac = Math.max(0, this.body.hp / this.maxHp);
-    const lost = Math.floor((1 - frac) * this.layers.length);
-    for (let i = this.layers.length - 1, k = 0; i >= 0; i--, k++) {
-      if (k < lost && !this.layers[i].falling) this._fall(this.layers[i]);
+    if (this.turret && !this.turret.dead) {
+      // The gun sits on top and holds the structure up: nothing sheds while it stands. It
+      // falls at its OWN threshold (authored corner: body past _turretFallAt; procedural
+      // corner: only when its 180hp is spent / the body is destroyed → _collapseAll).
+      if (this._turretFallAt == null || frac > this._turretFallAt) return;
+      this._killTurret();   // catches the stack up to the body's damage below
+    }
+    if (this._authoredCrumble) {                       // designer tower: shed by authored fallAt
+      for (const p of this.layers) if (!p.falling && (p.fallAt ?? 0) >= frac) this._fall(p);
+    } else {                                           // procedural wall/tower: peel top-down
+      const lost = Math.floor((1 - frac) * this.layers.length);
+      for (let i = this.layers.length - 1, k = 0; i >= 0; i--, k++) {
+        if (k < lost && !this.layers[i].falling) this._fall(this.layers[i]);
+      }
     }
   }
 
@@ -247,6 +310,16 @@ export class Wall {
 
   update(dt) {
     for (const L of this.layers) this._animate(L, dt);
+    if (this._doors) {   // ease the door leaves toward the open/closed target (skip fallen ones)
+      const goal = this._gateTarget;
+      this._doorT += (goal - this._doorT) * Math.min(1, dt * 5);
+      if (Math.abs(goal - this._doorT) < 0.001) this._doorT = goal;
+      for (const dr of this._doors) {
+        const L = this.layers.find(l => l.mesh === dr.mesh);
+        if (L && L.falling) continue;   // once crumbled, let it lie
+        dr.mesh.position[dr.axis] = dr.closed + (dr.open - dr.closed) * this._doorT;
+      }
+    }
     if (this.turret) {
       this._animate(this.turret, dt);
       if (!this.turret.dead && !this.turret.falling) {

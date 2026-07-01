@@ -145,8 +145,35 @@ export function buildAssetGroup(cfg, accent, { cell = DESIGN_CELL } = {}) {
     // staged-destruction data read by Destructible (which piece sheds at which HP, and how)
     mesh.userData.fallAt = part.fallAt ?? 0;
     mesh.userData.dmgStyle = part.dmgStyle || 'tumble';
+    if (part.turret) mesh.userData.turret = true;   // legacy per-part gun flag (superseded by groups)
+    if (part.group) mesh.userData.group = part.group;
     g.add(mesh);
   }
+  assembleGroups(g, cfg.groups);
   if (cell !== DESIGN_CELL) g.scale.setScalar(cell / DESIGN_CELL);
   return g;
+}
+
+// Fold the parts of each authored group into a single pivoted sub-Group tagged with its
+// ROLE (gun, gate, …). The pivot is the group's base centre (x/z centroid, min y), so a
+// game system can rotate the sub-Group about its vertical axis or slide it as one unit.
+// Ungrouped parts stay flat; assets with no groups are untouched.
+const _box = new THREE.Box3(), _ctr = new THREE.Vector3();
+function assembleGroups(g, groups) {
+  if (!groups) return;
+  const byId = new Map();
+  for (const m of g.children.slice()) {
+    const id = m.userData.group; if (!id) continue;
+    (byId.get(id) || byId.set(id, []).get(id)).push(m);
+  }
+  for (const [id, meshes] of byId) {
+    _box.makeEmpty(); for (const m of meshes) _box.expandByObject(m);
+    _box.getCenter(_ctr);
+    const sub = new THREE.Group();
+    sub.position.set(_ctr.x, _box.min.y, _ctr.z);           // pivot at the group's base centre
+    sub.userData.group = id;
+    sub.userData.role = (groups[id] && groups[id].role) || '';
+    for (const m of meshes) { m.position.sub(sub.position); sub.add(m); }
+    g.add(sub);
+  }
 }

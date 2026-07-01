@@ -1185,7 +1185,7 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
   veh.maxShield = st.shield; veh.shield = 0;   // armour pool, picked up at a generator
   veh._shieldFx = null;             // force-field bubble, created on first pickup
   veh._move = VEH_MOVE[veh.type] || VEH_MOVE.lurcher;
-  veh._blocked = blockedFor(veh._move, !isPlayer);   // AI paths around water; player may dive in
+  veh._blocked = blockedFor(veh._move, !isPlayer, veh.team);   // AI paths around water; player may dive in
   veh._sink = 0;
   veh.hitR = VEH_HIT_R[veh.type] ?? 3.2;   // Firebrat is small + nimble; heavies are big targets
   veh.dead = false;
@@ -1655,6 +1655,23 @@ function tickWallTurret(w, team, dt) {
     projectiles.spawn(0, _tHead.clone(), _tDir.clone(), hex);   // cosmetic tracer toward the target
   }
 }
+// Raise a base gate for its own side: open when a friendly unit is within range, else shut.
+// Neutral (ownerless) gates stay open. The door slide itself animates in WallPiece.update.
+const GATE_OPEN_R2 = () => (grid.cell * 2.4) * (grid.cell * 2.4);
+function updateGates(dt) {
+  if (!gates.length) return;
+  const r2 = GATE_OPEN_R2();
+  for (const g of gates) {
+    if (g.team == null) { g.w.setGateTarget(true); continue; }   // no owner → held open
+    let near = false;
+    for (const v of combatants) {
+      if (v.dead || v.team !== g.team || vehicleHidden(v)) continue;
+      const dx = v.holder.position.x - g.gx, dz = v.holder.position.z - g.gz;
+      if (dx * dx + dz * dz < r2) { near = true; break; }
+    }
+    g.w.setGateTarget(near);
+  }
+}
 function updateWallTurrets(dt) {
   if (matchOver) return;
   for (const c of camps) for (const w of c.walls) tickWallTurret(w, c.team, dt);
@@ -1800,11 +1817,19 @@ function killPlayer() {
 // avoidWater makes a land vehicle treat open sea as solid — used for the AI so it
 // paths around the coast; the player keeps avoidWater=false so it CAN drive in
 // (and flood/sink, see applyAltitude).
-function blockedFor(move, avoidWater) {
+function blockedFor(move, avoidWater, team) {
   return (x, z) => {
     const halfW = map.worldW / 2 + 24, halfH = map.worldH / 2 + 24;
     if (x < -halfW || x > halfW || z < -halfH || z > halfH) return true;
     if (islandBound && (x * x + z * z) > islandBound * islandBound) return true;   // off the island → walled off
+    // A shut gate is a solid door across its opening — checked BEFORE the road pass-through
+    // (the opening IS a road) so a closed enemy gate actually stops the enemy on the lane.
+    // Flyers clear it. Its cells reopen the instant it's breached or a friendly holds it.
+    if (!move.ignoreWalls) for (const g of gates) {
+      if (!gateBlocks(g.w, team)) continue;
+      const ax = x - g.gx, az = z - g.gz;
+      if (Math.abs(ax * g.nx + az * g.nz) < g.halfNorm + VEH_R && Math.abs(ax * g.px + az * g.pz) < g.halfRun) return true;
+    }
     const cx = Math.round(x / grid.cell), cz = Math.round(z / grid.cell);
     if (roadNet.cells && roadNet.cells.has(cx + ',' + cz)) return false;
     if (elevatorPadAt(x, z)) return false;
@@ -2317,7 +2342,8 @@ function cellBlocked(v, i, j) {
   const halfW = map.worldW / 2 + 24, halfH = map.worldH / 2 + 24;
   if (x < -halfW || x > halfW || z < -halfH || z > halfH) return true;
   if (islandBound && x * x + z * z > islandBound * islandBound) return true;
-  if (gateCells.has(i + ',' + j)) return false;
+  const gw = gateCells.get(i + ',' + j);
+  if (gw) return v._move.ignoreWalls ? false : gateBlocks(gw, v.team);   // shut enemy gate blocks; ally/open/breached/flyer → passable
   if (roadNet.cells && roadNet.cells.has(i + ',' + j)) return false;
   if (elevatorPadAt(x, z)) return false;
   if (gateSideCells.has(i + ',' + j)) return true;   // a gate flank — force the centre throat
@@ -3758,11 +3784,21 @@ function hasLOS(ax, az, bx, bz) {
 // --- Collision ---------------------------------------------------------
 // Solid wall pieces the player can't drive through (gates excluded — drive-through).
 let obstacles = [];           // { x, z, r }
-const gateCells = new Set();  // grid cells the A* navigator treats as always-open + cheap (gate centre lane)
+let gates = [];               // { w, team, gx, gz, isEW, halfRun, halfNorm } — doored openings that block enemies when closed
+const gateCells = new Map();  // grid cell "i,j" → the gate WallPiece controlling that lane (open for allies, closed = blocked for enemies)
 const gateSideCells = new Set();  // the gate's flanking cells — open to the eye but a full-radius vehicle scrapes the jamb there, so A* must NOT use them
 let islandBound = 0;          // radius (from map centre) past which no vehicle may go
+// Does gate `w` currently block a vehicle of `team`? Breached, ownerless, held-open, or
+// friendly all pass; otherwise a shut gate stops the enemy (who must destroy it to breach).
+function gateBlocks(w, team) {
+  if (!w || (w.body && w.body.dead)) return false;
+  if (w._gateTeam == null) return false;
+  if (team === w._gateTeam) return false;
+  return !w.gateOpen;
+}
 function buildObstacles() {
   obstacles = [];
+  gates = [];
   gateCells.clear();
   gateSideCells.clear();
   const c0 = grid.cell;
@@ -3780,10 +3816,12 @@ function buildObstacles() {
       const sz = Math.abs(dx) >= Math.abs(dz) ? 0 : Math.sign(dz);
       const px = sx !== 0 ? 0 : 1, pz = sx !== 0 ? 1 : 0;   // along-the-wall (perpendicular to the normal)
       for (let k = -2; k <= 2; k++) {
-        gateCells.add((gi + sx * k) + ',' + (gj + sz * k));
+        gateCells.set((gi + sx * k) + ',' + (gj + sz * k), w);
         if (k >= -1 && k <= 1)
           for (const s of [-1, 1]) gateSideCells.add((gi + sx * k + px * s) + ',' + (gj + sz * k + pz * s));
       }
+      w._gateTeam = c.team;
+      gates.push({ w, team: c.team, gx, gz, nx: sx, nz: sz, px, pz, halfRun: (w.span || 3) * c0 * 0.45, halfNorm: c0 * 0.32 });
       continue;
     }
     obstacles.push({ x: w.group.position.x, z: w.group.position.z, team: c.team, body: w.body,
@@ -3800,6 +3838,10 @@ function buildObstacles() {
         const pz = isEW ? w.group.position.z : w.group.position.z + s * off;
         obstacles.push({ x: px, z: pz, team: w._team, body: w.body, r: c0 * 0.35 });
       }
+      w._gateTeam = w._team;   // may be null (neutral placed gate → stays open, see updateGates)
+      gates.push({ w, team: w._team ?? null, gx: w.group.position.x, gz: w.group.position.z,
+                   nx: isEW ? 0 : 1, nz: isEW ? 1 : 0, px: isEW ? 1 : 0, pz: isEW ? 0 : 1,
+                   halfRun: (w.span || 3) * c0 * 0.45, halfNorm: c0 * 0.32 });
       continue;
     }
     obstacles.push({ x: w.group.position.x, z: w.group.position.z, team: w._team, body: w.body,
@@ -5038,6 +5080,7 @@ function animate() {
       if (touchUsed) orientAimArc();         // keep the touch aim wedge pointing the way the vehicle faces (screen-relative)
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateWallTurrets(dt);                 // base corner turrets fire on intruders in range
+      updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
       updateEngineSounds();                  // spatial enemy/AI engine noise (distance-based)
     }
