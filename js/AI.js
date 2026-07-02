@@ -23,6 +23,10 @@ import { COUNTER } from './AIStrategies.js?v=64';   // rock-paper-scissors web f
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
 
+// Rough ground-speed rank for the "can I outrun what's shooting me?" survivability check
+// in fightScore. Flyers (valkyrie) escape via altitude regardless — handled by view.flyer.
+const SPEED = { firebrat: 4, valkyrie: 3, lurcher: 2, jotun: 1 };
+
 // AI combat handicap — the single knob for "how hard does the AI hit". A human on a
 // touchscreen can't out-aim a perfect bot, so the opponents are deliberately reined in:
 //   aimSpread > 1 sprays their shots wider (more clean misses)
@@ -85,6 +89,14 @@ function fightScore(v, p) {
     const et = v.enemy.type;
     if (et && COUNTER[et] === s.type) w += 1.6;                   // we counter them → press
     if (et && COUNTER[s.type] === et) w -= 1.8;                   // they counter us → avoid
+    // ENEMY RELATIVE HP: a rival that's weaker than us (or already running) is worth
+    // finishing even when we're hurt — don't both limp away. (Subsumes the old finishHim.)
+    if (v.enemy.retreating || (v.enemy.hpFrac != null && v.enemy.hpFrac <= s.hpFrac)) w += 1.5;
+    // ESCAPE SURVIVABILITY: if we can't outrun what's on us — not a flyer, and slower than
+    // the rival — fleeing just gets us shot in the back, so stand and trade instead. This
+    // generalises the Jotun's "can't run, so doesn't" to ANY cornered unit (a hurt Lurcher
+    // chased by a Valkyrie shouldn't turn its back). Weighted so a decent matchup still fights.
+    if (!v.flyer && (SPEED[s.type] || 2) < (SPEED[et] || 2)) w += 1.6;
   }
   // The Jotun can't run, so it doesn't: as long as it has ammo it stands, swings the
   // railgun onto the target and fights regardless of the odds. (Out of ammo, it falls
@@ -111,11 +123,8 @@ const CONDITIONS = {
     const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
     return dx * dx + dz * dz < 60 * 60;
   },
-  // "Finish him": we're hurt enough to bail, BUT the rival we see is even worse off
-  // (lower hp) or is itself running — and we still have ammo. Don't both limp away;
-  // turn and put it down. Overrides the hurt retreat only (evaluated just above it).
-  finishHim: (v, m, p) => m._hurt && v.seesEnemy && v.enemy && ammoFrac(v) > 0 &&
-    (v.enemy.retreating || (v.enemy.hpFrac != null && v.enemy.hpFrac <= v.self.hpFrac)),
+  // (finishHim removed: "hurt but the rival's weaker → turn and finish" is now a term in
+  // fightScore + the engaging-before-retreat ordering, so it needs no special condition.)
   resupLatched: (v, m) => m._resup,                        // heading home to rearm/refuel
   shootGoal:    (v) => !!v.shootGoal,                      // the goal is a fortification
 
@@ -513,10 +522,15 @@ export const DEFAULT_BRAIN = {
   transitions: [
     { when: 'mustGo',       mode: 'exit',     target: 'goal' },
     { when: 'runnerFlee',   mode: 'flee',     target: 'goal' },
-    { when: 'finishHim',    mode: 'engage',   target: 'enemy' },
-    { when: 'hurtLatched',  mode: 'retreat',  target: 'home' },
-    { when: 'resupLatched', mode: 'resupply', target: 'resupplyOrGoal' },
+    // FIGHT-OR-FLIGHT LEADS when a rival is in range: fightScore already weighs hp, ammo,
+    // matchup, numbers AND (now) escape-survivability, so let IT decide fight-vs-flee before
+    // the blunt hurt-retreat. `fightScore>0` → engage (even if hurt, when the odds justify
+    // it); `<=0` → fall through to the retreat below (that's the flight). This replaces the
+    // old ordering where a flat "I'm hurt" latch pre-empted the weighted decision (and the
+    // finishHim patch that existed only to poke a hole in that override).
     { when: 'engaging',     mode: 'engage',   target: 'enemy' },
+    { when: 'hurtLatched',  mode: 'retreat',  target: 'home' },     // hurt AND no fight to be had → limp home to heal
+    { when: 'resupLatched', mode: 'resupply', target: 'resupplyOrGoal' },
     { when: 'threatened',   mode: 'suppress', target: 'threat' },
     { when: 'pursuing',     mode: 'pursue',   target: 'lastSeen' },
     { when: 'shootGoal',    mode: 'assault',  target: 'goal' },
