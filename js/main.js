@@ -1571,6 +1571,7 @@ function damageVehiclesAt(point, blast, dmg, team, shooter) {
 const dmgTally = { turret: 0, vehicle: 0, tree: 0, other: 0 };
 function damageVehicle(veh, amount, cause = 'other', shooter = null) {
   if (veh.dead) return;
+  const _hp0 = veh.hp;   // hull before, for the combat log
   dmgTally[cause] = (dmgTally[cause] || 0) + amount;
   if (veh.ai) veh._dmgBy = veh._dmgBy || { turret: 0, vehicle: 0, tree: 0, other: 0 }, veh._dmgBy[cause] += amount;
   // The shield pool soaks damage before the hull (body-armour style).
@@ -1584,6 +1585,13 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null) {
   if (amount > 0) veh.hp -= amount;
   if (veh.bar) updateHealthBar(veh);
   if (veh.isPlayer) updatePlayerHud();
+  // COMBAT LOG (deep view): vehicle-vs-vehicle hits only, and only when the hull actually
+  // took damage (shots fully soaked by shield are skipped). "PURPLE hits TEAL 150 dmg (200→50)".
+  if (cause === 'vehicle' && shooter && shooter.type && shooter !== veh) {
+    const dealt = Math.round(_hp0 - veh.hp);
+    if (dealt > 0) logCombat(shooter.team,
+      `${teamLabel(shooter.colorIndex)} ${shooter.type} hits ${teamLabel(veh.colorIndex)} ${veh.type} ${dealt} dmg (${Math.round(_hp0)}→${Math.max(0, Math.round(veh.hp))})`);
+  }
   if (veh.hp <= 0) destroyVehicle(veh, 'killed', shooter);
 }
 
@@ -2901,6 +2909,7 @@ class AICommander {
       fwd: +cmd.fwd.toFixed(2), turn: +cmd.turn.toFixed(2),
       blk: (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'),
       hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), shield: Math.round(v.shield),
+      fof: v.ai && v.ai._fof != null ? +v.ai._fof.toFixed(1) : null,   // live fight-or-flight score vs the rival in sight
       distFob: Math.round(Math.hypot(v.holder.position.x - fob.x, v.holder.position.z - fob.z)),
       px: Math.round(v.holder.position.x), pz: Math.round(v.holder.position.z),
       gx: view.goal ? Math.round(view.goal.x) : null, gz: view.goal ? Math.round(view.goal.z) : null,
@@ -3583,11 +3592,18 @@ function playDefeat() { clearCeleb(); showCelebTitle('DEFEAT', '#ff6a6a', 'FLAG 
 // between them; – collapses (full→brief→hidden), + expands to full.
 let aiLogMode = (QS.has('ailog') || SPECTATE) ? 'brief' : 'hidden';
 let paused = false;    // game frozen while the log is expanded full-screen
-const aiEvents = [];   // rolling [{t, team, msg}]
+const aiEvents = [];   // rolling [{t, team, msg}] — low-frequency DECISION events
 const _t0 = performance.now();
 function aiLog(team, msg) {
   aiEvents.push({ t: (performance.now() - _t0) / 1000, team, msg });
   while (aiEvents.length > 80) aiEvents.shift();   // deep enough to scroll back in full view
+}
+// Vehicle-vs-vehicle hits are HIGH-frequency, so they get their own buffer (kept out of the
+// decision feed so they don't flush the mission events) — shown only in the full/deep view.
+const combatEvents = [];
+function logCombat(team, msg) {
+  combatEvents.push({ t: (performance.now() - _t0) / 1000, team, msg });
+  while (combatEvents.length > 60) combatEvents.shift();
 }
 function setLogMode(mode) {
   aiLogMode = mode;
@@ -3683,7 +3699,8 @@ function updateAiLog() {
     // Header: COLOUR · VEHICLE · MISSION · PERSONALITY — all dot-separated, no brackets.
     html += `<div class="tb-h" style="color:${col}">${cmd.cname} · ${type} · ${mission}${card ? ` · ${card.toUpperCase()}` : ''}</div>`;
     if (d) {
-      html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel} · fob ${d.distFob}</div>`;
+      const fof = d.fof != null ? ` · <span style="color:${d.fof > 0 ? '#7fffb8' : '#ff9d7f'}">fof ${d.fof > 0 ? '+' : ''}${d.fof}</span>` : '';
+      html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}${fof} · fob ${d.distFob}</div>`;
       if (d.stuck) html += `<div class="tb-l" style="color:#ffb030">⚠ STUCK ${d.stuck}s — ${d.stuckWhy}</div>`;
     }
     html += `<div class="tb-l">twrs ${d ? d.towers : '?'} · knows ${known}</div>`;
@@ -3702,6 +3719,16 @@ function updateAiLog() {
       html += `<div><span class="tb-t">${e.t.toFixed(0)}s</span> <span style="color:${teamLogColor(e.team)}">${e.msg}</span></div>`;
     }
     html += `</div>`;
+    // Separate COMBAT feed (vehicle-vs-vehicle hits), dimmed so it reads as a sub-log.
+    if (combatEvents.length) {
+      html += `<div class="tb-feed" style="opacity:0.72;border-top:1px solid #2c4a3a;margin-top:4px">`;
+      html += `<div style="color:#8fae9c;letter-spacing:1px;font-size:9px">— COMBAT —</div>`;
+      for (let i = combatEvents.length - 1; i >= 0; i--) {
+        const e = combatEvents[i];
+        html += `<div><span class="tb-t">${e.t.toFixed(0)}s</span> <span style="color:${teamLogColor(e.team)}">${e.msg}</span></div>`;
+      }
+      html += `</div>`;
+    }
   }
   document.getElementById('ai-log-body').innerHTML = html;
 }
@@ -3735,6 +3762,10 @@ function buildLogExport() {
   }
   s += `\n--- events (newest first) ---\n`;
   for (let i = aiEvents.length - 1; i >= 0; i--) s += `${aiEvents[i].t.toFixed(0)}s ${aiEvents[i].msg}\n`;
+  if (combatEvents.length) {
+    s += `\n--- combat (newest first) ---\n`;
+    for (let i = combatEvents.length - 1; i >= 0; i--) s += `${combatEvents[i].t.toFixed(0)}s ${combatEvents[i].msg}\n`;
+  }
   return s;
 }
 // Copy the snapshot to the clipboard; always also pop a selectable overlay (the secure
@@ -4783,6 +4814,7 @@ window.RR = {
   get gateCells() { return [...gateCells]; },
   get gateSideCells() { return [...gateSideCells]; },
   get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
+  get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
   recStart: (mode) => recStart(mode),                          // FLIGHT RECORDER: capture per-unit decision changes (mode 'changes'|'all')
   recStop: () => recStop(),
   recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]

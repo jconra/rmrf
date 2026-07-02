@@ -142,7 +142,7 @@ const CONDITIONS = {
 
   // Fight-or-flight: only duel a spotted rival when the weighted odds favour it (good
   // hp/ammo/matchup), otherwise keep moving instead of trading into a loss.
-  engaging: (v, m, p) => v.seesEnemy && fightScore(v, p) > 0,
+  engaging: (v, m, p) => v.seesEnemy && (m._fof != null ? m._fof : fightScore(v, p)) > 0,
   // A wall-turret is shelling us and we still have teeth → silence it first.
   threatened: (v, m, p, cfg) => !!v.threat && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type),
   // Chase a recent sighting, but only brave brains bother — and never chase a ghost once
@@ -581,6 +581,7 @@ function maybeRecord(view, mem, reason, state, out) {
     sees: !!view.seesEnemy, enemyD: e ? Math.round(Math.hypot(e.x - s.x, e.z - s.z)) : null,
     threat: !!view.threat, threatLOS: !!view.threatLOS, demolish: !!view.demolishTarget, breakT: !!view.breakTarget,
     near: (view.enemiesNear | 0) + 'v' + (view.alliesNear | 0), shotBlk: !!view.shotBlocked, enemyGone: !!view.enemyGone,
+    fof: mem._fof != null ? +mem._fof.toFixed(2) : null,
     out: { f: +(out.fwd || 0).toFixed(2), t: +(out.turn || 0).toFixed(2), fire: !!out.fire, s: +(out.strafe || 0).toFixed(2) },
   });
   if (REC.length > REC_CAP) REC.shift();
@@ -634,6 +635,10 @@ export function runBrain(graph, view, mem) {
     if (!mem[L.flag] && CONDITIONS[L.trip](view, mem, p, cfg)) mem[L.flag] = true;
     else if (mem[L.flag] && CONDITIONS[L.clear](view, mem, p, cfg)) mem[L.flag] = false;
   }
+
+  // Fight-or-flight score for the rival in sight (null if none) — computed ONCE here so the
+  // `engaging` condition, the log overlay and the flight recorder all read the same number.
+  mem._fof = (view.seesEnemy && view.enemy) ? fightScore(view, p) : null;
 
   // Pick the active state: first transition whose condition holds.
   let rule = graph.transitions[graph.transitions.length - 1];
