@@ -47,6 +47,10 @@ export function randomPersonality(rng = Math.random) {
     // driving around it. High = trigger-happy: blasts trees/walls on contact and burns
     // ammo (then has to peel off and reload); low = patient: tries to skirt first.
     triggerHappy: clamp01(0.15 + rng() * 0.85),
+    // FOCUS (discipline / "mood"): how tunnel-visioned this brain is on its mission vs how
+    // readily it breaks off to brawl. High = leaves a DISTANT enemy be and pushes the
+    // objective, only fighting threats that come close; low = engages on sight (a scrapper).
+    focus: clamp01(0.15 + rng() * 0.7),
     pref: TYPES[(rng() * TYPES.length) | 0],
   };
 }
@@ -158,7 +162,20 @@ const CONDITIONS = {
 
   // Fight-or-flight: only duel a spotted rival when the weighted odds favour it (good
   // hp/ammo/matchup), otherwise keep moving instead of trading into a loss.
-  engaging: (v, m, p) => v.seesEnemy && (m._fof != null ? m._fof : fightScore(v, p)) > 0,
+  engaging: (v, m, p) => {
+    if (!v.seesEnemy) return false;
+    if (!((m._fof != null ? m._fof : fightScore(v, p)) > 0)) return false;
+    // FOCUS (discipline / mood): a disciplined brain won't abandon its objective to chase a
+    // DISTANT enemy — it only breaks off to brawl one that's actually close. brawlR shrinks
+    // with focus (focus 0 → ~1.25× weapon range = fights on sight; focus 1 → ~0.5× = only up
+    // close). An ATTACK mission still fights: its GOAL is the enemy, so it drives in to brawlR.
+    if (v.enemy && p.focus) {
+      const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
+      const brawlR = (v.engageRange || 36) * (1.25 - 0.75 * p.focus);
+      if (dx * dx + dz * dz > brawlR * brawlR) return false;   // too far to be worth leaving the mission
+    }
+    return true;
+  },
   // A wall-turret is shelling us and we still have teeth → silence it first.
   threatened: (v, m, p, cfg) => !!v.threat && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type),
   // Chase a recent sighting, but only brave brains bother — and never chase a ghost once

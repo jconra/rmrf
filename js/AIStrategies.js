@@ -168,6 +168,11 @@ class Doctrine {
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
     if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) next = 'defend';
+    // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
+    // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
+    // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
+    // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
+    if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) next = 'siege';
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
     if (!next && cmd._clearPathT > 0) next = 'attack';
