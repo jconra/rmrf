@@ -33,6 +33,10 @@ class Mission {
   shoot(cmd) { return true; }
   arriveDist(cmd) { return 12; }
   label(cmd) { return 'the objective'; }
+  // A short, characterful announcement the commander barks when it SWITCHES to this mission
+  // (logged in place of the old terse "scout → attack"). Fun but still informative — it names
+  // the intent. Deterministic: cycled by a per-commander counter, no RNG. Override per mission.
+  cry(cmd) { return `switching to ${this.key}`; }
   // Once carrying the flag, everyone just runs it home.
   _flagOrHome(cmd) {
     const f = cmd.flag();
@@ -49,6 +53,11 @@ class Scout extends Mission {
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 30; }
   label(cmd) { return 'sweeping for recon'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Where are they hiding? Fan out and find them.',
+    'No sign of the enemy yet — go take a look around.',
+    'Eyes on the field. Let’s see what they’re up to.',
+  ]); }
 }
 
 // ATTACK — recall the enemy's last-known position and hunt them down; with no recent
@@ -57,7 +66,19 @@ class Attack extends Mission {
   get key() { return 'attack'; }
   objective(cmd) { return cmd.lastEnemyPos() || cmd.enemyFobPos(); }
   arriveDist(cmd) { return 12; }
-  label(cmd) { return cmd.lastEnemyPos() ? 'hunting their last position' : 'hunting their vehicles'; }
+  // A NOUN phrase, not a verb — the state line prepends the brain's own verb
+  // ("advancing → …", "sieging …"), so a verb here reads as nonsense ("sieging hunting …").
+  label(cmd) { return cmd.lastEnemyPos() ? 'their last-known position' : 'the enemy staging point'; }
+  cry(cmd) { return cmd.lastEnemyPos()
+    ? pickCry(cmd, [
+        'We’ve got eyes on ’em — move in and take them out!',
+        'Enemy located! All units, run them down!',
+        'Got a fix on their position — go hunt them down!',
+      ])
+    : pickCry(cmd, [
+        'They’re out there somewhere — go flush them out!',
+        'No visual, but they’re close. Track them down and engage!',
+      ]); }
 }
 
 // SIEGE — level the enemy base, turret-first, until the flag is exposed.
@@ -107,6 +128,16 @@ class Siege extends Mission {
     if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit && cmd.unit.type === 'valkyrie' && !(cmd.unit && cmd.unit._siegeRearReached) && !cmd.flagExposed()) return 'flanking to shell the HQ from behind';
     return 'the enemy base';
   }
+  cry(cmd) { return cmd.enemyEliminated()
+    ? pickCry(cmd, [
+        'Field’s clear — nothing left to stop us. Raze their base!',
+        'They’re wiped out! Tear that base down to the dirt!',
+      ])
+    : pickCry(cmd, [
+        'They’re hiding behind their walls — let’s flatten their base!',
+        'Time to bring those walls down. Pour it on!',
+        'Punch through their defenses and level ’em!',
+      ]); }
 }
 
 // CAPTURE — run a Firebrat for the flag; do NOT engage (the runner flees contact). A Rogue
@@ -144,6 +175,16 @@ class Capture extends Mission {
     if ((cmd.archetype === 'rogue' || cmd._stealthCapture) && !(cmd.unit && cmd.unit._rearReached)) return 'sneaking round the back';
     return 'snatching the flag';
   }
+  cry(cmd) { return (cmd.archetype === 'rogue' || cmd._stealthCapture)
+    ? pickCry(cmd, [
+        'Flag’s open — sneaking a runner in the back door. Quiet now!',
+        'Go, go — slip round the back and grab that flag!',
+      ])
+    : pickCry(cmd, [
+        'The flag’s wide open — send the runner, grab it and RUN!',
+        'This is our shot — go for the flag, don’t stop for anything!',
+        'Flag’s exposed! Snatch it and haul it home!',
+      ]); }
 }
 
 // DEFEND — hold the home base under tower cover; the brain still engages on sight. Once
@@ -155,6 +196,11 @@ class Defend extends Mission {
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 8; }
   label(cmd) { return 'patrolling the rear (flag↔elevator)'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Pull back and hold the line — protect the flag!',
+    'They’re pushing hard — dig in under the towers and hold!',
+    'Everybody home — turtle up and guard our flag!',
+  ]); }
 }
 
 // INTERCEPT — our flag's been lifted: only a Valkyrie is mobile enough to run the thief
@@ -165,6 +211,11 @@ class Intercept extends Mission {
   objective(cmd) { return cmd.interceptSpot(); }
   arriveDist(cmd) { return 4; }
   label(cmd) { return 'intercepting the flag runner!'; }
+  cry(cmd) { return pickCry(cmd, [
+    'They’ve got our flag! Scramble the Valkyrie — chase ’em down!',
+    'Flag runner! Cut them off before they reach their elevator!',
+    'Stop that thief! Run the carrier down NOW!',
+  ]); }
 }
 
 const MISSIONS = { scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept };
@@ -177,6 +228,10 @@ function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // the old linear step machine that could never let go of a finished objective.
 const URGENT = new Set(['capture', 'intercept']);
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
+
+// Cycle a battle-cry pool deterministically (per-commander counter, no RNG) so the log reads
+// like a commander giving orders instead of "scout → attack". Bumped once per mission switch.
+function pickCry(cmd, pool) { cmd._cryN = (cmd._cryN || 0) + 1; return pool[cmd._cryN % pool.length]; }
 
 // Runner-lost response mode — 'new' = cause-based (attack the interceptor / stealth retry),
 // 'old' = the previous blind re-siege. Runtime-toggleable so a single build can A/B the two
@@ -231,7 +286,10 @@ class Doctrine {
     this.mission = makeMission(key);
     this.mission.enter(cmd, this);
     this.step = key; this.t = 0;
-    if (this.log) this.log(`${from} → ${key}`);
+    // Radio-chatter order instead of the terse "scout → attack". The mission's own cry()
+    // supplies a characterful line; it still names the intent, and the unit STATE lines
+    // carry the hard numbers (hp %, turrets left, ammo/fuel).
+    if (this.log) this.log(this.mission.cry(cmd));
   }
   // Runner died storming the base → respond to WHY, instead of feeding another firebrat down
   // the same lane. Shot by an enemy VEHICLE → send an ATTACK to clear the interceptor first

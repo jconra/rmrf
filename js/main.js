@@ -26,7 +26,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=68';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=69';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
@@ -1829,7 +1829,7 @@ function creditKill(killer, victim) {
   const cmd = commanders.find(c => c.team === killer.team);
   if (!cmd) return;
   cmd.kills = (cmd.kills || 0) + 1;
-  aiLog(killer.team, `${cmd.cname} ${killer.type} downs a ${victim.type} (${cmd.kills} kills)`);
+  aiLog(killer.team, `${cmd.cname}: Splash! ${killer.type} just dropped their ${victim.type} — that's ${cmd.kills} confirmed!`);
 }
 function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
@@ -2640,7 +2640,7 @@ class AICommander {
     this.respawnT = 0;
     this.deaths = 0;
     this.kills = 0;                                   // enemy vehicles this commander's units have downed
-    this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname} ${m}`));   // the archetype's mission doctrine
+    this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`));   // the archetype's mission doctrine
     this.fortHp0 = null;                              // enemy fort HP when this card started
     this.seenTypes = {};                              // rival vehicle types this team has spotted
     this.knownSupplies = new Set();                   // fog-of-war: resupply POIs this team has SCOUTED
@@ -2893,20 +2893,20 @@ class AICommander {
   get cname() { return teamLabel(this.colorIndex); }
 
   // Draw a fresh card (on repeated losses / stalls) — keeps the AI unpredictable.
-  redraw() { this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, this.strategy.constructor, m => aiLog(this.team, `${this.cname} ${m}`)); this.fortHp0 = fortHpOf(this.targetTeam()) || this.fortHp0; this.failStreak = 0; aiLog(this.team, `${this.cname} regroups (new plan)`); }
+  redraw() { this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, this.strategy.constructor, m => aiLog(this.team, `${this.cname}: ${m}`)); this.fortHp0 = fortHpOf(this.targetTeam()) || this.fortHp0; this.failStreak = 0; aiLog(this.team, `${this.cname}: That's not working — new plan, listen up!`); }
 
   deploy() {
     const want = this.strategy.wantVehicle(this);
     const type = this._pickAvailableType(want);
     if (!type) {                               // roster empty — this commander is out of the fight
       this.unit = null;
-      if (!this._eliminated) { this._eliminated = true; aiLog(this.team, `${this.cname} has no vehicles left`); }
+      if (!this._eliminated) { this._eliminated = true; aiLog(this.team, `${this.cname}: We're combat ineffective — no vehicles left! We're out!`); }
       return;
     }
     this._stepAtDeploy = this.strategy.step;   // lock the type for this step — no mid-step churn
     this._recalling = false;
-    const sub = type !== want ? ` (out of ${want})` : '';
-    aiLog(this.team, `${this.cname} deploys ${type}${sub} — ${this.fleetLeft()} left`);
+    const sub = type !== want ? ` (${want}s are gone)` : '';
+    aiLog(this.team, `${this.cname}: Rolling out a fresh ${type}${sub} — ${this.fleetLeft()} in reserve!`);
     // FLAVOUR: narrate the Rogue's signature play — sending the Valkyrie around the back to rocket the
     // HQ over the walls. Reads like the commander calling the shot (Brandon-approved log theatre). A
     // cycling pool (no RNG so it stays deterministic) keeps it varied without repeating the same line.
@@ -2991,8 +2991,8 @@ class AICommander {
     if (this._lastTowers == null) this._lastTowers = liveTowers;
     if (liveTowers < this._lastTowers) {
       aiLog(this.team, liveTowers === 0
-        ? `${this.cname}: enemy turrets CLEAR — breaching HQ`
-        : `${this.cname}: turret down — ${liveTowers} enemy turrets left`);
+        ? `${this.cname}: That's the last turret — defenses are DOWN! Breach the HQ!`
+        : `${this.cname}: Turret down! ${liveTowers} to go — keep pounding!`);
       this._lastTowers = liveTowers;
     } else if (liveTowers > this._lastTowers) { this._lastTowers = liveTowers; }   // match reset
     // MOVEMENT HEALTH — the half the log was missing: it showed INTENT ("assault turret")
@@ -3029,25 +3029,29 @@ class AICommander {
       // two combat states the bare names conflate — `engage` is duelling a moving enemy
       // VEHICLE, `suppress` is shelling a static enemy TOWER.
       const card = (this.strategy.constructor.name || 'Card').replace('Strategy', '');
-      const dest = this._intercepting ? 'to intercept the flag runner!'
-        : this._shielding ? 'to grab a shield'
+      const dest = this._intercepting ? 'the flag runner'
+        : this._shielding ? 'the shield generator'
         : (this.strategy.objectiveLabel ? this.strategy.objectiveLabel(this) : 'the objective');
       const hpPct = Math.round(v.hp / v.maxHp * 100);
+      // Radio-chatter phrasing — reads like the unit calling it in over the net, but still
+      // carries every number the old lines did (hp %, fuel %, turrets left, enemy type). The
+      // "— ${dest}" dash pattern joins cleanly whether the mission label is a noun ("the enemy
+      // base") or a gerund ("levelling the undefended base"), so no "sieging hunting" collisions.
       let line;
       switch (cmd.state) {
-        case 'exit':     line = `rolling out → ${dest}`; break;
-        case 'advance':  line = `advancing → ${dest}`; break;
-        case 'flee':     line = `dodging the enemy → ${dest}`; break;
-        case 'pursue':   line = 'chasing the last-seen enemy'; break;
-        case 'retreat':  line = `falling back to heal (hp ${hpPct}%)`; break;
-        case 'resupply': line = v.ammo <= 0 ? 'returning to rearm (out of ammo)' : `returning to refuel (fuel ${Math.round(v.fuel / v.maxFuel * 100)}%)`; break;
-        case 'engage':   line = `engaging enemy ${view.enemy ? view.enemy.type : 'vehicle'}`; break;
+        case 'exit':     line = `Rolling out the gate — ${dest}!`; break;
+        case 'advance':  line = `Moving up — ${dest}!`; break;
+        case 'flee':     line = `Taking fire — breaking off toward ${dest}!`; break;
+        case 'pursue':   line = 'Lost visual — pushing to their last-known spot!'; break;
+        case 'retreat':  line = `I'm hit! Hull at ${hpPct}% — pulling back to patch up, cover me!`; break;
+        case 'resupply': line = v.ammo <= 0 ? 'Winchester — outta ammo! Heading back to rearm!' : `Running low, fuel ${Math.round(v.fuel / v.maxFuel * 100)}% — RTB to refuel!`; break;
+        case 'engage':   line = `Contact! Enemy ${view.enemy ? view.enemy.type : 'vehicle'} in sight — engaging!`; break;
         case 'suppress': {
           const inPos = view.threatStand && Math.hypot(view.threatStand.x - v.holder.position.x, view.threatStand.z - v.holder.position.z) <= 6;
-          line = `${inPos ? 'shelling a turret' : 'skirting to isolate a turret'} (${this.turretsLive()} left)`;
+          line = inPos ? `On target — hammering their turret! ${this.turretsLive()} left!` : `Working an angle on their turret — ${this.turretsLive()} left!`;
           break;
         }
-        case 'assault':  line = `sieging ${dest} (${this.turretsLive()} turrets left)`; break;
+        case 'assault':  { const n = this.turretsLive(); line = `Danger close — on ${dest}! ${n} turret${n === 1 ? '' : 's'} left, pour it on!`; break; }
         default:         line = cmd.state;
       }
       aiLog(this.team, `${this.cname} ${v.type}: ${line} [${card}]`);
@@ -3122,7 +3126,7 @@ class AICommander {
     this._recallBestD = Infinity;                                  // closest we've gotten to home so far
     this._recallStallT = 0;                                        // time since we last made headway toward home
     this._nav.path = null;                                          // replan toward home
-    aiLog(this.team, `${this.cname} pulls ${this.unit.type} home to swap for ${want}`);
+    aiLog(this.team, `${this.cname}: Pull that ${this.unit.type} back — park it and roll out the ${want}!`);
   }
 
   // Drive a recalled unit back to its FOB, then despawn it quietly (no explosion) so
@@ -3144,7 +3148,7 @@ class AICommander {
     else this._recallStallT += dt;
     const stuck = this._recallStallT > RECALL_STALL;
     if (d < reach || stuck) {
-      aiLog(this.team, `${this.cname} ${v.type} ${d < reach ? 'home — swapping' : 'stuck, no progress home — swapping'}`);
+      aiLog(this.team, d < reach ? `${this.cname}: ${v.type} is home — swapping it out now!` : `${this.cname}: ${v.type} can't get home, it's hung up — ditch it and swap!`);
       removeCombatant(v); scene.remove(v.group); this.unit = null; this._recalling = false; this.respawnT = 1.0;
       return;
     }
@@ -3168,7 +3172,7 @@ class AICommander {
     // wandering off to "chase the last seen enemy" that no longer exists.
     if (!this._enemyGoneAnnounced && this.enemyEliminated()) {
       this._enemyGoneAnnounced = true;
-      aiLog(this.team, `${this.cname} — enemy fleet destroyed, pressing the base`);
+      aiLog(this.team, `${this.cname}: Their whole fleet's down — the field is OURS! All units, press the base!`);
     }
     if (!this.unit || this.unit.dead) {
       if (this.unit && this.unit.dead) {
@@ -3184,7 +3188,7 @@ class AICommander {
           const tt = this.targetTeam();
           const enemyHasUnits = combatants.some(o => !o.dead && o.team === tt && !vehicleHidden(o));
           this.strategy.onRunnerLost(this, enemyHasUnits);
-          aiLog(this.team, `${this.cname} runner down — ${enemyHasUnits ? 'clearing the defenders first' : 'switching to a stealth run'}`);
+          aiLog(this.team, enemyHasUnits ? `${this.cname}: Runner's down — they've got defenders! Clear them out first!` : `${this.cname}: Lost the runner — go quiet, we're sneaking the next one in wide!`);
         }
         // Keep losing the same way? Each repeat raises the odds of a brand-new plan — but
         // only for legacy deck commanders. An archetype keeps its doctrine (losing a unit
