@@ -19,7 +19,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality } from './AI.js?v=80';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig } from './AI.js?v=80';
 import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER } from './AIStrategies.js?v=66';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
@@ -4783,6 +4783,10 @@ window.RR = {
   get gateCells() { return [...gateCells]; },
   get gateSideCells() { return [...gateSideCells]; },
   get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
+  recStart: (mode) => recStart(mode),                          // FLIGHT RECORDER: capture per-unit decision changes (mode 'changes'|'all')
+  recStop: () => recStop(),
+  recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]
+  aiConfig: (k, v) => v === undefined ? getBrainConfig(k) : setBrainConfig(k, v),   // read/set a brain knob at runtime (auto-tuning sweeps)
   exploreFrac: (i = 0) => { const c = commanders[i]; return c && c.explore ? c.explore.fraction() : null; },   // debug: fraction of map this team has scouted
   exploreWp: (i = 0) => { const c = commanders[i]; return c ? c._exploreWp : null; },                          // debug: current recon waypoint
   aiRoster: (i = 0) => { const c = commanders[i]; return c ? { roster: { ...c.roster }, left: c.fleetLeft(), eliminated: c._eliminated } : null; },   // debug: remaining fleet

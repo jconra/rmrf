@@ -524,6 +524,42 @@ export const DEFAULT_BRAIN = {
   ],
 };
 
+// --- FLIGHT RECORDER (debug, off by default) -----------------------------
+// Captures each unit's DECISION whenever it CHANGES: the causal `view` fields, WHICH
+// transition fired (rule.when = the reason), and the resulting action. This is the
+// ground-truth "why did it do that" trace that state-sampling could only infer. Zero
+// cost when off (one boolean check per tick). The sim harness / RR toggles it.
+let REC_ON = false, REC_MODE = 'changes';   // 'changes' = log on decision change; 'all' = every tick
+const REC = []; const REC_CAP = 40000;
+export function recStart(mode = 'changes') { REC_ON = true; REC_MODE = mode; REC.length = 0; }
+export function recStop() { REC_ON = false; }
+export function recDump() { return REC.slice(); }
+export function recActive() { return REC_ON; }
+
+// --- runtime-tunable brain config (the auto-tuning gym) ----------------------
+// Mutates DEFAULT_BRAIN.config in place so a sweep can try different knob values
+// (bailBase, hurtClear, unstickDur, …) across matches WITHOUT a rebuild — every unit on
+// the default brain reads the new value next tick. getBrainConfig() with no key returns
+// a copy of the whole config so the harness can snapshot/restore it.
+export function setBrainConfig(k, v) { if (k in DEFAULT_BRAIN.config) DEFAULT_BRAIN.config[k] = v; return DEFAULT_BRAIN.config[k]; }
+export function getBrainConfig(k) { return k ? DEFAULT_BRAIN.config[k] : { ...DEFAULT_BRAIN.config }; }
+function maybeRecord(view, mem, reason, state, out) {
+  if (!REC_ON) return;
+  const key = state + '|' + reason;
+  if (REC_MODE !== 'all' && key === mem._recKey) return;   // only when the decision changes
+  mem._recKey = key;
+  const s = view.self, e = view.enemy;
+  REC.push({
+    t: +mem.t.toFixed(2), ty: s.type, reason, state,
+    hp: +s.hpFrac.toFixed(2), am: +s.ammoFrac.toFixed(2), fu: +s.fuelFrac.toFixed(2),
+    sees: !!view.seesEnemy, enemyD: e ? Math.round(Math.hypot(e.x - s.x, e.z - s.z)) : null,
+    threat: !!view.threat, threatLOS: !!view.threatLOS, demolish: !!view.demolishTarget, breakT: !!view.breakTarget,
+    near: (view.enemiesNear | 0) + 'v' + (view.alliesNear | 0), shotBlk: !!view.shotBlocked, enemyGone: !!view.enemyGone,
+    out: { f: +(out.fwd || 0).toFixed(2), t: +(out.turn || 0).toFixed(2), fire: !!out.fire, s: +(out.strafe || 0).toFixed(2) },
+  });
+  if (REC.length > REC_CAP) REC.shift();
+}
+
 // --- the interpreter ----------------------------------------------------
 // Walks `graph` against `view`, mutating `mem` (the per-unit latched memory =
 // the Brain instance). Reproduces the original think() order of operations exactly,
@@ -541,7 +577,9 @@ export function runBrain(graph, view, mem) {
   mem._lx = self.x; mem._lz = self.z;
   if (mem._unstick > 0) {
     mem._unstick -= view.dt;
-    return { fwd: -cfg.unstickRev, turn: mem._unstickTurn, fire: false, state: 'unstick' };
+    const r = { fwd: -cfg.unstickRev, turn: mem._unstickTurn, fire: false, state: 'unstick' };
+    maybeRecord(view, mem, 'unstick', 'unstick', r);
+    return r;
   }
   if (mem._wantMove && moved < cfg.stillEps) mem._stillT += view.dt; else mem._stillT = 0;
   // Progress wedge: a unit can SLIDE along a wall/turret at full speed (so the motion
@@ -591,7 +629,9 @@ export function runBrain(graph, view, mem) {
   // Overlay obstacle avoidance on the behavior's steering (commit to one way around,
   // keep firing) for any state that doesn't opt out — exit drives itself through the
   // gate, so it skips this.
-  return stateDef.skipWhiskers ? out : BEHAVIORS.avoid(ctx, out);
+  const result = stateDef.skipWhiskers ? out : BEHAVIORS.avoid(ctx, out);
+  maybeRecord(view, mem, rule.when, mode, result);
+  return result;
 }
 
 export class Brain {
