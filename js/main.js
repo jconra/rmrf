@@ -2055,7 +2055,7 @@ function updatePlayerHud() {
 // can be AI — enabling AI-vs-AI and (with more bases) N independent sides. A
 // HUMAN team is run by the player drive/deploy code instead. Perception is
 // team-relative (a unit only knows rivals it actually sees), so nothing cheats.
-const AI_VISION = 66;
+let AI_VISION = 66;   // how far an AI unit SEES an enemy (tunable via RR.setVision for A/B)
 // AI HEARING: how loud (same 0..1 audibility scale as the sound HUD) an unseen rival must
 // be before a unit investigates the noise. A heard contact only steers navigation — it is
 // NEVER a firing solution (enemy/seesEnemy stay line-of-sight). Gunfire easily clears this;
@@ -3045,6 +3045,15 @@ class AICommander {
   _maybeRecall() {
     if (!this.unit || this._recalling) return;
     if (this.strategy.step === this._stepAtDeploy) return;          // same beat → keep the current unit
+    // Don't turn our back on a live rival to go swap vehicles: a recalled unit drives home
+    // defenceless and gets shot in the back (a slow Jotun especially). Defer the swap while a
+    // rival is close — and DON'T consume the step change, so it re-attempts once the coast is
+    // clear. (Fixes: "jotun recalled to swap for a capture firebrat, turned its back, died".)
+    const up = this.unit.holder.position;
+    for (const o of combatants) {
+      if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
+      if ((o.holder.position.x - up.x) ** 2 + (o.holder.position.z - up.z) ** 2 < 52 * 52) return;
+    }
     // Compare against the type we'd ACTUALLY field (after save-last / role substitution),
     // not the raw role want — otherwise a unit that's already the best available substitute
     // gets recalled to "swap" for a wanted type we'd only re-substitute right back to it.
@@ -4870,6 +4879,8 @@ window.RR = {
   get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
   get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
   planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
+  setVision: (v) => { AI_VISION = v; return AI_VISION; },      // AI unit sight range (A/B the "less distraction" idea)
+  getVision: () => AI_VISION,
   recStart: (mode) => recStart(mode),                          // FLIGHT RECORDER: capture per-unit decision changes (mode 'changes'|'all')
   recStop: () => recStop(),
   recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]
