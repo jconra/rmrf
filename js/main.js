@@ -2465,7 +2465,7 @@ function planPath(v, dest) {
     if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
     return onRoad(i, j) ? 0.5 : 1;   // Warrior + default: roads are the cheap lane
   };
-  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true });
+  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes: 9000 });
   if (!path || path.length < 2) return null;
   return path.map(n => ({ x: n.i * c, z: n.j * c }));
 }
@@ -2535,12 +2535,19 @@ function avoidCell(x, z) {
 // when the path runs out. Returns a world {x,z}, or null to fall back to direct seek.
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
+  if (nav.failT > 0) nav.failT -= dt;
   const moved2 = nav.dx == null ? Infinity : (dest.x - nav.dx) ** 2 + (dest.z - nav.dz) ** 2;
   const c = grid.cell;
-  if (!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || moved2 > (c * 2) ** 2) {
+  // A FAILED plan (no route — unreachable/blocked goal) used to leave nav.path null, so the
+  // trigger below re-ran a full-grid A* search EVERY FRAME while a unit was stuck — ~80% of
+  // CPU in cellBlocked (the perf sawtooth). failT gates retries after a failure so we search
+  // at most a few times a second instead of 60×; a valid path (or a forced null) replans as before.
+  if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || moved2 > (c * 2) ** 2) && !(nav.failT > 0)) {
     nav.path = planPath(v, dest); nav.idx = 0; nav.t = 1.1; nav.dx = dest.x; nav.dz = dest.z;
+    nav.failT = nav.path ? 0 : 0.6;   // no route → don't re-run the search for 0.6s
     if (!nav.path) return null;
   }
+  if (!nav.path) return null;
   // Follow the path LOCALLY: consume the current waypoint only once the unit reaches it
   // (capture radius) or has clearly driven PAST it (it's nearer the NEXT node). Both
   // tests compare just idx vs idx+1, so the index marches forward one step at a time and
@@ -4862,6 +4869,7 @@ window.RR = {
   get gateSideCells() { return [...gateSideCells]; },
   get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
   get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
+  planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
   recStart: (mode) => recStart(mode),                          // FLIGHT RECORDER: capture per-unit decision changes (mode 'changes'|'all')
   recStop: () => recStop(),
   recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]

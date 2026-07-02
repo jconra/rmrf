@@ -8,7 +8,7 @@
 // onStep (optional) is a visualizer hook: it fires once per node popped off the
 // heap, with { cur:{i,j}, open:[{i,j}...] (the live frontier), path:[{i,j}...]
 // (best route to cur so far) }. It's guarded so normal pathfinding pays nothing.
-export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null }) {
+export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity }) {
   // Default is 4-connected (orthogonal) — road LAYOUT needs clean right-angle, connected
   // grids. allowDiagonal adds the 4 diagonals so UNIT NAV can cut straight across open
   // ground instead of staircasing. A diagonal step travels √2 as far, so it costs √2× the
@@ -39,8 +39,13 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   g.set(key(start.i, start.j, -1), 0);
   push({ i: start.i, j: start.j, d: -1, g: 0, f: h(start.i, start.j) });
 
+  let popped = 0;
   while (heap.length) {
     const cur = pop();
+    // SEARCH BOUND: an UNREACHABLE goal would otherwise expand the entire reachable grid
+    // (tens of thousands of cellBlocked calls) — and unit nav re-runs that constantly, which
+    // was the perf sawtooth. Give up past the bound and let the caller fall back / back off.
+    if (++popped > maxNodes) return null;
     const curK = key(cur.i, cur.j, cur.d);
     if (cur.g > (g.get(curK) ?? Infinity)) continue;
     if (onStep) {
