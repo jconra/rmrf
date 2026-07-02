@@ -416,6 +416,25 @@ const SHOT = QS.has('shot');
 // buries any real difference. Only the setup is seeded; in-match randomness stays live.
 function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 const doctrineRng = QS.has('dseed') ? mulberry32((+QS.get('dseed') >>> 0) || 1) : Math.random;
+
+// ?perf — on-device profiler: per-frame CPU time BROKEN DOWN by system, so a stutter's cause
+// is visible without DevTools (esp. on the phone, where there's no console). Off unless ?perf.
+const PERF = QS.has('perf');
+const _pfAcc = {};                                     // section → ms accumulated over the window
+let _pfFrames = 0, _pfWork = 0, _planCount = 0, _pfShownAt = 0;
+function _pfT(k, fn) { if (!PERF) return fn(); const t = performance.now(); fn(); _pfAcc[k] = (_pfAcc[k] || 0) + (performance.now() - t); }
+function _pfRender() {
+  const now = performance.now(); const win = now - _pfShownAt;
+  if (win < 300 || !_pfFrames) return;
+  _pfShownAt = now;
+  const fps = _pfFrames / (win / 1000), work = _pfWork / _pfFrames, rep = _planCount / (win / 1000);
+  let el = document.getElementById('perfhud');
+  if (!el) { el = document.createElement('div'); el.id = 'perfhud'; el.style.cssText = 'position:fixed;top:46px;right:8px;z-index:99;font:11px/1.35 monospace;color:#7fffb8;background:rgba(0,0,0,0.72);padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none'; document.body.appendChild(el); }
+  const secs = Object.entries(_pfAcc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k.padEnd(11)}${(v / _pfFrames).toFixed(1)}ms`);
+  el.textContent = `fps ${fps.toFixed(0)}  work ${work.toFixed(1)}ms\nreplans/s ${rep.toFixed(0)}  units ${combatants.length}  fx ${fx.length}\nscene ${scene.children.length}\n` + secs.join('\n');
+  for (const k in _pfAcc) _pfAcc[k] = 0;
+  _pfFrames = 0; _pfWork = 0; _planCount = 0;
+}
 const SHOT_SIZE = parseInt(QS.get('size')) || 96;
 const SHOT_FOL = QS.has('fol');
 const SHOT_SEED = QS.has('seed') ? parseInt(QS.get('seed')) : null;
@@ -2421,6 +2440,7 @@ function forestHas(k) {
   return forestCells.has(k);
 }
 function planPath(v, dest) {
+  if (PERF) _planCount++;
   const c = grid.cell;
   const start = { i: Math.round(v.holder.position.x / c), j: Math.round(v.holder.position.z / c) };
   let goal = { i: Math.round(dest.x / c), j: Math.round(dest.z / c) };
@@ -3400,6 +3420,7 @@ class AICommander {
       support: turretCountOf(this.team) > 0 ? this.homeBasePos() : null,   // rally toward own tower cover (ai_behavior duels)
       threat, threatLOS, flankSide, threatStand, demolishTarget, breakTarget, engageRange: ENGAGE_RANGE[v.type] || 36,
       fofW: fofFor(this.team),   // this team's fight-or-flight weight set (tunable / A/B)
+      hqThreat,   // the suppress target is the enemy KEEP (not a tower) — for logs/recorder
       goal: mustGo ? this._exit : goal,
       mustGo,
       resupply: supply ? { x: supply.center.x, z: supply.center.z } : goal,
@@ -5146,6 +5167,7 @@ let _splashHidden = false;
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
+  const _pfStart = PERF ? performance.now() : 0;
   const fade = document.getElementById('deployfade');
   if (garage && !onField) {
     garage.update(dt);
@@ -5167,32 +5189,27 @@ function animate() {
       updateTouchAim();                      // aim stick → _aimPoint/fireHeld (before drive reads them)
       if (!driveUpdate(dt)) spectateUpdate(dt) || panUpdate(dt);   // player, else follow the action / free cam
       trackVelocities(dt);                 // per-vehicle velocity for AI aim-leading
-      if (!matchOver) updateCommanders(dt);  // AI teams (fog-of-war) + flag carry/capture — frozen on win
-      for (const c of camps) c.update(dt);
-      for (const w of placedWalls) w.update(dt);   // placed fort crumble + turret swing
-      for (const e of elevators) e.update(dt);
-      for (const v of vehicles) v.idle(dt);
-      updateShadows();                       // ground-projected vehicle silhouette shadows
-      projectiles.update(dt);
-      updateProjectileHits();
+      _pfT('ai', () => { if (!matchOver) updateCommanders(dt); });  // AI teams (fog-of-war) + A* nav + flag carry
+      _pfT('structs', () => { for (const c of camps) c.update(dt); for (const w of placedWalls) w.update(dt); for (const e of elevators) e.update(dt); for (const v of vehicles) v.idle(dt); });
+      _pfT('shadows', () => updateShadows());  // ground-projected vehicle silhouette shadows
+      _pfT('projectiles', () => { projectiles.update(dt); updateProjectileHits(); });
       if (foliage) foliage.update(dt);       // tree topple animations
       waterT += dt; map.tickWater(waterT);   // animate the water-surface ripples
-      destructibles.update(dt);
+      _pfT('destruct', () => destructibles.update(dt));
       updateFx(dt);
       updateHealthBars();
       updateLock(dt);                        // Valkyrie target box: track + colour the lock
       updateAimReticle();                    // cursor crosshair (other vehicles) + aim point
-      updateSoundHud(dt);                    // edge-glow cue toward off-screen enemy noise (sound awareness)
+      _pfT('sound', () => { updateSoundHud(dt); updateEngineSounds(); });  // sound HUD + spatial engine noise
       if (touchUsed) orientAimArc();         // keep the touch aim wedge pointing the way the vehicle faces (screen-relative)
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
-      updateWallTurrets(dt);                 // base corner turrets fire on intruders in range
+      _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
-      updateEngineSounds();                  // spatial enemy/AI engine noise (distance-based)
     }
     updateAiLog();                         // AI decision overlay (renders even while paused)
     updateNavOverlay();                    // ?nav: draw each unit's A* path (also while paused)
-    renderer.render(scene, camera);
+    _pfT('render', () => renderer.render(scene, camera));
     if (fade) {
       if (returning && victoryReturn) {
         // Victory: stay clear so the confetti + descending Firebrat are visible,
@@ -5222,6 +5239,7 @@ function animate() {
     if (window.__rmrfHideSplash) window.__rmrfHideSplash();
   }
 
+  if (PERF) { _pfWork += performance.now() - _pfStart; _pfFrames++; _pfRender(); }
   perfTick++;
   fpsEma += (1 / Math.max(dt, 0.0001) - fpsEma) * 0.08;
   if (perfEl && perfTick % 20 === 0) {

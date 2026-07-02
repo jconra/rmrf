@@ -595,7 +595,7 @@ function maybeRecord(view, mem, reason, state, out) {
     t: +mem.t.toFixed(2), ty: s.type, reason, state,
     hp: +s.hpFrac.toFixed(2), am: +s.ammoFrac.toFixed(2), fu: +s.fuelFrac.toFixed(2),
     sees: !!view.seesEnemy, enemyD: e ? Math.round(Math.hypot(e.x - s.x, e.z - s.z)) : null,
-    threat: !!view.threat, threatLOS: !!view.threatLOS, demolish: !!view.demolishTarget, breakT: !!view.breakTarget,
+    threat: !!view.threat, threatLOS: !!view.threatLOS, hqT: !!view.hqThreat, demolish: !!view.demolishTarget, breakT: !!view.breakTarget,
     near: (view.enemiesNear | 0) + 'v' + (view.alliesNear | 0), shotBlk: !!view.shotBlocked, enemyGone: !!view.enemyGone,
     fof: mem._fof != null ? +mem._fof.toFixed(2) : null,
     out: { f: +(out.fwd || 0).toFixed(2), t: +(out.turn || 0).toFixed(2), fire: !!out.fire, s: +(out.strafe || 0).toFixed(2) },
