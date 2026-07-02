@@ -97,6 +97,18 @@ function fightScore(v, p) {
     // generalises the Jotun's "can't run, so doesn't" to ANY cornered unit (a hurt Lurcher
     // chased by a Valkyrie shouldn't turn its back). Weighted so a decent matchup still fights.
     if (!v.flyer && (SPEED[s.type] || 2) < (SPEED[et] || 2)) w += 1.6;
+    // FACING / POSITIONAL ADVANTAGE: who has whose back? A rival turned away has to swing
+    // around before it can shoot back, so we get free hits — press. If WE'RE the one caught
+    // facing away, they'll land the first shots — lean toward disengaging. (Front is local
+    // -Z, so forward = (-sin h, -cos h).) Symmetric: whoever's exposed reads a flee bias.
+    if (v.enemy.heading != null) {
+      const dx = v.enemy.x - s.x, dz = v.enemy.z - s.z, d = Math.hypot(dx, dz) || 1;
+      const nx = dx / d, nz = dz / d;
+      const iFace = (-Math.sin(s.heading)) * nx + (-Math.cos(s.heading)) * nz;               // +1 = we're pointed at them
+      const theyFace = (-Math.sin(v.enemy.heading)) * (-nx) + (-Math.cos(v.enemy.heading)) * (-nz);  // +1 = they're pointed at us
+      if (iFace > 0.4 && theyFace < 0) w += 1.0;                  // we have their back → free damage, press
+      if (theyFace > 0.4 && iFace < 0) w -= 1.0;                  // they have ours → they shoot first, disengage
+    }
   }
   // The Jotun can't run, so it doesn't: as long as it has ammo it stands, swings the
   // railgun onto the target and fights regardless of the odds. (Out of ammo, it falls
