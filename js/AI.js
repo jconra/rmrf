@@ -170,12 +170,35 @@ const CONDITIONS = {
     // DISTANT enemy — it only breaks off to brawl one that's actually close. brawlR shrinks
     // with focus (focus 0 → ~1.25× weapon range = fights on sight; focus 1 → ~0.5× = only up
     // close). An ATTACK mission still fights: its GOAL is the enemy, so it drives in to brawlR.
-    if (v.enemy && p.focus) {
+    // The JOTUN is exempt: it's far too slow to run, so there's no "too far to be worth leaving
+    // the mission" — it must answer ANY rival it sees, or it gets caught fleeing and dies (the
+    // "Jotun flees a Valkyrie at 5% HP" bug). It always has fof ≥ jotunFloor when it has ammo.
+    if (v.enemy && p.focus && v.self.type !== 'jotun') {
       const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
       const brawlR = (v.engageRange || 36) * (1.25 - 0.75 * p.focus);
       if (dx * dx + dz * dz > brawlR * brawlR) return false;   // too far to be worth leaving the mission
     }
     return true;
+  },
+  // IMMEDIATE VEHICLE THREAT — an enemy vehicle is right on top of us and we CANNOT cleanly
+  // get away (we're no flyer and no faster than it). Turning our back to keep sieging, to grab
+  // a shield, or to limp home just gets us shot in the spine — so we stand and fight. This sits
+  // at the TOP of the ladder (above the objective AND the hurt-retreat): spotting a rival vehicle
+  // and answering it outranks any siege/advance goal. Escapable units (flyers / faster) fall
+  // through to the normal weighted fight-or-flight. Gated by cfg.mustFight so it's A/B-toggleable.
+  underAttack: (v, m, p, cfg) => {
+    if (!cfg.mustFight || !v.seesEnemy || !v.enemy || ammoFrac(v) <= 0) return false;
+    const s = v.self, et = v.enemy.type;
+    if (v.flyer || (SPEED[s.type] || 2) > (SPEED[et] || 2)) return false;   // can outrun it → let normal fof/flee decide
+    // Trigger on an ACTUAL immediate threat, not mere nearness: either the rival is shooting us
+    // (underFire) or it's already inside our own weapon range (adjacent → we'd trade anyway). A
+    // rival merely loitering at mid-range does NOT pull us off a siege — we fight it once it
+    // actually engages/closes. This keeps sieges progressing while still never fleeing/ignoring a
+    // real attacker we can't outrun.
+    if (v.underFire) return true;
+    const dx = v.enemy.x - s.x, dz = v.enemy.z - s.z;
+    const reach = (v.engageRange || 36) * 1.05;
+    return dx * dx + dz * dz <= reach * reach;
   },
   // A wall-turret is shelling us and we still have teeth → silence it first.
   threatened: (v, m, p, cfg) => !!v.threat && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type),
@@ -544,6 +567,7 @@ export const DEFAULT_BRAIN = {
     fuelOK: 0.25,        // fuel that's "enough to carry on" — the bar the OTHER resource must clear at a depot
     ammoOK: 0.5,         // ammo that's "enough to carry on"
     topFull: 0.99,       // at an OWN BASE (heals too) don't leave until ammo, fuel AND hp are ALL maxed
+    mustFight: 1,        // 1 = an inescapable enemy vehicle on top of us pre-empts the objective (see `underAttack`); 0 = old behaviour (A/B knob)
   },
   // Latched interrupts: once tripped they hold (hysteresis) until their clear
   // condition, and force the matching state via the transition table below.
@@ -568,6 +592,9 @@ export const DEFAULT_BRAIN = {
   transitions: [
     { when: 'mustGo',       mode: 'exit',     target: 'goal' },
     { when: 'runnerFlee',   mode: 'flee',     target: 'goal' },
+    // IMMEDIATE VEHICLE THREAT leads everything below the gate/runner: an inescapable rival on
+    // top of us gets answered NOW — never keep sieging or flee-to-heal with our back to it.
+    { when: 'underAttack',  mode: 'engage',   target: 'enemy' },
     // SECURE THE SHIELD: committed to a close generator → grab the armour BEFORE picking a fight
     // (outranks engage/suppress). It's a short beeline; once topped up the commit clears and normal
     // fight-or-flight resumes. Stops units fighting next to a shield they never actually pick up.

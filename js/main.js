@@ -19,7 +19,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=82';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=84';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
@@ -1625,6 +1625,9 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null) {
     if (veh.shield <= 0 && veh._shieldFx) veh._shieldFx.visible = false;
   }
   if (amount > 0) veh.hp -= amount;
+  // Stamp when an ENEMY VEHICLE last hit us (shield hits count — we're still under fire). The
+  // AI uses this to answer an attacker it can't outrun instead of sieging on / fleeing (underFire).
+  if (cause === 'vehicle' && shooter && shooter !== veh && shooter.team !== veh.team) veh._hitByVehT = performance.now();
   if (veh.bar) updateHealthBar(veh);
   if (veh.isPlayer) updatePlayerHud();
   // COMBAT LOG (deep view): vehicle-vs-vehicle hits only, and only when the hull actually
@@ -3515,6 +3518,8 @@ class AICommander {
       dt,
       self: { x: px, z: pz, heading: h, type: v.type, shield: v.shield, hpFrac: v.hp / v.maxHp, fuelFrac: v.fuel / v.maxFuel, ammoFrac: v.ammo / v.maxAmmo },
       seesEnemy, enemy, heard, enemiesNear, alliesNear, flyer, shotArc: SHOT_ARC[v.type] ?? Math.PI / 5,
+      underFire: (performance.now() - (v._hitByVehT || -1e9)) < 1600,   // an enemy vehicle shot us in the last ~1.6s
+
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
       // the enemy → the firing lane is blocked; the combat brain sidesteps to clear it.
       shotBlocked: (v._blockedShots || 0) >= 2 && (performance.now() - (v._lastBlockT || 0)) < 2000,
@@ -3743,6 +3748,9 @@ function playDefeat() { clearCeleb(); showCelebTitle('DEFEAT', '#ff6a6a', 'FLAG 
 let aiLogMode = (QS.has('ailog') || SPECTATE) ? 'brief' : 'hidden';
 let paused = false;    // game frozen while the log is expanded full-screen
 const aiEvents = [];   // rolling [{t, team, msg}] — low-frequency DECISION events
+// Build tag shown in the AI LOG header — pulled from THIS script's own ?v= cache-bust so it
+// always reflects the build actually loaded (handy for confirming a phone got the new version).
+const AI_LOG_BUILD = (() => { try { return 'v' + (new URL(import.meta.url).searchParams.get('v') || '?'); } catch (e) { return ''; } })();
 const _t0 = performance.now();
 function aiLog(team, msg) {
   aiEvents.push({ t: (performance.now() - _t0) / 1000, team, msg });
@@ -3799,7 +3807,7 @@ function ensureAiLogEl() {
   ensureLogStyle();
   el = document.createElement('div'); el.id = 'ai-log';
   el.innerHTML =
-    '<div id="ai-log-head"><span id="ai-log-title">AI LOG</span>' +
+    `<div id="ai-log-head"><span id="ai-log-title">AI LOG · ${AI_LOG_BUILD}</span>` +
     '<span id="ai-log-btns"><span class="lg-btn" data-act="export" title="Copy a snapshot to share">⧉</span>' +
     '<span class="lg-btn" data-act="minus">–</span>' +
     '<span class="lg-btn" data-act="plus">+</span></span></div>' +
@@ -3831,7 +3839,7 @@ function updateAiLog() {
   if (aiLogMode === 'hidden') { if (el) el.style.display = 'none'; return; }
   const box = ensureAiLogEl(); box.style.display = '';
   box.className = aiLogMode;
-  document.getElementById('ai-log-title').textContent = aiLogMode === 'full' ? 'AI LOG · PAUSED' : 'AI LOG';
+  document.getElementById('ai-log-title').textContent = aiLogMode === 'full' ? `AI LOG · ${AI_LOG_BUILD} · PAUSED` : `AI LOG · ${AI_LOG_BUILD}`;
   // The most-recent event for a team (its "running" line), or null.
   const latestFor = team => { for (let i = aiEvents.length - 1; i >= 0; i--) if (aiEvents[i].team === team) return aiEvents[i]; return null; };
   let html = '';
