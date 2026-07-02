@@ -26,12 +26,12 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=69';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=70';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
-import { makePartsPallet, makeWreckage } from './Scrap.js?v=2';
+import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
 import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
 
 // --- Renderer ----------------------------------------------------------
@@ -701,7 +701,10 @@ let elevators = [];   // animated FOB surface lifts (one per forward base)
 let resupplies = [];  // neutral fuel/ammo/shield points of interest
 let scrapPiles = [];  // salvage piles (1 scrap each) — drive over one to collect it for your team
 const teamScrap = { red: 0, blue: 0 };   // scrap banked per team; spent in the garage to build vehicles
+const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
+let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // piles a destroyed vehicle leaves behind
+const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
 const BUILD_COST = { jotun: 5, valkyrie: 5, lurcher: 3, firebrat: 2 };   // scrap to build one (garage, slice 2)
 let onField = false;  // true while the island is on screen (false = hangar view)
 let fieldBuilt = false; // the island is generated once, then reused across deploys
@@ -2440,10 +2443,13 @@ function updateResupplies(dt) {
 const SCRAP_PICKUP_R = 6;   // how close a vehicle must get to snag a pile
 
 // kind 'parts' = organized delivery pallet (world scatter); 'wreck' = blown-up vehicle
-// debris (death drop, tinted to the dead vehicle's team via teamHex).
-function addScrapPile(x, z, kind = 'parts', teamHex = null) {
+// debris (death drop) — its armor plates wear the dead vehicle's team camo.
+function addScrapPile(x, z, kind = 'parts', colorIndex = null) {
   const g = (kind === 'wreck' ? makeWreckage : makePartsPallet)(grid.cell);
-  if (teamHex != null && g.userData.setTeamColor) g.userData.setTeamColor(teamHex);
+  if (colorIndex != null) {
+    if (kind === 'wreck' && g.userData.setCamo) g.userData.setCamo(colorIndex);           // camo the plates
+    else if (g.userData.setTeamColor && TEAM_COLORS[colorIndex]) g.userData.setTeamColor(TEAM_COLORS[colorIndex].hex);
+  }
   const gy = map.heightAt(x, z);
   g.position.set(x, gy + 0.04, z);
   g.rotation.y = Math.random() * Math.PI * 2;
@@ -2455,13 +2461,12 @@ function addScrapPile(x, z, kind = 'parts', teamHex = null) {
 
 // A destroyed vehicle leaves SCRAP_DROP[type] wreckage piles, scattered around the wreck.
 function dropScrap(pos, type, colorIndex) {
-  const hex = (TEAM_COLORS[colorIndex] && TEAM_COLORS[colorIndex].hex) || null;
   const n = SCRAP_DROP[type] || 1;
   for (let i = 0; i < n; i++) {
     const ang = Math.random() * Math.PI * 2, r = grid.cell * (0.5 + Math.random() * 0.9);
     let x = pos.x + Math.cos(ang) * r, z = pos.z + Math.sin(ang) * r;
     if (!map.isLand(x, z)) { x = pos.x; z = pos.z; }   // don't fling salvage into the sea
-    addScrapPile(x, z, 'wreck', hex);
+    addScrapPile(x, z, 'wreck', colorIndex);
   }
 }
 
@@ -2522,12 +2527,12 @@ function updateScrap(dt) {
   for (let i = scrapPiles.length - 1; i >= 0; i--) {
     const p = scrapPiles[i];
     p.bob += dt * 2;
-    p.group.position.y = p.pos.y + 0.04 + Math.sin(p.bob) * 0.05;   // gentle bob so it reads as a pickup
-    p.group.rotation.y += dt * 0.4;
+    p.group.position.y = p.pos.y + 0.04 + Math.sin(p.bob) * 0.05;   // gentle bob so it reads as a pickup (no spin — a heavy wreck/pallet shouldn't rotate)
     for (const v of combatants) {
       if (v.dead) continue;
       if (Math.hypot(v.holder.position.x - p.pos.x, v.holder.position.z - p.pos.z) <= SCRAP_PICKUP_R) {
         spawnScrapPop(p.pos);
+        p._gone = true;                 // let commanders prune it from their known-scrap intel
         scene.remove(p.group);
         scrapPiles.splice(i, 1);
         collectScrap(v.team);
@@ -2772,6 +2777,7 @@ class AICommander {
     this.fortHp0 = null;                              // enemy fort HP when this card started
     this.seenTypes = {};                              // rival vehicle types this team has spotted
     this.knownSupplies = new Set();                   // fog-of-war: resupply POIs this team has SCOUTED
+    this.knownScrap = new Set();                       // fog-of-war: salvage piles this team has SPOTTED
     this.knownElev = false;                           // scouted the enemy FOB/elevator yet?
     this.knownFlag = false;                           // scouted the enemy flag HQ yet?
     this._knownSig = '';                              // last logged known-POI signature (log only on change)
@@ -2968,6 +2974,43 @@ class AICommander {
   }
   // Total vehicles this commander has left to field (the fielded unit still counts).
   fleetLeft() { let n = 0; for (const k in this.roster) n += this.roster[k]; return n; }
+  // --- SALVAGE: this team's scrap bank + building from it ---
+  scrap() { return teamScrap[this.team] || 0; }
+  canAfford(type) { return this.scrap() >= (BUILD_COST[type] || 99); }
+  // Build one of `type` from salvage — capped at the base garage count (same finite fleet
+  // as the player). Returns true if it went through; adds it to the deployable roster.
+  buildUnit(type) {
+    const cost = BUILD_COST[type] || 99;
+    if (this.scrap() < cost) return false;
+    if ((this.roster[type] || 0) >= (GARAGE_COUNTS[type] || 0)) return false;   // already at base cap
+    teamScrap[this.team] -= cost;
+    this.roster[type] = (this.roster[type] || 0) + 1;
+    scrapBuilds[this.team] = (scrapBuilds[this.team] || 0) + 1;
+    if (viewerTeam() === this.team) updateScrapHud();
+    aiLog(this.team, `${this.cname}: We've got the parts — building a fresh ${type}! (${this.scrap()} scrap left)`);
+    return true;
+  }
+  // Nearest salvage pile this team has SPOTTED and that's still on the field (prunes collected
+  // ones). Drives the Scavenge mission + the opportunistic pickup detour.
+  nearestKnownScrapPt(x, z) {
+    let best = null, bd = Infinity;
+    for (const p of this.knownScrap) {
+      if (p._gone) continue;
+      const d = (p.pos.x - x) ** 2 + (p.pos.z - z) ** 2;
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best ? { x: best.pos.x, z: best.pos.z } : null;
+  }
+  // We need the flag RUNNER to win (their defenses are cracking) but have no firebrat and
+  // can't afford to build one → go collect salvage until we can. (Only worth it if there's
+  // scrap to find: a known pile, or map left to scout for one.)
+  needsPartsRun() {
+    if (!aiScrapBuild) return false;
+    if ((this.roster.firebrat || 0) > 0 || this.canAfford('firebrat')) return false;
+    if (!this.fortDown() && !this.flagExposed()) return false;   // not yet at the win-by-capture phase
+    const px = this.unit ? this.unit.holder.position.x : 0, pz = this.unit ? this.unit.holder.position.z : 0;
+    return !!this.nearestKnownScrapPt(px, pz) || this.explore.fraction() < 0.8;
+  }
   // The type to actually field: the wanted one if any remain, else a same-class
   // substitute, else whatever we have most of, else null (roster empty → eliminated).
   _pickAvailableType(want) {
@@ -3025,8 +3068,17 @@ class AICommander {
 
   deploy() {
     const want = this.strategy.wantVehicle(this);
-    const type = this._pickAvailableType(want);
-    if (!type) {                               // roster empty — this commander is out of the fight
+    let type = this._pickAvailableType(want);
+    // SALVAGE REINFORCEMENT: build the flag RUNNER when the plan needs one and we're out. The
+    // firebrat has no substitute, so a commander that's lost them all can't win by capture — so
+    // it spends the scrap bank to field a fresh one. Deliberately NOT a full resurrection: a
+    // wholly-wiped team (type === null) still gets eliminated, or matches would never end (a
+    // resurrecting team can't be beaten by elimination — measured -3/16 resolved). The build
+    // only applies while the team is otherwise still alive.
+    if (aiScrapBuild && want === 'firebrat' && (this.roster.firebrat || 0) === 0 && type !== null && type !== 'firebrat' && this.buildUnit('firebrat')) {
+      type = 'firebrat';
+    }
+    if (!type) {                               // roster empty AND can't afford a rebuild — out of the fight
       this.unit = null;
       if (!this._eliminated) { this._eliminated = true; aiLog(this.team, `${this.cname}: We're combat ineffective — no vehicles left! We're out!`); }
       return;
@@ -3440,6 +3492,13 @@ class AICommander {
       const d2 = (rp.pos.x - px) ** 2 + (rp.pos.z - pz) ** 2;
       if (d2 < sight * sight && (flyer || hasLOS(px, pz, rp.pos.x, rp.pos.z))) this.knownSupplies.add(rp);
     }
+    // Same fog-of-war for SALVAGE piles — a unit only "knows" a pile once it's seen it (so
+    // scavenging is a scouting reward, not omniscient). Low debris → normal sight, LOS for ground.
+    for (const p of scrapPiles) {
+      if (p._gone || this.knownScrap.has(p)) continue;
+      const d2 = (p.pos.x - px) ** 2 + (p.pos.z - pz) ** 2;
+      if (d2 < AI_VISION * AI_VISION && (flyer || hasLOS(px, pz, p.pos.x, p.pos.z))) this.knownScrap.add(p);
+    }
     // Same fog-of-war for the enemy's key STRUCTURES (its FOB/elevator + flag HQ): the
     // team only "knows" one once a unit has come within sight of it (tall towers carry, so
     // a wider sight than a crate; LOS for ground). Tracked for the known-POI log readout.
@@ -3484,6 +3543,16 @@ class AICommander {
     }
     if (this._shieldRun && !this._shieldRunOn) shieldBark(this, v, 'grab');   // announce the commit once
     this._shieldRunOn = this._shieldRun;
+    // OPPORTUNISTIC SALVAGE: swing over to a spotted scrap pile that's nearly on our path (free
+    // parts for the build bank). Short-range so it never drags a unit far off its real objective;
+    // skipped for the slow Jotun, active siegers, flag runners/carriers, and while already detouring.
+    this._scrapDetour = false;
+    if (!this._shielding && !this._intercepting && v.type !== 'jotun'
+        && this.strategy.step !== 'siege' && this.strategy.step !== 'capture' && this.strategy.step !== 'scavenge'
+        && !(this.flag() && this.flag().carrier === v)) {
+      const sp = this.nearestKnownScrapPt(px, pz);
+      if (sp && Math.hypot(sp.x - px, sp.z - pz) < SCRAP_GRAB_RANGE) { goal = { x: sp.x, z: sp.z }; this._scrapDetour = true; }
+    }
     // Where to rearm/refuel: the NEAREST valid source for what we need — own base
     // (always restocks fuel + ammo) OR a DISCOVERED neutral depot. A neutral depot gives
     // just ONE resource, so we only divert to one when topping it gets the unit combat-
@@ -3662,7 +3731,7 @@ class AICommander {
       // thing to shell — so suppress shootGoal or the unit would "assault" (and gun down) the
       // shield generator / intercept spot it's heading for. It still engages real enemies via
       // the combat transitions; this only stops it firing at the detour waypoint.
-      shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting,
+      shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
       finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
 
       shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
@@ -5201,8 +5270,10 @@ window.RR = {
   get resupplies() { return resupplies; },
   get scrapPiles() { return scrapPiles; },       // live salvage piles on the field
   get teamScrap() { return { ...teamScrap }; },   // scrap banked per team
+  get scrapBuilds() { return { ...scrapBuilds }; },   // vehicles built from salvage this match
   setTeamScrap: (team, n) => { if (team in teamScrap) teamScrap[team] = n | 0; return teamScrap[team]; },
   buildVehicle: (type) => buildVehicle(type),     // spend scrap → replace a lost vehicle (garage)
+  setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
   get playerLosses() { return playerLosses; },
   get matchOver() { return matchOver; },
   get matchWon() { return matchWon; },

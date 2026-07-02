@@ -218,7 +218,27 @@ class Intercept extends Mission {
   ]); }
 }
 
-const MISSIONS = { scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept };
+// SCAVENGE — "find parts": we need a flag RUNNER to win but have none and can't afford to
+// build one, so send a unit to collect salvage (known piles first, else scout for more) until
+// the bank can fund a firebrat. Don't pick fights — this is a supply run.
+class Scavenge extends Mission {
+  get key() { return 'scavenge'; }
+  wantVehicle(cmd) { return cmd._pickAvailableType('lurcher') || 'lurcher'; }   // a mobile collector, never our (missing) firebrat
+  objective(cmd) {
+    const u = cmd.unit ? cmd.unit.holder.position : { x: 0, z: 0 };
+    return cmd.nearestKnownScrapPt(u.x, u.z) || cmd.exploreTarget() || cmd.enemyFobPos();
+  }
+  shoot(cmd) { return false; }
+  arriveDist(cmd) { return 4; }
+  label(cmd) { return cmd.nearestKnownScrapPt(cmd.unit ? cmd.unit.holder.position.x : 0, cmd.unit ? cmd.unit.holder.position.z : 0) ? 'running down salvage for parts' : 'scouting for salvage'; }
+  cry(cmd) { return pickCry(cmd, [
+    'We’re out of runners — scrounge the wrecks for parts, we need to build one!',
+    'No firebrat, no flag. Go collect every scrap of salvage you can find!',
+    'Comb the field for parts — we can’t win without a runner!',
+  ]); }
+}
+
+const MISSIONS = { scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 
 // ---- DOCTRINE — a persona running one mission at a time ------------------------------
@@ -263,6 +283,10 @@ class Doctrine {
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
     if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) next = 'defend';
+    // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
+    // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
+    // without a firebrat to actually grab the exposed flag).
+    if (!next && cmd.needsPartsRun && cmd.needsPartsRun()) next = 'scavenge';
     // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
     // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
     // dueling their leftover units. Without this, Hunter-type doctrines only siege on full

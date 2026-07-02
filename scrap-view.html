@@ -6,7 +6,7 @@
 </head><body>
 <script type="module">
 import * as THREE from 'three';
-import { makePartsPallet, makeWreckage } from './js/Scrap.js?v=2';
+import { makePartsPallet, makeWreckage } from './js/Scrap.js?v=3';
 const S = 5;                                    // build-grid cell (matches the game)
 const W = 1100, H = 460;
 const renderer = new THREE.WebGLRenderer({ antialias:true });
@@ -18,16 +18,17 @@ const ground = new THREE.Mesh(new THREE.PlaneGeometry(200,200),
 ground.rotation.x = -Math.PI/2; scene.add(ground);
 scene.add(new THREE.HemisphereLight(0xbfd6ff, 0x6b5a3a, 0.9));
 const sun = new THREE.DirectionalLight(0xfff2d8, 1.5); sun.position.set(8,14,6); scene.add(sun);
-// left → right: PARTS (neutral), PARTS (red case), WRECKAGE (red), WRECKAGE (blue)
+// left → right: PARTS (neutral), PARTS (red case), WRECKAGE (RED camo), WRECKAGE (BLUE camo)
 const specs = [
   { x:-S*3.6, make:makePartsPallet, hex:null },
-  { x:-S*1.2, make:makePartsPallet, hex:'#e0402a' },
-  { x: S*1.2, make:makeWreckage,    hex:'#e0402a' },
-  { x: S*3.6, make:makeWreckage,    hex:'#2a6fe0' },
+  { x:-S*1.2, make:makePartsPallet, hex:'#9e2e2e' },
+  { x: S*1.2, make:makeWreckage,    ci:4 },   // RED
+  { x: S*3.6, make:makeWreckage,    ci:5 },   // BLUE
 ];
 for (const sp of specs) {
   const g = sp.make(S); g.position.x = sp.x;
-  if (sp.hex && g.userData.setTeamColor) g.userData.setTeamColor(sp.hex);
+  if (sp.ci != null && g.userData.setCamo) g.userData.setCamo(sp.ci);
+  else if (sp.hex && g.userData.setTeamColor) g.userData.setTeamColor(sp.hex);
   scene.add(g);
 }
 const cam = new THREE.PerspectiveCamera(42, W/H, 0.1, 200);

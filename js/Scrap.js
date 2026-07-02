@@ -8,6 +8,7 @@
 // Jacob refines these in the asset-designer — keep them simple.
 
 import * as THREE from 'three';
+import { getCamoTextures } from './CamoTexture.js';
 
 const WOOD   = () => new THREE.MeshStandardMaterial({ color: 0x6b4a2b, roughness: 0.9, metalness: 0.05, flatShading: true });
 const CRATE  = () => new THREE.MeshStandardMaterial({ color: 0x7a6033, roughness: 0.85, metalness: 0.08, flatShading: true });
@@ -78,53 +79,58 @@ export function makePartsPallet(s = 5) {
 export function makeWreckage(s = 5) {
   const g = new THREE.Group();
 
-  // charred scorch patch on the ground
-  const scar = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.75, s * 0.8, s * 0.03, 12), CHAR());
-  scar.position.y = s * 0.015; g.add(scar);
+  // small, subtle scorch under the debris (not a big black disc) — dark charred earth
+  const scar = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.44, s * 0.5, s * 0.02, 12),
+    new THREE.MeshStandardMaterial({ color: 0x342a20, roughness: 1.0, metalness: 0.0, flatShading: true }));
+  scar.position.y = s * 0.01; g.add(scar);
 
-  // bent CAMO armor plates (tinted to the destroyed vehicle's team via setTeamColor)
+  // two bent CAMO armor plates — the actual team camo goes on these via setCamo()
   const plates = [];
   const plateSpec = [
-    { w: 0.6, h: 0.04, d: 0.45, x: -0.1, y: 0.16, z: 0.05, rx: 0.5, ry: 0.3, rz: -0.25 },
-    { w: 0.5, h: 0.04, d: 0.4,  x: 0.22, y: 0.1,  z: -0.1, rx: -0.35, ry: -0.6, rz: 0.4 },
-    { w: 0.34, h: 0.035, d: 0.3, x: 0.02, y: 0.28, z: 0.18, rx: 0.9, ry: 0.2, rz: 0.15 },
+    { w: 0.58, h: 0.05, d: 0.44, x: -0.08, y: 0.15, z: 0.04, rx: 0.5, ry: 0.3, rz: -0.22 },
+    { w: 0.48, h: 0.05, d: 0.38, x: 0.2,  y: 0.1,  z: -0.1, rx: -0.32, ry: -0.6, rz: 0.4 },
   ];
   for (const p of plateSpec) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(p.w * s, p.h * s, p.d * s),
-      new THREE.MeshStandardMaterial({ color: 0x545a49, roughness: 0.75, metalness: 0.4, flatShading: true }));
+      new THREE.MeshStandardMaterial({ color: 0x5b6150, roughness: 0.75, metalness: 0.4, flatShading: true }));
     m.position.set(p.x * s, p.y * s, p.z * s);
     m.rotation.set(p.rx, p.ry, p.rz);
     g.add(m); plates.push(m);
   }
 
-  // black cylinders — a barrel on its side + a bent pipe/exhaust jutting up
-  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.14, s * 0.14, s * 0.5, 10), DARKM());
+  // one black cylinder (barrel on its side) + a dark cone (nose debris) — the "cones + black
+  // cylinders" of a blown-up vehicle, kept sparse so it doesn't read as a heap.
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.13, s * 0.13, s * 0.46, 10), DARKM());
   barrel.rotation.z = Math.PI / 2; barrel.rotation.y = 0.4;
-  barrel.position.set(-s * 0.28, s * 0.14, -s * 0.2); g.add(barrel);
-  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.05, s * 0.06, s * 0.5, 8), DARKM());
-  pipe.rotation.set(0.5, 0, 0.6); pipe.position.set(s * 0.26, s * 0.24, s * 0.16); g.add(pipe);
+  barrel.position.set(-s * 0.26, s * 0.13, -s * 0.16); g.add(barrel);
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(s * 0.16, s * 0.32, 8), DARKM());
+  cone.rotation.z = Math.PI * 0.6; cone.position.set(s * 0.3, s * 0.12, -s * 0.2); g.add(cone);
 
-  // dark cones — nose/tip debris, tipped over
-  const cone1 = new THREE.Mesh(new THREE.ConeGeometry(s * 0.17, s * 0.34, 8), DARKM());
-  cone1.rotation.z = Math.PI * 0.62; cone1.position.set(s * 0.32, s * 0.13, -s * 0.24); g.add(cone1);
-  const cone2 = new THREE.Mesh(new THREE.ConeGeometry(s * 0.12, s * 0.26, 7), DARKM());
-  cone2.rotation.x = 0.4; cone2.position.set(-s * 0.05, s * 0.14, s * 0.3); g.add(cone2);
-
-  // a few small charred chunks
-  for (let i = 0; i < 4; i++) {
-    const c = new THREE.Mesh(new THREE.BoxGeometry(s * 0.1, s * 0.1, s * 0.12), CHAR());
-    const a = Math.random() * Math.PI * 2, r = s * (0.15 + Math.random() * 0.4);
-    c.position.set(Math.cos(a) * r, s * 0.05, Math.sin(a) * r);
-    c.rotation.set(Math.random(), Math.random(), Math.random()); g.add(c);
+  // a couple of small charred chunks (deterministic offsets so it's stable across renders)
+  const chunks = [ { x: 0.24, z: 0.22 }, { x: -0.12, z: 0.28 } ];
+  for (const ch of chunks) {
+    const c = new THREE.Mesh(new THREE.BoxGeometry(s * 0.1, s * 0.09, s * 0.12), CHAR());
+    c.position.set(ch.x * s, s * 0.05, ch.z * s);
+    c.rotation.set(0.4, ch.x * 3, 0.3); g.add(c);
   }
 
   // faint ember so it reads as "just destroyed"
-  const ember = new THREE.Mesh(new THREE.BoxGeometry(s * 0.08, s * 0.05, s * 0.08),
+  const ember = new THREE.Mesh(new THREE.BoxGeometry(s * 0.07, s * 0.045, s * 0.07),
     new THREE.MeshStandardMaterial({ color: 0xff5a1e, emissive: 0xff5a1e, emissiveIntensity: 0.7, roughness: 1 }));
   ember.position.set(0, s * 0.08, 0); g.add(ember);
 
+  // Apply the destroyed vehicle's TEAM CAMO to the armor plates (per-team camo canvas,
+  // tiled up so the pattern reads at plate scale). Falls back to a flat tint if unavailable.
+  g.userData.setCamo = (colorIndex) => {
+    try {
+      const map = getCamoTextures(colorIndex).map.clone();
+      map.needsUpdate = true; map.repeat.set(2.4, 2.4);
+      const mat = new THREE.MeshStandardMaterial({ map, roughness: 0.75, metalness: 0.4, flatShading: true });
+      for (const m of plates) m.material = mat;
+    } catch (e) { /* keep the neutral plate colour */ }
+  };
   g.userData.setTeamColor = (hex) => {
-    for (const m of plates) m.material = new THREE.MeshStandardMaterial({ color: hex, roughness: 0.75, metalness: 0.45, flatShading: true });
+    for (const m of plates) m.material = new THREE.MeshStandardMaterial({ color: hex, roughness: 0.75, metalness: 0.4, flatShading: true });
   };
   return g;
 }
