@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset=utf8><title>scrap pile preview</title>
+<style>body{margin:0;background:#0c1118;overflow:hidden}</style>
+<script type="importmap">{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { makePartsPallet, makeWreckage } from './js/Scrap.js?v=2';
+const S = 5;                                    // build-grid cell (matches the game)
+const W = 1100, H = 460;
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(W, H); document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x1b2a36);
+// sandy ground
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200,200),
+  new THREE.MeshStandardMaterial({ color:0xcbb78a, roughness:1 }));
+ground.rotation.x = -Math.PI/2; scene.add(ground);
+scene.add(new THREE.HemisphereLight(0xbfd6ff, 0x6b5a3a, 0.9));
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.5); sun.position.set(8,14,6); scene.add(sun);
+// left → right: PARTS (neutral), PARTS (red case), WRECKAGE (red), WRECKAGE (blue)
+const specs = [
+  { x:-S*3.6, make:makePartsPallet, hex:null },
+  { x:-S*1.2, make:makePartsPallet, hex:'#e0402a' },
+  { x: S*1.2, make:makeWreckage,    hex:'#e0402a' },
+  { x: S*3.6, make:makeWreckage,    hex:'#2a6fe0' },
+];
+for (const sp of specs) {
+  const g = sp.make(S); g.position.x = sp.x;
+  if (sp.hex && g.userData.setTeamColor) g.userData.setTeamColor(sp.hex);
+  scene.add(g);
+}
+const cam = new THREE.PerspectiveCamera(42, W/H, 0.1, 200);
+cam.position.set(0, S*2.6, S*5.6); cam.lookAt(0, S*0.4, 0);
+renderer.render(scene, cam);
+window.__ready = true;
+</script>
+</body></html>

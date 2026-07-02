@@ -31,6 +31,7 @@ import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
+import { makePartsPallet, makeWreckage } from './Scrap.js?v=2';
 import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
 
 // --- Renderer ----------------------------------------------------------
@@ -698,6 +699,10 @@ let configBases = false;   // true when bases came from a DESIGNED map (no procg
 let placedWalls = [];      // designer-placed wall/tower/gate combat pieces (custom maps)
 let elevators = [];   // animated FOB surface lifts (one per forward base)
 let resupplies = [];  // neutral fuel/ammo/shield points of interest
+let scrapPiles = [];  // salvage piles (1 scrap each) — drive over one to collect it for your team
+const teamScrap = { red: 0, blue: 0 };   // scrap banked per team; spent in the garage to build vehicles
+const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // piles a destroyed vehicle leaves behind
+const BUILD_COST = { jotun: 5, valkyrie: 5, lurcher: 3, firebrat: 2 };   // scrap to build one (garage, slice 2)
 let onField = false;  // true while the island is on screen (false = hangar view)
 let fieldBuilt = false; // the island is generated once, then reused across deploys
 let matchOver = false;  // a flag was captured — freeze the action, show the result
@@ -857,6 +862,7 @@ function placeCamps() {
 
   buildFlags();        // capturable flag at each main base
   placeResupplies();   // neutral fuel/ammo/shield points of interest
+  scatterScrap();      // salvage piles out toward the map rim (scouting reward)
 }
 
 // World site (with ground height) of a build cell.
@@ -961,6 +967,7 @@ function placeCampsFromConfig(assets) {
 
   buildFlags();
   placeResupplies();
+  scatterScrap();
 }
 // Use the designed bases when a map carries placed assets; else procedural placement.
 function placeCampsAuto() {
@@ -1790,6 +1797,16 @@ function spawnExplosion(point, big) {
     dispose() { geo.dispose(); mat.dispose(); } });
 }
 
+// A small gold sparkle when a scrap pile is collected — reads as "picked up".
+function spawnScrapPop(point) {
+  const geo = new THREE.SphereGeometry(2.2, 10, 10);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffcf4a, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false });
+  const m = new THREE.Mesh(geo, mat); m.position.copy(point); m.position.y += 1.2; scene.add(m);
+  fx.push({ obj: m, life: 0.4, max: 0.4, update(dt, k) { m.scale.setScalar(0.4 + (1 - k) * 1.6); mat.opacity = 0.9 * k; },
+    dispose() { geo.dispose(); mat.dispose(); } });
+}
+
 // Soft white radial alpha (foam core → clear edge) for wake puffs, baked once.
 let _foamTex = null;
 function foamTex() {
@@ -1838,6 +1855,7 @@ function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
   veh.dead = true;
   spawnExplosion(veh.holder.position, veh.type === 'jotun');
+  if (cause !== 'sank') dropScrap(veh.holder.position, veh.type, veh.colorIndex);   // leave wreckage behind (not for units lost at sea)
   creditKill(killer, veh);   // credit the firing unit's commander (drives Warrior/Hunter doctrine + kill feed)
   if (veh.isPlayer) { killPlayer(); return; }
   // Surface what happened to the AI unit — drowned/destroyed units used to just vanish.
@@ -2412,6 +2430,110 @@ function updateResupplies(dt) {
     }
     if (nearOwnSupply(v, vx, vz)) { refuel(v, dt); rearm(v, dt); repair(v, dt); }   // home base tops fuel + ammo + patches the hull
     updateShieldFx(v, dt);
+  }
+}
+
+// --- SCRAP / SALVAGE ----------------------------------------------------
+// One pile = 1 scrap. Piles drop where vehicles die and are scattered in remote
+// corners at map build; a vehicle driving over one collects it for its team. Spend
+// scrap in the garage to build more vehicles (BUILD_COST). Neutral: either team grabs.
+const SCRAP_PICKUP_R = 6;   // how close a vehicle must get to snag a pile
+
+// kind 'parts' = organized delivery pallet (world scatter); 'wreck' = blown-up vehicle
+// debris (death drop, tinted to the dead vehicle's team via teamHex).
+function addScrapPile(x, z, kind = 'parts', teamHex = null) {
+  const g = (kind === 'wreck' ? makeWreckage : makePartsPallet)(grid.cell);
+  if (teamHex != null && g.userData.setTeamColor) g.userData.setTeamColor(teamHex);
+  const gy = map.heightAt(x, z);
+  g.position.set(x, gy + 0.04, z);
+  g.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(g);
+  const pile = { group: g, pos: new THREE.Vector3(x, gy, z), kind, bob: Math.random() * Math.PI * 2 };
+  scrapPiles.push(pile);
+  return pile;
+}
+
+// A destroyed vehicle leaves SCRAP_DROP[type] wreckage piles, scattered around the wreck.
+function dropScrap(pos, type, colorIndex) {
+  const hex = (TEAM_COLORS[colorIndex] && TEAM_COLORS[colorIndex].hex) || null;
+  const n = SCRAP_DROP[type] || 1;
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * Math.PI * 2, r = grid.cell * (0.5 + Math.random() * 0.9);
+    let x = pos.x + Math.cos(ang) * r, z = pos.z + Math.sin(ang) * r;
+    if (!map.isLand(x, z)) { x = pos.x; z = pos.z; }   // don't fling salvage into the sea
+    addScrapPile(x, z, 'wreck', hex);
+  }
+}
+
+// Scatter neutral salvage in remote/shore corners so scouting the map's edges pays off.
+function scatterScrap() {
+  for (const p of scrapPiles) scene.remove(p.group);
+  scrapPiles = [];
+  if (QS.has('noscrap') || configBases) return;   // custom maps place their own (slice 2)
+  const span = Math.min(map.worldW, map.worldH) / 2;
+  let placed = 0, tries = 0;
+  while (placed < 8 && tries++ < 400) {
+    const ang = Math.random() * Math.PI * 2, r = span * (0.6 + Math.random() * 0.34);   // out toward the rim
+    const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+    if (!map.isLand(x, z) || blockedAt(x, z)) continue;
+    let ok = true;
+    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 26) { ok = false; break; }
+    if (ok) for (const p of scrapPiles) if (Math.hypot(x - p.pos.x, z - p.pos.z) < 14) { ok = false; break; }
+    if (ok) { addScrapPile(x, z, 'parts'); placed++; }
+  }
+}
+
+function collectScrap(team) {
+  const t = team === 'red' || team === 'blue' ? team : null;
+  if (t) teamScrap[t] += 1;
+  updateScrapHud();
+}
+
+// Spend the player's scrap to BUILD one vehicle of `type` — replaces a lost reserve (the
+// garage has finite bays, so building refills attrition). Returns true if it went through.
+function buildVehicle(type) {
+  const cost = BUILD_COST[type] || 99;
+  if ((playerLosses[type] || 0) <= 0) return false;          // roster already full for this type
+  if ((teamScrap[PLAYER_TEAM] || 0) < cost) return false;    // can't afford it
+  teamScrap[PLAYER_TEAM] -= cost;
+  playerLosses[type] = Math.max(0, (playerLosses[type] || 0) - 1);
+  if (garage) garage.applyRoster(playerLosses);              // the rebuilt vehicle reappears in its bay
+  return true;
+}
+
+// Whose scrap the HUD shows: the spectated unit's team, else the player's side.
+function viewerTeam() { return (spectateTarget && spectateTarget.team) || PLAYER_TEAM; }
+
+function updateScrapHud() {
+  let el = document.getElementById('scrap-hud');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'scrap-hud';
+    el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:60;'
+      + 'pointer-events:none;font:bold 15px "Courier New",monospace;letter-spacing:2px;'
+      + 'color:#ffcf4a;text-shadow:0 1px 3px rgba(0,0,0,0.6);';
+    document.body.appendChild(el);
+  }
+  el.style.display = onField ? '' : 'none';
+  if (onField) el.textContent = `⚙ SCRAP ${teamScrap[viewerTeam()] || 0}`;
+}
+
+function updateScrap(dt) {
+  for (let i = scrapPiles.length - 1; i >= 0; i--) {
+    const p = scrapPiles[i];
+    p.bob += dt * 2;
+    p.group.position.y = p.pos.y + 0.04 + Math.sin(p.bob) * 0.05;   // gentle bob so it reads as a pickup
+    p.group.rotation.y += dt * 0.4;
+    for (const v of combatants) {
+      if (v.dead) continue;
+      if (Math.hypot(v.holder.position.x - p.pos.x, v.holder.position.z - p.pos.z) <= SCRAP_PICKUP_R) {
+        spawnScrapPop(p.pos);
+        scene.remove(p.group);
+        scrapPiles.splice(i, 1);
+        collectScrap(v.team);
+        break;
+      }
+    }
   }
 }
 
@@ -4399,14 +4521,16 @@ let teamColorLocked = false;
 // Toggle the garage overlays (CCTV / HUD / team selector) and the field UI (title +
 // touch joystick) when switching between the hangar view and the island.
 function setGarageOverlays(show) {
-  for (const id of ['cctv', 'hud-name', 'hud-stats', 'teamsel']) {
+  for (const id of ['cctv', 'hud-name', 'hud-stats', 'teamsel', 'build-panel']) {
     const el = document.getElementById(id);
     if (!el) continue;
     // Once locked, never re-reveal the colour swatches on later garage visits.
     const vis = show && !(id === 'teamsel' && teamColorLocked);
     el.style.display = vis ? '' : 'none';
   }
+  if (show && _refreshBuildPanel) _refreshBuildPanel();   // reflect scrap earned this run + this match's losses
 }
+let _refreshBuildPanel = null;   // set by mountHangarHud; refreshes the BUILD panel when the garage reopens
 function setFieldUI(show) {
   const hud = document.getElementById('hud');
   if (hud) hud.style.display = show ? '' : 'none';
@@ -4421,6 +4545,7 @@ function setFieldUI(show) {
     document.getElementById(id)?.classList.remove('visible');
   }
   if (show) refreshAimArc();   // tint the aim wedge to the deployed vehicle's arc
+  updateScrapHud();            // team scrap counter (top-center) — show on field, hide in garage
   ensureLogToggle(); updateLogToggle();   // phone-friendly AI-log button (top-right)
   ensureAstarToggle(); updateAstarToggle();   // PATH button (left of LOG) — opens the A* visualizer
   if (!show) { fireHeld = false; touchAim = null; touchAiming = false; }   // drop a held shot at the garage
@@ -4495,6 +4620,7 @@ function setupGarageUI() {
     else if (k === 'arrowright' || k === 'd') { garage.cycleType(1); e.preventDefault(); }
     else if (k === 'arrowleft' || k === 'a') { garage.cycleType(-1); e.preventDefault(); }
     else if (k >= '1' && k <= '4') { garage.selectType(garage.types[+k - 1]); }
+    else if (k === 'b') { const s = garage.selected(); if (s && buildVehicle(s.type) && _refreshBuildPanel) _refreshBuildPanel(); e.preventDefault(); }
   });
 
   // Field hotkeys. The AI log is toggled by the on-screen LOG button (no keyboard on a
@@ -4820,7 +4946,18 @@ function mountHangarHud(garage) {
       font:11px ui-monospace, monospace; }
     #hud-stats .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:5px 0; }
     #hud-stats .lab { letter-spacing:0.15em; color:#5a7a8a; }
-    #hud-stats .bar { font-size:14px; letter-spacing:0.08em; color:#00eeff; }`;
+    #hud-stats .bar { font-size:14px; letter-spacing:0.08em; color:#00eeff; }
+    #build-panel { position:fixed; top:132px; right:20px; z-index:59;
+      background:rgba(5,12,20,0.78); border:1px solid #0e2030; padding:10px 14px; min-width:190px;
+      font:11px ui-monospace, monospace; }
+    #build-panel .scrap { color:#ffcf4a; letter-spacing:0.12em; margin-bottom:8px; }
+    #build-panel .scrap b { font-size:15px; }
+    #build-panel .bp-btn { display:block; width:100%; padding:8px 6px; cursor:pointer;
+      background:#123020; border:1px solid #1f6b3f; color:#8ff0b0; font:bold 11px ui-monospace,monospace;
+      letter-spacing:0.1em; border-radius:4px; }
+    #build-panel .bp-btn:hover:not(:disabled) { background:#1a4a30; }
+    #build-panel .bp-btn:disabled { opacity:0.4; cursor:default; border-color:#333; color:#778; }
+    #build-panel .bp-hint { margin-top:6px; min-height:13px; color:#7089; letter-spacing:0.08em; }`;
   document.head.appendChild(style);
 
   const name = document.createElement('div');
@@ -4835,6 +4972,14 @@ function mountHangarHud(garage) {
     `<div class="row"><span class="lab">${k.toUpperCase()}</span><span class="bar" id="hud-${k}"></span></div>`).join('');
   document.body.appendChild(stats);
 
+  // BUILD panel — spend collected scrap to replace a lost vehicle of the selected type.
+  const panel = document.createElement('div');
+  panel.id = 'build-panel';
+  panel.innerHTML = `<div class="scrap">⚙ SCRAP <b id="bp-scrap">0</b></div>`
+    + `<button id="bp-build" class="bp-btn">BUILD</button>`
+    + `<div class="bp-hint" id="bp-hint"></div>`;
+  document.body.appendChild(panel);
+
   const bar = (v, max = 5) => '▪'.repeat(v) + '▫'.repeat(max - v);
   const update = () => {
     const s = garage.selected();
@@ -4844,7 +4989,24 @@ function mountHangarHud(garage) {
     name.querySelector('.cnt').textContent = '×' + garage.remaining(s.type);
     name.querySelector('.role').textContent = def.role;
     for (const k of ROWS) document.getElementById('hud-' + k).textContent = bar(def.stat[k]);
+    updateBuild();
   };
+  const updateBuild = () => {
+    const s = garage.selected();
+    if (!s) return;
+    const type = s.type, cost = BUILD_COST[type] || 0, have = teamScrap[PLAYER_TEAM] || 0;
+    const lost = (playerLosses[type] || 0) > 0, afford = have >= cost, ok = lost && afford;
+    document.getElementById('bp-scrap').textContent = have;
+    const btn = document.getElementById('bp-build');
+    btn.textContent = `BUILD ${VEHICLE_TYPES[type].label.toUpperCase()} · ${cost}`;
+    btn.disabled = !ok;
+    document.getElementById('bp-hint').textContent = !lost ? 'roster full' : !afford ? `need ${cost - have} more scrap` : 'salvage a replacement';
+  };
+  panel.querySelector('#bp-build').addEventListener('click', () => {
+    const s = garage.selected();
+    if (s && buildVehicle(s.type)) { update(); }
+  });
+  _refreshBuildPanel = updateBuild;
   garage.onSelect(update);
   update();
 }
@@ -5007,7 +5169,7 @@ window.RR = {
       for (const v of vehicles) v.idle(dt);
       projectiles.update(dt); updateProjectileHits();
       destructibles.update(dt);
-      updateResupplies(dt); updateWallTurrets(dt); updateLock(dt);
+      updateResupplies(dt); updateScrap(dt); updateWallTurrets(dt); updateLock(dt);
     }
   },
   blockedAt: (x, z) => blockedAt(x, z),
@@ -5037,6 +5199,10 @@ window.RR = {
   startCommanders: (reserved) => startCommanders(reserved),
   get lock() { return lock; },
   get resupplies() { return resupplies; },
+  get scrapPiles() { return scrapPiles; },       // live salvage piles on the field
+  get teamScrap() { return { ...teamScrap }; },   // scrap banked per team
+  setTeamScrap: (team, n) => { if (team in teamScrap) teamScrap[team] = n | 0; return teamScrap[team]; },
+  buildVehicle: (type) => buildVehicle(type),     // spend scrap → replace a lost vehicle (garage)
   get playerLosses() { return playerLosses; },
   get matchOver() { return matchOver; },
   get matchWon() { return matchWon; },
@@ -5365,6 +5531,7 @@ function animate() {
       _pfT('sound', () => { updateSoundHud(dt); updateEngineSounds(); });  // sound HUD + spatial engine noise
       if (touchUsed) orientAimArc();         // keep the touch aim wedge pointing the way the vehicle faces (screen-relative)
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
+      updateScrap(dt);                       // salvage piles: bob + proximity pickup → team scrap
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
