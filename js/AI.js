@@ -211,7 +211,24 @@ const CONDITIONS = {
   },
 
   // --- latch triggers ---
-  resupNeeded: (v, m, p, cfg) => ammoFrac(v) <= 0 || v.self.fuelFrac < cfg.fuelLow,
+  resupNeeded: (v, m, p, cfg) => {
+    if (v.self.fuelFrac < cfg.fuelLow || ammoFrac(v) <= 0) return true;   // low fuel / truly dry → always rearm
+    // AMMO RESERVE (a CAUTIOUS commander's trait): while shelling STRUCTURES with no enemy in
+    // sight, a careful commander won't burn the last of the magazine on walls — it heads home to
+    // rearm early, banking a reserve so an interceptor can't catch it defenseless (that reserve is
+    // still spent freely on enemy VEHICLES via the combat states). Only LOW-aggression personalities
+    // do this — an aggressive commander spends it all; the reserve fades to 0 as aggression rises to
+    // reserveMaxAggr. And nobody holds back when FINISHING the base (turrets down / enemy wiped), or
+    // while an enemy is in sight (then we fight, not run).
+    if (v.shootGoal && !v.seesEnemy && !v.finishing) {
+      const aggr = p.aggression || 0, cap = cfg.reserveMaxAggr || 0.5;
+      if (aggr < cap) {
+        const reserve = (cfg.siegeAmmoReserve || 0) * (1 - aggr / cap);
+        if (ammoFrac(v) <= reserve) return true;
+      }
+    }
+    return false;
+  },
   // At an OWN BASE (which also patches the hull) hold until ammo, fuel AND hp are ALL
   // topped off — don't roll back out half-healed. At a single-resource depot, clear once
   // the resource it fills is topped AND the OTHER one is merely "OK to carry on" (not full
@@ -568,6 +585,8 @@ export const DEFAULT_BRAIN = {
     ammoOK: 0.5,         // ammo that's "enough to carry on"
     topFull: 0.99,       // at an OWN BASE (heals too) don't leave until ammo, fuel AND hp are ALL maxed
     mustFight: 1,        // 1 = an inescapable enemy vehicle on top of us pre-empts the objective (see `underAttack`); 0 = old behaviour (A/B knob)
+    siegeAmmoReserve: 0.2, // a CAUTIOUS commander sieging with no enemy in sight heads home to rearm at this ammo frac instead of 0 — banks a reserve for self-defense on the trip (0 = old spend-it-all; A/B knob). Fades to 0 as aggression rises to reserveMaxAggr; ignored when finishing the base off.
+    reserveMaxAggr: 0.5,   // aggression at/above which a commander banks NO ammo reserve (spends it all) — the reserve is a low-aggression trait
   },
   // Latched interrupts: once tripped they hold (hysteresis) until their clear
   // condition, and force the matching state via the transition table below.

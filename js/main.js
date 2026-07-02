@@ -19,7 +19,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=84';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=86';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
@@ -2084,6 +2084,9 @@ const AI_HEARD_MIN = 0.18;
 const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to top up at a known shield generator
 const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT — grab the armour before fighting
 const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the armour top-up
+let SHIELD_SIGHT_MULT = 1.4;    // shield beacon spotted at this × base vision. Tall & glowing so it carries
+                                // past a crate, but NOT half the map — a shield is a reason to SCOUT, not a
+                                // freebie. Runtime-tunable via RR.setShieldSight for A/B.
 // Shield-doctrine narration: the commander calls the play in plain English (like the Rogue bark). One
 // pool per tactic; a per-commander counter cycles them (no RNG → deterministic).
 const SHIELD_BARKS = {
@@ -3311,7 +3314,7 @@ class AICommander {
     // That's what makes the flank generator actually get discovered + used.
     for (const rp of resupplies) {
       if (rp.dead || this.knownSupplies.has(rp)) continue;
-      const sight = rp.kind === 'shield' ? AI_VISION * 2.6 : AI_VISION;
+      const sight = rp.kind === 'shield' ? AI_VISION * SHIELD_SIGHT_MULT : AI_VISION;
       const d2 = (rp.pos.x - px) ** 2 + (rp.pos.z - pz) ** 2;
       if (d2 < sight * sight && (flyer || hasLOS(px, pz, rp.pos.x, rp.pos.z))) this.knownSupplies.add(rp);
     }
@@ -3538,6 +3541,8 @@ class AICommander {
       // shield generator / intercept spot it's heading for. It still engages real enemies via
       // the combat transitions; this only stops it firing at the detour waypoint.
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting,
+      finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
+
       shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
       arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),
       // Is this unit on a flee-contact RUNNER mission (grab the flag / scout — avoid fights)
@@ -4976,6 +4981,7 @@ window.RR = {
   planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
   setVision: (v) => { AI_VISION = v; return AI_VISION; },      // base sight range (A/B the "less distraction" idea)
   getVision: () => AI_VISION,
+  setShieldSight: (m) => { SHIELD_SIGHT_MULT = m; return SHIELD_SIGHT_MULT; },   // shield beacon sight = m × base (A/B scouting-for-shields)
   setSight: (type, m) => { SIGHT[type] = m; return { ...SIGHT }; },   // per-vehicle: how far this type SEES
   setVis: (type, m) => { VIS[type] = m; return { ...VIS }; },         // per-vehicle: how far this type is SEEN
   visionTables: () => ({ base: AI_VISION, SIGHT: { ...SIGHT }, VIS: { ...VIS } }),
