@@ -575,6 +575,7 @@ export class Valkyrie {
     }
 
     nacelleGroup.add(rotorGroup);
+    rotorGroup.userData.noShadow = true;   // keep the (static) fan disc out of the ground shadow — leave a clean duct ring
 
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.08, 8), darkMat);
     rotorGroup.add(hub);

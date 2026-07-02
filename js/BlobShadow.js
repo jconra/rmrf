@@ -55,7 +55,10 @@ export function vehicleSilhouette(renderer, typeKey, modelGroup) {
   const rt = new THREE.WebGLRenderTarget(S, S);
   const sscene = new THREE.Scene();
   const clone = modelGroup.clone(true);
-  clone.traverse(o => { if (o.isMesh) o.material = _black; });
+  // Meshes/groups tagged userData.noShadow are left OUT of the silhouette (e.g. the Valkyrie's
+  // fan rotors — a static shadow filling the ducts reads as odd; excluding them leaves a clean
+  // ring shadow with the duct hole).
+  clone.traverse(o => { if (o.userData && o.userData.noShadow) o.visible = false; if (o.isMesh) o.material = _black; });
   sscene.add(clone);
   clone.updateWorldMatrix(true, true);
   const box = new THREE.Box3().setFromObject(clone);

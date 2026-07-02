@@ -197,9 +197,12 @@ class Doctrine {
   // the same lane. Shot by an enemy VEHICLE → send an ATTACK to clear the interceptor first
   // (timed window). Shot by TOWERS on the approach → retry as a STEALTH capture: a wide rear
   // route around the hot zone (the flag's still grabbable, just not head-on).
-  onRunnerLost(cmd, byVehicle) {
+  onRunnerLost(cmd, enemyHasUnits) {
     if (RUNNER_MODE === 'old') { this._switch(this.softenKey, cmd); return; }   // A/B baseline: blind re-siege
-    if (byVehicle) cmd._clearPathT = 18;
+    // Defenders still alive → switch to ATTACK NOW (so the NEXT deploy is a fighter, not
+    // another firebrat) and hold it there for a window to clear them, then resume the grab.
+    // No defenders left (pure tower gauntlet) → sneak in on a wide route instead.
+    if (enemyHasUnits) { cmd._clearPathT = 18; this._switch('attack', cmd); }
     else cmd._stealthCapture = true;
   }
   get softenKey() { return 'siege'; }

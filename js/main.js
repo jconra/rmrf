@@ -1106,9 +1106,14 @@ const vehShadows = new THREE.Group(); scene.add(vehShadows);   // ground-project
 // wrong dragged along, so these get a soft round blob instead — reads as a shadow
 // without pinning a static leg pose under a moving vehicle.
 const WALKER_SHADOW = new Set(['lurcher']);
+// Per-vehicle shadow tweaks: hide (Jotun rides the ground + its turret shadow can't rotate),
+// scale (footprint multiplier), dark (opacity multiplier).
+const SHADOW_CFG = { jotun: { hide: true }, lurcher: { scale: 0.5, dark: 1.5 } };
 function updateShadows() {
   for (const v of combatants) {
     if (!v.model) continue;
+    const cfg = SHADOW_CFG[v.type];
+    if (cfg && cfg.hide) { if (v._shadow) v._shadow.visible = false; continue; }   // e.g. Jotun: no ground shadow
     if (!v._shadow) {
       if (WALKER_SHADOW.has(v.type)) {
         const rec = vehicleSilhouette(renderer, v.type, v.model.group);   // cached; used only for footprint size
@@ -1129,9 +1134,10 @@ function updateShadows() {
     s.visible = true;
     s.position.set(x, gy + 0.2, z);   // lifted so the flat decal doesn't cut into sloped shore terrain
     s.rotation.y = v.holder.rotation.y;
-    if (v._shadowR) { const d = v._shadowR * 2 * (0.7 + 0.3 * f); s.scale.set(d, 1, d); }
-    else s.scale.setScalar(0.7 + 0.3 * f);
-    s.material.opacity = 0.5 * f;
+    const scl = cfg && cfg.scale ? cfg.scale : 1;
+    if (v._shadowR) { const d = v._shadowR * 2 * (0.7 + 0.3 * f) * scl; s.scale.set(d, 1, d); }
+    else s.scale.setScalar((0.7 + 0.3 * f) * scl);
+    s.material.opacity = Math.min(1, 0.5 * f * (cfg && cfg.dark ? cfg.dark : 1));
   }
 }
 const fx = [];                 // transient hit sparks / explosions ({obj,life,update})
@@ -3128,14 +3134,15 @@ class AICommander {
         this.failStreak = (this.failStreak || 0) + 1;
         const lost = this.unit.type;                 // attrition: that vehicle is gone from the roster
         if (this.roster[lost] != null) this.roster[lost] = Math.max(0, this.roster[lost] - 1);
-        // A runner died storming the base → respond to WHY (from its damage breakdown):
-        // killed by an enemy VEHICLE → hunt the interceptor; killed by TOWERS → retry as a
-        // wide stealth run. Beats feeding another Firebrat straight into the same death.
+        // A runner died storming the base → don't just feed another firebrat in. If the enemy
+        // still has DEFENDING VEHICLES, they'll intercept the fragile runner — send a combat
+        // unit to CLEAR THEM FIRST (better signal than the death's damage-split, which mislabels
+        // a mixed tower+vehicle kill). Only a pure tower gauntlet (no enemy vehicles) → sneak wide.
         if (this.unit.type === 'firebrat' && this.strategy.step === 'capture') {
-          const by = this.unit._dmgBy || {};
-          const byVehicle = (by.vehicle || 0) >= (by.turret || 0);
-          this.strategy.onRunnerLost(this, byVehicle);
-          aiLog(this.team, `${this.cname} runner down — ${byVehicle ? 'hunting the interceptor' : 'switching to a stealth run'}`);
+          const tt = this.targetTeam();
+          const enemyHasUnits = combatants.some(o => !o.dead && o.team === tt && !vehicleHidden(o));
+          this.strategy.onRunnerLost(this, enemyHasUnits);
+          aiLog(this.team, `${this.cname} runner down — ${enemyHasUnits ? 'clearing the defenders first' : 'switching to a stealth run'}`);
         }
         // Keep losing the same way? Each repeat raises the odds of a brand-new plan — but
         // only for legacy deck commanders. An archetype keeps its doctrine (losing a unit
