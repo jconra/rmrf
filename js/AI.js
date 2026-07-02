@@ -162,6 +162,7 @@ const CONDITIONS = {
 
   // Fight-or-flight: only duel a spotted rival when the weighted odds favour it (good
   // hp/ammo/matchup), otherwise keep moving instead of trading into a loss.
+  shieldRun: (v) => !!v.shieldRun,   // committed to grab a close shield → do that first (see transitions)
   engaging: (v, m, p) => {
     if (!v.seesEnemy) return false;
     if (!((m._fof != null ? m._fof : fightScore(v, p)) > 0)) return false;
@@ -567,6 +568,10 @@ export const DEFAULT_BRAIN = {
   transitions: [
     { when: 'mustGo',       mode: 'exit',     target: 'goal' },
     { when: 'runnerFlee',   mode: 'flee',     target: 'goal' },
+    // SECURE THE SHIELD: committed to a close generator → grab the armour BEFORE picking a fight
+    // (outranks engage/suppress). It's a short beeline; once topped up the commit clears and normal
+    // fight-or-flight resumes. Stops units fighting next to a shield they never actually pick up.
+    { when: 'shieldRun',    mode: 'advance',  target: 'goal' },
     // FIGHT-OR-FLIGHT LEADS when a rival is in range: fightScore already weighs hp, ammo,
     // matchup, numbers AND (now) escape-survivability, so let IT decide fight-vs-flee before
     // the blunt hurt-retreat. `fightScore>0` → engage (even if hurt, when the odds justify

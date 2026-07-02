@@ -19,14 +19,14 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=80';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=82';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode } from './AIStrategies.js?v=66';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=68';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
@@ -415,6 +415,11 @@ const SHOT = QS.has('shot');
 // — otherwise Math.random gives every run a different Warrior-vs-Turtle-etc game and the noise
 // buries any real difference. Only the setup is seeded; in-match randomness stays live.
 function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+// ?rngseed=N (TEST-RIG ONLY) — makes an ENTIRE headless match deterministic by reseeding the global
+// RNG, so a behavior tweak can be A/B'd on TRULY identical matches (same combat rolls; only the change
+// differs). Non-determinism otherwise buries subtle fixes in run-to-run noise. The LIVE GAME never
+// passes this param, so real play keeps native Math.random untouched. Set before anything reads it.
+if (QS.has('rngseed')) { const _seedRng = mulberry32((+QS.get('rngseed') >>> 0) || 1); Math.random = () => _seedRng(); }
 const doctrineRng = QS.has('dseed') ? mulberry32((+QS.get('dseed') >>> 0) || 1) : Math.random;
 
 // ?perf — on-device profiler: per-frame CPU time BROKEN DOWN by system, so a stutter's cause
@@ -1311,7 +1316,7 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
     if (!playSound && sound && sound.spatialReady) {
       try { sound.fireGunAt(idx, mpos.x, mpos.y, mpos.z); } catch (e) { /* best-effort */ }
     }
-    emitSoundPing(mpos.x, mpos.y, mpos.z, idx, veh.team);   // sound-awareness HUD: a loud, far-carrying gun report
+    emitSoundPing(mpos.x, mpos.y, mpos.z, idx, veh.team, veh.colorIndex);   // sound-awareness HUD: a loud, far-carrying gun report
     const aim = muzzle.parent || veh.group;
     const dir = _fireDir.set(0, 0, -1).applyQuaternion(aim.getWorldQuaternion(_gunQuat)).normalize();
     const hex = TEAM_COLORS[veh.colorIndex] ? TEAM_COLORS[veh.colorIndex].hex : 0xffffff;
@@ -2074,6 +2079,20 @@ const VIS   = { valkyrie: 1.5, jotun: 1.3, lurcher: 1.0, firebrat: 0.65 };
 // a moving Jotun's drone clears it at range; an idling unit barely makes a whisper.
 const AI_HEARD_MIN = 0.18;
 const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to top up at a known shield generator
+const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT — grab the armour before fighting
+const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the armour top-up
+// Shield-doctrine narration: the commander calls the play in plain English (like the Rogue bark). One
+// pool per tactic; a per-commander counter cycles them (no RNG → deterministic).
+const SHIELD_BARKS = {
+  grab:    ['armour up first — then we fight', 'grabbing the shield before this gets ugly', 'topping off on the way in', 'not charging in bare — shield first'],
+  camp:    ['holding the generator — come and get it', 'digging in on the armour', 'this shield is mine — hold here', 'let them come to me, I\'ll be armoured'],
+  contest: ['they\'re turtling on the shield — push them off it', 'go break up their armour party', 'they don\'t get to sit on that generator', 'deny them the shield — move in'],
+  deny:    ['wreck that generator — no armour for them', 'take out the shield, then take the base', 'smash the generator so they stop leaning on it', 'no more free armour — level the shield'],
+};
+function shieldBark(cmd, v, kind) {
+  const pool = SHIELD_BARKS[kind]; cmd._sbN = (cmd._sbN || 0) + 1;
+  aiLog(cmd.team, `${cmd.cname} ${v.type}: “${pool[cmd._sbN % pool.length]}”`);
+}
 const commanders = [];          // one AICommander per AI-controlled team
 
 function teamCamp(team, role) { return camps.find(c => c.team === team && c.role === role); }
@@ -2888,6 +2907,21 @@ class AICommander {
     this._recalling = false;
     const sub = type !== want ? ` (out of ${want})` : '';
     aiLog(this.team, `${this.cname} deploys ${type}${sub} — ${this.fleetLeft()} left`);
+    // FLAVOUR: narrate the Rogue's signature play — sending the Valkyrie around the back to rocket the
+    // HQ over the walls. Reads like the commander calling the shot (Brandon-approved log theatre). A
+    // cycling pool (no RNG so it stays deterministic) keeps it varied without repeating the same line.
+    if (this.archetype === 'rogue' && type === 'valkyrie' && this.strategy.step === 'siege') {
+      const barks = [
+        'front door\'s a meatgrinder — Valkyrie, take the back way',
+        'send the Valkyrie around the back',
+        'over the walls and onto the keep from behind',
+        'flank wide, hit the HQ where they aren\'t looking',
+        'the walls are their problem — Valkyrie goes over the top',
+        'quiet route round the back, rockets on the flag base',
+      ];
+      this._barkN = (this._barkN || 0) + 1;
+      aiLog(this.team, `${this.cname}: “${barks[this._barkN % barks.length]}”`);
+    }
     const home = this.homePos();
     const v = new Vehicle(type); v.setScale(0.72);
     v.setCamo(this.colorIndex); v.setTeamColor(TEAM_COLORS[this.colorIndex].hex);
@@ -3296,7 +3330,7 @@ class AICommander {
     // ATTACK prep (ai_behavior): a Lurcher/Valkyrie rolling out with little shield swings
     // by a KNOWN, nearby shield generator to armour up first. (Firebrats run — speed is
     // their armour; Jotuns siege — too slow to detour. Intercept always outranks this.)
-    this._shielding = false;
+    this._shielding = false; this._shieldRun = false; this._shieldGen = null;
     if (!this._intercepting && (v.type === 'lurcher' || v.type === 'valkyrie')
         && v.maxShield > 0 && v.shield < v.maxShield * 0.6
         && !(this.flag() && this.flag().carrier === v)) {
@@ -3306,10 +3340,18 @@ class AICommander {
       // So armour-capable units reliably swing by the generator on the way out, instead of
       // only grabbing it when it happens to be right next to them.
       const reach = SHIELD_GRAB_RANGE * (1.6 - v.shield / v.maxShield);
-      if (gen && Math.hypot(gen.pos.x - px, gen.pos.z - pz) < reach) {
-        goal = { x: gen.pos.x, z: gen.pos.z }; this._shielding = true;
+      const gd = gen ? Math.hypot(gen.pos.x - px, gen.pos.z - pz) : Infinity;
+      if (gen && gd < reach) {
+        goal = { x: gen.pos.x, z: gen.pos.z }; this._shielding = true; this._shieldGen = gen;
+        // SECURE IT: once we're CLOSE, grabbing the armour beats picking a fight — beeline the gen,
+        // top up, THEN fight (shieldRun outranks combat in the brain). Fixes the "went for the shield,
+        // then wandered off to a turret and never got it" bail. shootGoal is already off while
+        // detouring, so it won't gun down its own generator on the way in.
+        if (gd < SHIELD_COMMIT) this._shieldRun = true;
       }
     }
+    if (this._shieldRun && !this._shieldRunOn) shieldBark(this, v, 'grab');   // announce the commit once
+    this._shieldRunOn = this._shieldRun;
     // Where to rearm/refuel: the NEAREST valid source for what we need — own base
     // (always restocks fuel + ammo) OR a DISCOVERED neutral depot. A neutral depot gives
     // just ONE resource, so we only divert to one when topping it gets the unit combat-
@@ -3487,6 +3529,7 @@ class AICommander {
       // shield generator / intercept spot it's heading for. It still engages real enemies via
       // the combat transitions; this only stops it firing at the detour waypoint.
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting,
+      shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
       arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),
       // Is this unit on a flee-contact RUNNER mission (grab the flag / scout — avoid fights)
       // vs one the commander sent it out to FIGHT on (attack/siege/defend/intercept)? Gates
@@ -4932,6 +4975,7 @@ window.RR = {
   getFof: (team) => ({ ...fofFor(team) }),
   fofDefault: () => ({ ...FOF_DEFAULT }),
   setRunnerMode: (m) => setRunnerMode(m),   // 'old' | 'new' — A/B the runner-lost response on paired matchups
+  setRogueRearSiege: (v) => setRogueRearSiege(v),   // true|false — A/B the Rogue Valkyrie rear-siege (HQ from behind)
   exploreFrac: (i = 0) => { const c = commanders[i]; return c && c.explore ? c.explore.fraction() : null; },   // debug: fraction of map this team has scouted
   exploreWp: (i = 0) => { const c = commanders[i]; return c ? c._exploreWp : null; },                          // debug: current recon waypoint
   aiRoster: (i = 0) => { const c = commanders[i]; return c ? { roster: { ...c.roster }, left: c.fleetLeft(), eliminated: c._eliminated } : null; },   // debug: remaining fleet
@@ -5135,8 +5179,8 @@ const ACOUSTIC = [
 const GUN_RANGE = 700;                 // gunfire carries far (matches SoundManager.fireGunAt)
 const SND = { idleEmit: 0.30, gunLoud: 1.6, gunDecay: 1.2, selfMask: 0.6, minAudible: 0.10 };
 const soundPings = [];                 // recent gun reports: { x, y, z, idx, team, life }
-function emitSoundPing(x, y, z, idx, team) {
-  soundPings.push({ x, y, z, idx, team, life: 1 });
+function emitSoundPing(x, y, z, idx, team, colorIndex) {
+  soundPings.push({ x, y, z, idx, team, colorIndex, life: 1 });
   if (soundPings.length > 48) soundPings.shift();
 }
 function acFall(dist, ref, max) {
@@ -5144,6 +5188,19 @@ function acFall(dist, ref, max) {
   if (dist >= max) return 0;
   return (max - dist) / (max - ref);
 }
+// The source's IN-GAME team colour as an "r,g,b" string (the sonar HUD draws in the enemy's colour).
+function teamRGB(colorIndex) {
+  const hex = (TEAM_COLORS[colorIndex] && TEAM_COLORS[colorIndex].hex != null) ? TEAM_COLORS[colorIndex].hex : 0xffffff;
+  return ((hex >> 16) & 255) + ',' + ((hex >> 8) & 255) + ',' + (hex & 255);
+}
+// Sonar edge-HUD tuning (see drawSonarArcs). Distances are WORLD units; radii/lengths are px.
+const SONAR = {
+  distNear: 25, distFar: 160,    // world distance → curvature: near=tight arc, far=flat
+  Rmin: 80, Rmax: 1500,          // screen curvature radius (px) at near / far
+  maxArcLen: 165,                // cap the drawn arc length so a far/flat arc stays a short streak
+  ringGap: 9, ringSpan: 3.2,     // louder → more concentric rings (loud*ringSpan), spaced ringGap px
+  maxRings: 4, pad: 40,          // inset from the screen edge
+};
 let soundHudCanvas = null, soundHudCtx = null;
 function ensureSoundHud() {
   if (soundHudCanvas) return;
@@ -5173,40 +5230,65 @@ function soundSources(listener) {
     const dist = Math.hypot(v.holder.position.x - hp.x, v.holder.position.z - hp.z);
     const emit = a.gain * (SND.idleEmit + (1 - SND.idleEmit) * (v._throttle || 0));
     const loud = emit * acFall(dist, a.ref, a.max) - selfNoise;
-    if (loud > SND.minAudible) out.push({ pos: v.holder.position, loud, type: 'engine' });
+    if (loud > SND.minAudible) out.push({ pos: v.holder.position, loud, dist, type: 'engine', color: teamRGB(v.colorIndex) });
   }
   for (const p of soundPings) {
     if (p.team === listener.team) continue;
     const a = ACOUSTIC[p.idx] || ACOUSTIC[0];
     const dist = Math.hypot(p.x - hp.x, p.z - hp.z);
     const loud = SND.gunLoud * a.gain * acFall(dist, a.ref, GUN_RANGE) * p.life - selfNoise;
-    if (loud > SND.minAudible) out.push({ pos: { x: p.x, y: p.y, z: p.z }, loud, type: 'gun' });
+    if (loud > SND.minAudible) out.push({ pos: { x: p.x, y: p.y, z: p.z }, loud, dist, type: 'gun', color: teamRGB(p.colorIndex) });
   }
   return out;
 }
 const _shv = new THREE.Vector3();
-// True if this source got drawn as an EDGE glow (i.e. it's off-screen / behind you).
-function drawEdgeGlow(g, W, H, s) {
+// SONAR edge-HUD: an off-screen enemy noise draws as concentric arcs at the screen edge, curved as
+// if they were rings radiating FROM the source (centre of curvature sits off-screen toward it).
+//   • curvature = DISTANCE — a near source curves tight (up to ~90° of arc); a far one flattens to
+//     a near-straight streak (radius grows with distance).
+//   • ring count = LOUDNESS — faint shows one thin arc, loud shows several concentric rings.
+//   • colour = the enemy's in-game team colour. Arc length is capped so a flat far arc stays short.
+// Returns true if it drew (source is off-screen / behind).
+function drawSonarArcs(g, W, H, s) {
   _shv.set(s.pos.x, s.pos.y, s.pos.z).project(camera);
   let nx = _shv.x, ny = _shv.y;
   const behind = _shv.z > 1;
   if (behind) { nx = -nx; ny = -ny; }
   if (!behind && nx >= -0.96 && nx <= 0.96 && ny >= -0.96 && ny <= 0.96) return false;   // on-screen → you can see it
-  let dx = nx, dy = -ny;                                   // NDC → screen space (y down)
+  let dx = nx, dy = -ny;                                   // NDC → screen space (y down); points OUTWARD toward the source
   const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
-  const cx = W / 2, cy = H / 2, pad = 48;
+  const cx = W / 2, cy = H / 2, pad = SONAR.pad;
   const sc = Math.min(dx !== 0 ? (W / 2 - pad) / Math.abs(dx) : Infinity,
                       dy !== 0 ? (H / 2 - pad) / Math.abs(dy) : Infinity);
-  const ex = cx + dx * sc, ey = cy + dy * sc;
+  const ex = cx + dx * sc, ey = cy + dy * sc;             // where the source direction meets the screen edge
   const loud = Math.max(0, Math.min(1.2, s.loud));
-  const R = 50 + loud * 95;
-  const alpha = Math.max(0.12, Math.min(0.85, loud * 0.9));
-  const col = s.type === 'gun' ? '255,80,55' : '255,190,110';
-  const grad = g.createRadialGradient(ex, ey, 0, ex, ey, R);
-  grad.addColorStop(0, `rgba(${col},${alpha})`);
-  grad.addColorStop(1, `rgba(${col},0)`);
-  g.fillStyle = grad;
-  g.beginPath(); g.arc(ex, ey, R, 0, Math.PI * 2); g.fill();
+  // CENTRE OF CURVATURE = the source's ACTUAL projected screen position (off-screen), so the arc is a
+  // true slice of a ring centred on the enemy — as it moves, the arc curves around where it really is.
+  // The radius is just how far off-screen it projects (clamped so a very distant/behind source stays a
+  // sensible gentle curve rather than an infinite straight line). When in range, the centre IS the
+  // source exactly; when clamped, it stays on the true edge→source line.
+  const sx = cx + nx * (W / 2), sy = cy - ny * (H / 2);       // source's projected screen position (raw NDC → px)
+  let vX = sx - ex, vY = sy - ey; const vlen = Math.hypot(vX, vY) || 1; vX /= vlen; vY /= vlen;   // edge→source dir
+  const R = Math.min(SONAR.Rmax, Math.max(SONAR.Rmin, vlen));
+  const theta = Math.min(SONAR.maxArcLen / R, Math.PI / 2);   // arc angular extent: capped length AND ≤ 90°
+  const Cx = ex + vX * R, Cy = ey + vY * R;                   // = the source itself when its off-screen dist is in range
+  const base = Math.atan2(ey - Cy, ex - Cx);                  // centre→edge angle (arc centred here, curving around source)
+  const nRings = 1 + Math.min(SONAR.maxRings - 1, Math.floor(loud * SONAR.ringSpan));
+  const baseAlpha = Math.max(0.16, Math.min(0.92, 0.22 + loud * 0.72));
+  g.save();
+  g.lineCap = 'round';
+  g.shadowColor = `rgba(${s.color},${(baseAlpha * 0.5).toFixed(3)})`;
+  g.shadowBlur = 7;
+  for (let i = 0; i < nRings; i++) {
+    const r = R + i * SONAR.ringGap;                          // successive rings march inward from the edge
+    const a = baseAlpha * (1 - i / (nRings + 1));
+    g.beginPath();
+    g.arc(Cx, Cy, r, base - theta / 2, base + theta / 2);
+    g.strokeStyle = `rgba(${s.color},${a.toFixed(3)})`;
+    g.lineWidth = Math.max(1.4, 3 - i * 0.45);
+    g.stroke();
+  }
+  g.restore();
   return true;
 }
 function updateSoundHud(dt) {
@@ -5222,7 +5304,7 @@ function updateSoundHud(dt) {
   if (soundHudCanvas.width !== W) soundHudCanvas.width = W;
   if (soundHudCanvas.height !== H) soundHudCanvas.height = H;
   const g = soundHudCtx; g.clearRect(0, 0, W, H);
-  for (const s of soundSources(listener)) drawEdgeGlow(g, W, H, s);
+  for (const s of soundSources(listener)) drawSonarArcs(g, W, H, s);
 }
 
 let _splashHidden = false;

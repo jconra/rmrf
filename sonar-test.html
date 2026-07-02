@@ -1,0 +1,41 @@
+<!doctype html><meta charset=utf8><title>sonar HUD preview — centred on source</title>
+<body style="margin:0;background:#12202b;color:#9fd0e0;font:13px monospace">
+<div style="padding:8px 14px">SONAR sound-HUD — the arc is a slice of a ring <b>centred on the enemy</b> (the dot). White line = screen edge; the dot sits off-screen. Rows = how far off-screen the source is (near→far), cols = loudness (rings).</div>
+<canvas id=c width=980 height=660></canvas>
+<script>
+// Mirrors the in-game drawSonarArcs geometry: centre of curvature = the source's projected position;
+// radius = its off-screen distance (clamped); arc length capped; rings = loudness. Here the "source"
+// is a visible dot placed off the right edge so you can see the arc wrap around it.
+const SONAR = { Rmin:60, Rmax:1500, maxArcLen:165, ringGap:9, ringSpan:3.2, maxRings:4 };
+const g = document.getElementById('c').getContext('2d');
+function draw(edgeX, midY, offset, loud, color){
+  const sx = edgeX + offset, sy = midY;             // source dot (off-screen, to the right of the edge)
+  const ex = edgeX, ey = midY;                      // edge point (source direction meets the edge)
+  let vX=sx-ex, vY=sy-ey; const vlen=Math.hypot(vX,vY)||1; vX/=vlen; vY/=vlen;
+  const R = Math.min(SONAR.Rmax, Math.max(SONAR.Rmin, vlen));
+  const Cx = ex+vX*R, Cy = ey+vY*R;                 // = the source dot when in range
+  const theta = Math.min(SONAR.maxArcLen/R, Math.PI/2);
+  const base = Math.atan2(ey-Cy, ex-Cx);
+  const nRings = 1 + Math.min(SONAR.maxRings-1, Math.floor(loud*SONAR.ringSpan));
+  const baseA = Math.max(0.16, Math.min(0.92, 0.22+loud*0.72));
+  // the source dot (so you see the centre)
+  g.fillStyle=`rgba(${color},0.9)`; g.beginPath(); g.arc(sx,sy,4,0,7); g.fill();
+  g.strokeStyle=`rgba(${color},0.25)`; g.setLineDash([3,4]); g.lineWidth=1; g.beginPath(); g.moveTo(ex,ey); g.lineTo(sx,sy); g.stroke(); g.setLineDash([]);
+  g.save(); g.lineCap='round'; g.shadowColor=`rgba(${color},${baseA*0.5})`; g.shadowBlur=7;
+  for(let i=0;i<nRings;i++){ const r=R+i*SONAR.ringGap; const a=baseA*(1-i/(nRings+1));
+    g.beginPath(); g.arc(Cx,Cy,r, base-theta/2, base+theta/2);
+    g.strokeStyle=`rgba(${color},${a})`; g.lineWidth=Math.max(1.4,3-i*0.45); g.stroke(); }
+  g.restore();
+}
+g.fillStyle='#12202b'; g.fillRect(0,0,980,660);
+const rows=[{n:'NEAR off-screen',o:70},{n:'MID',o:240},{n:'FAR',o:640}];
+const cols=[{n:'faint 0.2',l:0.2},{n:'mid 0.6',l:0.6},{n:'loud 1.1',l:1.1}];
+const col='235,80,60';
+for(let r=0;r<rows.length;r++)for(let c=0;c<cols.length;c++){
+  const x0=30+c*315, y0=70+r*195, edgeX=x0+150, midY=y0+70;
+  g.fillStyle='#7fb0c8'; g.fillText(rows[r].n+'  ·  '+cols[c].n, x0, y0-14);
+  g.strokeStyle='rgba(255,255,255,0.12)'; g.lineWidth=1; g.beginPath(); g.moveTo(edgeX,y0-4); g.lineTo(edgeX,y0+150); g.stroke();
+  draw(edgeX, midY, rows[r].o, cols[c].l, col);
+}
+window.__ready=true;
+</script>

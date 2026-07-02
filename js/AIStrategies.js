@@ -70,9 +70,43 @@ class Siege extends Mission {
   // match just stalled with a lone flyer idling at the wall). _pickAvailableType falls
   // back (jotun → lurcher → valkyrie) if we're out of railguns.
   wantVehicle(cmd) { return cmd.enemyEliminated() ? 'jotun' : this.doc.role(this.key); }
-  objective(cmd) { return cmd.enemyBasePos(); }
-  arriveDist(cmd) { return cmd.unit && cmd.unit.type === 'valkyrie' ? 26 : 12; }   // flyers shell from standoff
-  label(cmd) { return cmd.enemyEliminated() ? 'levelling the undefended base' : 'the enemy base'; }
+  // ROGUE SIEGE (from behind): a Rogue's Valkyrie doesn't slug it out at the front — it curls AROUND
+  // to the REAR of the enemy base and rockets the flag HQ from behind. Flight is the whole point: a
+  // ground unit sent to stop it gets hung up on the base walls, while the flyer just lifts over them
+  // and repositions — so it survives to keep chipping the HQ down instead of trading into the
+  // defender out front. Loop to the rear staging point first (latched, like the capture sneak), then
+  // settle into the shell; the hqThreat standoff then holds on that rear line.
+  objective(cmd) {
+    if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit && cmd.unit.type === 'valkyrie' && !cmd.flagExposed()) {
+      const u = cmd.unit.holder.position, rear = cmd.enemyRearApproach(), base = cmd.enemyBasePos(), home = cmd.homePos();
+      if (!cmd.unit._siegeRearReached) {
+        // Latch once we've actually gotten AROUND to the far side. A flyer holds ~26u off, so the
+        // old "within 12u of the rear point" test never tripped — use "past the base centre on the
+        // home→base axis" (i.e. behind it) OR loosely near the rear point.
+        let dx = base.x - home.x, dz = base.z - home.z; const d = Math.hypot(dx, dz) || 1;
+        const behind = ((u.x - base.x) * dx + (u.z - base.z) * dz) / d;   // +ve = on the rear side of the base
+        if (behind > 6 || Math.hypot(u.x - rear.x, u.z - rear.z) < 30) cmd.unit._siegeRearReached = true;
+        else return rear;                                                 // still curling around — head for the rear
+      }
+    }
+    return cmd.enemyBasePos();                                            // behind now → shell the HQ from the rear
+  }
+  arriveDist(cmd) {
+    if (cmd.unit && cmd.unit.type === 'valkyrie') {
+      // Rogue rear-siege: once behind the base, close to ~10u of the HQ (point-blank for a flyer at
+      // 7.5u cruise → rockets dive in at a natural ~37° instead of a hard 90° kink) so EVERY rocket
+      // lands on the keep — not spread across wall pieces or wasted from a 26u standoff. The flyer
+      // crosses over the walls to get there (ignoreWalls). Normal valkyrie siege still holds at 26u.
+      if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit._siegeRearReached && !cmd.flagExposed()) return 10;
+      return 26;
+    }
+    return 12;
+  }
+  label(cmd) {
+    if (cmd.enemyEliminated()) return 'levelling the undefended base';
+    if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit && cmd.unit.type === 'valkyrie' && !(cmd.unit && cmd.unit._siegeRearReached) && !cmd.flagExposed()) return 'flanking to shell the HQ from behind';
+    return 'the enemy base';
+  }
 }
 
 // CAPTURE — run a Firebrat for the flag; do NOT engage (the runner flees contact). A Rogue
@@ -149,6 +183,12 @@ const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
 // on identical (dseed-paired) matchups. Set via RR.setRunnerMode.
 let RUNNER_MODE = 'new';
 export function setRunnerMode(m) { RUNNER_MODE = m; }
+
+// Rogue rear-siege — Valkyrie flanks to the back of the enemy base to shell the HQ from behind,
+// staying out of the defender's reach (walls block a chasing ground unit; the flyer lifts over).
+// Runtime-toggleable so a single build can A/B it on deterministic (rngseed) paired matches.
+let ROGUE_REAR_SIEGE = true;
+export function setRogueRearSiege(v) { ROGUE_REAR_SIEGE = !!v; }
 
 class Doctrine {
   constructor(rng = Math.random, log = null) {
