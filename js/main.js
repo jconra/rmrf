@@ -1805,6 +1805,17 @@ function destroyVehicle(veh, cause, killer = null) {
   if (veh.ai && veh.team) {
     const how = cause === 'sank' ? 'DROWNED' : 'destroyed';
     aiLog(veh.team, `${teamLabel(veh.colorIndex)} ${veh.type} ${how}`);
+    // DEATH-CAUSE breakdown (deep combat log): where did the damage come from (turret vs
+    // vehicle vs terrain), plus where it died and what mission it was on — so we can see, e.g.,
+    // whether a capture-run firebrat is being killed by the enemy's FOB turrets.
+    const by = veh._dmgBy;
+    if (by) {
+      const parts = Object.entries(by).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${Math.round(n)}`);
+      const cmdr = commanders.find(c => c.team === veh.team);
+      const mis = cmdr && cmdr.strategy ? cmdr.strategy.step : '';
+      const pp = veh.holder.position;
+      logCombat(veh.team, `${teamLabel(veh.colorIndex)} ${veh.type} DOWN${mis ? ` (${mis})` : ''} @(${Math.round(pp.x)},${Math.round(pp.z)}) — ${parts.join(', ') || 'unknown'}`);
+    }
   }
   removeCombatant(veh);
   if (veh.ai) veh.ai.dead = true;
@@ -3065,12 +3076,14 @@ class AICommander {
         this.failStreak = (this.failStreak || 0) + 1;
         const lost = this.unit.type;                 // attrition: that vehicle is gone from the roster
         if (this.roster[lost] != null) this.roster[lost] = Math.max(0, this.roster[lost] - 1);
-        // A runner died storming the base → the approach isn't safe yet. Go BACK to
-        // softening (send a heavy to finish the towers) instead of feeding another
-        // Firebrat into the exact same death.
+        // A runner died storming the base → respond to WHY (from its damage breakdown):
+        // killed by an enemy VEHICLE → hunt the interceptor; killed by TOWERS → retry as a
+        // wide stealth run. Beats feeding another Firebrat straight into the same death.
         if (this.unit.type === 'firebrat' && this.strategy.step === 'capture') {
-          this.strategy.onRunnerLost(this);
-          aiLog(this.team, `${this.cname} runner down — re-softening (towers still up)`);
+          const by = this.unit._dmgBy || {};
+          const byVehicle = (by.vehicle || 0) >= (by.turret || 0);
+          this.strategy.onRunnerLost(this, byVehicle);
+          aiLog(this.team, `${this.cname} runner down — ${byVehicle ? 'hunting the interceptor' : 'switching to a stealth run'}`);
         }
         // Keep losing the same way? Each repeat raises the odds of a brand-new plan — but
         // only for legacy deck commanders. An archetype keeps its doctrine (losing a unit

@@ -85,7 +85,9 @@ class Capture extends Mission {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return cmd.homePos();            // carrying → run it home
     const flagPt = f ? { x: f.group.position.x, z: f.group.position.z } : cmd.enemyBasePos();
-    if (cmd.archetype === 'rogue' && cmd.unit) {                       // stealth: loop to the rear, THEN grab
+    // Stealth run: a Rogue always sneaks in the back; ANY commander does after a runner was
+    // shot on the direct approach (cmd._stealthCapture), to take a wide route around the hot zone.
+    if ((cmd.archetype === 'rogue' || cmd._stealthCapture) && cmd.unit) {   // loop to the rear, THEN grab
       const u = cmd.unit.holder.position, rear = cmd.enemyRearApproach();
       // Head for the rear staging point first, but LATCH the handoff to the flag once we
       // reach the rear OR we're already on the doorstep — otherwise the two far-apart goals
@@ -105,7 +107,7 @@ class Capture extends Mission {
   label(cmd) {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return 'home with the flag';
-    if (cmd.archetype === 'rogue' && !(cmd.unit && cmd.unit._rearReached)) return 'sneaking round the back';
+    if ((cmd.archetype === 'rogue' || cmd._stealthCapture) && !(cmd.unit && cmd.unit._rearReached)) return 'sneaking round the back';
     return 'snatching the flag';
   }
 }
@@ -153,12 +155,16 @@ class Doctrine {
   tick(cmd, dt) {
     this.t += dt;
     this.mission.tick(cmd, dt);
+    if (cmd._clearPathT > 0) cmd._clearPathT -= dt;   // countdown: clearing a downed runner's interceptor
     let next = this._urgent(cmd);
     // PRESERVATION (any persona): losing the attrition war → hold under tower cover instead
     // of trading the last of the army out in the open — UNLESS we can win right now by
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
     if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) next = 'defend';
+    // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
+    // feeding another firebrat into it (timed, so it doesn't chase forever).
+    if (!next && cmd._clearPathT > 0) next = 'attack';
     if (!next) next = this.choose(cmd);
     if (next && next !== this.step && (this.t > DWELL || URGENT.has(next))) this._switch(next, cmd);
   }
@@ -176,8 +182,14 @@ class Doctrine {
     this.step = key; this.t = 0;
     if (this.log) this.log(`${from} → ${key}`);
   }
-  // Runner died storming the base → the approach isn't safe; go back to softening it.
-  onRunnerLost(cmd) { this._switch(this.softenKey, cmd); }
+  // Runner died storming the base → respond to WHY, instead of feeding another firebrat down
+  // the same lane. Shot by an enemy VEHICLE → send an ATTACK to clear the interceptor first
+  // (timed window). Shot by TOWERS on the approach → retry as a STEALTH capture: a wide rear
+  // route around the hot zone (the flag's still grabbable, just not head-on).
+  onRunnerLost(cmd, byVehicle) {
+    if (byVehicle) cmd._clearPathT = 18;
+    else cmd._stealthCapture = true;
+  }
   get softenKey() { return 'siege'; }
   // --- interface the commander consumes (delegated to the running mission) ---
   wantVehicle(cmd) { return this.mission.wantVehicle(cmd); }
