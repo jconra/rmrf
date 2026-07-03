@@ -41,22 +41,30 @@ export class ExploreMemory {
 
   fraction() { return this.seenCount / this.seen.length; }
 
-  // Pick an unexplored cell to head for next. Per the scouting doctrine: prefer cells
-  // CLOSE to home (don't dive into danger early) but FAR from where we are right now
-  // (so the path sweeps outward in big arcs instead of dithering in one corner).
+  // Pick an unexplored cell to head for next. Sweep the NEAREST unexplored ground — since the
+  // cells behind the unit are already painted seen, "nearest unexplored" naturally sits ahead/
+  // to the side, so the scout makes steady FORWARD progress filling the map contiguously (the
+  // old "far from me, near home" score yanked an out-on-the-field scout back toward home every
+  // repick, so it ping-ponged and barely advanced). A mild home term still breaks ties toward
+  // safer ground so it doesn't dive at the enemy base. `minR` skips cells so close the caller
+  // would clear them on the next tick (which froze the scout: arrived → stops, never repicks).
   // Returns a world point {x,z} at the cell centre, or null when everything's explored.
-  pickTarget(selfX, selfZ, homeX, homeZ) {
-    let best = -Infinity, target = null;
+  pickTarget(selfX, selfZ, homeX, homeZ, minR = 0) {
+    let best = -Infinity, target = null, nearBest = Infinity, near = null;
+    const minR2 = minR * minR;
     for (let j = 0; j < this.gh; j++) {
       for (let i = 0; i < this.gw; i++) {
         if (this.seen[j * this.gw + i]) continue;
         const c = this._cellCentre(i, j);
-        const dSelf = Math.hypot(c.x - selfX, c.z - selfZ);
+        const d2 = (c.x - selfX) ** 2 + (c.z - selfZ) ** 2;
+        if (d2 < nearBest) { nearBest = d2; near = c; }   // absolute nearest (fallback if all are inside minR)
+        if (d2 < minR2) continue;
+        const dSelf = Math.sqrt(d2);
         const dHome = Math.hypot(c.x - homeX, c.z - homeZ);
-        const score = dSelf - 1.35 * dHome;   // far from me, near home → outward sweep, danger-averse
+        const score = -dSelf - 0.3 * dHome;   // nearest unexplored (forward sweep), mild pull toward safe ground
         if (score > best) { best = score; target = c; }
       }
     }
-    return target;
+    return target || near;   // everything unexplored was within minR → just take the nearest so the scout keeps going
   }
 }

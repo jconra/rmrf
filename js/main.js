@@ -27,7 +27,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=71';
-import { ExploreMemory } from './ExploreMemory.js?v=54';
+import { ExploreMemory } from './ExploreMemory.js?v=55';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
@@ -1865,6 +1865,42 @@ function updateFx(dt) {
   }
 }
 
+// --- NAV DEBUG: "where's it going" lines ---------------------------------
+// Draws a team-coloured line from each AI unit to the destination its brain is ACTUALLY
+// steering for this tick (the state-resolved dest from _dbg — scout waypoint, fuel point,
+// enemy, etc.), with a marker at the far end. The watched/spectated unit's line is bright;
+// the rest are dim. Toggle with the `g` key or RR.navLines(). Rebuilt each frame (a handful
+// of units, cheap) so it tracks live goals even in combat/skirting — including flyers, which
+// the A* replay tool can't show. Off by default.
+let navLineGroup = null, showNavLines = QS.has('navlines');   // ?navlines enables it on load (phone-friendly; no keyboard needed)
+function updateNavLines() {
+  if (!navLineGroup) { navLineGroup = new THREE.Group(); scene.add(navLineGroup); }
+  navLineGroup.visible = showNavLines && onField;
+  if (!navLineGroup.visible) { return; }
+  for (let i = navLineGroup.children.length - 1; i >= 0; i--) {   // clear last frame's lines/markers
+    const o = navLineGroup.children[i];
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) o.material.dispose();
+    navLineGroup.remove(o);
+  }
+  const watched = spectateTarget || _specFocus || player;
+  for (const cmd of commanders) {
+    const v = cmd.unit, d = cmd._dbg;
+    if (!v || v.dead || !d || d.gx == null) continue;
+    const hex = (TEAM_COLORS[cmd.colorIndex] && TEAM_COLORS[cmd.colorIndex].hex) || '#ffffff';
+    const col = new THREE.Color(hex);
+    const hot = v === watched;
+    const gy = map.heightAt(d.gx, d.gz) + 1.5;
+    const a = v.holder.position, b = new THREE.Vector3(d.gx, gy, d.gz);
+    const geo = new THREE.BufferGeometry().setFromPoints([a.clone(), b]);
+    navLineGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: hot ? 0.95 : 0.3 })));
+    const mk = new THREE.Mesh(new THREE.SphereGeometry(hot ? 2 : 1.1, 8, 8),
+      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: hot ? 0.85 : 0.3, depthWrite: false }));
+    mk.position.copy(b);
+    navLineGroup.add(mk);
+  }
+}
+
 // Destroy a vehicle: explosion, then remove it (or send the player to the garage).
 // Credit a kill to the firing unit's commander (ignores self/team kills, environment
 // deaths where there's no killer, and the player who has no commander). Powers the
@@ -3199,7 +3235,9 @@ class AICommander {
       const reach = this.strategy.arriveDist(this) + 8;
       if ((this._exploreWp.x - px) ** 2 + (this._exploreWp.z - pz) ** 2 < reach * reach) this._exploreWp = null;
     }
-    if (!this._exploreWp) { const home = this.homePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z); }
+    // minR beyond the clear radius so a fresh waypoint is always something to actually TRAVEL to
+    // (never one that's cleared next tick → the scout keeps moving instead of freezing).
+    if (!this._exploreWp) { const home = this.homePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12); }
     return this._exploreWp;
   }
 
@@ -4919,6 +4957,10 @@ function setupGarageUI() {
     else if (e.key === '[') { cycleSpectate(-1); e.preventDefault(); }
     else if (e.key === '`') { spectateTarget = null; }
   });
+  // NAV DEBUG lines toggle — works in spectate AND player mode (g key / RR.navLines()).
+  window.addEventListener('keydown', (e) => {
+    if (onField && (e.key === 'g' || e.key === 'G')) showNavLines = !showNavLines;
+  });
 
   // Click a vehicle to select its type; click the already-selected type again to
   // confirm/deploy it. (Ignore real drags / orbit.)
@@ -5544,6 +5586,7 @@ window.RR = {
   },
   enemyHp: () => { const e = combatants.find(c => !c.isPlayer && !c.dead); return e ? e.hp : null; },
   cycleSpectate: (dir = 1) => { cycleSpectate(dir); return spectateTarget ? spectateTarget.type : null; },
+  navLines: (on) => { showNavLines = on == null ? !showNavLines : !!on; return showNavLines; },   // debug: "where's it going" goal-line overlay
   tickSpectate: (dt = 0.1) => spectateUpdate(dt),
   refreshAiLog: () => updateAiLog(),
   get spectateFocus() { return spectateTarget; },
@@ -5827,6 +5870,7 @@ function animate() {
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateScrap(dt);                       // salvage piles: bob + proximity pickup → team scrap
       updateGibs(dt);                        // fly the debris from just-destroyed vehicles until it settles
+      updateNavLines();                      // debug: "where's it going" goal lines (toggle: g / RR.navLines)
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
