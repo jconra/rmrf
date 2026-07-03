@@ -223,7 +223,7 @@ class Intercept extends Mission {
 // the bank can fund a firebrat. Don't pick fights — this is a supply run.
 class Scavenge extends Mission {
   get key() { return 'scavenge'; }
-  wantVehicle(cmd) { return cmd._pickAvailableType('lurcher') || 'lurcher'; }   // a mobile collector, never our (missing) firebrat
+  wantVehicle(cmd) { return cmd._pickAvailableType('lurcher') || cmd._pickAvailableType('firebrat') || 'lurcher'; }   // any mobile collector we've got
   objective(cmd) {
     const u = cmd.unit ? cmd.unit.holder.position : { x: 0, z: 0 };
     return cmd.nearestKnownScrapPt(u.x, u.z) || cmd.exploreTarget() || cmd.enemyFobPos();

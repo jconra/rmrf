@@ -19,14 +19,14 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=86';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=88';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=70';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=71';
 import { ExploreMemory } from './ExploreMemory.js?v=54';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
@@ -699,12 +699,19 @@ let configBases = false;   // true when bases came from a DESIGNED map (no procg
 let placedWalls = [];      // designer-placed wall/tower/gate combat pieces (custom maps)
 let elevators = [];   // animated FOB surface lifts (one per forward base)
 let resupplies = [];  // neutral fuel/ammo/shield points of interest
-let scrapPiles = [];  // salvage piles (1 scrap each) — drive over one to collect it for your team
+let scrapPiles = [];  // salvage piles — drive over one to collect it for your team (a gib-wreck is worth SCRAP_DROP[type])
+let gibChunks = [];   // vehicle part-meshes currently flying apart on death (see gibVehicle/updateGibs)
 const teamScrap = { red: 0, blue: 0 };   // scrap banked per team; spent in the garage to build vehicles
 const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
-const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // piles a destroyed vehicle leaves behind
+const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
+const LOOT_RANGE = 28;         // after a KILL, how far the killer will swing over to grab the wreck it just made
+const LOOT_MS = 6000;          // give up the loot order after this long (don't let it stall the advance)
+let aiKillLoot = true;         // killers collect the wreck of what they just destroyed (A/B knob via RR.setKillLoot)
+const GIB_GRAV = 42;           // gravity on flying debris pieces (world units/s^2)
+const GIB_HOT_MS = 1500;       // debris is airborne/uncollectable this long after death
+const MAX_WRECKS = 10;         // cap persistent wreck piles on the field; oldest fades when exceeded
 const BUILD_COST = { jotun: 5, valkyrie: 5, lurcher: 3, firebrat: 2 };   // scrap to build one (garage, slice 2)
 let onField = false;  // true while the island is on screen (false = hangar view)
 let fieldBuilt = false; // the island is generated once, then reused across deploys
@@ -1084,6 +1091,9 @@ const ENGAGE_RANGE = { lurcher: 50, firebrat: 24, valkyrie: 50, jotun: 70 };
 // out-snipes the tower untouched; the Valkyrie flies its arc in; the Lurcher (no
 // fly, sinks in water) sits at the corner and busts that tower/wall the hard way.
 const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 46, firebrat: 26 };
+let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
+let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
+const CAPTURE_COMMIT = 55;   // within this of a grabbable flag, the runner beelines it and ignores turrets (final-dash commit)
 
 // Movement personality per type. cruise = rest altitude above the surface;
 // ignoreWalls = flies over base walls; water = 'cross' (hover/fly) or 'sink'
@@ -1858,8 +1868,19 @@ function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
   veh.dead = true;
   spawnExplosion(veh.holder.position, veh.type === 'jotun');
-  if (cause !== 'sank') dropScrap(veh.holder.position, veh.type, veh.colorIndex);   // leave wreckage behind (not for units lost at sea)
   creditKill(killer, veh);   // credit the firing unit's commander (drives Warrior/Hunter doctrine + kill feed)
+  if (cause !== 'sank') {     // units lost at sea sink whole — no wreckage
+    let impact = null;
+    if (killer && killer.holder) { impact = veh.holder.position.clone().sub(killer.holder.position); impact.y = 0; }
+    const wreck = gibVehicle(veh, impact);   // blow the model apart; the settled debris becomes the scrap pile
+    // FRESH KILL loot: hand the wreck to the KILLER'S commander so it swings over and grabs what
+    // it just dropped — it's close and the fight's (locally) over. Whether it bothers is a mood +
+    // dice roll with mission exceptions (see wantsLoot). Only its OWN commander's current unit.
+    if (wreck && killer && killer.team && killer.team !== veh.team) {
+      const cmd = commanders.find(c => c.team === killer.team && c.unit === killer);
+      if (cmd && !wreck.overWater && cmd.wantsLoot()) { cmd._lootPile = wreck; cmd._lootUntil = performance.now() + LOOT_MS; }
+    }
+  }
   if (veh.isPlayer) { killPlayer(); return; }
   // Surface what happened to the AI unit — drowned/destroyed units used to just vanish.
   if (veh.ai && veh.team) {
@@ -2440,7 +2461,7 @@ function updateResupplies(dt) {
 // One pile = 1 scrap. Piles drop where vehicles die and are scattered in remote
 // corners at map build; a vehicle driving over one collects it for its team. Spend
 // scrap in the garage to build more vehicles (BUILD_COST). Neutral: either team grabs.
-const SCRAP_PICKUP_R = 6;   // how close a vehicle must get to snag a pile
+const SCRAP_PICKUP_R = 8;   // how close a vehicle must get to snag a pile (a little margin so a unit halting at the kill site still collects)
 
 // kind 'parts' = organized delivery pallet (world scatter); 'wreck' = blown-up vehicle
 // debris (death drop) — its armor plates wear the dead vehicle's team camo.
@@ -2459,14 +2480,82 @@ function addScrapPile(x, z, kind = 'parts', colorIndex = null) {
   return pile;
 }
 
-// A destroyed vehicle leaves SCRAP_DROP[type] wreckage piles, scattered around the wreck.
-function dropScrap(pos, type, colorIndex) {
-  const n = SCRAP_DROP[type] || 1;
-  for (let i = 0; i < n; i++) {
-    const ang = Math.random() * Math.PI * 2, r = grid.cell * (0.5 + Math.random() * 0.9);
-    let x = pos.x + Math.cos(ang) * r, z = pos.z + Math.sin(ang) * r;
-    if (!map.isLand(x, z)) { x = pos.x; z = pos.z; }   // don't fling salvage into the sea
-    addScrapPile(x, z, 'wreck', colorIndex);
+// Blow a vehicle APART on death: detach every part-mesh of its model into world space and
+// fling it outward — away from the killing shot and radially from the hull centre — with an
+// upward pop and a tumble, then let gravity settle it into a scattered pile. That settled
+// debris IS the wreckage: it registers as one scrap pile worth SCRAP_DROP[type]. `impact` is
+// the shot's travel direction on the ground (killer → victim); null for environment deaths.
+function gibVehicle(veh, impact) {
+  const model = veh.model && veh.model.group;
+  if (!model) { scene.remove(veh.group); return; }
+  veh.group.updateMatrixWorld(true);
+  const center = veh.holder.position.clone();
+  let ix = impact ? impact.x : 0, iz = impact ? impact.z : 0;
+  const il = Math.hypot(ix, iz);
+  if (il > 1e-3) { ix /= il; iz /= il; } else { const a = Math.random() * Math.PI * 2; ix = Math.cos(a); iz = Math.sin(a); }
+
+  // Hold the settled debris in a world-space group (identity transform → child positions ARE
+  // world coords), so the physics can write mesh.position directly and pickup can drop it whole.
+  const wreck = new THREE.Group();
+  scene.add(wreck);
+  const meshes = [];
+  model.traverse(o => { if (o.isMesh) meshes.push(o); });
+  const now = performance.now();
+  for (const m of meshes) {
+    wreck.attach(m);                         // reparent, preserving world position/rotation/scale
+    const rx = m.position.x - center.x, rz = m.position.z - center.z;
+    let dx = rx, dz = rz; const rl = Math.hypot(dx, dz);
+    if (rl > 0.01) { dx /= rl; dz /= rl; } else { dx = ix; dz = iz; }
+    dx = dx * 0.5 + ix * 0.9; dz = dz * 0.5 + iz * 0.9;   // blend "outward" with "away from the shot"
+    const spd = 5 + Math.random() * 11;
+    gibChunks.push({
+      mesh: m,
+      vx: dx * spd + (Math.random() - 0.5) * 4,
+      vy: 7 + Math.random() * 9,             // pop up
+      vz: dz * spd + (Math.random() - 0.5) * 4,
+      ax: (Math.random() - 0.5) * 13, ay: (Math.random() - 0.5) * 13, az: (Math.random() - 0.5) * 13,
+    });
+  }
+  scene.remove(veh.group);   // the model is now empty (all meshes reparented to `wreck`)
+
+  // Register the settled pile as scrap. `hotUntil` keeps it uncollectable while it's still
+  // airborne; noBob keeps scattered debris from bobbing like a tidy pickup.
+  const value = SCRAP_DROP[veh.type] || 1;
+  // A wreck that landed over water is UNREACHABLE for ground units — flag it so nobody paths
+  // to it and gets stuck at the shoreline (it still shows as debris; a passing flyer could grab it).
+  const overWater = !map.isLand(center.x, center.z);
+  const pile = { group: wreck, pos: center.clone(), kind: 'wreck', value, overWater,
+    bob: 0, noBob: true, hotUntil: now + GIB_HOT_MS };
+  scrapPiles.push(pile);
+
+  // Cap persistent wrecks so a long match doesn't pile up hundreds of static meshes.
+  let wrecks = scrapPiles.filter(p => p.kind === 'wreck');
+  while (wrecks.length > MAX_WRECKS) {
+    const old = wrecks.shift();
+    scene.remove(old.group);
+    const i = scrapPiles.indexOf(old); if (i >= 0) scrapPiles.splice(i, 1);
+    old._gone = true;   // let commanders prune it from known-scrap intel
+  }
+  return pile;
+}
+
+// Fly the detached debris pieces: gravity, tumble, and a small bounce, then settle on the
+// ground. Settled pieces are removed from the sim (they stay parented in their wreck group).
+function updateGibs(dt) {
+  for (let i = gibChunks.length - 1; i >= 0; i--) {
+    const g = gibChunks[i], m = g.mesh;
+    if (!m.parent) { gibChunks.splice(i, 1); continue; }   // wreck was collected mid-flight
+    g.vy -= GIB_GRAV * dt;
+    m.position.x += g.vx * dt; m.position.y += g.vy * dt; m.position.z += g.vz * dt;
+    m.rotation.x += g.ax * dt; m.rotation.y += g.ay * dt; m.rotation.z += g.az * dt;
+    const groundY = map.heightAt(m.position.x, m.position.z) + 0.12;
+    if (m.position.y <= groundY) {
+      m.position.y = groundY;
+      g.vx *= 0.42; g.vz *= 0.42;                          // ground friction
+      g.ax *= 0.3; g.ay *= 0.3; g.az *= 0.3;               // spin bleeds off on impact
+      if (g.vy < -2.5) { g.vy = -g.vy * 0.35; }            // one small bounce
+      else { gibChunks.splice(i, 1); }                     // come to rest → stop simulating
+    }
   }
 }
 
@@ -2474,6 +2563,7 @@ function dropScrap(pos, type, colorIndex) {
 function scatterScrap() {
   for (const p of scrapPiles) scene.remove(p.group);
   scrapPiles = [];
+  gibChunks = [];   // drop any debris still mid-flight from the previous map
   if (QS.has('noscrap') || configBases) return;   // custom maps place their own (slice 2)
   const span = Math.min(map.worldW, map.worldH) / 2;
   let placed = 0, tries = 0;
@@ -2488,9 +2578,9 @@ function scatterScrap() {
   }
 }
 
-function collectScrap(team) {
+function collectScrap(team, value = 1) {
   const t = team === 'red' || team === 'blue' ? team : null;
-  if (t) teamScrap[t] += 1;
+  if (t) teamScrap[t] += value;
   updateScrapHud();
 }
 
@@ -2520,14 +2610,25 @@ function updateScrapHud() {
     document.body.appendChild(el);
   }
   el.style.display = onField ? '' : 'none';
-  if (onField) el.textContent = `⚙ SCRAP ${teamScrap[viewerTeam()] || 0}`;
+  if (!onField) return;
+  // Watching AI-vs-AI: show BOTH sides so it's unambiguous whose scrap is whose (the single
+  // spectated-team number was easy to misread as "the" scrap). A human game shows just yours.
+  if (TEAM_CTRL[PLAYER_TEAM] !== 'human') {
+    el.textContent = `⚙ A ${teamScrap.red || 0}   B ${teamScrap.blue || 0}`;
+  } else {
+    el.textContent = `⚙ SCRAP ${teamScrap[viewerTeam()] || 0}`;
+  }
 }
 
 function updateScrap(dt) {
+  const now = performance.now();
   for (let i = scrapPiles.length - 1; i >= 0; i--) {
     const p = scrapPiles[i];
-    p.bob += dt * 2;
-    p.group.position.y = p.pos.y + 0.04 + Math.sin(p.bob) * 0.05;   // gentle bob so it reads as a pickup (no spin — a heavy wreck/pallet shouldn't rotate)
+    if (!p.noBob) {   // parts pallets bob gently as a pickup; scattered gib-wrecks sit still
+      p.bob += dt * 2;
+      p.group.position.y = p.pos.y + 0.04 + Math.sin(p.bob) * 0.05;   // no spin — a heavy wreck/pallet shouldn't rotate
+    }
+    if (p.hotUntil && now < p.hotUntil) continue;   // debris still flying → not collectable yet
     for (const v of combatants) {
       if (v.dead) continue;
       if (Math.hypot(v.holder.position.x - p.pos.x, v.holder.position.z - p.pos.z) <= SCRAP_PICKUP_R) {
@@ -2535,11 +2636,12 @@ function updateScrap(dt) {
         p._gone = true;                 // let commanders prune it from their known-scrap intel
         scene.remove(p.group);
         scrapPiles.splice(i, 1);
-        collectScrap(v.team);
+        collectScrap(v.team, p.value || 1);
         break;
       }
     }
   }
+  updateScrapHud();   // refresh each frame so the counter tracks the spectated team (Tab / side buttons)
 }
 
 // --- Ground-unit navigation (A*) ---------------------------------------
@@ -2934,9 +3036,13 @@ class AICommander {
   // ALL its turrets are down. A single live tower over the flag will shred the runner on
   // the grab, so we don't commit one until the defenses are fully silenced.
   fortDown() { return this.turretsLive() === 0; }
-  // The runner only goes when the flag is both EXPOSED (HQ building rubble) and its
-  // turrets are DOWN — otherwise it's sent to die over a guarded or sealed flag.
-  flagGrabbable() { return this.flagExposed() && this.fortDown(); }
+  // Send the runner once the flag is EXPOSED (HQ is rubble) and the defenses are mostly
+  // silenced — all four turrets down is IDEAL but not required. A Firebrat is fast enough to
+  // dash in past the couple of BACK towers, snatch the flag and get out, so we commit once the
+  // near defenses are cleared (<= FLAG_GRAB_TURRETS still standing) rather than waiting for a
+  // full sweep that often never finishes (the stalemate). A fully-down fort is still preferred
+  // by the doctrine (it'll keep sieging while it can), this just stops hoarding the win.
+  flagGrabbable() { return this.flagExposed() && (aiKeepBreach ? this.turretsLive() <= FLAG_GRAB_TURRETS : this.fortDown()); }
   // The enemy flag is sealed inside its HQ until that building is rubble. The
   // runner can't grab it before then, so the heavy must finish the HQ first —
   // strategy cards gate the open→grab handoff on this.
@@ -2995,19 +3101,45 @@ class AICommander {
   nearestKnownScrapPt(x, z) {
     let best = null, bd = Infinity;
     for (const p of this.knownScrap) {
-      if (p._gone) continue;
+      if (p._gone || p.overWater) continue;   // skip debris in the water — ground units can't reach it
       const d = (p.pos.x - x) ** 2 + (p.pos.z - z) ** 2;
       if (d < bd) { bd = d; best = p; }
     }
     return best ? { x: best.pos.x, z: best.pos.z } : null;
   }
-  // We need the flag RUNNER to win (their defenses are cracking) but have no firebrat and
-  // can't afford to build one → go collect salvage until we can. (Only worth it if there's
-  // scrap to find: a known pile, or map left to scout for one.)
+  // After a KILL, should the killer grab the wreck? The unit ALREADY pushes to the enemy's
+  // last-known spot (= the kill site) and pauses to investigate, so the wreck is a few units
+  // further on its existing path — grabbing it is basically free, so we just do it. The only
+  // hard skips are decisive flag moments, where nothing should pull focus:
+  //  • carrying the enemy flag, or on a CAPTURE run → stay on the objective
+  //  • ANY flag in play (either side being carried) → don't wander at the deciding moment
+  //  • our flag stolen → go contest it, not loot
+  // (The longer OUT-OF-THE-WAY detours for distant scrap keep their mood/RNG gating; this is
+  // only the free grab at a fresh kill.)
+  wantsLoot() {
+    if (!aiKillLoot) return false;
+    const v = this.unit; if (!v || v.dead) return false;
+    if (this.flag() && this.flag().carrier === v) return false;
+    if (this.strategy.step === 'capture' || this.strategy.key === 'capture') return false;
+    if (this.ourFlagStolen()) return false;
+    for (const f of flags) if (f.carried) return false;
+    return true;
+  }
+  // Should the team break off to SCAVENGE for parts? Two cases (both need scrap to actually be
+  // findable — a known pile, or unexplored map left to scout):
+  //   (A) defenses are cracking but we've no firebrat to run the flag and can't buy one, OR
+  //   (B) we're down to ONLY firebrats (2+) with nothing heavier — poor at sieging, so go build
+  //       up scrap for a real sieger instead of throwing runners at walls (Jacob's idea).
   needsPartsRun() {
     if (!aiScrapBuild) return false;
-    if ((this.roster.firebrat || 0) > 0 || this.canAfford('firebrat')) return false;
-    if (!this.fortDown() && !this.flagExposed()) return false;   // not yet at the win-by-capture phase
+    const r = this.roster || {};
+    const uType = this.unit && !this.unit.dead ? this.unit.type : null;
+    const heavies = (r.jotun || 0) + (r.valkyrie || 0) + (r.lurcher || 0) + (uType && uType !== 'firebrat' ? 1 : 0);
+    const firebrats = (r.firebrat || 0) + (uType === 'firebrat' ? 1 : 0);
+    const needRunner = firebrats === 0 && !this.canAfford('firebrat') && (this.fortDown() || this.flagExposed());
+    const onlyRunners = heavies === 0 && firebrats >= 2
+      && !this.canAfford('jotun') && !this.canAfford('valkyrie') && !this.canAfford('lurcher');
+    if (!needRunner && !onlyRunners) return false;
     const px = this.unit ? this.unit.holder.position.x : 0, pz = this.unit ? this.unit.holder.position.z : 0;
     return !!this.nearestKnownScrapPt(px, pz) || this.explore.fraction() < 0.8;
   }
@@ -3077,6 +3209,14 @@ class AICommander {
     // only applies while the team is otherwise still alive.
     if (aiScrapBuild && want === 'firebrat' && (this.roster.firebrat || 0) === 0 && type !== null && type !== 'firebrat' && this.buildUnit('firebrat')) {
       type = 'firebrat';
+    }
+    // SALVAGE REINFORCEMENT (heavy): the plan wants a SIEGER but we're down to only runners
+    // (type fell back to 'firebrat' with no heavy in the roster). Spend the scrap we scavenged to
+    // field the best heavy we can afford, so a firebrat-only team isn't stuck battering walls with
+    // runners. Team still alive (has firebrats), so this is no wiped-team resurrection.
+    if (aiScrapBuild && want !== 'firebrat' && type === 'firebrat'
+        && !(this.roster.jotun || 0) && !(this.roster.valkyrie || 0) && !(this.roster.lurcher || 0)) {
+      for (const heavy of ['jotun', 'valkyrie', 'lurcher']) { if (this.buildUnit(heavy)) { type = heavy; break; } }
     }
     if (!type) {                               // roster empty AND can't afford a rebuild — out of the fight
       this.unit = null;
@@ -3543,16 +3683,34 @@ class AICommander {
     }
     if (this._shieldRun && !this._shieldRunOn) shieldBark(this, v, 'grab');   // announce the commit once
     this._shieldRunOn = this._shieldRun;
-    // OPPORTUNISTIC SALVAGE: swing over to a spotted scrap pile that's nearly on our path (free
-    // parts for the build bank). Short-range so it never drags a unit far off its real objective;
-    // skipped for the slow Jotun, active siegers, flag runners/carriers, and while already detouring.
+    // SALVAGE PICKUP — two ways a unit diverts to grab scrap. Shield/intercept always win.
     this._scrapDetour = false;
-    if (!this._shielding && !this._intercepting && v.type !== 'jotun'
+    // 1) FRESH KILL loot (top scrap priority): grab the wreck we just made. It's right here and
+    //    the local fight's over — but BAIL the moment another live enemy is close (back to the
+    //    fight) or if it somehow drifted out of reach. wantsLoot() already applied the mood/RNG/
+    //    mission gate when the pile was assigned; here we just honour a live loot order.
+    if (this._lootPile && !this._shielding && !this._intercepting
+        && !(this.flag() && this.flag().carrier === v)) {
+      const lp = this._lootPile;
+      const enemyNear = lp._gone ? false : combatants.some(o => !o.dead && o.team !== this.team
+        && !vehicleHidden(o) && (o.holder.position.x - px) ** 2 + (o.holder.position.z - pz) ** 2 < 46 * 46);
+      const d = Math.hypot(lp.pos.x - px, lp.pos.z - pz);
+      if (lp._gone || lp.overWater || enemyNear || d > LOOT_RANGE || performance.now() > this._lootUntil) this._lootPile = null;   // collected / unreachable / re-engaged / too far / timed out → drop it
+      else { goal = { x: lp.pos.x, z: lp.pos.z }; this._scrapDetour = true; }
+    }
+    // 2) OPPORTUNISTIC SALVAGE: swing over to a spotted scrap pile that's nearly on our path (free
+    //    parts for the build bank). Short-range so it never drags a unit far off its real objective;
+    //    skipped for the slow Jotun, active siegers/capturers, flag carriers, and while already detouring.
+    if (!this._scrapDetour && !this._shielding && !this._intercepting && v.type !== 'jotun'
         && this.strategy.step !== 'siege' && this.strategy.step !== 'capture' && this.strategy.step !== 'scavenge'
         && !(this.flag() && this.flag().carrier === v)) {
       const sp = this.nearestKnownScrapPt(px, pz);
       if (sp && Math.hypot(sp.x - px, sp.z - pz) < SCRAP_GRAB_RANGE) { goal = { x: sp.x, z: sp.z }; this._scrapDetour = true; }
     }
+    if (this._scrapDetour && !this._scrapDetourOn) {   // announce the commit ONCE (false→true), like the shield grab
+      aiLog(this.team, `${this.cname} ${v.type}: “Salvage on our line — grabbing it.”`);
+    }
+    this._scrapDetourOn = this._scrapDetour;
     // Where to rearm/refuel: the NEAREST valid source for what we need — own base
     // (always restocks fuel + ammo) OR a DISCOVERED neutral depot. A neutral depot gives
     // just ONE resource, so we only divert to one when topping it gets the unit combat-
@@ -3616,20 +3774,32 @@ class AICommander {
         if (d < threatD) { threatD = d; threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; threatCamp = c; }
       }
     }
-    // FALLBACK KEEP: all the turrets are down but the flag HQ still stands. On a SIEGE the
-    // keep BUILDING itself becomes the target, so the base gets levelled — the only way the
-    // flag ever exposes. This is also the ONLY siege target a FLYER can prosecute: a Valkyrie
-    // never earns a ground unit's break-through, so without this it silences the towers and
-    // then stalls over an intact HQ forever, and its side can never win.
+    // KILL THE KEEP: the flag HQ is a first-class siege target, not a last resort. The flag only
+    // exposes when the HQ building falls, so hoarding it until all four turrets are dead is what
+    // stalls a siege forever. Whenever a siege unit has a CLEAN LINE to the enemy HQ, prefer
+    // flattening it when the HQ is the better shot — no live turret at all, no clear line to the
+    // nearest turret (it's walled behind the keep), or the HQ is simply closer. Dropping the HQ
+    // reveals the flag AND opens angles on the back towers. LOS-gated, so units still grind the
+    // walls/near towers until a line to the keep actually opens (they don't charge blind).
     let hqThreat = false;
-    if (!threat && this.strategy.key === 'siege') {
-      let bestH = Infinity, ec = null;
+    if (this.strategy.key === 'siege') {
+      let bestH = Infinity, ec = null, hqPt = null;
       for (const c of camps) {
         if (c.team === this.team || !c.flagHQ || c.flagHQ.dead) continue;
-        const d = (c.center.x - px) ** 2 + (c.center.z - pz) ** 2;
-        if (d < bestH) { bestH = d; ec = c; }
+        const hx = c.center.x, hz = c.center.z;
+        const d = (hx - px) ** 2 + (hz - pz) ** 2;   // no LOS gate — if it's walled, we break a path to it
+        if (d < bestH) { bestH = d; ec = c; hqPt = { x: hx, y: map.heightAt(hx, hz) + 5, z: hz }; }
       }
-      if (ec) { threat = { x: ec.center.x, y: map.heightAt(ec.center.x, ec.center.z) + 5, z: ec.center.z }; threatCamp = ec; hqThreat = true; }
+      if (ec) {
+        // Target the keep whenever there's no turret we can actually SHOOT right now — none left,
+        // OR the nearest one is walled behind the keep (no clean line). With no line to the keep
+        // either, the demolish/break-through logic below chews a wall path straight to it, so it
+        // gets flattened WHILE the back towers still stand (revealing the flag). We do NOT pull off
+        // a turret that's out in the open shooting at us. OFF = old rule (only once all turrets die).
+        const turretLOS = threat && (flyer || hasLOS(px, pz, threat.x, threat.z));
+        const promote = aiKeepBreach ? (!threat || !turretLOS) : !threat;
+        if (promote) { threat = hqPt; threatCamp = ec; hqThreat = true; }
+      }
     }
     // Is there a CLEAR shot at the nearest tower, and which way to peel around it?
     // `threatLOS` lets the brain hold + fire when it can see the tower, or swing wide
@@ -3727,12 +3897,20 @@ class AICommander {
       resupply: supply ? { x: supply.center.x, z: supply.center.z } : goal,
       supplyHeals,   // the chosen resupply point is an own base → hold until ammo+fuel+hp are all maxed
       home: healHome || goal,
+      atHome: nearOwnSupply(v, px, pz),   // already in the base's heal/rearm zone → stop and top up (don't orbit the exact centre)
       // While DETOURING (grabbing a shield / intercepting), the goal is a place to GO, not a
       // thing to shell — so suppress shootGoal or the unit would "assault" (and gun down) the
       // shield generator / intercept spot it's heading for. It still engages real enemies via
       // the combat transitions; this only stops it firing at the detour waypoint.
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
       finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
+      // CAPTURE COMMIT: on a capture run, once the flag is grabbable AND we're on the final approach
+      // (within CAPTURE_COMMIT), beeline it and ignore turrets (brain: 'capturing' near the top). Not
+      // set once we're carrying it (then the objective is home). Fixes "worked the turret, never grabbed".
+      capturing: this.strategy.key === 'capture' && this.flagGrabbable() && (() => {
+        const f = this.flag(); if (!f || f.carrier === v) return false;
+        return (px - f.group.position.x) ** 2 + (pz - f.group.position.z) ** 2 < CAPTURE_COMMIT * CAPTURE_COMMIT;
+      })(),
 
       shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
       arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),
@@ -5238,7 +5416,7 @@ window.RR = {
       for (const v of vehicles) v.idle(dt);
       projectiles.update(dt); updateProjectileHits();
       destructibles.update(dt);
-      updateResupplies(dt); updateScrap(dt); updateWallTurrets(dt); updateLock(dt);
+      updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateLock(dt);
     }
   },
   blockedAt: (x, z) => blockedAt(x, z),
@@ -5259,7 +5437,7 @@ window.RR = {
   get damageTally() { return { ...dmgTally }; },
   explodeAt: (x, y, z, blast = 4, dmg = 100) => explodeAt(new THREE.Vector3(x, y, z), blast, dmg, null, null),
   // Headless test hook: run one combat sim step (projectile flight + hits + fx).
-  tickCombat: (dt = 0.05) => { projectiles.update(dt); updateProjectileHits(); if (foliage) foliage.update(dt); updateFx(dt); },
+  tickCombat: (dt = 0.05) => { projectiles.update(dt); updateProjectileHits(); if (foliage) foliage.update(dt); updateFx(dt); updateGibs(dt); },
   tickAI: (dt = 0.1) => updateCommanders(dt),
   get sound() { return sound; },
   tickEngines: () => updateEngineSounds(),
@@ -5269,11 +5447,15 @@ window.RR = {
   get lock() { return lock; },
   get resupplies() { return resupplies; },
   get scrapPiles() { return scrapPiles; },       // live salvage piles on the field
+  get gibCount() { return gibChunks.length; },   // debug: debris pieces currently mid-flight
   get teamScrap() { return { ...teamScrap }; },   // scrap banked per team
   get scrapBuilds() { return { ...scrapBuilds }; },   // vehicles built from salvage this match
   setTeamScrap: (team, n) => { if (team in teamScrap) teamScrap[team] = n | 0; return teamScrap[team]; },
   buildVehicle: (type) => buildVehicle(type),     // spend scrap → replace a lost vehicle (garage)
   setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
+  setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
+  setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
+  setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
   get playerLosses() { return playerLosses; },
   get matchOver() { return matchOver; },
   get matchWon() { return matchWon; },
@@ -5603,6 +5785,7 @@ function animate() {
       if (touchUsed) orientAimArc();         // keep the touch aim wedge pointing the way the vehicle faces (screen-relative)
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateScrap(dt);                       // salvage piles: bob + proximity pickup → team scrap
+      updateGibs(dt);                        // fly the debris from just-destroyed vehicles until it settles
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events

@@ -143,6 +143,7 @@ function fightScore(v, p) {
 const CONDITIONS = {
   always:       () => true,
   mustGo:       (v) => !!v.mustGo,                         // still inside the gate
+  capturing:    (v) => !!v.capturing,                      // final dash to a grabbable flag → take it, ignore the turrets
   hurtLatched:  (v, m) => m._hurt,                         // pulled out to patch up
   // Runner evasion: a Firebrat is too fragile to duel — when an enemy is close it flees
   // (curving toward its goal) instead of engaging. Only firebrats; only a near threat; and
@@ -468,7 +469,11 @@ const BEHAVIORS = {
     const homeward = mode === 'retreat' || mode === 'resupply';
     const arrive = homeward ? 5 : (view.arriveDist || 8);
     const turn = clamp(err * 2.0, -1, 1);
-    const fwd = dist < arrive ? 0 : 1;
+    // Heading home: the instant we're actually IN the base's heal/rearm zone, STOP — don't chase
+    // the exact centre. A wide-turning unit (Lurcher) can't land on a 5u pinpoint and just orbits
+    // it, which parks it circling on top of its own FOB elevator. atHome (the real supply radius)
+    // lets it settle anywhere in the zone and top up.
+    const fwd = ((homeward && view.atHome) || dist < arrive) ? 0 : 1;
     mem._wantMove = Math.abs(fwd) > 0.3;
     return { fwd, turn, fire: false, state: ctx.mode };
   },
@@ -610,6 +615,11 @@ export const DEFAULT_BRAIN = {
   // then the objective. `target` says what the chosen behavior aims at.
   transitions: [
     { when: 'mustGo',       mode: 'exit',     target: 'goal' },
+    // TAKE THE FLAG: on the final approach to a grabbable flag, the runner COMMITS — beeline it and
+    // ignore the turrets. A runner that stops to trade with the last tower next to the flag just
+    // dies without the grab (the "worked an angle on the turret and shot the wall" bug). It's a
+    // short, distance-gated dash (the flag's right there), so it's a commit, not a suicide charge.
+    { when: 'capturing',    mode: 'advance',  target: 'goal' },
     { when: 'runnerFlee',   mode: 'flee',     target: 'goal' },
     // IMMEDIATE VEHICLE THREAT leads everything below the gate/runner: an inescapable rival on
     // top of us gets answered NOW — never keep sieging or flee-to-heal with our back to it.
