@@ -3342,17 +3342,29 @@ class AICommander {
         : (view.blockedLeft && view.blockedRight) ? 'boxed in'
         : 'wedged on terrain';
     }
+    // The RESOLVED destination the unit is actually driving to THIS tick — depends on the brain
+    // state, not just the mission goal (a resupplying unit heads to fuel, not its objective). This
+    // is what makes the log honest about "where is it trying to get to" (Jacob's ask).
+    let dest = view.goal;
+    if (cmd.state === 'exit') dest = this._exit || view.goal;
+    else if (cmd.state === 'retreat') dest = this._home || view.goal;
+    else if (cmd.state === 'resupply') dest = this._supply || view.goal;
+    else if (cmd.state === 'pursue') dest = (v.ai && v.ai.lastSeen) || view.goal;
+    else if (cmd.state === 'engage') dest = view.enemy || view.goal;
+    else if (cmd.state === 'suppress') dest = view.threatStand || view.threat || view.goal;
+    const destDist = dest ? Math.round(Math.hypot(v.holder.position.x - dest.x, v.holder.position.z - dest.z)) : null;
     this._dbg = {
       name: this.cname, type: v.type, state: cmd.state,
       stuck: this._stuckT > 0.8 ? +this._stuckT.toFixed(1) : 0, stuckWhy,
       card: (this.strategy.constructor.name || 'Card').replace('Strategy', ''),
       fwd: +cmd.fwd.toFixed(2), turn: +cmd.turn.toFixed(2),
       blk: (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'),
-      hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), shield: Math.round(v.shield),
+      hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), maxFuel: Math.round(v.maxFuel), shield: Math.round(v.shield),
       fof: v.ai && v.ai._fof != null ? +v.ai._fof.toFixed(1) : null,   // live fight-or-flight score vs the rival in sight
       distFob: Math.round(Math.hypot(v.holder.position.x - fob.x, v.holder.position.z - fob.z)),
       px: Math.round(v.holder.position.x), pz: Math.round(v.holder.position.z),
-      gx: view.goal ? Math.round(view.goal.x) : null, gz: view.goal ? Math.round(view.goal.z) : null,
+      gx: dest ? Math.round(dest.x) : null, gz: dest ? Math.round(dest.z) : null, gd: destDist,   // where it's ACTUALLY headed + distance
+      atHome: !!view.atHome, navPath: this._nav && this._nav.path ? this._nav.path.length : 0,   // in a supply/heal zone? has an A* route?
       towers: this.turretsLive(),   // enemy turrets still standing (tower-first ordering)
     };
     if (cmd.state !== prev) {
@@ -4254,7 +4266,12 @@ function updateAiLog() {
     html += `<div class="tb-h" style="color:${col}">${cmd.cname} · ${type} · ${mission}${card ? ` · ${card.toUpperCase()}` : ''}</div>`;
     if (d) {
       const fof = d.fof != null ? ` · <span style="color:${d.fof > 0 ? '#7fffb8' : '#ff9d7f'}">fof ${d.fof > 0 ? '+' : ''}${d.fof}</span>` : '';
-      html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}${fof} · fob ${d.distFob}</div>`;
+      html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}/${d.maxFuel}${fof} · fob ${d.distFob}</div>`;
+      // WHERE it's headed + HOW hard it's driving there — reads "@here → there Nu · fwd/turn".
+      // A big gd with fwd 0 = it's decided to sit (why?); fwd>0 with STUCK = it's trying but wedged.
+      const to = d.gx != null ? `(${d.gx},${d.gz}) ${d.gd}u` : '—';
+      const flags = (d.atHome ? ' · atBase' : '') + (d.navPath ? ` · path ${d.navPath}` : '');
+      html += `<div class="tb-l">@(${d.px},${d.pz}) → ${to} · drive ${d.fwd}/${d.turn} · blk ${d.blk}${flags}</div>`;
       if (d.stuck) html += `<div class="tb-l" style="color:#ffb030">⚠ STUCK ${d.stuck}s — ${d.stuckWhy}</div>`;
     }
     html += `<div class="tb-l">twrs ${d ? d.towers : '?'} · knows ${known}</div>`;
