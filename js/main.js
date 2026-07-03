@@ -13,7 +13,7 @@ import { makeFlagHQ } from './Buildings.js?v=3';   // decoy HQ buildings on desi
 import { RoadNetwork } from './Roads.js?v=81';
 import { Foliage } from './Foliage.js?v=4';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
-import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=67';
+import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
 import { Elevator } from './Elevator.js?v=3';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
@@ -1019,6 +1019,17 @@ function elevatorPadAt(x, z) {
   return null;
 }
 
+// Road speed modifier for a vehicle at its CURRENT cell: ground units get ROAD_SPEED_MUL on a
+// road tile (the highway is genuinely faster, not just cheaper to path), 1 elsewhere. Flyers
+// don't ride roads, so they never get it. Fed to Vehicle.speedMul each frame before it drives.
+function roadSpeedMul(v) {
+  if (v._move && v._move.ignoreWalls) return 1;
+  if (!roadNet.cells) return 1;
+  const c = grid.cell;
+  const cx = Math.round(v.holder.position.x / c), cz = Math.round(v.holder.position.z / c);
+  return roadNet.cells.has(cx + ',' + cz) ? ROAD_SPEED_MUL : 1;
+}
+
 // A vehicle still riding a FOB lift UP the shaft hasn't surfaced yet — down in the pit
 // it's out of sight, so it can't be SEEN, targeted or shot until its lift tops out. This
 // stops a unit camping the enemy's elevator mouth and shelling riders before they rise.
@@ -1091,6 +1102,7 @@ const ENGAGE_RANGE = { lurcher: 50, firebrat: 24, valkyrie: 50, jotun: 70 };
 // out-snipes the tower untouched; the Valkyrie flies its arc in; the Lurcher (no
 // fly, sinks in water) sits at the corner and busts that tower/wall the hard way.
 const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 46, firebrat: 26 };
+let ROAD_SPEED_MUL = 1.25;   // ground vehicles drive this much faster on a road cell (RR.setRoadSpeed to tune)
 let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
 const CAPTURE_COMMIT = 55;   // within this of a grabbable flag, the runner beelines it and ignores turrets (final-dash commit)
@@ -3476,6 +3488,7 @@ class AICommander {
     const s = steerToward(v, wp.x, wp.z);
     const out = burnFuel(v, { fwd: s.fwd, turn: s.turn }, dt);
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6);
+    v.speedMul = roadSpeedMul(v);
     v.drive(dt, out.fwd, out.turn, null, v._blocked);
     v.ai._wantMove = s.fwd > 0.3;
     this._dbg = {
@@ -3554,6 +3567,7 @@ class AICommander {
     this._logTick(v, view, cmd);
     const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn, strafe: cmd.strafe || 0 }, dt);
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
+    v.speedMul = roadSpeedMul(v);
     v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
     applyAltitude(v, dt);
     decayAim(v, dt);
@@ -4632,6 +4646,7 @@ function driveUpdate(dt) {
   }
   if (!driving || !player || player.dead) return false;
   const inp = matchOver ? { fwd: 0, turn: 0, strafe: 0 } : driveInput();   // controls freeze on win
+  player.speedMul = roadSpeedMul(player);   // the player gets the same road boost as the AI
   let revFwd, revTurn, stopped;
   if (inp.omni) {
     // Omni Lurcher: burnFuel for the accounting (+ LIMP scaling when dry), then drive the
@@ -5464,6 +5479,7 @@ window.RR = {
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
+  setRoadSpeed: (m) => { ROAD_SPEED_MUL = m; return ROAD_SPEED_MUL; },   // tune the on-road speed boost (1 = off)
   get playerLosses() { return playerLosses; },
   get matchOver() { return matchOver; },
   get matchWon() { return matchWon; },

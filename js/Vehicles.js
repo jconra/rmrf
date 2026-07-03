@@ -98,8 +98,9 @@ export class Vehicle {
     const h = this.heading;
     const fx = -Math.sin(h), fz = -Math.cos(h);   // forward (local -Z)
     const rx =  Math.cos(h), rz = -Math.sin(h);   // right   (local +X)
-    const d = forward * this.speed * dt;
-    const s = strafe * this.speed * STRAFE_FRAC * dt;
+    const eff = this.speed * (this.speedMul || 1);   // speedMul = terrain modifier (e.g. a road boost), set per-frame by the game
+    const d = forward * eff * dt;
+    const s = strafe * eff * STRAFE_FRAC * dt;
     const dx = fx * d + rx * s;
     const dz = fz * d + rz * s;
     const px = this.holder.position.x, pz = this.holder.position.z;
@@ -128,7 +129,7 @@ export class Vehicle {
       this.heading += Math.max(-slew, Math.min(slew, turn));
       this.holder.rotation.y = this.heading;
     }
-    const d = this.speed * dt;
+    const d = this.speed * (this.speedMul || 1) * dt;
     const dx = mx * d, dz = mz * d;
     const px = this.holder.position.x, pz = this.holder.position.z;
     let nx = px + dx, nz = pz + dz;
