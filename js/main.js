@@ -31,7 +31,7 @@ import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
-import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=1';
+import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=2';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
 import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
 

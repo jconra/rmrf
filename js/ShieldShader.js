@@ -28,6 +28,7 @@ const fragmentShader = /* glsl */ `
   uniform vec3  uColor;
   uniform float uLife;          // 1 = full shield, 0 = empty (drives colour toward red)
   uniform float uOpacity;
+  uniform float uFill;          // base surface glow everywhere (gives the dome a visible "top", not just an edge ring)
   uniform float uHexScale, uEdgeWidth, uHexOpacity;
   uniform float uFresnelPower, uFresnelStrength;
   uniform float uFlashSpeed, uFlashIntensity;
@@ -148,7 +149,7 @@ const fragmentShader = /* glsl */ `
 
     vec3 lColor = lifeColor(uLife);
     float effHex = uHexOpacity + hexHitBoost*uHitIntensity;
-    float intensity = hex*effHex*(0.3 + fresnel*0.7) + fresnel*0.4 + flash;
+    float intensity = hex*effHex*(0.3 + fresnel*0.7) + fresnel*0.4 + flash + uFill*(0.6 + 0.4*flowNoise);
     vec3 shieldColor = lColor*intensity*2.0;
     shieldColor += lColor*(flowNoise*fresnel*uFlowIntensity);
     shieldColor += lColor*ringContrib*uHitIntensity;
@@ -166,6 +167,7 @@ function defaultUniforms(hex) {
     uColor:           { value: new THREE.Color(hex || '#26aeff') },
     uLife:            { value: 1 },
     uOpacity:         { value: 0.76 },
+    uFill:            { value: 0.06 },
     uHexScale:        { value: 3.0 },
     uEdgeWidth:       { value: 0.06 },
     uHexOpacity:      { value: 0.13 },
@@ -175,7 +177,7 @@ function defaultUniforms(hex) {
     uFlashIntensity:  { value: 0.11 },
     uFlowScale:       { value: 2.4 },
     uFlowSpeed:       { value: 1.13 },
-    uFlowIntensity:   { value: 4.0 },
+    uFlowIntensity:   { value: 1.0 },   // toned down from the reference's 4.0 — RMRF has no bloom/tonemap, so 4 blew the edges to white
     uHitPos:          { value: hits },
     uHitTime:         { value: times },
     uHitRingSpeed:    { value: 1.75 },
