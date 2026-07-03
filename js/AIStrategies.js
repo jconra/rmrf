@@ -90,7 +90,16 @@ class Siege extends Mission {
   // long-range chip fire (which the audit showed barely dents a structure, so a decided
   // match just stalled with a lone flyer idling at the wall). _pickAvailableType falls
   // back (jotun → lurcher → valkyrie) if we're out of railguns.
-  wantVehicle(cmd) { return cmd.enemyEliminated() ? 'jotun' : this.doc.role(this.key); }
+  // HQ FINISHER: turrets are down but the walled HQ still stands. A GROUND unit (a Warrior's
+  // Jotun) can't hit the keep through the surrounding walls — it clears every turret and then
+  // stalls at 85 dmg on a 600hp HQ (measured). Only a FLYER lifts over the walls for a clean
+  // shot, so once the fort is down we field a Valkyrie to actually crack it (data: the HQ only
+  // ever dies with sustained Valkyrie presence). Toggle via RR.setHqFinisher for A/B.
+  wantVehicle(cmd) {
+    if (cmd.enemyEliminated()) return 'jotun';                                  // unopposed → railgun closes in + demolishes fast
+    if (HQ_FINISHER && cmd.fortDown() && !cmd.flagExposed()) return 'valkyrie';  // turrets down, HQ walled → send the flyer
+    return this.doc.role(this.key);
+  }
   // ROGUE SIEGE (from behind): a Rogue's Valkyrie doesn't slug it out at the front — it curls AROUND
   // to the REAR of the enemy base and rockets the flag HQ from behind. Flight is the whole point: a
   // ground unit sent to stop it gets hung up on the base walls, while the flyer just lifts over them
@@ -258,6 +267,14 @@ function pickCry(cmd, pool) { cmd._cryN = (cmd._cryN || 0) + 1; return pool[cmd.
 // on identical (dseed-paired) matchups. Set via RR.setRunnerMode.
 let RUNNER_MODE = 'new';
 export function setRunnerMode(m) { RUNNER_MODE = m; }
+
+// Once the enemy fort is down but its HQ still stands, field a Valkyrie to shell the keep over
+// the walls (a ground siege can't reach it). Default OFF: the swap FIRES correctly but a lone
+// Valkyrie can't out-DPS the 600hp HQ before dying, so it's resolution-neutral and just adds
+// recall churn — it needs pairing with a balance change (lower HQ hp / higher structure DPS).
+// A/B via RR.setHqFinisher.
+let HQ_FINISHER = false;
+export function setHqFinisher(v) { HQ_FINISHER = !!v; return HQ_FINISHER; }
 
 // Rogue rear-siege — Valkyrie flanks to the back of the enemy base to shell the HQ from behind,
 // staying out of the defender's reach (walls block a chasing ground unit; the flyer lifts over).

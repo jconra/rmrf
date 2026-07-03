@@ -26,7 +26,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=71';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=72';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
@@ -704,6 +704,7 @@ let scrapPiles = [];  // salvage piles — drive over one to collect it for your
 let gibChunks = [];   // vehicle part-meshes currently flying apart on death (see gibVehicle/updateGibs)
 const teamScrap = { red: 0, blue: 0 };   // scrap banked per team; spent in the garage to build vehicles
 const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
+let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
@@ -3573,7 +3574,20 @@ class AICommander {
   // unit, we flag it to DRIVE HOME and get swapped at base (see _driveHome).
   _maybeRecall() {
     if (!this.unit || this._recalling) return;
-    if (this.strategy.step === this._stepAtDeploy) return;          // same beat → keep the current unit
+    // HQ-FINISHER swap: the fort's down mid-siege but the walled HQ still stands and our sieger is
+    // a GROUND unit that can't reach the keep — pull it back and roll out the flyer the doctrine now
+    // wants (a Valkyrie). Normally we only re-pick on a STEP change; this fires within the siege step.
+    const hqSwap = this.strategy.step === 'siege' && this.fortDown() && !this.flagExposed()
+      && this.unit.type !== 'valkyrie' && !this.unit._move.ignoreWalls
+      && this._pickAvailableType(this.strategy.wantVehicle(this)) === 'valkyrie';
+    if (this.strategy.step === this._stepAtDeploy && !hqSwap) return;   // same beat → keep the current unit (unless we need the flyer)
+    if (hqSwap) {   // commit the finisher swap even with defenders near — a Jotun lost en route just respawns as the Valkyrie
+      _hqSwapCount++;
+      this._stepAtDeploy = this.strategy.step; this._recalling = true;
+      this._recallBestD = Infinity; this._recallStallT = 0; this._nav.path = null;
+      aiLog(this.team, `${this.cname}: Turrets are down — pull the ${this.unit.type} back, roll out a Valkyrie to crack that keep!`);
+      return;
+    }
     // Don't turn our back on a live rival to go swap vehicles: a recalled unit drives home
     // defenceless and gets shot in the back (a slow Jotun especially). Defer the swap while a
     // rival is close — and DON'T consume the step change, so it re-attempts once the coast is
@@ -5624,6 +5638,8 @@ window.RR = {
   setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
+  setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
+  get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
   setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
   setRoadSpeed: (m) => { ROAD_SPEED_MUL = m; return ROAD_SPEED_MUL; },   // tune the on-road speed boost (1 = off)
   setShieldCap: (n) => { RR_shieldCap = Math.max(0, n | 0); return RR_shieldCap; },   // how many shields run the fancy shader (0 = all cheap)
