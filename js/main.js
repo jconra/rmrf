@@ -1646,6 +1646,20 @@ function damageVehiclesAt(point, blast, dmg, team, shooter) {
 const dmgTally = { turret: 0, vehicle: 0, tree: 0, other: 0 };
 function damageVehicle(veh, amount, cause = 'other', shooter = null) {
   if (veh.dead) return;
+  // ELEVATOR ANTI-CAMP: while surfacing on the pad, nothing gets through — just flare the bubble
+  // (and a hit-ring toward the shooter) so the block reads. Drops the moment it drives off (or times out).
+  if (elevShieldOn(veh)) {
+    ensureShieldFx(veh);
+    const b = veh._shieldFx;
+    if (b) {
+      b.userData.hit = 1;
+      if (isFancyMat(b.material) && shooter && shooter.holder) {
+        b.updateWorldMatrix(true, false);
+        pushShieldHit(b.material, b.worldToLocal(shooter.holder.position.clone()).normalize(), performance.now() / 1000);
+      }
+    }
+    return;
+  }
   const _hp0 = veh.hp;   // hull before, for the combat log
   dmgTally[cause] = (dmgTally[cause] || 0) + amount;
   if (veh.ai) veh._dmgBy = veh._dmgBy || { turret: 0, vehicle: 0, tree: 0, other: 0 }, veh._dmgBy[cause] += amount;
@@ -2478,6 +2492,15 @@ function nearOwnSupply(v, vx, vz) {
   return false;
 }
 
+// ELEVATOR ANTI-CAMP shield: a vehicle surfacing on its FOB lift is fully protected so an enemy
+// can't sit at the elevator mouth and farm it. Active while it's ON the pad AND within the time
+// cap after surfacing (whichever ends first) — so it can't park behind the shield to camp.
+const ELEV_SHIELD_MS = 5000;
+function elevShieldOn(v) {
+  return !!(v && v._elevShieldUntil && performance.now() < v._elevShieldUntil
+    && elevatorPadAt(v.holder.position.x, v.holder.position.z));
+}
+function shieldUp(v) { return v.shield > 0 || elevShieldOn(v); }
 function ensureShieldFx(v) {
   if (v._shieldFx) { v._shieldFx.visible = true; return; }
   // Build on a UNIT sphere (radius 1) scaled to the hull, so the force-field shader reads the
@@ -2513,12 +2536,12 @@ function assignFancyShields() {
   const cap = Math.max(0, RR_shieldCap | 0);
   while (fancyPool.length < cap) fancyPool.push({ mat: makeShieldMaterial('#26aeff'), owner: null });
   const list = [];
-  if (player && !player.dead && player.shield > 0 && player._shieldFx) list.push(player);
-  for (const v of combatants) if (!v.dead && v !== player && v.shield > 0 && v._shieldFx) list.push(v);
+  if (player && !player.dead && shieldUp(player)) { ensureShieldFx(player); list.push(player); }
+  for (const v of combatants) if (!v.dead && v !== player && shieldUp(v)) { ensureShieldFx(v); list.push(v); }
   list.sort((a, b) => shieldPriority(a) - shieldPriority(b));
   const chosen = new Set(list.slice(0, cap));
   for (const slot of fancyPool) {   // free slots whose owner dropped out
-    if (slot.owner && (!chosen.has(slot.owner) || slot.owner.dead || slot.owner.shield <= 0)) releaseFancyShield(slot.owner);
+    if (slot.owner && (!chosen.has(slot.owner) || slot.owner.dead || !shieldUp(slot.owner))) releaseFancyShield(slot.owner);
   }
   for (const v of chosen) {          // assign a free slot to any chosen vehicle not yet fancy
     const b = v._shieldFx;
@@ -2534,16 +2557,17 @@ function assignFancyShields() {
   }
 }
 function updateShieldFx(v, dt) {
+  if (!shieldUp(v)) { if (v._shieldFx) v._shieldFx.visible = false; return; }
+  ensureShieldFx(v);   // the elevator shield has no pickup, so make the bubble on demand
   const b = v._shieldFx;
-  if (!b) return;
-  if (v.shield <= 0) { b.visible = false; return; }
   b.visible = true;
+  const life = (v.maxShield > 0 && v.shield > 0) ? v.shield / v.maxShield : 1;   // elevator shield reads full
   if (isFancyMat(b.material)) {
-    stepShield(b.material, performance.now() / 1000, v.shield / v.maxShield, shieldTeamHex(v));
+    stepShield(b.material, performance.now() / 1000, life, shieldTeamHex(v));
     return;   // the shader owns opacity/animation + hit rings
   }
   const hit = b.userData.hit || 0;
-  b.material.opacity = 0.12 + 0.16 * (v.shield / v.maxShield) + hit * 0.6;
+  b.material.opacity = 0.12 + 0.16 * life + hit * 0.6;
   if (hit > 0) b.userData.hit = Math.max(0, hit - dt * 3);
   b.rotation.y += dt * 0.6;
 }
@@ -3651,6 +3675,7 @@ class AICommander {
     if (this._rising) {
       if (this._elev && this._elev.rider === this.unit && this._elev.phase === 'top') {
         this._elev.rider = null; this._rising = false;
+        this.unit._elevShieldUntil = performance.now() + ELEV_SHIELD_MS;   // anti-camp cover while it clears the mouth
         this._planExit();   // ground units must aim at a GATE and drive out before pursuing
       } else { return; }
     }
@@ -4758,6 +4783,7 @@ function driveInput() {
 function driveUpdate(dt) {
   if (playerElev && player && playerElev.rider === player && playerElev.phase === 'top') {
     playerElev.rider = null;   // detach so drive() owns the transform
+    player._elevShieldUntil = performance.now() + ELEV_SHIELD_MS;   // anti-camp cover while it clears the mouth
     driving = true;
     refreshAimArc();           // tint the aim wedge to this vehicle's arc, now that it's live
   }
