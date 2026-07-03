@@ -1644,20 +1644,24 @@ function damageVehiclesAt(point, blast, dmg, team, shooter) {
 // Running tally of damage dealt to vehicles, by source — powers siege diagnostics
 // (are attackers dying to towers or to enemy vehicles?) and a future kill feed.
 const dmgTally = { turret: 0, vehicle: 0, tree: 0, other: 0 };
-function damageVehicle(veh, amount, cause = 'other', shooter = null) {
+// Spawn a hit-ring on a fancy shield bubble, toward `worldPos` if known (shooter or turret),
+// else a random spot — so EVERY shield hit reads, including turret fire (which has no shooter).
+const _ringTmp = new THREE.Vector3();
+function shieldRingAt(b, worldPos) {
+  if (!b || !isFancyMat(b.material)) return;
+  b.updateWorldMatrix(true, false);
+  const dir = worldPos ? b.worldToLocal(_ringTmp.copy(worldPos)).normalize()
+                       : _ringTmp.set(Math.random() - 0.5, Math.random() - 0.3, Math.random() - 0.5).normalize();
+  pushShieldHit(b.material, dir, performance.now() / 1000);
+}
+function damageVehicle(veh, amount, cause = 'other', shooter = null, srcPos = null) {
   if (veh.dead) return;
   // ELEVATOR ANTI-CAMP: while surfacing on the pad, nothing gets through — just flare the bubble
   // (and a hit-ring toward the shooter) so the block reads. Drops the moment it drives off (or times out).
   if (elevShieldOn(veh)) {
     ensureShieldFx(veh);
     const b = veh._shieldFx;
-    if (b) {
-      b.userData.hit = 1;
-      if (isFancyMat(b.material) && shooter && shooter.holder) {
-        b.updateWorldMatrix(true, false);
-        pushShieldHit(b.material, b.worldToLocal(shooter.holder.position.clone()).normalize(), performance.now() / 1000);
-      }
-    }
+    if (b) { b.userData.hit = 1; shieldRingAt(b, (shooter && shooter.holder) ? shooter.holder.position : srcPos); }
     return;
   }
   const _hp0 = veh.hp;   // hull before, for the combat log
@@ -1669,13 +1673,8 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null) {
     veh.shield -= absorbed;
     amount -= absorbed;
     if (veh._shieldFx) {
-      const b = veh._shieldFx;
-      b.userData.hit = 1;   // cheap-bubble flare
-      // Fancy bubble: spawn an expanding ring on the side facing the shooter (object-space dir).
-      if (isFancyMat(b.material) && shooter && shooter.holder) {
-        b.updateWorldMatrix(true, false);
-        pushShieldHit(b.material, b.worldToLocal(shooter.holder.position.clone()).normalize(), performance.now() / 1000);
-      }
+      veh._shieldFx.userData.hit = 1;   // cheap-bubble flare
+      shieldRingAt(veh._shieldFx, (shooter && shooter.holder) ? shooter.holder.position : srcPos);
     }
     if (veh.shield <= 0 && veh._shieldFx) veh._shieldFx.visible = false;
   }
@@ -1757,7 +1756,7 @@ function tickWallTurret(w, team, dt) {
     t._cd = TURRET_CD;
     // Damage the locked target directly (with range falloff) + a cosmetic tracer.
     // Direct, so the slug can't clip the turret's OWN walls on the way out.
-    damageVehicle(target, TURRET_DMG * turretFalloff(Math.sqrt(bestD)), 'turret');
+    damageVehicle(target, TURRET_DMG * turretFalloff(Math.sqrt(bestD)), 'turret', null, _tHead);   // srcPos → hit-ring faces the turret
     _tDir.copy(tp).sub(_tHead).normalize();
     const hex = TEAM_ACCENT[team] ? new THREE.Color(TEAM_ACCENT[team]).getHex() : 0xffd0a0;
     projectiles.spawn(0, _tHead.clone(), _tDir.clone(), hex);   // cosmetic tracer toward the target
