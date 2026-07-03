@@ -8,6 +8,11 @@
 // coarse (~40u) — far bigger than a nav cell — because all we need is a sense of which
 // broad regions are known. World is centred on the origin: x,z run [-worldW/2, +worldW/2].
 
+// A/B knob: 'near' = new nearest-unexplored forward sweep; 'far' = old "far from me, near home"
+// score (which ping-ponged). Toggled globally via RR.setScoutSweep for paired self-play tests.
+let SWEEP_MODE = 'near';
+export function setSweepMode(m) { SWEEP_MODE = m === 'far' ? 'far' : 'near'; return SWEEP_MODE; }
+
 export class ExploreMemory {
   constructor(worldW, worldH, cell = 30) {
     this.cell = cell;
@@ -61,7 +66,9 @@ export class ExploreMemory {
         if (d2 < minR2) continue;
         const dSelf = Math.sqrt(d2);
         const dHome = Math.hypot(c.x - homeX, c.z - homeZ);
-        const score = -dSelf - 0.3 * dHome;   // nearest unexplored (forward sweep), mild pull toward safe ground
+        const score = SWEEP_MODE === 'far'
+          ? dSelf - 1.35 * dHome        // OLD: far from me, near home (ping-ponged)
+          : -dSelf - 0.3 * dHome;       // NEW: nearest unexplored (forward sweep), mild pull toward safe ground
         if (score > best) { best = score; target = c; }
       }
     }

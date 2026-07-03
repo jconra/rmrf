@@ -27,7 +27,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege } from './AIStrategies.js?v=71';
-import { ExploreMemory } from './ExploreMemory.js?v=55';
+import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
@@ -5587,6 +5587,7 @@ window.RR = {
   enemyHp: () => { const e = combatants.find(c => !c.isPlayer && !c.dead); return e ? e.hp : null; },
   cycleSpectate: (dir = 1) => { cycleSpectate(dir); return spectateTarget ? spectateTarget.type : null; },
   navLines: (on) => { showNavLines = on == null ? !showNavLines : !!on; return showNavLines; },   // debug: "where's it going" goal-line overlay
+  setScoutSweep: (m) => setSweepMode(m),   // A/B: 'near' (new forward sweep) vs 'far' (old ping-pong)
   tickSpectate: (dt = 0.1) => spectateUpdate(dt),
   refreshAiLog: () => updateAiLog(),
   get spectateFocus() { return spectateTarget; },
