@@ -31,6 +31,7 @@ import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
+import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=1';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
 import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
 
@@ -1279,7 +1280,7 @@ function removeCombatant(veh) {
   if (i >= 0) combatants.splice(i, 1);
   if (veh.bar) { scene.remove(veh.bar.group); veh.bar = null; }
   if (veh._engineId != null && sound) { sound.dropSpatialEngine(veh._engineId); veh._engineId = null; }
-  if (veh._shieldFx) { veh.holder.remove(veh._shieldFx); veh._shieldFx.geometry.dispose(); veh._shieldFx.material.dispose(); veh._shieldFx = null; }
+  if (veh._shieldFx) { releaseFancyShield(veh); veh.holder.remove(veh._shieldFx); veh._shieldFx.geometry.dispose(); if (veh._shieldFx.userData.cheapMat) veh._shieldFx.userData.cheapMat.dispose(); veh._shieldFx = null; }
   if (veh._shadow) { vehShadows.remove(veh._shadow); veh._shadow.geometry.dispose(); veh._shadow.material.dispose(); veh._shadow = null; }
 }
 
@@ -1653,7 +1654,15 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null) {
     const absorbed = Math.min(veh.shield, amount);
     veh.shield -= absorbed;
     amount -= absorbed;
-    if (veh._shieldFx) veh._shieldFx.userData.hit = 1;   // flare the bubble on impact
+    if (veh._shieldFx) {
+      const b = veh._shieldFx;
+      b.userData.hit = 1;   // cheap-bubble flare
+      // Fancy bubble: spawn an expanding ring on the side facing the shooter (object-space dir).
+      if (isFancyMat(b.material) && shooter && shooter.holder) {
+        b.updateWorldMatrix(true, false);
+        pushShieldHit(b.material, b.worldToLocal(shooter.holder.position.clone()).normalize(), performance.now() / 1000);
+      }
+    }
     if (veh.shield <= 0 && veh._shieldFx) veh._shieldFx.visible = false;
   }
   if (amount > 0) veh.hp -= amount;
@@ -2471,16 +2480,68 @@ function nearOwnSupply(v, vx, vz) {
 
 function ensureShieldFx(v) {
   if (v._shieldFx) { v._shieldFx.visible = true; return; }
-  const b = makeShieldBubble(v.hitR * 1.5);
+  // Build on a UNIT sphere (radius 1) scaled to the hull, so the force-field shader reads the
+  // same at any size (its object-space is normalised). The cheap wireframe stays the default.
+  const b = makeShieldBubble(1);
+  const s = v.hitR * 1.5;
+  b.scale.set(s, s * 0.7, s);
   b.position.y = 2.0;
+  b.userData.cheapMat = b.material;
   v.holder.add(b);            // rides with the hull (holder is unscaled)
   v._shieldFx = b;
+}
+// --- FANCY force-field: only a few run the full shader at once (perf cap). Most shields keep
+// the cheap wireframe bubble; the player's, the spectated unit's, and the nearest AI shields
+// (up to RR_shieldCap) get the hex + fresnel + hit-ring shader. Pooled so materials (compiled
+// shaders) are reused, never created/disposed per assignment.
+let RR_shieldCap = 3;
+const fancyPool = [];   // { mat, owner }
+function isFancyMat(m) { return !!(m && m.userData && m.userData.hitCursor != null); }
+function shieldTeamHex(v) { return (TEAM_COLORS[v.colorIndex] && TEAM_COLORS[v.colorIndex].hex) || '#26aeff'; }
+function shieldPriority(v) {
+  if (v === player) return -2;                       // the player's own shield always gets it
+  if (v === spectateTarget || v === _specFocus) return -1;   // then whoever we're watching
+  return camera.position.distanceToSquared(v.holder.position);   // then nearest to the camera
+}
+function releaseFancyShield(v) {   // hand a vehicle's fancy material back to the pool
+  const b = v._shieldFx; if (!b) return;
+  const slot = fancyPool.find(s => s.owner === v);
+  if (slot) slot.owner = null;
+  if (isFancyMat(b.material) && b.userData.cheapMat) b.material = b.userData.cheapMat;
+}
+function assignFancyShields() {
+  const cap = Math.max(0, RR_shieldCap | 0);
+  while (fancyPool.length < cap) fancyPool.push({ mat: makeShieldMaterial('#26aeff'), owner: null });
+  const list = [];
+  if (player && !player.dead && player.shield > 0 && player._shieldFx) list.push(player);
+  for (const v of combatants) if (!v.dead && v !== player && v.shield > 0 && v._shieldFx) list.push(v);
+  list.sort((a, b) => shieldPriority(a) - shieldPriority(b));
+  const chosen = new Set(list.slice(0, cap));
+  for (const slot of fancyPool) {   // free slots whose owner dropped out
+    if (slot.owner && (!chosen.has(slot.owner) || slot.owner.dead || slot.owner.shield <= 0)) releaseFancyShield(slot.owner);
+  }
+  for (const v of chosen) {          // assign a free slot to any chosen vehicle not yet fancy
+    const b = v._shieldFx;
+    if (!b || isFancyMat(b.material)) continue;
+    const slot = fancyPool.find(s => !s.owner);
+    if (!slot) break;
+    slot.owner = v;
+    b.userData.cheapMat = b.material;
+    slot.mat.userData.hitCursor = 0;
+    for (let i = 0; i < slot.mat.uniforms.uHitTime.value.length; i++) slot.mat.uniforms.uHitTime.value[i] = -1e3;
+    slot.mat.uniforms.uColor.value.set(shieldTeamHex(v));
+    b.material = slot.mat;
+  }
 }
 function updateShieldFx(v, dt) {
   const b = v._shieldFx;
   if (!b) return;
   if (v.shield <= 0) { b.visible = false; return; }
   b.visible = true;
+  if (isFancyMat(b.material)) {
+    stepShield(b.material, performance.now() / 1000, v.shield / v.maxShield, shieldTeamHex(v));
+    return;   // the shader owns opacity/animation + hit rings
+  }
   const hit = b.userData.hit || 0;
   b.material.opacity = 0.12 + 0.16 * (v.shield / v.maxShield) + hit * 0.6;
   if (hit > 0) b.userData.hit = Math.max(0, hit - dt * 3);
@@ -2488,6 +2549,7 @@ function updateShieldFx(v, dt) {
 }
 
 function updateResupplies(dt) {
+  assignFancyShields();   // pick which few shields run the full force-field shader this frame
   for (const rp of resupplies) {
     if (!rp.dead && rp.kind === 'shield' && rp.group.userData.spin) rp.group.userData.spin.rotation.z += dt * 1.5;
   }
@@ -5539,6 +5601,8 @@ window.RR = {
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
   setRoadSpeed: (m) => { ROAD_SPEED_MUL = m; return ROAD_SPEED_MUL; },   // tune the on-road speed boost (1 = off)
+  setShieldCap: (n) => { RR_shieldCap = Math.max(0, n | 0); return RR_shieldCap; },   // how many shields run the fancy shader (0 = all cheap)
+  testShield: (i = 0) => { const u = commanders[i] && commanders[i].unit; if (!u) return false; if (u.maxShield <= 0) u.maxShield = 100; u.shield = u.maxShield; ensureShieldFx(u); return true; },   // debug: force a shield bubble
   get playerLosses() { return playerLosses; },
   get matchOver() { return matchOver; },
   get matchWon() { return matchWon; },
