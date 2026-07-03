@@ -156,6 +156,16 @@ const CONDITIONS = {
     const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
     return dx * dx + dz * dz < 60 * 60;
   },
+  // Flee is LATCHED (hysteresis) so a runner commits to escaping instead of dancing on the 60u
+  // line — trips via runnerFlee, and only clears once it's genuinely CLEAR of the danger (100u
+  // from the threat, seen or last-known). Without this it fled to 61u, dropped flee, turned back
+  // toward its goal (past the enemy), re-entered 60u, and repeated until it died.
+  fleeLatched: (v, m) => m._flee,
+  fleeClear: (v, m) => {
+    if (v.seesEnemy && v.enemy) { const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z; return dx * dx + dz * dz > 100 * 100; }
+    const f = m._fleeFrom; if (!f) return true;   // lost sight and no remembered threat → clear
+    const dx = v.self.x - f.x, dz = v.self.z - f.z; return dx * dx + dz * dz > 100 * 100;
+  },
   // (finishHim removed: "hurt but the rival's weaker → turn and finish" is now a term in
   // fightScore + the engaging-before-retreat ordering, so it needs no special condition.)
   resupLatched: (v, m) => m._resup,                        // heading home to rearm/refuel
@@ -486,18 +496,21 @@ const BEHAVIORS = {
   // death. Gating the goal pull on "does it lead me back toward the threat?" breaks that.
   flee(ctx) {
     const { view, mem, self } = ctx;
-    const e = view.enemy;
-    let ax = self.x - e.x, az = self.z - e.z;                       // away from the threat (leads)
+    // Remember the freshest threat point so we keep fleeing even after we break line of sight
+    // (the latch holds; without a live enemy we'd otherwise have nothing to run from).
+    if (view.enemy) mem._fleeFrom = { x: view.enemy.x, z: view.enemy.z };
+    const f = mem._fleeFrom || view.goal || { x: self.x, z: self.z + 1 };
+    let ax = self.x - f.x, az = self.z - f.z;                       // straight AWAY from the danger — LEADS, dominant
     const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
-    let gx = view.goal.x - self.x, gz = view.goal.z - self.z;       // toward the objective
-    const gl = Math.hypot(gx, gz) || 1; gx /= gl; gz /= gl;
-    // Fold the goal in only when heading for it doesn't mean heading back toward the enemy
-    // (goal-dir and away-dir roughly agree). Otherwise run PURE away — straight off the
-    // threat (and naturally toward open water) instead of circling back to die.
-    const gw = (gx * ax + gz * az) > 0 ? 0.7 : 0;
-    const fx = ax + gx * gw, fz = az + gz * gw;
+    // Bias toward our OWN tower cover (safety) instead of the objective — a runner fleeing toward
+    // its capture goal curved back PAST the enemy and died (the "bad dance"). Fold safety in only
+    // when it doesn't point back at the threat; away always wins.
+    let sx = 0, sz = 0;
+    if (view.support) { sx = view.support.x - self.x; sz = view.support.z - self.z; const sl = Math.hypot(sx, sz) || 1; sx /= sl; sz /= sl; }
+    const sw = (sx * ax + sz * az) > -0.15 ? 0.6 : 0;
+    const fx = ax + sx * sw, fz = az + sz * sw;
     const desired = Math.atan2(-fx, -fz);                          // model front is local -Z
-    const turn = clamp(wrapPi(desired - self.heading) * 2.4, -1, 1);
+    const turn = clamp(wrapPi(desired - self.heading) * 2.8, -1, 1);   // snap onto the escape heading hard
     mem._wantMove = true;
     return { fwd: 1, turn, fire: false, state: ctx.mode };          // run flat out, hold fire
   },
@@ -598,6 +611,7 @@ export const DEFAULT_BRAIN = {
   latches: [
     { flag: '_resup', trip: 'resupNeeded', clear: 'resupDone' },
     { flag: '_hurt',  trip: 'hurtNeeded',  clear: 'hurtDone' },
+    { flag: '_flee',  trip: 'runnerFlee',  clear: 'fleeClear' },   // runner commits to escaping (hysteresis)
   ],
   states: {
     exit:     { behavior: 'exit', skipWhiskers: true },
@@ -620,7 +634,7 @@ export const DEFAULT_BRAIN = {
     // dies without the grab (the "worked an angle on the turret and shot the wall" bug). It's a
     // short, distance-gated dash (the flag's right there), so it's a commit, not a suicide charge.
     { when: 'capturing',    mode: 'advance',  target: 'goal' },
-    { when: 'runnerFlee',   mode: 'flee',     target: 'goal' },
+    { when: 'fleeLatched',  mode: 'flee',     target: 'goal' },
     // IMMEDIATE VEHICLE THREAT leads everything below the gate/runner: an inescapable rival on
     // top of us gets answered NOW — never keep sieging or flee-to-heal with our back to it.
     { when: 'underAttack',  mode: 'engage',   target: 'enemy' },
