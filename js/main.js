@@ -3617,6 +3617,14 @@ class AICommander {
         this._lastEnemyPos = { x: heard.x, z: heard.z, t: performance.now(), heard: true };
       }
     }
+    // GHOST CLEARED: we reached the last-known spot and there's nobody here to see OR hear —
+    // so the intel is spent. Drop it now instead of loitering over an empty spot for the full
+    // 12s stale window (the "Valkyrie hovering over where a teammate died" idle). With it gone,
+    // the Attack objective falls back to the enemy base and the unit pushes on.
+    if (!seesEnemy && !heard && this._lastEnemyPos) {
+      const dx = this._lastEnemyPos.x - px, dz = this._lastEnemyPos.z - pz;
+      if (dx * dx + dz * dz < 12 * 12) this._lastEnemyPos = null;
+    }
     // Fog-of-war intel: remember what the enemy keeps fielding so counterVehicle() works.
     if (seen) this.seenTypes[seen.type] = (this.seenTypes[seen.type] || 0) + 1;
     // DISCOVER nearby supply points — the team only "knows" a depot once one of its
