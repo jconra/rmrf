@@ -50,7 +50,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { makeShieldMaterial, pushShieldHit, stepShield } from './js/ShieldShader.js?v=2';
+import { makeShieldMaterial, pushShieldHit, stepShield } from './js/ShieldShader.js?v=3';
 
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias:true });
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
@@ -78,13 +78,13 @@ scene.add(bubble);
 
 // ── sliders ──────────────────────────────────────────────────────────────────
 const SPEC = [
-  ['uLife',1,0,1,0.01],['uOpacity',0.76,0,2,0.01],['uFill',0.06,0,0.6,0.005],
-  ['uHexScale',3,0.5,8,0.1],['uEdgeWidth',0.06,0,0.3,0.005],['uHexOpacity',0.13,0,0.6,0.01],
-  ['uFresnelPower',1.8,0.2,5,0.05],['uFresnelStrength',1.75,0,4,0.05],
-  ['uFlashSpeed',0.6,0,3,0.05],['uFlashIntensity',0.11,0,0.5,0.01],
-  ['uFlowScale',2.4,0.5,8,0.1],['uFlowSpeed',1.13,0,3,0.05],['uFlowIntensity',1.0,0,6,0.05],
-  ['uHitRingSpeed',1.75,0.2,4,0.05],['uHitRingWidth',0.12,0.02,0.4,0.005],['uHitMaxRadius',2.4,0.5,3.5,0.05],
-  ['uHitDuration',1.6,0.3,4,0.05],['uHitIntensity',1.0,0,3,0.05],['uHitImpactRadius',0.5,0,1.5,0.02],
+  ['uLife',1,0,1,0.01],['uOpacity',0.33,0,2,0.01],['uFill',0.045,0,0.6,0.005],
+  ['uHexScale',4.1,0.5,8,0.1],['uEdgeWidth',0.05,0,0.3,0.005],['uHexOpacity',0.6,0,1,0.01],
+  ['uFresnelPower',1.2,0.2,5,0.05],['uFresnelStrength',0.4,0,4,0.05],
+  ['uFlashSpeed',0.95,0,3,0.05],['uFlashIntensity',0.5,0,0.8,0.01],
+  ['uFlowScale',4.7,0.5,8,0.1],['uFlowSpeed',0.7,0,3,0.05],['uFlowIntensity',1.45,0,6,0.05],
+  ['uHitRingSpeed',2.35,0.2,4,0.05],['uHitRingWidth',0.185,0.02,0.4,0.005],['uHitMaxRadius',1.25,0.5,3.5,0.05],
+  ['uHitDuration',1.1,0.3,4,0.05],['uHitIntensity',3,0,6,0.05],['uHitImpactRadius',1.5,0,2.5,0.02],
 ];
 const box = document.getElementById('sliders'); const inputs = {};
 for (const [k, def, min, max, step] of SPEC) {
