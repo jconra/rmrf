@@ -19,19 +19,19 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=89';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=91';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=72';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=74';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
-import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=3';
+import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
 import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
 
@@ -1097,16 +1097,27 @@ const VEH_HIT_R = { lurcher: 3.2, firebrat: 2.0, valkyrie: 3.0, jotun: 3.6 };
 // Jotun (no range falloff) snipes from beyond most of the wall-turrets' reach; the
 // Firebrat has to close to use its short forward gun. Drives both duels and the
 // turret-suppression standoff (see AI.js engage/suppress).
-const ENGAGE_RANGE = { lurcher: 50, firebrat: 24, valkyrie: 50, jotun: 70 };
+// How far a round ACTUALLY reaches (u) = tracer speed × life from Projectiles.js (idx L/F/V/J).
+// The Lurcher slug dies at 85·0.5 ≈ 42, so firing from its old 50u engage range dropped every
+// shot SHORT of the target — the "stuck plinking a shore tower just out of reach, reload, repeat"
+// bug. A unit must be inside THIS to land a hit; the AI fire gate is capped by it (see AI.js
+// combat). Firebrat = 40u hitscan laser; Jotun slug 115·0.7 ≈ 80; the Valkyrie's homing missile
+// curves in so distance isn't its limiter (kept generous).
+const SHOT_REACH = { lurcher: 42, firebrat: 40, valkyrie: 80, jotun: 80 };
+// Lurcher engage/hold pulled INSIDE its 42u reach (was 50/46) so it plants close enough to
+// actually connect instead of raining rounds down short of the tower.
+const ENGAGE_RANGE = { lurcher: 40, firebrat: 24, valkyrie: 50, jotun: 70 };
 // Where a unit SITS to silence a wall-turret — the standoff is placed radially
 // OUTSIDE the base through the target turret, so only that one turret bears on it
 // (no crossfire from the others). The Jotun parks beyond TURRET_RANGE (54) so it
 // out-snipes the tower untouched; the Valkyrie flies its arc in; the Lurcher (no
 // fly, sinks in water) sits at the corner and busts that tower/wall the hard way.
-const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 46, firebrat: 26 };
+const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 38, firebrat: 26 };
 let ROAD_SPEED_MUL = 1.25;   // ground vehicles drive this much faster on a road cell (RR.setRoadSpeed to tune)
 let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
+const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie if a ground unit is within this of our FOB — else chase with what we've got
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
+let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hole (A/B via RR.setBreachCommit); off = old orbit-and-spray standoff
 const CAPTURE_COMMIT = 55;   // within this of a grabbable flag, the runner beelines it and ignores turrets (final-dash commit)
 
 // Movement personality per type. cruise = rest altitude above the surface;
@@ -1888,41 +1899,9 @@ function updateFx(dt) {
   }
 }
 
-// --- NAV DEBUG: "where's it going" lines ---------------------------------
-// Draws a team-coloured line from each AI unit to the destination its brain is ACTUALLY
-// steering for this tick (the state-resolved dest from _dbg — scout waypoint, fuel point,
-// enemy, etc.), with a marker at the far end. The watched/spectated unit's line is bright;
-// the rest are dim. Toggle with the `g` key or RR.navLines(). Rebuilt each frame (a handful
-// of units, cheap) so it tracks live goals even in combat/skirting — including flyers, which
-// the A* replay tool can't show. Off by default.
-let navLineGroup = null, showNavLines = QS.has('navlines');   // ?navlines enables it on load (phone-friendly; no keyboard needed)
-function updateNavLines() {
-  if (!navLineGroup) { navLineGroup = new THREE.Group(); scene.add(navLineGroup); }
-  navLineGroup.visible = showNavLines && onField;
-  if (!navLineGroup.visible) { return; }
-  for (let i = navLineGroup.children.length - 1; i >= 0; i--) {   // clear last frame's lines/markers
-    const o = navLineGroup.children[i];
-    if (o.geometry) o.geometry.dispose();
-    if (o.material) o.material.dispose();
-    navLineGroup.remove(o);
-  }
-  const watched = spectateTarget || _specFocus || player;
-  for (const cmd of commanders) {
-    const v = cmd.unit, d = cmd._dbg;
-    if (!v || v.dead || !d || d.gx == null) continue;
-    const hex = (TEAM_COLORS[cmd.colorIndex] && TEAM_COLORS[cmd.colorIndex].hex) || '#ffffff';
-    const col = new THREE.Color(hex);
-    const hot = v === watched;
-    const gy = map.heightAt(d.gx, d.gz) + 1.5;
-    const a = v.holder.position, b = new THREE.Vector3(d.gx, gy, d.gz);
-    const geo = new THREE.BufferGeometry().setFromPoints([a.clone(), b]);
-    navLineGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: hot ? 0.95 : 0.3 })));
-    const mk = new THREE.Mesh(new THREE.SphereGeometry(hot ? 2 : 1.1, 8, 8),
-      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: hot ? 0.85 : 0.3, depthWrite: false }));
-    mk.position.copy(b);
-    navLineGroup.add(mk);
-  }
-}
+// NOTE: the old separate "where's it going" goal-line overlay (?navlines / updateNavLines)
+// is now FOLDED INTO updateNavOverlay (?nav) — one toggle draws the A* route for grounders and
+// a straight goal-line for flyers/skirters. See updateNavOverlay further down.
 
 // Destroy a vehicle: explosion, then remove it (or send the player to the garage).
 // Credit a kill to the firing unit's commander (ignores self/team kills, environment
@@ -3014,6 +2993,8 @@ class AICommander {
     this.seenTypes = {};                              // rival vehicle types this team has spotted
     this.knownSupplies = new Set();                   // fog-of-war: resupply POIs this team has SCOUTED
     this.knownScrap = new Set();                       // fog-of-war: salvage piles this team has SPOTTED
+    this._scrapNoReach = new Map();                     // pile → expiry(ms): salvage A* couldn't route to (walled-off spit) — don't re-commit
+    this._scrapTargetPile = null;                       // the pile the current salvage detour is committed to (for the unreachable-bail check)
     this.knownElev = false;                           // scouted the enemy FOB/elevator yet?
     this.knownFlag = false;                           // scouted the enemy flag HQ yet?
     this._knownSig = '';                              // last logged known-POI signature (log only on change)
@@ -3232,14 +3213,20 @@ class AICommander {
   }
   // Nearest salvage pile this team has SPOTTED and that's still on the field (prunes collected
   // ones). Drives the Scavenge mission + the opportunistic pickup detour.
-  nearestKnownScrapPt(x, z) {
+  // Nearest salvage pile this team knows about and can plausibly reach — skips debris in the
+  // water AND piles A* recently failed to route to (walled off on a spit of land), so a unit
+  // doesn't lock onto one it can never get to. Returns the PILE (use .pos), or null.
+  nearestKnownScrap(x, z) {
+    const now = performance.now();
     let best = null, bd = Infinity;
     for (const p of this.knownScrap) {
       if (p._gone || p.overWater) continue;   // skip debris in the water — ground units can't reach it
+      const noReach = this._scrapNoReach.get(p);
+      if (noReach != null) { if (noReach > now) continue; else this._scrapNoReach.delete(p); }   // recently unreachable → skip (expire the mark)
       const d = (p.pos.x - x) ** 2 + (p.pos.z - z) ** 2;
       if (d < bd) { bd = d; best = p; }
     }
-    return best ? { x: best.pos.x, z: best.pos.z } : null;
+    return best;
   }
   // After a KILL, should the killer grab the wreck? The unit ALREADY pushes to the enemy's
   // last-known spot (= the kill site) and pauses to investigate, so the wreck is a few units
@@ -3275,7 +3262,7 @@ class AICommander {
       && !this.canAfford('jotun') && !this.canAfford('valkyrie') && !this.canAfford('lurcher');
     if (!needRunner && !onlyRunners) return false;
     const px = this.unit ? this.unit.holder.position.x : 0, pz = this.unit ? this.unit.holder.position.z : 0;
-    return !!this.nearestKnownScrapPt(px, pz) || this.explore.fraction() < 0.8;
+    return !!this.nearestKnownScrap(px, pz) || this.explore.fraction() < 0.8;
   }
   // The type to actually field: the wanted one if any remain, else a same-class
   // substitute, else whatever we have most of, else null (roster empty → eliminated).
@@ -3603,6 +3590,17 @@ class AICommander {
     const want = this._pickAvailableType(this.strategy.wantVehicle(this));
     this._stepAtDeploy = this.strategy.step;                        // consume the step change either way
     if (!want || this.unit.type === want) return;                  // new beat wants the same vehicle → carry on
+    // INTERCEPT (our flag was just lifted): only worth driving HOME to fetch a Valkyrie if it's a
+    // QUICK swap — a slow GROUND unit (Jotun/Lurcher) that's already near our own FOB. Otherwise
+    // retreating to swap just gifts the runner a clean escape; keep whatever we've got and RUN THE
+    // THIEF DOWN (interceptSpot already tracks the carrier, and engage kills it on sight). A Firebrat
+    // is fast enough to chase; a distant heavy still does more cutting the lane than turning its back.
+    if (this.strategy.step === 'intercept') {
+      const ground = this.unit.type === 'jotun' || this.unit.type === 'lurcher';
+      const home = teamCenter(this.team, 'fob');
+      const nearElev = (up.x - home.x) ** 2 + (up.z - home.z) ** 2 < INTERCEPT_SWAP_R * INTERCEPT_SWAP_R;
+      if (!(ground && nearElev)) return;   // chase with the current unit — no recall home
+    }
     this._recalling = true;
     this._recallBestD = Infinity;                                  // closest we've gotten to home so far
     this._recallStallT = 0;                                        // time since we last made headway toward home
@@ -3714,6 +3712,16 @@ class AICommander {
     const cmd = v.ai.think(view);
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
+    // UNREACHABLE SALVAGE bail: we committed to a scrap pile but A* found NO route to it (walled
+    // off on a spit next to the base). Without this the brain just steers straight at it — nosing
+    // into the wall forever (the nav line points through the wall). Blocklist the pile for a bit
+    // and drop the detour so the unit goes back to its real job instead of grinding on the wall.
+    if (this._scrapDetour && this._scrapTargetPile && !this._nav.path && this._nav.failT > 0
+        && this._nav.dx === this._scrapTargetPile.pos.x && this._nav.dz === this._scrapTargetPile.pos.z) {   // the failed plan was to THIS pile (not a stale failT from another goal)
+      this._scrapNoReach.set(this._scrapTargetPile, performance.now() + 8000);
+      if (this._lootPile === this._scrapTargetPile) this._lootPile = null;
+      this._scrapDetour = false; this._scrapTargetPile = null;
+    }
     this._logTick(v, view, cmd);
     const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn, strafe: cmd.strafe || 0 }, dt);
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
@@ -3857,6 +3865,7 @@ class AICommander {
     this._shieldRunOn = this._shieldRun;
     // SALVAGE PICKUP — two ways a unit diverts to grab scrap. Shield/intercept always win.
     this._scrapDetour = false;
+    this._scrapTargetPile = null;   // reset; set below to whichever pile we commit to (drives the unreachable-bail check)
     // 1) FRESH KILL loot (top scrap priority): grab the wreck we just made. It's right here and
     //    the local fight's over — but BAIL the moment another live enemy is close (back to the
     //    fight) or if it somehow drifted out of reach. wantsLoot() already applied the mood/RNG/
@@ -3868,7 +3877,7 @@ class AICommander {
         && !vehicleHidden(o) && (o.holder.position.x - px) ** 2 + (o.holder.position.z - pz) ** 2 < 46 * 46);
       const d = Math.hypot(lp.pos.x - px, lp.pos.z - pz);
       if (lp._gone || lp.overWater || enemyNear || d > LOOT_RANGE || performance.now() > this._lootUntil) this._lootPile = null;   // collected / unreachable / re-engaged / too far / timed out → drop it
-      else { goal = { x: lp.pos.x, z: lp.pos.z }; this._scrapDetour = true; }
+      else { goal = { x: lp.pos.x, z: lp.pos.z }; this._scrapDetour = true; this._scrapTargetPile = lp; }
     }
     // 2) OPPORTUNISTIC SALVAGE: swing over to a spotted scrap pile that's nearly on our path (free
     //    parts for the build bank). Short-range so it never drags a unit far off its real objective;
@@ -3876,8 +3885,8 @@ class AICommander {
     if (!this._scrapDetour && !this._shielding && !this._intercepting && v.type !== 'jotun'
         && this.strategy.step !== 'siege' && this.strategy.step !== 'capture' && this.strategy.step !== 'scavenge'
         && !(this.flag() && this.flag().carrier === v)) {
-      const sp = this.nearestKnownScrapPt(px, pz);
-      if (sp && Math.hypot(sp.x - px, sp.z - pz) < SCRAP_GRAB_RANGE) { goal = { x: sp.x, z: sp.z }; this._scrapDetour = true; }
+      const sp = this.nearestKnownScrap(px, pz);
+      if (sp && Math.hypot(sp.pos.x - px, sp.pos.z - pz) < SCRAP_GRAB_RANGE) { goal = { x: sp.pos.x, z: sp.pos.z }; this._scrapDetour = true; this._scrapTargetPile = sp; }
     }
     if (this._scrapDetour && !this._scrapDetourOn) {   // announce the commit ONCE (false→true), like the shield grab
       aiLog(this.team, `${this.cname} ${v.type}: “Salvage on our line — grabbing it.”`);
@@ -3978,17 +3987,47 @@ class AICommander {
     // to the flank (rather than hammer the wall in front of it) when it can't. The
     // cross product of (base→tower) × (tower→unit) picks the nearer side to arc to.
     let flankSide = 0, threatLOS = false, threatStand = null;
+    if (threat) threatLOS = flyer || hasLOS(px, pz, threat.x, threat.z);
+    // BREACH COMMIT: the siege stall was the sieger ORBITING the base at sniper range,
+    // re-picking the nearest wall every tick — so fire spread across the whole ring and no
+    // gap ever opened (measured: walls stuck at 23/30, HQ never lost a point over 8000 ticks).
+    // Instead LATCH one wall and hammer it to rubble, then the next nearest — punching a single
+    // breach we can push through, exactly how a human cracks a base.
+    let breachWall = null, breached = false;
+    if (aiBreachCommit && threat && !threatLOS && threatCamp && !flyer) {
+      breached = threatCamp.walls.some(w => w.body && w.body.dead);   // a hole already exists?
+      let w = this._breachW;                                          // keep the latched wall while it stands
+      if (!(w && w.body && !w.body.dead && threatCamp.walls.includes(w))) {
+        w = null; let bestW = Infinity;
+        for (const cand of threatCamp.walls) {
+          if (!cand.body || cand.body.dead) continue;
+          const d = (cand.group.position.x - px) ** 2 + (cand.group.position.z - pz) ** 2;
+          if (d < bestW) { bestW = d; w = cand; }
+        }
+        this._breachW = w;
+      }
+      breachWall = w;
+    } else { this._breachW = null; }
     if (threat) {
-      threatLOS = flyer || hasLOS(px, pz, threat.x, threat.z);
-      // FINISHER: enemy is eliminated → nothing shoots back, so the timid one-gun-at-a-time
-      // standoff is pointless. A heavy planted at its full 64u sniper hold often has NO line
-      // through the base walls, so it never fires and just idles (the audit's "lone jotun
-      // frozen at the wall for 640s"). Close right in instead — at ~22u it clears the wall
-      // ring, gets LOS, and levels turret→turret→HQ.
+      // CLOSE IN to finish. A heavy planted at its full 64u sniper hold often has NO line through
+      // the base walls, so it sprays the wall face and idles (the audit's "lone jotun frozen at
+      // the wall for 640s"). Drive to a short hold — when we can actually finish (enemy wiped, OR
+      // turrets down, OR we've already punched a hole) — to get a real line on the breach / keep.
       const finisher = this.enemyEliminated();
-      const hold = finisher ? Math.min(22, TURRET_HOLD[v.type] || 22)
-                            : (TURRET_HOLD[v.type] || (ENGAGE_RANGE[v.type] || 36) * 0.9);
-      if (hqThreat) {
+      const closeIn = aiBreachCommit ? (finisher || this.fortDown() || breached) : finisher;
+      const sniper = TURRET_HOLD[v.type] || (ENGAGE_RANGE[v.type] || 36) * 0.9;
+      const hold = !aiBreachCommit ? (finisher ? Math.min(22, TURRET_HOLD[v.type] || 22) : sniper)
+                 : closeIn ? Math.min(24, TURRET_HOLD[v.type] || 24)
+                 : breachWall ? Math.min(34, TURRET_HOLD[v.type] || 34)
+                 : sniper;
+      if (breachWall) {
+        // Plant OUTSIDE the latched breach wall (radial from base centre) and HOLD — hammer this
+        // one wall down instead of circling and smearing fire across the ring.
+        const cx = threatCamp.center.x, cz = threatCamp.center.z;
+        const wx = breachWall.group.position.x, wz = breachWall.group.position.z;
+        let dx = wx - cx, dz = wz - cz; const dm = Math.hypot(dx, dz) || 1;
+        threatStand = { x: wx + (dx / dm) * hold, z: wz + (dz / dm) * hold };
+      } else if (hqThreat) {
         // The keep IS the base centre, so there's no "radial through a corner tower" to
         // stand off along — and no other guns left to dodge. Just hold at range on our
         // current approach line and pour fire in.
@@ -4004,11 +4043,14 @@ class AICommander {
         threatStand = { x: threat.x + (bx / om) * hold, z: threat.z + (bz / om) * hold };
       }
     }
-    // SIEGE FLATTEN: with no clean line on the tower, a siege unit demolishes the nearest
-    // enemy WALL in its way (a real, solidly-hittable target at its true position) to blow
-    // a path through to the far side — aimed shots at the hidden turret just arc over.
+    // SIEGE FLATTEN: with no clean line on the tower, shell the latched breach wall (a real,
+    // solidly-hittable target at its true position) to blow a path through — aimed shots at the
+    // hidden turret just arc over. Falls back to the nearest wall if no breach wall is latched.
     let demolishTarget = null;
-    if (threat && !threatLOS && threatCamp) {
+    if (breachWall) {
+      const wx = breachWall.group.position.x, wz = breachWall.group.position.z;
+      demolishTarget = { x: wx, y: map.heightAt(wx, wz) + 2.5, z: wz };
+    } else if (threat && !threatLOS && threatCamp) {   // knob-OFF fallback: nearest wall, re-picked each tick
       let bestW = Infinity;
       for (const w of threatCamp.walls) {
         if (!w.body || w.body.dead) continue;
@@ -4062,6 +4104,7 @@ class AICommander {
       enemyGone: this.enemyEliminated(),   // target fleet wiped → don't waste time ghost-chasing a dead sighting
       support: turretCountOf(this.team) > 0 ? this.homeBasePos() : null,   // rally toward own tower cover (ai_behavior duels)
       threat, threatLOS, flankSide, threatStand, demolishTarget, breakTarget, engageRange: ENGAGE_RANGE[v.type] || 36,
+      shotReach: SHOT_REACH[v.type] || 999,   // hard cap on firing distance — a round physically dies past this (see SHOT_REACH)
       fofW: fofFor(this.team),   // this team's fight-or-flight weight set (tunable / A/B)
       hqThreat,   // the suppress target is the enemy KEEP (not a tower) — for logs/recorder
       goal: mustGo ? this._exit : goal,
@@ -4297,6 +4340,19 @@ const aiEvents = [];   // rolling [{t, team, msg}] — low-frequency DECISION ev
 // Build tag shown in the AI LOG header — pulled from THIS script's own ?v= cache-bust so it
 // always reflects the build actually loaded (handy for confirming a phone got the new version).
 const AI_LOG_BUILD = (() => { try { return 'v' + (new URL(import.meta.url).searchParams.get('v') || '?'); } catch (e) { return ''; } })();
+// Seed tag in the header so a logged/screenshotted match is reproducible. Shows ?seed (the map
+// seed); if ?dseed/?rngseed differ they're spelled out as s/d/r, else just the one shared seed.
+const AI_LOG_SEED = (() => {
+  const s = QS.get('seed'), d = QS.get('dseed'), r = QS.get('rngseed');
+  if (s == null && d == null && r == null) return MAP_SEED != null ? `seed ${MAP_SEED}` : '';
+  if (s != null && s === d && d === r) return `seed ${s}`;
+  const parts = [];
+  if (s != null) parts.push('s' + s);
+  if (d != null) parts.push('d' + d);
+  if (r != null) parts.push('r' + r);
+  return 'seed ' + parts.join('/');
+})();
+const AI_LOG_TAG = AI_LOG_BUILD + (AI_LOG_SEED ? ' · ' + AI_LOG_SEED : '');
 const _t0 = performance.now();
 function aiLog(team, msg) {
   aiEvents.push({ t: (performance.now() - _t0) / 1000, team, msg });
@@ -4353,7 +4409,7 @@ function ensureAiLogEl() {
   ensureLogStyle();
   el = document.createElement('div'); el.id = 'ai-log';
   el.innerHTML =
-    `<div id="ai-log-head"><span id="ai-log-title">AI LOG · ${AI_LOG_BUILD}</span>` +
+    `<div id="ai-log-head"><span id="ai-log-title">AI LOG · ${AI_LOG_TAG}</span>` +
     '<span id="ai-log-btns"><span class="lg-btn" data-act="export" title="Copy a snapshot to share">⧉</span>' +
     '<span class="lg-btn" data-act="minus">–</span>' +
     '<span class="lg-btn" data-act="plus">+</span></span></div>' +
@@ -4385,7 +4441,7 @@ function updateAiLog() {
   if (aiLogMode === 'hidden') { if (el) el.style.display = 'none'; return; }
   const box = ensureAiLogEl(); box.style.display = '';
   box.className = aiLogMode;
-  document.getElementById('ai-log-title').textContent = aiLogMode === 'full' ? `AI LOG · ${AI_LOG_BUILD} · PAUSED` : `AI LOG · ${AI_LOG_BUILD}`;
+  document.getElementById('ai-log-title').textContent = aiLogMode === 'full' ? `AI LOG · ${AI_LOG_TAG} · PAUSED` : `AI LOG · ${AI_LOG_TAG}`;
   // The most-recent event for a team (its "running" line), or null.
   const latestFor = team => { for (let i = aiEvents.length - 1; i >= 0; i--) if (aiEvents[i].team === team) return aiEvents[i]; return null; };
   let html = '';
@@ -4405,11 +4461,14 @@ function updateAiLog() {
     if (d) {
       const fof = d.fof != null ? ` · <span style="color:${d.fof > 0 ? '#7fffb8' : '#ff9d7f'}">fof ${d.fof > 0 ? '+' : ''}${d.fof}</span>` : '';
       html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}/${d.maxFuel}${fof} · fob ${d.distFob}</div>`;
-      // WHERE it's headed + HOW hard it's driving there — reads "@here → there Nu · fwd/turn".
-      // A big gd with fwd 0 = it's decided to sit (why?); fwd>0 with STUCK = it's trying but wedged.
+      // WHERE it's headed (stable line) then, on its OWN line, the per-tick DRIVE readout —
+      // blk first, then fwd/turn. Both are kept off the position line and fixed-width so the
+      // rapidly-changing numbers can't wrap/resize the box and scramble everything above.
       const to = d.gx != null ? `(${d.gx},${d.gz}) ${d.gd}u` : '—';
       const flags = (d.atHome ? ' · atBase' : '') + (d.navPath ? ` · path ${d.navPath}` : '');
-      html += `<div class="tb-l">@(${d.px},${d.pz}) → ${to} · drive ${d.fwd}/${d.turn} · blk ${d.blk}${flags}</div>`;
+      const sgn = n => (Number(n) >= 0 ? ' ' : '') + Number(n).toFixed(2);   // fixed 5-char width (leading space for +)
+      html += `<div class="tb-l">@(${d.px},${d.pz}) → ${to}${flags}</div>`;
+      html += `<div class="tb-l" style="opacity:0.6">blk ${d.blk} · drive ${sgn(d.fwd)}/${sgn(d.turn)}</div>`;
       if (d.stuck) html += `<div class="tb-l" style="color:#ffb030">⚠ STUCK ${d.stuck}s — ${d.stuckWhy}</div>`;
     }
     html += `<div class="tb-l">twrs ${d ? d.towers : '?'} · knows ${known}</div>`;
@@ -5058,9 +5117,9 @@ function setupGarageUI() {
     else if (e.key === '[') { cycleSpectate(-1); e.preventDefault(); }
     else if (e.key === '`') { spectateTarget = null; }
   });
-  // NAV DEBUG lines toggle — works in spectate AND player mode (g key / RR.navLines()).
+  // NAV DEBUG overlay toggle — works in spectate AND player mode (g key / RR.nav()).
   window.addEventListener('keydown', (e) => {
-    if (onField && (e.key === 'g' || e.key === 'G')) showNavLines = !showNavLines;
+    if (onField && (e.key === 'g' || e.key === 'G')) navDebug = !navDebug;
   });
 
   // Click a vehicle to select its type; click the already-selected type again to
@@ -5638,6 +5697,7 @@ window.RR = {
   setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
+  setBreachCommit: (v) => { aiBreachCommit = !!v; return aiBreachCommit; },   // A/B: siegers latch one wall + push in vs orbit-and-spray
   setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
   get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
   setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
@@ -5691,7 +5751,8 @@ window.RR = {
   },
   enemyHp: () => { const e = combatants.find(c => !c.isPlayer && !c.dead); return e ? e.hp : null; },
   cycleSpectate: (dir = 1) => { cycleSpectate(dir); return spectateTarget ? spectateTarget.type : null; },
-  navLines: (on) => { showNavLines = on == null ? !showNavLines : !!on; return showNavLines; },   // debug: "where's it going" goal-line overlay
+  nav: (on) => { navDebug = on == null ? !navDebug : !!on; return navDebug; },   // debug: combined nav overlay (A* route for grounders, goal-line for flyers)
+  navLines: (on) => { navDebug = on == null ? !navDebug : !!on; return navDebug; },   // legacy alias for RR.nav()
   setScoutSweep: (m) => setSweepMode(m),   // A/B: 'near' (new forward sweep) vs 'far' (old ping-pong)
   tickSpectate: (dt = 0.1) => spectateUpdate(dt),
   refreshAiLog: () => updateAiLog(),
@@ -5733,7 +5794,10 @@ const clock = new THREE.Clock();
 // Pure visualisation of data the navigator already stores — no extra pathfinding. Runs
 // live and KEEPS drawing while the sim is paused (full-screen log), so you can freeze a
 // wedged unit and read exactly where its path is sending it (e.g. a line into the sea).
-const NAV_DEBUG = QS.has('nav');
+// ?nav (or the legacy ?navlines) turns on ONE combined overlay: it draws whichever nav method
+// the unit is actually using — the full A* route for a ground unit that has one, or a straight
+// line to its live brain-goal for a flyer / a unit skirting without a path. Toggle: g / RR.nav().
+let navDebug = QS.has('nav') || QS.has('navlines');
 let navLines = null;   // Map<commander, {line, posAttr, wp, dest}>
 function _makeNavObj() {
   const geo = new THREE.BufferGeometry();
@@ -5751,43 +5815,67 @@ function _makeNavObj() {
   return { line, posAttr, wp, dest };
 }
 function updateNavOverlay() {
-  if (!NAV_DEBUG) return;
+  if (!navDebug) return;
   if (!navLines) navLines = new Map();
   for (const o of navLines.values()) { o.line.visible = false; o.wp.visible = false; o.dest.visible = false; }
   if (!onField) return;
+  const watched = spectateTarget || _specFocus || player;   // the watched unit draws bright, the rest dim
   for (const cmd of commanders) {
     const v = cmd.unit, nav = cmd._nav;
-    if (!v || v.dead || !nav || !nav.path || !nav.path.length) continue;
+    if (!v || v.dead) continue;
+    const hasPath = nav && nav.path && nav.path.length;
+    const d = cmd._dbg;
+    if (!hasPath && (!d || d.gx == null)) continue;          // nothing to draw for this unit
     let o = navLines.get(cmd);
     if (!o) { o = _makeNavObj(); navLines.set(cmd, o); }
     const col = new THREE.Color(teamColor(cmd.team));
+    const hot = v === watched;
     o.line.material.color.copy(col); o.dest.material.color.copy(col);
-    const pts = nav.path, arr = o.posAttr.array;
-    let n = 0;
-    const add = (x, z) => { if (n >= 256) return; arr[n * 3] = x; arr[n * 3 + 1] = map.heightAt(x, z) + 1.3; arr[n * 3 + 2] = z; n++; };
-    add(v.holder.position.x, v.holder.position.z);          // start the line at the unit itself
-    // …then only the REMAINING route (from the current target onward). Drawing from
-    // index 0 looped back to the path's original start — already behind the unit — which
-    // read as the line "going backwards" before heading for the dot.
-    for (let i = Math.min(nav.idx, pts.length - 1); i < pts.length; i++) add(pts[i].x, pts[i].z);
-    o.posAttr.needsUpdate = true;
-    o.line.geometry.setDrawRange(0, n);
-    o.line.visible = true;
-    // Dot = the next BEND in the route (or the destination), not the per-tick look-ahead
-    // cell. The look-ahead point slides ~1 cell ahead of the unit every frame and looked
-    // frantic; a bend is a stable landmark — it holds while the unit drives the straight
-    // toward it, then hops to the next corner once passed.
-    let bi = pts.length - 1;
-    const start = Math.min(nav.idx, pts.length - 2);
-    if (start >= 0) {
-      const seg = i => Math.sign(pts[i + 1].x - pts[i].x) + ',' + Math.sign(pts[i + 1].z - pts[i].z);
-      const d0 = seg(start);
-      for (let i = start + 1; i <= pts.length - 2; i++) { if (seg(i) !== d0) { bi = i; break; } }
+    o.line.material.opacity = hot ? 0.95 : 0.32;
+    o.dest.material.opacity = hot ? 0.85 : 0.3;
+    o.wp.material.opacity = hot ? 1 : 0.35; o.wp.material.transparent = true;
+    if (hasPath) {
+      // GROUND unit on an A* route — trace the remaining path, bend marker + destination cone.
+      const pts = nav.path, arr = o.posAttr.array;
+      let n = 0;
+      const add = (x, z) => { if (n >= 256) return; arr[n * 3] = x; arr[n * 3 + 1] = map.heightAt(x, z) + 1.3; arr[n * 3 + 2] = z; n++; };
+      add(v.holder.position.x, v.holder.position.z);          // start the line at the unit itself
+      // …then only the REMAINING route (from the current target onward). Drawing from
+      // index 0 looped back to the path's original start — already behind the unit — which
+      // read as the line "going backwards" before heading for the dot.
+      for (let i = Math.min(nav.idx, pts.length - 1); i < pts.length; i++) add(pts[i].x, pts[i].z);
+      o.posAttr.needsUpdate = true;
+      o.line.geometry.setDrawRange(0, n);
+      o.line.visible = true;
+      // Dot = the next BEND in the route (or the destination), not the per-tick look-ahead
+      // cell. The look-ahead point slides ~1 cell ahead of the unit every frame and looked
+      // frantic; a bend is a stable landmark — it holds while the unit drives the straight
+      // toward it, then hops to the next corner once passed.
+      let bi = pts.length - 1;
+      const start = Math.min(nav.idx, pts.length - 2);
+      if (start >= 0) {
+        const seg = i => Math.sign(pts[i + 1].x - pts[i].x) + ',' + Math.sign(pts[i + 1].z - pts[i].z);
+        const d0 = seg(start);
+        for (let i = start + 1; i <= pts.length - 2; i++) { if (seg(i) !== d0) { bi = i; break; } }
+      }
+      const w = pts[Math.min(bi, pts.length - 1)];             // the next turn the unit is driving toward
+      o.wp.position.set(w.x, map.heightAt(w.x, w.z) + 1.6, w.z); o.wp.visible = true;
+      const dp = pts[pts.length - 1];                          // the route's end (its destination)
+      o.dest.position.set(dp.x, map.heightAt(dp.x, dp.z) + 3.2, dp.z); o.dest.visible = true;
+    } else {
+      // FLYER (ignoreWalls, no A*) or a unit skirting without a path — draw a straight line to
+      // the live brain-goal from _dbg. This is what the old ?navlines tool did; folding it in
+      // here means one ?nav toggle shows every unit's real intent, Valkyries included.
+      const arr = o.posAttr.array;
+      const gy = map.heightAt(d.gx, d.gz);
+      arr[0] = v.holder.position.x; arr[1] = map.heightAt(v.holder.position.x, v.holder.position.z) + 1.3; arr[2] = v.holder.position.z;
+      arr[3] = d.gx; arr[4] = gy + 1.3; arr[5] = d.gz;
+      o.posAttr.needsUpdate = true;
+      o.line.geometry.setDrawRange(0, 2);
+      o.line.visible = true;
+      o.wp.visible = false;                                    // no route bends on a direct line
+      o.dest.position.set(d.gx, gy + 3.2, d.gz); o.dest.visible = true;
     }
-    const w = pts[Math.min(bi, pts.length - 1)];             // the next turn the unit is driving toward
-    o.wp.position.set(w.x, map.heightAt(w.x, w.z) + 1.6, w.z); o.wp.visible = true;
-    const dp = pts[pts.length - 1];                          // the route's end (its destination)
-    o.dest.position.set(dp.x, map.heightAt(dp.x, dp.z) + 3.2, dp.z); o.dest.visible = true;
   }
 }
 
@@ -5976,13 +6064,12 @@ function animate() {
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateScrap(dt);                       // salvage piles: bob + proximity pickup → team scrap
       updateGibs(dt);                        // fly the debris from just-destroyed vehicles until it settles
-      updateNavLines();                      // debug: "where's it going" goal lines (toggle: g / RR.navLines)
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
     }
     updateAiLog();                         // AI decision overlay (renders even while paused)
-    updateNavOverlay();                    // ?nav: draw each unit's A* path (also while paused)
+    updateNavOverlay();                    // ?nav: A* route (grounders) + goal-line (flyers), also while paused
     _pfT('render', () => renderer.render(scene, camera));
     if (fade) {
       if (returning && victoryReturn) {

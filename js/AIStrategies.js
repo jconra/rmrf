@@ -65,6 +65,11 @@ class Scout extends Mission {
 class Attack extends Mission {
   get key() { return 'attack'; }
   objective(cmd) { return cmd.lastEnemyPos() || cmd.enemyFobPos(); }
+  // The objective is a place to HOLD/HUNT (a last-seen spot or the enemy's deploy pad), NOT a
+  // fortification to shell — so don't blind-fire the goal (base Mission defaults shoot=true, which
+  // had a Warrior dumping rounds over a flattened, empty staging point). Real targets are still
+  // engaged: seen enemies via engage, live turrets via the threatened→suppress transition.
+  shoot(cmd) { return false; }
   arriveDist(cmd) { return 12; }
   // A NOUN phrase, not a verb — the state line prepends the brain's own verb
   // ("advancing → …", "sieging …"), so a verb here reads as nonsense ("sieging hunting …").
@@ -218,6 +223,10 @@ class Intercept extends Mission {
   get key() { return 'intercept'; }
   wantVehicle(cmd) { return 'valkyrie'; }
   objective(cmd) { return cmd.interceptSpot(); }
+  // Chase the carrier (interceptSpot tracks it), but don't blind-fire the chase point — kill the
+  // thief when we actually SEE it (the engage transition, with lead-aim). Stops shooting at the
+  // empty spot where the runner was / at their elevator.
+  shoot(cmd) { return false; }
   arriveDist(cmd) { return 4; }
   label(cmd) { return 'intercepting the flag runner!'; }
   cry(cmd) { return pickCry(cmd, [

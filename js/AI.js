@@ -223,7 +223,10 @@ const CONDITIONS = {
 
   // --- latch triggers ---
   resupNeeded: (v, m, p, cfg) => {
-    if (v.self.fuelFrac < cfg.fuelLow || ammoFrac(v) <= 0) return true;   // low fuel / truly dry → always rearm
+    // low fuel / truly dry → rearm. EXCEPT a runner (flag-grabber/scout) doesn't need ammo to do
+    // its job — don't let an empty magazine pull a Firebrat off a flag it's standing next to to go
+    // rearm (Jacob: "ran out of ammo and drove right by the flag to get more"). Still rearms for fuel.
+    if (v.self.fuelFrac < cfg.fuelLow || (ammoFrac(v) <= 0 && !v.runnerMode)) return true;
     // AMMO RESERVE (a CAUTIOUS commander's trait): while shelling STRUCTURES with no enemy in
     // sight, a careful commander won't burn the last of the magazine on walls — it heads home to
     // rearm early, banking a reserve so an interceptor can't catch it defenseless (that reserve is
@@ -311,6 +314,11 @@ const BEHAVIORS = {
     const aimGate = 0.18 + p.aggression * 0.12;
     const want = view.engageRange || 36;
     const range = mode === 'suppress' ? want : want * (1 - p.aggression * 0.45);
+    // Hard fire-distance cap: a round physically dies past its reach, so NEVER pull the
+    // trigger beyond it — otherwise a short-reach unit (the Lurcher, ~42u) plinks a tower
+    // that's 46u away, all shots land short, and it's stuck reloading forever. Clamps the
+    // per-gate `*1.3` aim-tolerance so it can't authorise an out-of-range shot.
+    const fireCap = view.shotReach || 999;
     // SIEGE DOCTRINE: silence a turret from a spot where only IT can hit back. If we
     // already have a clean line on the tower, PLANT and pour fire (don't wander off a
     // good shot). Otherwise drive to the radial standoff — outside the base through
@@ -330,7 +338,7 @@ const BEHAVIORS = {
       // Fire whenever the turret can bear on the tower (target inside the arc) and it's
       // in range with a clear line — independent of where the hull is pointed.
       const arc = Math.min(view.shotArc || 0.26, Math.PI * 0.55);
-      const aimed = Math.abs(err) < arc && dist < want * 1.3;
+      const aimed = Math.abs(err) < arc && dist < Math.min(want * 1.3, fireCap);
       const canBear = view.threatLOS && aimed;
       // SIEGE FLATTEN: a ground unit with NO clean line on the tower (a wall/HQ blocks
       // it) doesn't circle forever hunting an angle — it PLANTS, squares onto the nearest
@@ -341,7 +349,7 @@ const BEHAVIORS = {
       let demolish = false, demoErr = 0, demoAimed = false;
       if (!view.flyer && !view.threatLOS && view.demolishTarget) {
         const ddx = view.demolishTarget.x - self.x, ddz = view.demolishTarget.z - self.z;
-        if (Math.hypot(ddx, ddz) < want * 1.3) {
+        if (Math.hypot(ddx, ddz) < Math.min(want * 1.3, fireCap)) {
           demolish = true;
           demoErr = wrapPi(Math.atan2(-ddx, -ddz) - self.heading);   // hull-relative bearing to the wall
           demoAimed = Math.abs(demoErr) < arc;
@@ -381,7 +389,7 @@ const BEHAVIORS = {
     else fwd = 1;                                  // close to range
     let fire = false;
     const gate = mode === 'suppress' ? aimGate + 0.05 : aimGate;
-    if (los && Math.abs(err) < gate && dist < range * 1.3) fire = mem.rng() < (0.65 + p.aggression * 0.35) * AI_HANDICAP.fireProb;
+    if (los && Math.abs(err) < gate && dist < Math.min(range * 1.3, fireCap)) fire = mem.rng() < (0.65 + p.aggression * 0.35) * AI_HANDICAP.fireProb;
     // DUEL FOOTWORK (the ai_behavior matchup table) — engage only; suppress keeps its
     // planted siege standoff above. Picks kite / press / strafe from the pairing.
     let strafe = 0;
@@ -395,7 +403,7 @@ const BEHAVIORS = {
         const sx = view.support.x - self.x, sz = view.support.z - self.z;
         turn = clamp(wrapPi(Math.atan2(-sx, -sz) - self.heading) * 2.0, -1, 1);
         fwd = 1;
-        fire = (Math.abs(err) < arc && dist < range * 1.4) ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
+        fire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap)) ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
         mem._wantMove = true;
         return { fwd, turn, fire, strafe: 0, state: mode };
       }
@@ -539,7 +547,11 @@ const BEHAVIORS = {
     // tries to skirt for a beat first and only shoots if it's still wedged. Combat
     // states keep their own targeting (the siege-flatten in `combat`), so skip those.
     const hasAmmo = view.self.ammoFrac == null || view.self.ammoFrac > 0;
-    const canBreak = hasAmmo && view.breakTarget && view.blockedAhead && cmd.state !== 'engage' && cmd.state !== 'suppress';
+    // A RUNNER (Firebrat grabbing a flag / scouting) NEVER shoots its way through — it's fragile,
+    // its gun barely dents a wall, and breakAim disables A* routing (navOverride bails on it), so it
+    // noses the wall and ignores the gate/gap right beside it, burning the ammo it doesn't even need.
+    // Let it navigate AROUND instead (A* finds the gap). Combat states keep their own siege-flatten.
+    const canBreak = hasAmmo && !view.runnerMode && view.breakTarget && view.blockedAhead && cmd.state !== 'engage' && cmd.state !== 'suppress';
     if (canBreak) {
       mem._breakT = (mem._breakT || 0) + view.dt;
       const patience = (1 - (p.triggerHappy ?? 0.5)) * cfg.breakPatience;   // eager → ~0s, patient → full

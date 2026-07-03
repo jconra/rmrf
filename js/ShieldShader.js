@@ -32,7 +32,7 @@ const fragmentShader = /* glsl */ `
   uniform float uHexScale, uEdgeWidth, uHexOpacity;
   uniform float uFresnelPower, uFresnelStrength;
   uniform float uFlashSpeed, uFlashIntensity;
-  uniform float uFlowScale, uFlowSpeed, uFlowIntensity;
+  uniform float uFlowIntensity;   // edge-glow strength (the animated flow NOISE was cut to save GPU; this stays as a static rim glow)
   uniform vec3  uHitPos[MAX_HITS];
   uniform float uHitTime[MAX_HITS];
   uniform float uHitRingSpeed, uHitRingWidth, uHitMaxRadius, uHitDuration, uHitIntensity, uHitImpactRadius;
@@ -114,10 +114,6 @@ const fragmentShader = /* glsl */ `
   void main(){
     float fresnel = pow(1.0 - dot(vNormal, vViewDir), uFresnelPower) * uFresnelStrength;
 
-    float t = uTime*uFlowSpeed;
-    float fn1 = snoise(vObjPos*uFlowScale + vec3(t, t*0.6, t*0.4));
-    float flowNoise = fn1*0.5 + 0.5;
-
     // hex via cube-face triplanar with a seam fade so no ghost grid at the 45deg edges
     vec3 absN = abs(normalize(vObjPos));
     float dominance = max(absN.x, max(absN.y, absN.z));
@@ -149,9 +145,9 @@ const fragmentShader = /* glsl */ `
 
     vec3 lColor = lifeColor(uLife);
     float effHex = uHexOpacity + hexHitBoost*uHitIntensity;
-    float intensity = hex*effHex*(0.3 + fresnel*0.7) + fresnel*0.4 + flash + uFill*(0.6 + 0.4*flowNoise);
+    float intensity = hex*effHex*(0.3 + fresnel*0.7) + fresnel*0.4 + flash + uFill*0.8;
     vec3 shieldColor = lColor*intensity*2.0;
-    shieldColor += lColor*(flowNoise*fresnel*uFlowIntensity);
+    shieldColor += lColor*(0.5*fresnel*uFlowIntensity);
     shieldColor += lColor*ringContrib*uHitIntensity;
     float alpha = clamp(intensity*uOpacity + ringContrib*0.4, 0.0, 1.0);
     gl_FragColor = vec4(shieldColor, alpha);
@@ -167,7 +163,7 @@ function defaultUniforms(hex) {
     uColor:           { value: new THREE.Color(hex || '#26aeff') },
     uLife:            { value: 1 },
     // Jacob's tuned values from the shield lab (2026-07-03).
-    uOpacity:         { value: 0.33 },
+    uOpacity:         { value: 1 },
     uFill:            { value: 0.045 },
     uHexScale:        { value: 4.1 },
     uEdgeWidth:       { value: 0.05 },
@@ -176,9 +172,7 @@ function defaultUniforms(hex) {
     uFresnelStrength: { value: 0.4 },
     uFlashSpeed:      { value: 0.95 },
     uFlashIntensity:  { value: 0.5 },
-    uFlowScale:       { value: 4.7 },
-    uFlowSpeed:       { value: 0.7 },
-    uFlowIntensity:   { value: 1.45 },
+    uFlowIntensity:   { value: 1.45 },   // static rim-glow strength (animated flow noise removed)
     uHitPos:          { value: hits },
     uHitTime:         { value: times },
     uHitRingSpeed:    { value: 2.35 },
