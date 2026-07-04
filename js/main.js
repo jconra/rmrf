@@ -2853,6 +2853,18 @@ function planPath(v, dest) {
     // deep water and flood) — so make off-road shallows EXPENSIVE: A* keeps them on land/roads
     // and only fords when there's genuinely no dry route. Overrides any archetype water love.
     if (sinks && !onRoad(i, j) && !map.isLand(i * c, j * c)) return 35;   // fording is a LAST resort — heavily prefer land/bridges
+    // FIREBRAT (the flag runner): it BUMPS trees (can't crush them) but SKIMS across water. Route
+    // it AROUND the forest — over the open, tree-free water if that's clearer — instead of threading
+    // a gap too tight for its hull, where it boxes in on trees, won't shoot (runner), and wedges.
+    // Land hugging a tree is dear so A* keeps a berth. Overrides the commander's archetype lane
+    // (a Hunter's runner was even being pulled TOWARD forest). Depends only on the vehicle, not the doc.
+    if (v.type === 'firebrat') {
+      if (onRoad(i, j)) return 0.5;
+      const treeNear = forestHas((i + 1) + ',' + j) || forestHas((i - 1) + ',' + j) || forestHas(i + ',' + (j + 1)) || forestHas(i + ',' + (j - 1));
+      // Water and clean land cost the same (1) — don't PREFER water (that sent it on long detours),
+      // just make tree-adjacent land dear so it skirts the forest, over the water if that's shorter.
+      return treeNear ? 6 : 1;
+    }
     if (arch === 'rogue') return !map.isLand(i * c, j * c) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
     if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
     return onRoad(i, j) ? 0.5 : 1;   // Warrior + default: roads are the cheap lane
