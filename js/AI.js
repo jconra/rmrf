@@ -176,6 +176,11 @@ const CONDITIONS = {
   shieldRun: (v) => !!v.shieldRun,   // committed to grab a close shield → do that first (see transitions)
   engaging: (v, m, p) => {
     if (!v.seesEnemy) return false;
+    // OUT OF AMMO can't duel — standing in 'engage' dry just holds the unit nose-to-nose with a
+    // rival forever (two dry Jotuns stared each other down for a whole match). Disengage so it
+    // falls through to resupLatched and pulls back to rearm (matches underAttack, which already
+    // bails when dry). The Jotun exemption below assumes it can actually shoot back.
+    if (ammoFrac(v) <= 0) return false;
     if (!((m._fof != null ? m._fof : fightScore(v, p)) > 0)) return false;
     // FOCUS (discipline / mood): a disciplined brain won't abandon its objective to chase a
     // DISTANT enemy — it only breaks off to brawl one that's actually close. brawlR shrinks
