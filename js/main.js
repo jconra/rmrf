@@ -26,7 +26,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=74';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=75';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
 import { astarGrid } from './astar.js?v=4';
 import { AstarViz } from './AstarViz.js?v=3';
@@ -5672,6 +5672,7 @@ window.RR = {
   emitSoundPing: (x, y, z, idx, team) => emitSoundPing(x, y, z, idx, team),
   get projectiles() { return projectiles; },
   get combatants() { return combatants; },
+  terrainAt: (x, z) => map.heightAt(x, z),   // debug/tools: world surface height (<=0 = underwater) for shore-stuck analysis
   get commanders() { return commanders; },
   get flags() { return flags; },
   get teamCtrl() { return TEAM_CTRL; },

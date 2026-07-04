@@ -244,11 +244,12 @@ class Scavenge extends Mission {
   wantVehicle(cmd) { return cmd._pickAvailableType('lurcher') || cmd._pickAvailableType('firebrat') || 'lurcher'; }   // any mobile collector we've got
   objective(cmd) {
     const u = cmd.unit ? cmd.unit.holder.position : { x: 0, z: 0 };
-    return cmd.nearestKnownScrapPt(u.x, u.z) || cmd.exploreTarget() || cmd.enemyFobPos();
+    const sp = cmd.nearestKnownScrap(u.x, u.z);   // returns the PILE now (renamed) — take its point
+    return (sp ? sp.pos : null) || cmd.exploreTarget() || cmd.enemyFobPos();
   }
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 4; }
-  label(cmd) { return cmd.nearestKnownScrapPt(cmd.unit ? cmd.unit.holder.position.x : 0, cmd.unit ? cmd.unit.holder.position.z : 0) ? 'running down salvage for parts' : 'scouting for salvage'; }
+  label(cmd) { return cmd.nearestKnownScrap(cmd.unit ? cmd.unit.holder.position.x : 0, cmd.unit ? cmd.unit.holder.position.z : 0) ? 'running down salvage for parts' : 'scouting for salvage'; }
   cry(cmd) { return pickCry(cmd, [
     'We’re out of runners — scrounge the wrecks for parts, we need to build one!',
     'No firebrat, no flag. Go collect every scrap of salvage you can find!',
