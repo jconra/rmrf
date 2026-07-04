@@ -86,7 +86,7 @@ export const FOF_DEFAULT = {
   enemyShield: 1,                    // they're harder to crack
   counterUs: 1.6,                    // we counter them → press
   counteredBy: 1.8,                  // they counter us → avoid
-  weaker: 1.5,                       // rival weaker / already running → finish it
+  weaker: 2.2,                       // rival weaker / already running → finish it (chase a fleer, don't let it reset)
   escape: 1.6,                       // can't outrun them → stand and trade
   facing: 1.0,                       // positional advantage (who has whose back)
   jotunFloor: 1,                     // a Jotun with ammo always fights (can't run)
@@ -176,6 +176,10 @@ const CONDITIONS = {
   shieldRun: (v) => !!v.shieldRun,   // committed to grab a close shield → do that first (see transitions)
   engaging: (v, m, p) => {
     if (!v.seesEnemy) return false;
+    // STALEMATE GAMBIT: we've committed a flyer to slip AROUND the mid-field fight and crack the
+    // HQ — ignore the enemy entirely and keep rushing the base (the whole point is not to trade).
+    if (v.rushBase) return false;
+    if (ammoFrac(v) <= 0) return false;
     // OUT OF AMMO can't duel — standing in 'engage' dry just holds the unit nose-to-nose with a
     // rival forever (two dry Jotuns stared each other down for a whole match). Disengage so it
     // falls through to resupLatched and pulls back to rearm (matches underAttack, which already
@@ -440,9 +444,14 @@ const BEHAVIORS = {
           if (dist < range * 0.9) fwd = -0.3;            // back out of the front arc
         }
       }
-      // PRESS — we hold the edge (or they're running): close in, and CUT OFF a fleeing
-      // target by steering at a point AHEAD of its travel instead of its current spot.
-      if (!holdOff && tac.press > 0 && (view.enemy.retreating || tac.press >= 0.7)) {
+      // PRESS the advantage — close in, and CUT OFF a fleeing target by steering AHEAD of its
+      // travel. Trigger on the matchup press (normal duelling) OR — regardless of matchup —
+      // whenever the rival is RUNNING or clearly WEAKER: the healthier unit runs the loser down
+      // instead of letting it stroll home, heal to full, and come back (the reset that stalemates
+      // AI-vs-AI). This OVERRIDES the Jotun's press=0, so a winning heavy actually chases and rakes
+      // the fleer's exposed back the whole way — and when it stops at base to heal, it takes a beating.
+      const winning = view.enemy.retreating || (view.enemy.hpFrac != null && view.enemy.hpFrac < self.hpFrac - 0.15);
+      if (!holdOff && (winning || tac.press >= 0.7)) {
         if (dist > range * 0.5) fwd = 1;
         if (view.enemy.retreating) {
           const tx = view.enemy.x + (view.enemy.vx || 0) * 0.9, tz = view.enemy.z + (view.enemy.vz || 0) * 0.9;

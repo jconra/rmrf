@@ -105,6 +105,7 @@ class Siege extends Mission {
   // ever dies with sustained Valkyrie presence). Toggle via RR.setHqFinisher for A/B.
   wantVehicle(cmd) {
     if (cmd.enemyEliminated()) return 'jotun';                                  // unopposed → railgun closes in + demolishes fast
+    if (cmd._gambit && !cmd.flagExposed()) return 'valkyrie';                   // stalemate gambit → send the flyer around the back
     if (HQ_FINISHER && cmd.fortDown() && !cmd.flagExposed()) return 'valkyrie';  // turrets down, HQ walled → send the flyer
     return this.doc.role(this.key);
   }
@@ -115,7 +116,7 @@ class Siege extends Mission {
   // defender out front. Loop to the rear staging point first (latched, like the capture sneak), then
   // settle into the shell; the hqThreat standoff then holds on that rear line.
   objective(cmd) {
-    if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit && cmd.unit.type === 'valkyrie' && !cmd.flagExposed()) {
+    if (ROGUE_REAR_SIEGE && (cmd.archetype === 'rogue' || cmd._gambit) && cmd.unit && cmd.unit.type === 'valkyrie' && !cmd.flagExposed()) {
       const u = cmd.unit.holder.position, rear = cmd.enemyRearApproach(), base = cmd.enemyBasePos(), home = cmd.homePos();
       if (!cmd.unit._siegeRearReached) {
         // Latch once we've actually gotten AROUND to the far side. A flyer holds ~26u off, so the
@@ -135,14 +136,14 @@ class Siege extends Mission {
       // 7.5u cruise → rockets dive in at a natural ~37° instead of a hard 90° kink) so EVERY rocket
       // lands on the keep — not spread across wall pieces or wasted from a 26u standoff. The flyer
       // crosses over the walls to get there (ignoreWalls). Normal valkyrie siege still holds at 26u.
-      if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit._siegeRearReached && !cmd.flagExposed()) return 10;
+      if (ROGUE_REAR_SIEGE && (cmd.archetype === 'rogue' || cmd._gambit) && cmd.unit._siegeRearReached && !cmd.flagExposed()) return 10;
       return 26;
     }
     return 12;
   }
   label(cmd) {
     if (cmd.enemyEliminated()) return 'levelling the undefended base';
-    if (ROGUE_REAR_SIEGE && cmd.archetype === 'rogue' && cmd.unit && cmd.unit.type === 'valkyrie' && !(cmd.unit && cmd.unit._siegeRearReached) && !cmd.flagExposed()) return 'flanking to shell the HQ from behind';
+    if (ROGUE_REAR_SIEGE && (cmd.archetype === 'rogue' || cmd._gambit) && cmd.unit && cmd.unit.type === 'valkyrie' && !(cmd.unit && cmd.unit._siegeRearReached) && !cmd.flagExposed()) return 'flanking to shell the HQ from behind';
     return 'the enemy base';
   }
   cry(cmd) { return cmd.enemyEliminated()
@@ -322,6 +323,10 @@ class Doctrine {
     // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
     // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
     if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) next = 'siege';
+    // STALEMATE GAMBIT: the match dragged on with the enemy base untouched — stop grinding the
+    // mid-field duel and commit to the "Valkyrie around the back" siege (the Siege mission reads
+    // cmd._gambit to force the flyer + rear flank, and rushBase suppresses engaging en route).
+    if (!next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) next = 'siege';   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
     if (!next && cmd._clearPathT > 0) next = 'attack';

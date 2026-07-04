@@ -19,14 +19,14 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=92';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=94';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=77';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=79';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=57';
 import { astarGrid } from './astar.js?v=5';
 import { AstarViz } from './AstarViz.js?v=3';
@@ -1116,6 +1116,7 @@ const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 38, firebrat: 26 };
 let ROAD_SPEED_MUL = 1.25;   // ground vehicles drive this much faster on a road cell (RR.setRoadSpeed to tune)
 let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
 const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie if a ground unit is within this of our FOB — else chase with what we've got
+let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
 let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hole (A/B via RR.setBreachCommit); off = old orbit-and-spray standoff
 const CAPTURE_COMMIT = 55;   // within this of a grabbable flag, the runner beelines it and ignores turrets (final-dash commit)
@@ -2992,6 +2993,8 @@ class AICommander {
     this.started = false;
     this.unit = null;
     this.respawnT = 0;
+    this._matchT = 0;          // seconds this commander has been fighting (drives the stalemate gambit)
+    this._gambit = false;      // latched: gave up on the mid-field grind → send a Valkyrie around to crack the HQ
     this.deaths = 0;
     this.kills = 0;                                   // enemy vehicles this commander's units have downed
     this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`));   // the archetype's mission doctrine
@@ -3087,6 +3090,20 @@ class AICommander {
     if (!ec) return false;
     const mine = this.fleetLeft(), theirs = ec.fleetLeft();
     return mine <= 5 && mine <= theirs - 3;
+  }
+  // STALEMATE GAMBIT: the match has dragged on and we've made ZERO progress on the enemy base
+  // (their towers still nearly all up) — we're just trading + healing in mid-field. Give up on
+  // the grind and send a Valkyrie the ROGUE way: flank AROUND the field fight to the rear of the
+  // base and rocket the HQ down while the enemy's tied up out front. Latched once tripped. Needs a
+  // Valkyrie available; skips once we're already winning (flag exposed / enemy wiped → normal siege).
+  gambitOn() {
+    if (this._gambit) return true;
+    if (this._matchT > GAMBIT_AFTER && this.turretsLive() >= 3 && !this.flagExposed()
+        && !this.enemyEliminated() && this._pickAvailableType('valkyrie') === 'valkyrie') {
+      this._gambit = true;
+      aiLog(this.team, `${this.cname}: This slugfest's going nowhere — Valkyrie, swing around the back and crack their HQ! Don't stop to fight.`);
+    }
+    return this._gambit;
   }
   // A holding spot to the SIDE of our flag base — on the enemy-facing edge but offset
   // off the approach lane, inside tower cover. The Turtle ambushes from here and flanks
@@ -3573,15 +3590,21 @@ class AICommander {
     // HQ-FINISHER swap: the fort's down mid-siege but the walled HQ still stands and our sieger is
     // a GROUND unit that can't reach the keep — pull it back and roll out the flyer the doctrine now
     // wants (a Valkyrie). Normally we only re-pick on a STEP change; this fires within the siege step.
-    const hqSwap = this.strategy.step === 'siege' && this.fortDown() && !this.flagExposed()
+    // Force a Valkyrie swap WITHIN the siege step (not just on a step change) for either the
+    // HQ-finisher (towers down, walled HQ) OR the stalemate gambit (base untouched, we're bailing
+    // on the mid-field grind to fly one around the back). Both want the flyer that a ground sieger
+    // can't be.
+    const hqSwap = this.strategy.step === 'siege' && (this.fortDown() || this._gambit) && !this.flagExposed()
       && this.unit.type !== 'valkyrie' && !this.unit._move.ignoreWalls
       && this._pickAvailableType(this.strategy.wantVehicle(this)) === 'valkyrie';
     if (this.strategy.step === this._stepAtDeploy && !hqSwap) return;   // same beat → keep the current unit (unless we need the flyer)
-    if (hqSwap) {   // commit the finisher swap even with defenders near — a Jotun lost en route just respawns as the Valkyrie
+    if (hqSwap) {   // commit the swap even with defenders near — a unit lost en route just respawns as the Valkyrie
       _hqSwapCount++;
       this._stepAtDeploy = this.strategy.step; this._recalling = true;
       this._recallBestD = Infinity; this._recallStallT = 0; this._nav.path = null;
-      aiLog(this.team, `${this.cname}: Turrets are down — pull the ${this.unit.type} back, roll out a Valkyrie to crack that keep!`);
+      aiLog(this.team, this.fortDown()
+        ? `${this.cname}: Turrets are down — pull the ${this.unit.type} back, roll out a Valkyrie to crack that keep!`
+        : `${this.cname}: Break off the grind — pull the ${this.unit.type} back, Valkyrie's going around the back!`);
       return;
     }
     // Don't turn our back on a live rival to go swap vehicles: a recalled unit drives home
@@ -3657,6 +3680,7 @@ class AICommander {
   }
 
   update(dt) {
+    this._matchT += dt;
     // Notify once the moment the enemy fleet is wiped — instead of a unit silently
     // wandering off to "chase the last seen enemy" that no longer exists.
     if (!this._enemyGoneAnnounced && this.enemyEliminated()) {
@@ -3972,7 +3996,7 @@ class AICommander {
     // reveals the flag AND opens angles on the back towers. LOS-gated, so units still grind the
     // walls/near towers until a line to the keep actually opens (they don't charge blind).
     let hqThreat = false;
-    if (this.strategy.key === 'siege') {
+    if (this.strategy.step === 'siege') {   // (was this.strategy.key — always undefined, so this HQ-targeting block never ran: siegers only ever shelled turrets, never the keep)
       let bestH = Infinity, ec = null, hqPt = null;
       for (const c of camps) {
         if (c.team === this.team || !c.flagHQ || c.flagHQ.dead) continue;
@@ -3987,7 +4011,9 @@ class AICommander {
         // gets flattened WHILE the back towers still stand (revealing the flag). We do NOT pull off
         // a turret that's out in the open shooting at us. OFF = old rule (only once all turrets die).
         const turretLOS = threat && (flyer || hasLOS(px, pz, threat.x, threat.z));
-        const promote = aiKeepBreach ? (!threat || !turretLOS) : !threat;
+        // The stalemate GAMBIT goes straight for the KEEP (that's the whole point — crack the HQ,
+        // expose the flag, win — not trade tower-for-tower while the enemy's tied up mid-field).
+        const promote = this._gambit || (aiKeepBreach ? (!threat || !turretLOS) : !threat);
         if (promote) { threat = hqPt; threatCamp = ec; hqThreat = true; }
       }
     }
@@ -4128,10 +4154,11 @@ class AICommander {
       // the combat transitions; this only stops it firing at the detour waypoint.
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
       finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
+      rushBase: this._gambit && !this.flagExposed(),   // stalemate gambit: IGNORE the enemy, slip around and crack the HQ (suppresses engaging)
       // CAPTURE COMMIT: on a capture run, once the flag is grabbable AND we're on the final approach
       // (within CAPTURE_COMMIT), beeline it and ignore turrets (brain: 'capturing' near the top). Not
       // set once we're carrying it (then the objective is home). Fixes "worked the turret, never grabbed".
-      capturing: this.strategy.key === 'capture' && this.flagGrabbable() && (() => {
+      capturing: this.strategy.step === 'capture' && this.flagGrabbable() && (() => {   // (was strategy.key — always undefined, so the final flag-grab commit never fired)
         const f = this.flag(); if (!f || f.carrier === v) return false;
         return (px - f.group.position.x) ** 2 + (pz - f.group.position.z) ** 2 < CAPTURE_COMMIT * CAPTURE_COMMIT;
       })(),
@@ -5708,6 +5735,7 @@ window.RR = {
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setBreachCommit: (v) => { aiBreachCommit = !!v; return aiBreachCommit; },   // A/B: siegers latch one wall + push in vs orbit-and-spray
+  setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
   setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
   get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
   setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
