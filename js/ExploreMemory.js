@@ -14,7 +14,7 @@ let SWEEP_MODE = 'near';
 export function setSweepMode(m) { SWEEP_MODE = m === 'far' ? 'far' : 'near'; return SWEEP_MODE; }
 
 export class ExploreMemory {
-  constructor(worldW, worldH, cell = 30) {
+  constructor(worldW, worldH, cell = 30, isLand = null) {
     this.cell = cell;
     this.halfW = worldW / 2;
     this.halfH = worldH / 2;
@@ -22,6 +22,16 @@ export class ExploreMemory {
     this.gh = Math.max(1, Math.ceil(worldH / cell));
     this.seen = new Uint8Array(this.gw * this.gh);
     this.seenCount = 0;
+    // Mark which cells are LAND. Ocean cells are never worth scouting AND can never be reached/
+    // marked-seen — so a scout that targeted one froze against the coast forever, and the sea
+    // (~85% of the map) kept fraction() near 0 so "mostly explored" never triggered. Excluding
+    // ocean from BOTH pickTarget and fraction fixes both. isLand(worldX,worldZ)->bool; null = all land.
+    this.land = new Uint8Array(this.gw * this.gh);
+    this.landTotal = 0; this.landSeen = 0;
+    for (let j = 0; j < this.gh; j++) for (let i = 0; i < this.gw; i++) {
+      const c = this._cellCentre(i, j);
+      if (!isLand || isLand(c.x, c.z)) { this.land[j * this.gw + i] = 1; this.landTotal++; }
+    }
   }
 
   // World point → cell centre (used to score candidates back in world space).
@@ -39,12 +49,13 @@ export class ExploreMemory {
         const c = this._cellCentre(i, j);
         if ((c.x - x) ** 2 + (c.z - z) ** 2 > r2) continue;
         const k = j * this.gw + i;
-        if (!this.seen[k]) { this.seen[k] = 1; this.seenCount++; }
+        if (!this.seen[k]) { this.seen[k] = 1; this.seenCount++; if (this.land[k]) this.landSeen++; }
       }
     }
   }
 
-  fraction() { return this.seenCount / this.seen.length; }
+  // Fraction of the LAND explored (ocean is excluded — it can't be scouted and never gets marked).
+  fraction() { return this.landTotal ? this.landSeen / this.landTotal : 1; }
 
   // Pick an unexplored cell to head for next. Sweep the NEAREST unexplored ground — since the
   // cells behind the unit are already painted seen, "nearest unexplored" naturally sits ahead/
@@ -59,7 +70,8 @@ export class ExploreMemory {
     const minR2 = minR * minR;
     for (let j = 0; j < this.gh; j++) {
       for (let i = 0; i < this.gw; i++) {
-        if (this.seen[j * this.gw + i]) continue;
+        const k = j * this.gw + i;
+        if (this.seen[k] || !this.land[k]) continue;   // skip already-seen AND ocean (unreachable, nothing to scout)
         const c = this._cellCentre(i, j);
         const d2 = (c.x - selfX) ** 2 + (c.z - selfZ) ** 2;
         if (d2 < nearBest) { nearBest = d2; near = c; }   // absolute nearest (fallback if all are inside minR)

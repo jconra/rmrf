@@ -51,7 +51,10 @@ class Scout extends Mission {
   get key() { return 'scout'; }
   objective(cmd) { return cmd.exploreTarget() || cmd.enemyFobPos(); }
   shoot(cmd) { return false; }
-  arriveDist(cmd) { return 30; }
+  // Close arrive distance: a scout must actually FLY TO each recon waypoint. At the old 30u the
+  // seek behaviour stopped 30u short — and since a unit paints ~46u of map "seen" around itself,
+  // it marked the waypoint from afar, stopped, and never travelled: parked at its own FOB all match.
+  arriveDist(cmd) { return 10; }
   label(cmd) { return 'sweeping for recon'; }
   cry(cmd) { return pickCry(cmd, [
     'Where are they hiding? Fan out and find them.',
@@ -402,7 +405,9 @@ class Hunter extends Doctrine {
   choose(cmd) {
     if (cmd.flagGrabbable()) return 'capture';
     if (cmd.enemyEliminated()) return 'siege';                 // no one to hunt → press the base
-    if (!cmd.knowsEnemy()) return 'scout';                     // haven't found them yet → recon
+    // Recon UNTIL we've found them OR the field is mostly mapped — the fraction backstop stops a
+    // Hunter idling in 'scout' with its Valkyrie parked once there's nothing left to reveal.
+    if (!cmd.knowsEnemy() && cmd.explore.fraction() < 0.8) return 'scout';
     return 'attack';
   }
 }

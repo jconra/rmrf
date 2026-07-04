@@ -8,7 +8,7 @@
 // onStep (optional) is a visualizer hook: it fires once per node popped off the
 // heap, with { cur:{i,j}, open:[{i,j}...] (the live frontier), path:[{i,j}...]
 // (best route to cur so far) }. It's guarded so normal pathfinding pays nothing.
-export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity }) {
+export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false }) {
   // Default is 4-connected (orthogonal) — road LAYOUT needs clean right-angle, connected
   // grids. allowDiagonal adds the 4 diagonals so UNIT NAV can cut straight across open
   // ground instead of staircasing. A diagonal step travels √2 as far, so it costs √2× the
@@ -39,15 +39,22 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   g.set(key(start.i, start.j, -1), 0);
   push({ i: start.i, j: start.j, d: -1, g: 0, f: h(start.i, start.j) });
 
+  const buildPath = (node) => { const path = []; while (node) { path.push({ i: node.i, j: node.j }); node = from.get(key(node.i, node.j, node.d)) || null; } return path.reverse(); };
+  // PARTIAL fallback: remember the settled node CLOSEST to the goal, so an unreachable / past-bound
+  // search can still hand back a valid route that makes real progress toward the goal instead of null
+  // (the caller then walks toward it along passable cells rather than beelining straight into terrain).
+  let best = null, bestH = Infinity;
   let popped = 0;
   while (heap.length) {
     const cur = pop();
     // SEARCH BOUND: an UNREACHABLE goal would otherwise expand the entire reachable grid
     // (tens of thousands of cellBlocked calls) — and unit nav re-runs that constantly, which
-    // was the perf sawtooth. Give up past the bound and let the caller fall back / back off.
-    if (++popped > maxNodes) return null;
+    // was the perf sawtooth. Give up past the bound and return the best partial (below) / back off.
+    if (++popped > maxNodes) break;
     const curK = key(cur.i, cur.j, cur.d);
     if (cur.g > (g.get(curK) ?? Infinity)) continue;
+    const ch = h(cur.i, cur.j);
+    if (ch < bestH) { bestH = ch; best = cur; }
     if (onStep) {
       // Reconstruct the best-known route to the node we just settled, so the
       // visualizer can draw the path firming up as the frontier sweeps outward.
@@ -56,12 +63,7 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
       pth.reverse();
       onStep({ cur: { i: cur.i, j: cur.j }, open: heap.map(n => ({ i: n.i, j: n.j })), path: pth });
     }
-    if (cur.i === goal.i && cur.j === goal.j) {
-      const path = [];
-      let node = cur;
-      while (node) { path.push({ i: node.i, j: node.j }); node = from.get(key(node.i, node.j, node.d)) || null; }
-      return path.reverse();
-    }
+    if (cur.i === goal.i && cur.j === goal.j) return buildPath(cur);
     for (let di = 0; di < DIRS.length; di++) {
       const ddi = DIRS[di][0], ddj = DIRS[di][1];
       const ni = cur.i + ddi, nj = cur.j + ddj;
@@ -82,5 +84,8 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
       }
     }
   }
+  // Goal unreachable (or past the node bound): hand back the closest partial route, but only if it
+  // actually gets NEARER the goal than the start — otherwise there's no progress to be had (null).
+  if (partial && best && bestH < h(start.i, start.j) - 0.5) return buildPath(best);
   return null;
 }

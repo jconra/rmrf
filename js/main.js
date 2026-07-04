@@ -26,9 +26,9 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=75';
-import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=56';
-import { astarGrid } from './astar.js?v=4';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=77';
+import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=57';
+import { astarGrid } from './astar.js?v=5';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
@@ -2856,7 +2856,13 @@ function planPath(v, dest) {
     if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
     return onRoad(i, j) ? 0.5 : 1;   // Warrior + default: roads are the cheap lane
   };
-  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes: 9000 });
+  // Node budget scales with the grid: 9000 was tuned on smaller maps and left units on the big
+  // default (480) map with NO route to a far goal (they then beelined into terrain and wedged).
+  // Capped so a genuinely-unreachable search still bails cheaply. partial:true → on failure A*
+  // returns a valid route to the closest reachable cell, so the unit still makes real progress.
+  const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
+  const maxNodes = Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4)));
+  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true });
   if (!path || path.length < 2) return null;
   return path.map(n => ({ x: n.i * c, z: n.j * c }));
 }
@@ -2998,7 +3004,7 @@ class AICommander {
     this.knownElev = false;                           // scouted the enemy FOB/elevator yet?
     this.knownFlag = false;                           // scouted the enemy flag HQ yet?
     this._knownSig = '';                              // last logged known-POI signature (log only on change)
-    this.explore = new ExploreMemory(map.worldW, map.worldH);   // coarse "where have we looked" grid
+    this.explore = new ExploreMemory(map.worldW, map.worldH, 30, (x, z) => map.isLand(x, z));   // coarse "where have we looked" grid (land-only)
     this._exploreWp = null;                           // current recon waypoint (held until reached)
     this.roster = { ...GARAGE_COUNTS };               // finite fleet, same numbers as the player's garage; a death removes one
     this._eliminated = false;                         // true once the roster is empty (no more vehicles to field)
@@ -3051,7 +3057,10 @@ class AICommander {
     return parts.length ? parts.join(' ') : 'none';
   }
   // Have we ever laid eyes on an enemy vehicle? (drives Hunter scout → attack)
-  knowsEnemy() { return Object.keys(this.seenTypes).length > 0; }
+  // "Found them" = seen an enemy VEHICLE or scouted their base (FOB/HQ). The base check matters:
+  // a scout that reaches the enemy FOB but never happens to spot a unit used to count as still-
+  // searching, so a Hunter sat in 'scout' forever with its Valkyrie parked at the enemy elevator.
+  knowsEnemy() { return Object.keys(this.seenTypes).length > 0 || this.knownElev || this.knownFlag; }
   // The enemy's last-known position, if seen recently (else null → fall back to the
   // elevator). Lets the Attack mission "recall the last known location" (ai_behavior).
   lastEnemyPos() {
