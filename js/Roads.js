@@ -5,7 +5,7 @@
 // keeps it on land and bridges only when forced).
 
 import * as THREE from 'three';
-import { astarGrid } from './astar.js?v=4';
+import { astarGrid } from './astar.js?v=6';
 import { TILE } from './IslandMap.js';
 
 const ROAD_T = 0.5;   // road slab thickness — buried in the flat land, its side covers the drop at rough shore cells
@@ -233,14 +233,20 @@ export class RoadNetwork {
       if (this._buffer.has(k)) return 5000;        // moat ring — avoid unless truly forced
     }
     const t = this._tileAt(i, j);
-    if (t === TILE.SAND || t === TILE.GRASS || t === TILE.ROCK) return 1;
-    if (t === TILE.SHALLOW) return 8;
-    return 22;   // deep water — only bridged when forced
+    // Land costs 3 (not 1) so the gap to ROAD_REUSE (0.1) is ~2.9/cell: two roads leaving
+    // the same camp by different gates now MERGE within a few cells (the saving out-earns the
+    // join's turn + lateral overhead) instead of running parallel — with the turn penalty and
+    // approach cells as fixed overheads, the ground:reuse RATIO is what sets the break-even.
+    // Water keeps its multiple over land so bridging stays a last resort.
+    if (t === TILE.SAND || t === TILE.GRASS || t === TILE.ROCK) return 3;
+    if (t === TILE.SHALLOW) return 24;
+    return 66;   // deep water — only bridged when forced
   }
 
   // connections: [{ a:gate, b:gate, y }], gate = { pos:Vector3, outward:Vector3 }.
   build(connections) {
     this.tiles.clear();
+    this.paths = [];           // per-connection cell paths (debug: which road laid which cells)
     const cells = new Map();   // key -> { i, j, y }
     // Cells already carrying road. _cost charges almost nothing for these, so each new
     // connection's A* would rather detour onto an existing road and follow it than lay a
@@ -271,7 +277,11 @@ export class RoadNetwork {
         cost: (i, j) => this._cost(i, j),
         inBounds: (i, j) => this._inBounds(i, j),
         turnPenalty: 6,
+        // Admissible heuristic for the DISCOUNTED road cells — without this the search never
+        // "sees" that riding an existing road is cheap, and lays a parallel one (see astar.js).
+        hScale: ROAD_REUSE,
       });
+      this.paths.push(path ? path.map(p => [p.i, p.j]) : null);
       // Safety net: never paint a tile onto a wall cell (guards the rare case
       // where an approach endpoint lands in a tightly-packed neighbour's footprint).
       if (path) for (const p of path) {

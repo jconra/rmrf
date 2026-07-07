@@ -12,7 +12,7 @@
 //   bounds:{iMin,iMax,jMin,jMax}, allowDiagonal, turnPenalty } gives the REAL cost
 // field for the chosen grid.
 
-import { astarGrid } from './astar.js?v=4';
+import { astarGrid } from './astar.js?v=6';
 
 const C = {
   wall: 'rgba(10,16,24,0.60)', frontier: 'rgba(60,165,255,0.85)',

@@ -8,7 +8,7 @@
 // onStep (optional) is a visualizer hook: it fires once per node popped off the
 // heap, with { cur:{i,j}, open:[{i,j}...] (the live frontier), path:[{i,j}...]
 // (best route to cur so far) }. It's guarded so normal pathfinding pays nothing.
-export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false }) {
+export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false, hScale = 1 }) {
   // Default is 4-connected (orthogonal) — road LAYOUT needs clean right-angle, connected
   // grids. allowDiagonal adds the 4 diagonals so UNIT NAV can cut straight across open
   // ground instead of staircasing. A diagonal step travels √2 as far, so it costs √2× the
@@ -17,7 +17,14 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   const DIRS = allowDiagonal ? CARD.concat([[1, 1], [1, -1], [-1, 1], [-1, -1]]) : CARD;
   const SQRT2 = Math.SQRT2;
   const key = (i, j, d) => i + ',' + j + ',' + d;
-  const h = (i, j) => Math.hypot(i - goal.i, j - goal.j);
+  // hScale: the heuristic assumes every cell costs ≥1, but callers with DISCOUNTED cells
+  // (road reuse at 0.1) make that an OVERESTIMATE along the cheap corridor — inadmissible,
+  // so A* would settle the goal via a full-price direct route without ever exploring the
+  // discounted one (why new roads ran parallel to existing roads instead of merging).
+  // Pass hScale = the minimum possible cell cost to restore admissibility (more node
+  // expansions, exact results) — worth it for one-shot layout work like roads; unit nav
+  // keeps 1 (speed over exactness: its discounts are mild and per-frame budget is tight).
+  const h = (i, j) => Math.hypot(i - goal.i, j - goal.j) * hScale;
 
   // Tiny binary min-heap keyed on f.
   const heap = [];

@@ -396,7 +396,15 @@ class Doctrine {
     // Defenders still alive → switch to ATTACK NOW (so the NEXT deploy is a fighter, not
     // another firebrat) and hold it there for a window to clear them, then resume the grab.
     // No defenders left (pure tower gauntlet) → sneak in on a wide route instead.
-    if (enemyHasUnits) { cmd._clearPathT = 18; this._switch('attack', cmd, 'runner intercepted — clear the defenders first'); }
+    if (enemyHasUnits) {
+      // Escalating clear-window: 18s was never enough to actually hunt the interceptor down, so
+      // capture↔attack cycled every ~100s, feeding a runner into the same guns each lap
+      // (richwatch MISSION-FLAP). Each lost runner buys a LONGER clearing phase before the next
+      // attempt — the retry rate decays instead of hammering.
+      cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
+      cmd._clearPathT = Math.min(60, 18 * cmd._runnerLosses);
+      this._switch('attack', cmd, `runner intercepted — clear the defenders first (${cmd._clearPathT | 0}s sweep)`);
+    }
     else cmd._stealthCapture = true;
   }
   get softenKey() { return 'siege'; }

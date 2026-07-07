@@ -10,7 +10,7 @@ import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
 import { Camp, Wall } from './Walls.js?v=60';
 import { makeFlagHQ } from './Buildings.js?v=3';   // decoy HQ buildings on designed maps
-import { RoadNetwork } from './Roads.js?v=81';
+import { RoadNetwork } from './Roads.js?v=85';
 import { Foliage } from './Foliage.js?v=4';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
@@ -19,17 +19,17 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=104';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=108';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=82';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=83';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
-import { astarGrid } from './astar.js?v=5';
-import { AstarViz } from './AstarViz.js?v=3';
+import { astarGrid } from './astar.js?v=6';
+import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
@@ -780,6 +780,11 @@ function buildRoads() {
   const byTeam = {};
   for (const c of camps) (byTeam[c.team] ??= {})[c.role] = c;
   const conns = [];
+  // Each connection uses its own nearest gate — a gate that gets a road KEEPS a road (gates
+  // without one look wrong). The two roads leaving one camp then MERGE just outside because
+  // ground costs 2 while an existing road costs 0.1 (see Roads._cost): the ~1.9/cell saving
+  // beats the join overhead (turns + a couple of lateral cells) within a few cells, so A*
+  // rides the shared trunk instead of laying a parallel twin (Jacob's design, seed 513445024).
   for (const t of ['red', 'blue']) {
     const m = byTeam[t] && byTeam[t].main, f = byTeam[t] && byTeam[t].fob;
     if (m && f) conns.push({ a: m.gates[0], b: nearestGate(f, m.center), y: m.center.y });
@@ -1399,9 +1404,24 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
       }
     }
   };
-  if (idx === 3) setTimeout(discharge, 900);   // railgun charge
+  // RAILGUN CHARGE — on the GAME clock, not setTimeout. A real timer never fires inside a
+  // blocked headless-sim loop (the whole match runs in one evaluate), so every sim jotun shot
+  // spent ammo, made the report sound, and discharged NOTHING: zero damage, zero shot-feedback,
+  // whole matches of railgun blanks (the seed-25 "staring contest" and silently-nerfed jotuns
+  // in every tournament). performance.now is the sim clock headless, real time live — one path.
+  if (idx === 3) _chargedShots.push({ at: performance.now() + 900, fn: discharge });
   else discharge();
   veh.cooldown = FIRE_INTERVALS[idx] || 0.3;
+}
+// Pending charged discharges (see above) — ticked from updateProjectileHits so every loop
+// (live animate, RR.stepField, tickCombat) fires them at the right game time.
+const _chargedShots = [];
+function tickChargedShots() {
+  if (!_chargedShots.length) return;
+  const now = performance.now();
+  for (let i = _chargedShots.length - 1; i >= 0; i--) {
+    if (now >= _chargedShots[i].at) { const c = _chargedShots.splice(i, 1)[0]; c.fn(); }
+  }
 }
 
 // Nearest enemy inside the player's forward gun arc (+ range). Gives the fixed-gun Firebrat
@@ -1815,6 +1835,7 @@ function nearestEnemyVehicle(point, pad, team, shooter) {
 // Advance travelling projectiles' damage: detonate on first solid/tree/vehicle/
 // ground contact. (Projectiles.js already flies + fades them visually.)
 function updateProjectileHits() {
+  tickChargedShots();   // fire any railgun whose charge completed (game-clock, see fireVehicle)
   for (let i = projectiles.items.length - 1; i >= 0; i--) {
     const p = projectiles.items[i];
     if (p.dmg == null) continue;            // laser shots carry no travel damage
@@ -3122,11 +3143,21 @@ class AICommander {
     let px = -dz, pz = dx;   // unit vector perpendicular to the base-to-base line
     if ((v.holder.position.x - mx) * px + (v.holder.position.z - mz) * pz < 0) { px = -px; pz = -pz; }   // the side we're already on
     let best = { x: mx + px * 20, z: mz + pz * 20 };
-    for (let d = 20; d <= 340; d += 6) {   // march out to the last land before the water = the beach edge
+    // March out to the beach — but no further than ~55% of the base separation. The flank only
+    // needs to clear the defended middle; "last land" along a diagonal could be a far MAP CORNER,
+    // and runners drove hundreds of units out to park next to one (richwatch: 77s stagnant).
+    const maxD = Math.min(340, L * 0.55);
+    for (let d = 20; d <= maxD; d += 6) {
       const x = mx + px * d, z = mz + pz * d;
       if (!map.isLand(x, z)) break;
       best = { x, z };
     }
+    // Snap to a cell the runner can actually OCCUPY — the raw beach lip can be an unenterable
+    // sliver against water/rocks, leaving the unit circling 20u out with the arrival check
+    // (which needs it INSIDE the radius) never tripping.
+    const c = grid.cell;
+    const oc = nearestOpenCell(v, Math.round(best.x / c), Math.round(best.z / c), 6);
+    if (oc) best = { x: oc.i * c, z: oc.j * c };
     this._flankPt = best;
     return best;
   }
@@ -4126,7 +4157,7 @@ class AICommander {
       const dEnemy = Math.hypot(enemyB.x - px, enemyB.z - pz);
       if (goalToEnemy < 70 && dEnemy > 70 && !this._flankDone) {
         const fp = this._flankPoint(v);
-        if (Math.hypot(fp.x - px, fp.z - pz) < 16) this._flankDone = true;   // rounded the flank → now go for the flag
+        if (Math.hypot(fp.x - px, fp.z - pz) < 22) this._flankDone = true;   // rounded the flank → now go for the flag (loose radius: the point sits on a beach lip)
         else { goal = fp; this._flanking = true; }
       }
     }
@@ -4364,6 +4395,7 @@ class AICommander {
       dt,
       self: { x: px, z: pz, heading: h, type: v.type, shield: v.shield, hpFrac: v.hp / v.maxHp, fuelFrac: v.fuel / v.maxFuel, ammoFrac: v.ammo / v.maxAmmo },
       seesEnemy, enemy, heard, enemiesNear, alliesNear, flyer, shotArc: SHOT_ARC[v.type] ?? Math.PI / 5,
+      worldR: islandBound || 0,   // hard travel rim (map centre radius) — flee bends along it instead of pinning
       underFire: (performance.now() - (v._hitByVehT || -1e9)) < 1600,   // an enemy vehicle shot us in the last ~1.6s
 
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
@@ -5922,6 +5954,8 @@ window.RR = {
   recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]
   aiConfig: (k, v) => v === undefined ? getBrainConfig(k) : setBrainConfig(k, v),   // read/set a brain knob at runtime (auto-tuning sweeps)
   aiEvents: () => aiArchive,                                   // full structured decision-event archive (headless analysis)
+  roadCells: () => roadNet.cells,                              // road layout cells (headless parallel-road checks)
+  get roadNet() { return roadNet; },                           // full network incl. per-connection paths (debug)
   setFof: (team, patch) => Object.assign(fofFor(team), patch || {}),                // override this team's fight-or-flight weights (A/B self-play)
   getFof: (team) => ({ ...fofFor(team) }),
   fofDefault: () => ({ ...FOF_DEFAULT }),

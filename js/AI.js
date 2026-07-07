@@ -61,6 +61,11 @@ function wrapPi(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) 
 
 // Fraction of ammo remaining (treat "unknown" as full, matching the old behaviour).
 function ammoFrac(view) { return view.self.ammoFrac != null ? view.self.ammoFrac : 1; }
+// Ammo hysteresis for the fight conditions: STAYING in a fight only needs a round in the gun,
+// but ENTERING one needs a usable burst (~12% of the magazine). Without the asymmetry a unit
+// topping up at base flipped resupply↔engage on every refill tick — off to fight with one
+// round, fire it, dry, back to resupply, repeat (the deterministic ×38 strobe, seed 11 t=201).
+function ammoBurst(view, mem) { return ammoFrac(view) > (mem && mem.state === 'engage' ? 0 : 0.12); }
 // Pull-out HP threshold: brave brains hold longer (0.27–0.45 across aggression). The
 // Jotun is the exception — it's far too slow to flee (a crawling retreat just gets it
 // shot in the back), so it holds and keeps firing down to nearly dead.
@@ -179,12 +184,13 @@ const CONDITIONS = {
     // STALEMATE GAMBIT: we've committed a flyer to slip AROUND the mid-field fight and crack the
     // HQ — ignore the enemy entirely and keep rushing the base (the whole point is not to trade).
     if (v.rushBase) return false;
-    if (ammoFrac(v) <= 0) return false;
     // OUT OF AMMO can't duel — standing in 'engage' dry just holds the unit nose-to-nose with a
     // rival forever (two dry Jotuns stared each other down for a whole match). Disengage so it
     // falls through to resupLatched and pulls back to rearm (matches underAttack, which already
-    // bails when dry). The Jotun exemption below assumes it can actually shoot back.
-    if (ammoFrac(v) <= 0) return false;
+    // bails when dry). ENTRY needs a usable magazine, not a trickle: a unit topping up at base
+    // used to flip resupply↔engage on every refill tick, fighting one round at a time (×38
+    // strobe) — while it stays in resupply, the pad-fight branch already returns fire.
+    if (!ammoBurst(v, m)) return false;
     if (!((m._fof != null ? m._fof : fightScore(v, p)) > 0)) return false;
     // FOCUS (discipline / mood): a disciplined brain won't abandon its objective to chase a
     // DISTANT enemy — it only breaks off to brawl one that's actually close. brawlR shrinks
@@ -207,7 +213,7 @@ const CONDITIONS = {
   // and answering it outranks any siege/advance goal. Escapable units (flyers / faster) fall
   // through to the normal weighted fight-or-flight. Gated by cfg.mustFight so it's A/B-toggleable.
   underAttack: (v, m, p, cfg) => {
-    if (!cfg.mustFight || !v.seesEnemy || !v.enemy || ammoFrac(v) <= 0) return false;
+    if (!cfg.mustFight || !v.seesEnemy || !v.enemy || !ammoBurst(v, m)) return false;
     const s = v.self, et = v.enemy.type;
     if (v.flyer || (SPEED[s.type] || 2) > (SPEED[et] || 2)) return false;   // can outrun it → let normal fof/flee decide
     // Trigger on an ACTUAL immediate threat, not mere nearness: either the rival is shooting us
@@ -228,6 +234,10 @@ const CONDITIONS = {
   // the enemy fleet is gone (the commander redirects to the base instead of wasting time).
   pursuing: (v, m, p) => {
     if (v.enemyGone) return false;
+    // A RUNNER never chases a sighting — pursue drove the fleeing firebrat straight back at
+    // the enemy it had just escaped (flee to 100u → clear → pursue to 60u → flee …, the
+    // panic flap). Runners resume the mission; the flee latch handles real chasers.
+    if (v.runnerMode && v.self.type === 'firebrat') return false;
     const seenRecently = m.lastSeen && (m.t - m.lastSeen.t) < (3 + p.aggression * 5);
     return seenRecently && p.aggression > 0.6;
   },
@@ -430,13 +440,23 @@ const BEHAVIORS = {
       // "two units fire at the hill between them forever" stalemate — so commit to a hard
       // sidestep (held ~1.5s so it actually clears the hump) while still test-firing the new
       // lane; the instant a shot connects the feedback resets and normal footwork resumes.
+      // FUTILITY ESCALATION: a 1.5s random-direction hop clears a rock but not a RIDGE — two
+      // jotuns random-walked the same crest for 300s, burning full magazines with zero damage
+      // (richwatch seed 25). After a few failed hops, COMMIT: hold one direction for a long
+      // leg (~5s) so the firing line genuinely moves off the blocking feature.
       if (view.shotBlocked) {
-        if (mem._unblockT == null || (mem.t - mem._unblockT) > 1.5) {
-          mem._unblockDir = mem.rng() < 0.5 ? -1 : 1; mem._unblockT = mem.t;
+        mem._blockSeenT = mem.t;
+        if (mem._unblockT == null || (mem.t - mem._unblockT) > (mem._unblockLong ? 5 : 1.5)) {
+          mem._unblockN = (mem._unblockN || 0) + 1;
+          mem._unblockLong = mem._unblockN >= 3;
+          if (!mem._unblockLong || mem._unblockDir == null) mem._unblockDir = mem.rng() < 0.5 ? -1 : 1;
+          mem._unblockT = mem.t;
         }
         mem._wantMove = true;
-        return { fwd: 0.35, turn, fire, strafe: mem._unblockDir * 0.95, state: mode };
+        return { fwd: mem._unblockLong ? 0.4 : 0.35, turn, fire, strafe: mem._unblockDir * 0.95, state: mode };
       }
+      // Lane cleared (a shot landed, or the fight moved) for a few seconds → forget the futility.
+      if (mem._unblockN && mem.t - (mem._blockSeenT ?? -99) > 4) { mem._unblockN = 0; mem._unblockLong = false; }
       // AMBUSH A JOTUN (ai_behavior Hunter): its 30° front arc is a guaranteed hit, so
       // never trade there — if we're in front of a MOVING Jotun, let it roll by: hold fire,
       // ease out of the kill zone, and orbit hard toward its blind rear. Once we're off its
@@ -559,7 +579,22 @@ const BEHAVIORS = {
     let sx = 0, sz = 0;
     if (view.support) { sx = view.support.x - self.x; sz = view.support.z - self.z; const sl = Math.hypot(sx, sz) || 1; sx /= sl; sz /= sl; }
     const sw = (sx * ax + sz * az) > -0.15 ? 0.6 : 0;
-    const fx = ax + sx * sw, fz = az + sz * sw;
+    let fx = ax + sx * sw, fz = az + sz * sw;
+    // MAP-EDGE DEFLECTION: pure away-from-threat can pin the runner against the island bound
+    // (it fled into the world's corner and jolt-stormed there). Near the rim, if the escape
+    // still presses OUTWARD, bend it along the TANGENT — the side already matching the escape —
+    // with a slight inward ease, so it skirts the rim past the pursuer instead of grinding it.
+    if (view.worldR) {
+      const r = Math.hypot(self.x, self.z);
+      if (r > view.worldR - 24) {
+        const rx = self.x / (r || 1), rz = self.z / (r || 1);      // outward radial
+        if (fx * rx + fz * rz > 0) {
+          let tx = -rz, tz = rx;                                   // rim tangent
+          if (tx * fx + tz * fz < 0) { tx = -tx; tz = -tz; }
+          fx = tx - rx * 0.25; fz = tz - rz * 0.25;
+        }
+      }
+    }
     const desired = Math.atan2(-fx, -fz);                          // model front is local -Z
     const turn = clamp(wrapPi(desired - self.heading) * 2.8, -1, 1);   // snap onto the escape heading hard
     mem._wantMove = true;
@@ -647,6 +682,7 @@ export const DEFAULT_BRAIN = {
   config: {
     stillEps: 0.05,      // movement under this (units/tick) counts as "not moving"
     engageGlow: 0.9,     // seconds a lost duel target stays "visible" (anti engage↔pursue flap)
+    threatGlow: 2.5,     // seconds a lost TURRET target is held — turrets don't move, so a blink isn't a disappearance (anti suppress↔assault flap)
     fofStick: 0.25,      // fight-or-flight commitment bias while already engaging (anti boundary-strobe)
     stillLimit: 1.8,     // seconds wedged before the unstick jolt fires
     wedgeLimit: 1.6,     // seconds PRESSED on an obstacle with no gain on the goal before the jolt (a unit sliding along a wall/turret is "moving" but going nowhere)
@@ -827,6 +863,21 @@ export function runBrain(graph, view, mem) {
   else if ((mem.state === 'engage' || mem.state === 'suppress') && mem._lastEnemyView
            && mem.t - (mem._lastSeenT ?? -99) < cfg.engageGlow) {
     view.seesEnemy = true; view.enemy = mem._lastEnemyView; view.enemyGhost = true;
+  }
+  // THREAT AFTERGLOW — the same trick for wall-turret targets, held LONGER because turrets
+  // don't move: the threat is only reported with a clear line to it, so a sieger strafing
+  // past wall edges had it blinking every tick, flipping suppress↔assault once a second for
+  // minutes (richwatch: ×98 in 101s). Hold the last turret as the target through blinks;
+  // threatLOS stays false for the ghost, so FIRING still requires a genuine line.
+  if (view.threat) {
+    mem._lastThreatView = { threat: { ...view.threat }, stand: view.threatStand ? { ...view.threatStand } : null, hq: !!view.hqThreat };
+    mem._lastThreatT = mem.t;
+  } else if ((mem.state === 'suppress' || mem.state === 'assault') && mem._lastThreatView
+             && mem.t - (mem._lastThreatT ?? -99) < cfg.threatGlow) {
+    view.threat = mem._lastThreatView.threat;
+    view.threatStand = mem._lastThreatView.stand;
+    view.hqThreat = mem._lastThreatView.hq;
+    view.threatLOS = false;
   }
 
   // Update latched interrupts (hysteresis).
