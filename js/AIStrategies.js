@@ -337,6 +337,8 @@ class Doctrine {
     this.t += dt;
     this.mission.tick(cmd, dt);
     if (cmd._clearPathT > 0) cmd._clearPathT -= dt;   // countdown: clearing a downed runner's interceptor
+    if (cmd._softenT > 0) cmd._softenT -= dt;         // countdown: silencing the towers that keep killing runners
+    if (cmd._softenT > 0 && cmd.fortDown && cmd.fortDown()) cmd._softenT = 0;   // towers are down — job done, go grab
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
     let next = this._urgent(cmd), why = next ? 'our flag is on the move — run the thief down' : null;
@@ -361,6 +363,9 @@ class Doctrine {
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
     if (!next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; }
+    // Tower-soften window (see onRunnerLost): the towers keep shredding runners → hold SIEGE
+    // until they're silenced, instead of rebuilding a firebrat into the same guns each lap.
+    if (!next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; }
     if (!next) { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
     // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
     // don't repeat the bad decision; run its unblocker (unless that's banned too).
@@ -396,14 +401,23 @@ class Doctrine {
     // Defenders still alive → switch to ATTACK NOW (so the NEXT deploy is a fighter, not
     // another firebrat) and hold it there for a window to clear them, then resume the grab.
     // No defenders left (pure tower gauntlet) → sneak in on a wide route instead.
+    cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
     if (enemyHasUnits) {
       // Escalating clear-window: 18s was never enough to actually hunt the interceptor down, so
       // capture↔attack cycled every ~100s, feeding a runner into the same guns each lap
       // (richwatch MISSION-FLAP). Each lost runner buys a LONGER clearing phase before the next
       // attempt — the retry rate decays instead of hammering.
-      cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
       cmd._clearPathT = Math.min(60, 18 * cmd._runnerLosses);
       this._switch('attack', cmd, `runner intercepted — clear the defenders first (${cmd._clearPathT | 0}s sweep)`);
+    }
+    // Pure tower gauntlet (no enemy vehicles left): stealth ONCE — a wide route sometimes
+    // slips the back towers for free. But if the towers keep killing runners, stop feeding
+    // them (seed 137: a fresh firebrat rebuilt and shredded every ~30s for 800s while two
+    // jotuns idled in the garage) and ESCALATE: force a timed SIEGE window so a real sieger
+    // silences the remaining towers before the next grab attempt.
+    else if (cmd._runnerLosses >= 2 && cmd.turretsLive() > 0) {
+      cmd._softenT = Math.min(90, 30 * cmd._runnerLosses);
+      this._switch('siege', cmd, `the towers keep shredding our runners — silencing them first (${cmd._softenT | 0}s)`);
     }
     else cmd._stealthCapture = true;
   }

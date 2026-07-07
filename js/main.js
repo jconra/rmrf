@@ -15,7 +15,7 @@ import { Foliage } from './Foliage.js?v=4';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
 import { Elevator } from './Elevator.js?v=3';
-import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
+import { Garage, GARAGE_COUNTS } from './Garage.js?v=7';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
@@ -26,7 +26,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=83';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=84';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1298,6 +1298,10 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
   if (veh.model) { veh.model.autoScan = false; veh.model.aimYaw = 0; }   // controlled → face forward, not idle-sweep
   veh._engineId = null;   // assigned lazily by updateEngineSounds (non-player)
   if (!isPlayer) veh.bar = makeHealthBar(veh);   // enemies show a floating bar; player uses the HUD
+  // PROMOTIONS: this type's individual keeps its rank through the garage — restore banked stars.
+  const bank = rankBankFor(veh);
+  veh.rankKills = (bank && bank[veh.type]) || 0;
+  if (veh.rankKills) { applyRankHp(veh); updateRankStars(veh); if (veh.bar) updateHealthBar(veh); }
   combatants.push(veh);
   return veh;
 }
@@ -1306,6 +1310,7 @@ function removeCombatant(veh) {
   const i = combatants.indexOf(veh);
   if (i >= 0) combatants.splice(i, 1);
   if (veh.bar) { scene.remove(veh.bar.group); veh.bar = null; }
+  if (veh._rankGrp) { scene.remove(veh._rankGrp); veh._rankGrp = null; veh._rankSpr = null; }
   if (veh._engineId != null && sound) { sound.dropSpatialEngine(veh._engineId); veh._engineId = null; }
   if (veh._shieldFx) { releaseFancyShield(veh); veh.holder.remove(veh._shieldFx); veh._shieldFx.geometry.dispose(); if (veh._shieldFx.userData.cheapMat) veh._shieldFx.userData.cheapMat.dispose(); veh._shieldFx = null; }
   if (veh._shadow) { vehShadows.remove(veh._shadow); veh._shadow.geometry.dispose(); veh._shadow.material.dispose(); veh._shadow = null; }
@@ -1387,17 +1392,17 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
     if (guaranteed) {
       // Land the damage directly on the locked target; the slug is just a visual.
       const dist = targetVeh.holder.position.distanceTo(mpos);
-      damageVehicle(targetVeh, SHOT_DMG[idx] * rangeFalloff(veh.type, dist), 'vehicle', veh);
+      damageVehicle(targetVeh, SHOT_DMG[idx] * rangeFalloff(veh.type, dist) * rankDmgMul(veh), 'vehicle', veh);
       projectiles.spawn(idx, mpos, dir, hex);   // no dmg payload → updateProjectileHits ignores it
     } else if (idx === 1) {
       // Firebrat laser = hitscan: damage the first thing along the beam now.
-      raycastDamage(mpos, dir, 40, SHOT_DMG[idx], SHOT_BLAST[idx], veh.team, veh);
+      raycastDamage(mpos, dir, 40, SHOT_DMG[idx] * rankDmgMul(veh), SHOT_BLAST[idx], veh.team, veh);
       projectiles.spawn(idx, mpos, dir, hex);
     } else {
       projectiles.spawn(idx, mpos, dir, hex);
       const shot = projectiles.items[projectiles.items.length - 1];
       if (shot) {
-        shot.dmg = SHOT_DMG[idx]; shot.blast = SHOT_BLAST[idx]; shot.team = veh.team; shot.shooter = veh;
+        shot.dmg = SHOT_DMG[idx] * rankDmgMul(veh); shot.blast = SHOT_BLAST[idx]; shot.team = veh.team; shot.shooter = veh;   // gold stars sharpen the round
         shot.atVehicle = aimedAtEnemy;   // shot-feedback: was this round aimed at an enemy vehicle?
         // Home onto the locked target (live position) — but only if it's holdable;
         // a too-fast mover (red box) dumb-fires straight.
@@ -1955,18 +1960,96 @@ function updateFx(dt) {
 // Credit a kill to the firing unit's commander (ignores self/team kills, environment
 // deaths where there's no killer, and the player who has no commander). Powers the
 // "after a couple kills" doctrine transitions and a short kill-feed line.
+// --- UNIT PROMOTIONS ---------------------------------------------------------
+// Kills promote the INDIVIDUAL vehicle (Jacob's design): kills 1-3 pin bronze stars
+// (+3% speed each), 4-6 silver (+5% max hull each, the increase healed on pin-on),
+// 7-9 gold (+5% damage each) — three gold stars is max rank. Rank rides the roster
+// individual: a recalled ace keeps its stars for the next deploy of that TYPE (the
+// per-team rank bank below); death resets that type's rank — attrition keeps teeth.
+const RANK_MAX = 9;
+const playerRankBank = {};   // the player's per-type rank memory (garage swaps keep stars)
+function rankBankFor(v) {
+  if (!v || v.team == null) return null;
+  if (v.isPlayer) return playerRankBank;
+  const cmd = commanders.find(c => c.team === v.team);
+  return cmd ? (cmd._rankBank ??= {}) : null;
+}
+function rankSpeedMul(v) { return 1 + 0.03 * Math.min(v.rankKills || 0, 3); }
+function rankDmgMul(v) { return 1 + 0.05 * Math.max(0, Math.min(v.rankKills || 0, RANK_MAX) - 6); }
+function applyRankHp(v) {
+  const silver = Math.max(0, Math.min(v.rankKills || 0, 6) - 3);
+  const base = v._baseMaxHp || (v._baseMaxHp = v.maxHp);
+  const newMax = Math.round(base * (1 + 0.05 * silver));
+  if (newMax !== v.maxHp) { const gain = newMax - v.maxHp; v.maxHp = newMax; if (gain > 0) v.hp = Math.min(newMax, v.hp + gain); }
+}
+function rankLabel(k) {
+  if (!k) return '';
+  const t = k >= 7 ? 'GOLD' : k >= 4 ? 'SILVER' : 'BRONZE';
+  const n = k >= 7 ? k - 6 : k >= 4 ? k - 3 : k;
+  return t + ' ' + '\u2605'.repeat(n);
+}
+// Star billboard above the hull — rides the health-bar group (AI) or its own group (player).
+function updateRankStars(v) {
+  const k = Math.min(v.rankKills || 0, RANK_MAX);
+  if (!k) { if (v._rankSpr) v._rankSpr.visible = false; return; }
+  if (!v._rankSpr) {
+    const cv = document.createElement('canvas'); cv.width = 96; cv.height = 26;
+    const tex = new THREE.CanvasTexture(cv);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    sp.scale.set(4.5, 1.2, 1);
+    sp.userData.cv = cv; sp.userData.tex = tex;
+    v._rankSpr = sp;
+    if (v.bar) { sp.position.set(0, 1.15, 0); v.bar.group.add(sp); }
+    else { const g = new THREE.Group(); g.add(sp); scene.add(g); v._rankGrp = g; }   // the player has no bar
+  }
+  const cv = v._rankSpr.userData.cv, ctx = cv.getContext('2d');
+  const col = k >= 7 ? '#ffd24a' : k >= 4 ? '#d7dee5' : '#d08a4a';
+  const n = k >= 7 ? k - 6 : k >= 4 ? k - 3 : k;
+  ctx.clearRect(0, 0, 96, 26);
+  // Vector stars (not a text glyph — headless/odd fonts render \u2605 as tofu boxes).
+  for (let i = 0; i < n; i++) {
+    const cx = 48 + (i - (n - 1) / 2) * 24, cy = 13, r = 11;
+    ctx.beginPath();
+    for (let j = 0; j < 10; j++) {
+      const ang = -Math.PI / 2 + j * Math.PI / 5;
+      const rr = j % 2 === 0 ? r : r * 0.45;
+      const x = cx + Math.cos(ang) * rr, y = cy + Math.sin(ang) * rr;
+      j ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = col; ctx.strokeStyle = 'rgba(10,14,20,0.85)'; ctx.lineWidth = 2;
+    ctx.fill(); ctx.stroke();
+  }
+  v._rankSpr.userData.tex.needsUpdate = true;
+  v._rankSpr.visible = true;
+}
+
 function creditKill(killer, victim) {
   if (!killer || killer.team == null || killer.team === victim.team) return;
   const cmd = commanders.find(c => c.team === killer.team);
-  if (!cmd) return;
+  if (!cmd) { promoteUnit(killer); return; }   // player/no-commander team: stars still pin on
   cmd.kills = (cmd.kills || 0) + 1;
   aiLog(killer.team, `${cmd.cname}: Splash! ${killer.type} just dropped their ${victim.type} — that's ${cmd.kills} confirmed!`);
+  promoteUnit(killer);
+}
+// Pin a star on the firing UNIT (player included — its commander credit is a no-op above).
+function promoteUnit(killer) {
+  if (!killer || killer.dead || killer.team == null) return;
+  if ((killer.rankKills || 0) >= RANK_MAX) return;
+  killer.rankKills = (killer.rankKills || 0) + 1;
+  applyRankHp(killer); updateRankStars(killer);
+  if (killer.bar) updateHealthBar(killer);
+  if (killer.isPlayer) updatePlayerHud();
+  const bank = rankBankFor(killer); if (bank) bank[killer.type] = killer.rankKills;
+  aiLog(killer.team, `${teamLabel(killer.colorIndex)} ${killer.type} promoted — ${rankLabel(killer.rankKills)}!`);
 }
 function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
   veh.dead = true;
   spawnExplosion(veh.holder.position, veh.type === 'jotun');
   creditKill(killer, veh);   // credit the firing unit's commander (drives Warrior/Hunter doctrine + kill feed)
+  { const bank = rankBankFor(veh); if (bank) bank[veh.type] = 0; }   // the decorated individual is gone — rank dies with it
+  if (veh._rankGrp) { scene.remove(veh._rankGrp); veh._rankGrp = null; veh._rankSpr = null; }
   if (cause !== 'sank') {     // units lost at sea sink whole — no wreckage
     let impact = null;
     if (killer && killer.holder) { impact = veh.holder.position.clone().sub(killer.holder.position); impact.y = 0; }
@@ -2179,6 +2262,7 @@ function updateHealthBar(veh) {
 // Keep bars above their vehicle and facing the camera (sprites already billboard).
 function updateHealthBars() {
   for (const v of combatants) {
+    if (v._rankGrp) v._rankGrp.position.set(v.holder.position.x, v.holder.position.y + 8, v.holder.position.z);   // player stars (no bar group)
     if (!v.bar) continue;
     v.bar.group.position.set(v.holder.position.x, v.holder.position.y + 7, v.holder.position.z);
   }
@@ -3189,7 +3273,16 @@ class AICommander {
   // the doctrine should run its FAIL_ALT unblocker instead. Time-boxed: after 90s the
   // field has usually changed enough that the plan deserves another look.
   missionBanned(key) {
-    return this._failStep === key && this._failN >= 2 && performance.now() - this._failT < 90000;
+    if (this._failStep !== key || this._failN < 2) return false;
+    if (performance.now() - this._failT > 240000) return false;   // hard cap: if the FIXER is failing too, let the doctrine reconsider
+    // BENCH-UNTIL-FIXED (Jacob's model: "send a stronger unit to deal with the problem and
+    // don't worry how long it takes, as long as there's progress"): the ban lifts the moment
+    // the unblocker has genuinely broken something — a tower down, real base damage, or a
+    // kill — NOT on a timer. The old 90s window was shorter than a jotun's round trip, so
+    // capture resumed before the tower fell and the next runner died to the same gun.
+    const s = this._failSnap;
+    if (s && (this.turretsLive() < s.twr || fortHpOf(this.targetTeam()) < s.fort - 120 || this.kills > s.k)) return false;
+    return true;
   }
   // Is the target team out of the fight for good — no live unit AND its commander is
   // eliminated? (A human team has no commander and can always redeploy, so never "out".)
@@ -3481,6 +3574,12 @@ class AICommander {
 
   deploy() {
     const want = this.strategy.wantVehicle(this);
+    // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
+    // plus running LOW on the wanted type builds a fresh one before picking — not just at
+    // zero. A commander sat on 15 scrap feeding lone runners into a defended base; a rich
+    // team converts parts into pressure. Keeps a small float (+3) so it can't bankrupt
+    // itself on one build; buildUnit still respects the garage cap.
+    if (aiScrapBuild && (this.roster[want] || 0) <= 1 && this.scrap() >= (BUILD_COST[want] || 99) + 3) this.buildUnit(want);
     let type = this._pickAvailableType(want);
     // SALVAGE REINFORCEMENT: build the flag RUNNER when the plan needs one and we're out. The
     // firebrat has no substitute, so a commander that's lost them all can't win by capture — so
@@ -3610,6 +3709,20 @@ class AICommander {
     this._lpx = pX; this._lpz = pZ;
     const wantsMove = Math.abs(cmd.fwd) > 0.2 || Math.abs(cmd.turn) > 0.5 || cmd.state === 'engage';
     if (wantsMove && step < view.dt * 0.8) this._stuckT = (this._stuckT || 0) + view.dt; else this._stuckT = 0;
+    // NET-PROGRESS watchdog — the wedge class every timer above is blind to: a unit sliding
+    // on shore terrain with NO feeler contact (blk=···) resets _stuckT (it moves each tick),
+    // never accrues the brain's _wedgeT (not pressed on anything), and never goes still. The
+    // tournament caught a runner ground against a shore slope for 802s with every reflex
+    // silent (seed 137). Sample NET displacement on a 10s window: wanting to move for most
+    // of it while covering under 4u of real ground is a wedge, whatever the feelers say —
+    // navOverride answers with a reverse-pivot jolt + spot blacklist + fresh replan.
+    this._netT = (this._netT || 0) + view.dt;
+    if (wantsMove) this._wantT = (this._wantT || 0) + view.dt;
+    if (this._netT >= 10) {
+      this._netStuck = this._netX != null && (this._wantT || 0) > 6
+        && Math.hypot(pX - this._netX, pZ - this._netZ) < 4;
+      this._netX = pX; this._netZ = pZ; this._netT = 0; this._wantT = 0;
+    }
     let stuckWhy = '';
     if (this._stuckT > 0.6) {
       stuckWhy = !map.isLand(pX, pZ) ? 'in water'
@@ -3756,11 +3869,25 @@ class AICommander {
     // a REAL way around it. This preserves a valid, obstacle-avoiding route (the old "skip
     // ahead N nodes" just aimed at a far waypoint in a straight line, cutting across
     // everything the path was avoiding — turning a good path into a bad one).
-    if (this._stuckT > NAV_BLOCK_AFTER) {
+    if (this._stuckT > NAV_BLOCK_AFTER || this._netStuck) {
       const hx = -Math.sin(v.heading), hz = -Math.cos(v.heading);
       avoidCell(v.holder.position.x + hx * VEH_R, v.holder.position.z + hz * VEH_R);   // the obstacle right at the nose
       this._nav.path = null;                         // force a replan that routes around it
-      this._stuckT = NAV_BLOCK_AFTER * 0.4;          // back off the timer (don't re-fire every tick; re-escalate if still stuck)
+      this._stuckT = Math.min(this._stuckT, NAV_BLOCK_AFTER * 0.4);   // back off the timer (don't re-fire every tick; re-escalate if still stuck)
+      if (this._netStuck) {
+        // Terrain wedge the feelers can't see (see the net-progress watchdog): a replan
+        // alone won't free a hull that's physically ground on a slope — back it off with a
+        // reverse-pivot first (alternating sides each episode), THEN drive the fresh route.
+        this._netStuck = false;
+        this._joltT = 1.4;
+        this._joltSide = ((this._joltN = (this._joltN || 0) + 1) % 2) ? 1 : -1;
+      }
+    }
+    if (this._joltT > 0) {   // reverse-pivot out of the wedge, then hand back to the route
+      this._joltT -= dt;
+      cmd.fwd = -0.8; cmd.turn = this._joltSide || 1;
+      if (v.ai) v.ai._wantMove = true;
+      return;
     }
     const wp = navWaypoint(this._nav, v, dest, dt);
     if (!wp) return;                                // no route — keep the brain's command
@@ -3786,7 +3913,23 @@ class AICommander {
     const hqSwap = this.strategy.step === 'siege' && (this.fortDown() || this._gambit) && !this.flagExposed()
       && this.unit.type !== 'valkyrie' && !this.unit._move.ignoreWalls
       && this._pickAvailableType(this.strategy.wantVehicle(this)) === 'valkyrie';
-    if (this.strategy.step === this._stepAtDeploy && !hqSwap) return;   // same beat → keep the current unit (unless we need the flyer)
+    // RUNNER SWAP: we're on CAPTURE with a grabbable flag, but the fielded unit is a stand-in
+    // heavy (all firebrats died earlier, so the type fell back to "most numerous"). deploy()
+    // knows how to build a fresh firebrat from scrap — but deploy only runs on death/recall,
+    // and with the enemy eliminated this unit never dies and capture never changes step, so
+    // the build was unreachable (seed 193: a lurcher looped fuel-RTB "sneak" runs for 800s
+    // with 15 scrap banked). If a real runner is in the garage or affordable, swap for it.
+    const runnerSwap = this.strategy.step === 'capture' && this.flagGrabbable()
+      && this.unit.type !== 'firebrat'
+      && ((this.roster.firebrat || 0) > 0 || (aiScrapBuild && this.canAfford('firebrat')));
+    if (this.strategy.step === this._stepAtDeploy && !hqSwap && !runnerSwap) return;   // same beat → keep the current unit (unless we need the flyer/runner)
+    if (runnerSwap) {
+      this._stepAtDeploy = this.strategy.step; this._recalling = true;
+      this._recallForce = true;   // committed — same deadlock-proofing as the hqSwap recall
+      this._recallBestD = Infinity; this._recallStallT = 0; this._nav.path = null;
+      aiLog(this.team, `${this.cname}: The flag's sitting right there — pull the ${this.unit.type} back, we're sending a real runner!`);
+      return;
+    }
     if (hqSwap) {   // commit the swap even with defenders near — a unit lost en route just respawns as the Valkyrie
       _hqSwapCount++;
       this._stepAtDeploy = this.strategy.step; this._recalling = true;
@@ -3858,7 +4001,7 @@ class AICommander {
     const s = steerToward(v, wp.x, wp.z);
     const out = burnFuel(v, { fwd: s.fwd, turn: s.turn }, dt);
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6);
-    v.speedMul = roadSpeedMul(v);
+    v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);   // road boost × promotion (bronze stars)
     v.drive(dt, out.fwd, out.turn, null, v._blocked);
     v.ai._wantMove = s.fwd > 0.3;
     this._dbg = {
@@ -3897,7 +4040,12 @@ class AICommander {
           if (!progress) {
             if (this._failStep === step) this._failN++; else { this._failStep = step; this._failN = 1; }
             this._failT = performance.now();
-            if (this._failN === 2) aiLog(this.team, `${this.cname}: That's two units lost on this ${step} plan with NOTHING to show — we're trying something else!`);
+            if (this._failN === 2) {
+              // Snapshot the battlefield the bench is supposed to change — the ban lifts on
+              // PROGRESS against these, not on a timer (see missionBanned).
+              this._failSnap = { twr: this.turretsLive(), fort: fortHpOf(this.targetTeam()), k: this.kills };
+              aiLog(this.team, `${this.cname}: That's two units lost on this ${step} plan with NOTHING to show — we're trying something else!`);
+            }
           } else if (this._failStep === step) { this._failStep = null; this._failN = 0; }
         }
         // A runner died storming the base → don't just feed another firebrat in. If the enemy
@@ -3987,7 +4135,7 @@ class AICommander {
       if (map.isDeepWater(ahx, ahz) && roadDeckY(ahx, ahz) == null) { out.fwd = 0; v.ai._wantMove = false; }
     }
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
-    v.speedMul = roadSpeedMul(v);
+    v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);   // road boost × promotion (bronze stars)
     v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
     applyAltitude(v, dt);
     decayAim(v, dt);
@@ -4379,6 +4527,13 @@ class AICommander {
         const d = (wx - px) ** 2 + (wz - pz) ** 2;
         if (d < bestW) { bestW = d; demolishTarget = { x: wx, y: map.heightAt(wx, wz) + 2.5, z: wz }; }
       }
+      // FINISH THE KEEP: every wall is rubble and the "threat" is the solid HQ itself.
+      // A LOS ray to the HQ's CENTRE dies inside the building's own obstacle circle, so
+      // threatLOS can never come true for a ground unit — the sieger used to park at its
+      // standoff and never fire (seed 207: a lurcher staring at a 297hp keep for 400s
+      // while the flag stayed sealed). With nothing else left to shoot through, the keep
+      // is a demolish target like any wall: square onto the hull and shell it open.
+      if (!demolishTarget && hqThreat) demolishTarget = { x: threat.x, y: map.heightAt(threat.x, threat.z) + 2.5, z: threat.z };
     }
     const fx = -Math.sin(h), fz = -Math.cos(h), lx = -Math.sin(h + 0.6), lz = -Math.cos(h + 0.6),
           rx = -Math.sin(h - 0.6), rz = -Math.cos(h - 0.6), P = 9;
@@ -5197,7 +5352,7 @@ function driveUpdate(dt) {
   }
   if (!driving || !player || player.dead) return false;
   const inp = matchOver ? { fwd: 0, turn: 0, strafe: 0 } : driveInput();   // controls freeze on win
-  player.speedMul = roadSpeedMul(player);   // the player gets the same road boost as the AI
+  player.speedMul = roadSpeedMul(player) * rankSpeedMul(player);   // road boost × promotion (bronze stars)
   let revFwd, revTurn, stopped;
   if (inp.omni) {
     // Omni Lurcher: burnFuel for the accounting (+ LIMP scaling when dry), then drive the
@@ -5825,7 +5980,10 @@ function mountHangarHud(garage) {
     const btn = document.getElementById('bp-build');
     btn.textContent = `BUILD ${VEHICLE_TYPES[type].label.toUpperCase()} · ${cost}`;
     btn.disabled = !ok;
-    document.getElementById('bp-hint').textContent = !lost ? 'roster full' : !afford ? `need ${cost - have} more scrap` : 'salvage a replacement';
+    const wiped = garage.remaining(type) <= 0;
+    document.getElementById('bp-hint').textContent = !lost ? 'roster full'
+      : !afford ? `need ${cost - have} more scrap`
+      : wiped ? 'type wiped out — rebuild it from salvage' : 'salvage a replacement';
   };
   panel.querySelector('#bp-build').addEventListener('click', () => {
     const s = garage.selected();
@@ -5978,6 +6136,15 @@ window.RR = {
   aiConfig: (k, v) => v === undefined ? getBrainConfig(k) : setBrainConfig(k, v),   // read/set a brain knob at runtime (auto-tuning sweeps)
   aiEvents: () => aiArchive,                                   // full structured decision-event archive (headless analysis)
   roadCells: () => roadNet.cells,                              // road layout cells (headless parallel-road checks)
+  setPaused: (v) => { paused = !!v; },                         // debug: freeze the sim (screenshots)
+  setLogMode: (m) => setLogMode(m),                            // debug: drive the log overlay ('hidden'|'brief'|'full')
+  setRank: (i, k) => {                                         // debug: pin a rank on combatants[i] (promotion screenshots/tuning)
+    const v = combatants[i]; if (!v || v.dead) return null;
+    v.rankKills = Math.max(0, Math.min(RANK_MAX, k));
+    applyRankHp(v); updateRankStars(v); if (v.bar) updateHealthBar(v);
+    const bank = rankBankFor(v); if (bank) bank[v.type] = v.rankKills;
+    return rankLabel(v.rankKills);
+  },
   get roadNet() { return roadNet; },                           // full network incl. per-connection paths (debug)
   setFof: (team, patch) => Object.assign(fofFor(team), patch || {}),                // override this team's fight-or-flight weights (A/B self-play)
   getFof: (team) => ({ ...fofFor(team) }),

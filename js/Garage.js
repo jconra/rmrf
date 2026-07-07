@@ -412,12 +412,17 @@ export class Garage {
     this._ensureValidSelection();
   }
   _ensureValidSelection() {
-    const t = this.typeAlive(this.selType) ? this.selType : this.types.find(x => this.typeAlive(x));
-    if (t) { this.selType = t; this.select(DEPLOY_SLOT[t]); }
+    // Keep the CURRENT selection even if that type just got wiped — yanking the highlight off
+    // an empty bay would close the buy drop-down the player is looking at. (Rebuilding via
+    // applyRoster lands here too, restoring the light onto the freshly rebuilt vehicle.)
+    if (this.selType) this.select(DEPLOY_SLOT[this.selType]);
   }
 
   selectType(type) {
-    if (this.phase !== 'select' || DEPLOY_SLOT[type] === undefined || !this.typeAlive(type)) return;
+    // A WIPED type stays selectable — the selector doubles as the BUY drop-down: browse to
+    // the empty bay (spotlight on the vacant slot = the "greyed-out" option) and rebuild it
+    // from scrap. Only DEPLOYING a wiped type is blocked (see confirm()).
+    if (this.phase !== 'select' || DEPLOY_SLOT[type] === undefined) return;
     this.selType = type;
     this.select(DEPLOY_SLOT[type]);
   }
@@ -427,7 +432,7 @@ export class Garage {
     let i = this.types.indexOf(this.selType);
     for (let step = 0; step < n; step++) {
       i = (i + dir + n) % n;
-      if (this.typeAlive(this.types[i])) { this.selectType(this.types[i]); return; }
+      { this.selectType(this.types[i]); return; }   // wiped types included — the drop-down shows every option
     }
   }
   // Click a vehicle to select its TYPE (snaps the light to that type's deploy
@@ -473,6 +478,7 @@ export class Garage {
 
   confirm() {
     if (this.phase !== 'select') return false;
+    if (!this.typeAlive(this.selType)) return false;   // an empty bay can't roll out — build it first
     const s = this.selected();
     this.phase = 'rolling';
     // Drive straight onto the lift nose-first instead of pirouetting to a fixed
