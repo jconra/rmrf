@@ -19,7 +19,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=108';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
@@ -1128,7 +1128,12 @@ let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hol
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
 let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
 let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
-const CAPTURE_COMMIT = 55;   // within this of a grabbable flag, the runner beelines it and ignores turrets (final-dash commit)
+const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beelines it and ignores turrets/fire (final-dash commit).
+                             // MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
+                             // fear-ring, and with the commit at 55 the ring ENCLOSED the dash zone — the runner ping-ponged in
+                             // the 60..100u shell forever, aborting the grab each lap ("Taking fire — breaking off toward
+                             // snatching the flag" ×10+, seed 25's endless endgame). Commit outside the fear ring: grab or die
+                             // trying — either resolves the match, and the defender/intercept play is the counter, not the dance.
 
 // Movement personality per type. cruise = rest altitude above the surface;
 // ignoreWalls = flies over base walls; water = 'cross' (hover/fly) or 'sink'
@@ -3429,8 +3434,12 @@ class AICommander {
     // substitute first. (Firebrats are the only runner, so they have no stand-in and skip
     // this — the Hunter's own firebrat reserve handles saving those for the capture.)
     if (have(want) >= 2) return want;                      // plenty of the wanted type — use it
+    // Among abundant substitutes, POOL ORDER wins (it encodes role suitability — jotun first
+    // for siege work). Sorting by count here sent a reach-42 lurcher to do a reach-80 jotun's
+    // siege because the team happened to own one more lurcher (seed 11's pop-gun sieger,
+    // plinking a base for six minutes while two jotuns sat in the garage).
     const richSub = pool.filter(t => t !== want && have(t) >= 2);
-    if (richSub.length) { richSub.sort((a, b) => have(b) - have(a)); return richSub[0]; }
+    if (richSub.length) return richSub[0];
     // Nothing abundant left to spare — everything's down to its last, so it's now fine to
     // spend a final unit: the wanted type if any remain, else a same-role sub, else
     // whatever we have most of (e.g. a firebrat-only fleet).
@@ -3714,7 +3723,14 @@ class AICommander {
     // stays without 'suppress' — the nav overlay treats the close-in fight as combat-steered.
     else if (st === 'suppress' && view.threatStand
              && (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2 > 26 * 26) {
-      dest = view.threatStand; slack = 14;
+      // While the stand is a LONG march away, travel on the MISSION OBJECTIVE's route — the
+      // same dest assault uses. The threat line flickers at long range, and suppress↔assault
+      // flips used to alternate two DIVERGENT A* routes (they left opposite ways around an
+      // inlet): 20u out, flip, 20u back — six minutes of zero-net triangle jiggle at one spot
+      // (seed 11). The radial standoff owns only the final ~70u approach.
+      const d2s = (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2;
+      const obj = d2s > 70 * 70 ? this.strategy.objective(this) : null;
+      dest = obj || view.threatStand; slack = 14;
     }
     else {
       if (st === 'unstick') {
@@ -4207,7 +4223,13 @@ class AICommander {
     // refuel↔roll-out at 85% fuel). And the objective must be OFFENSIVE (far from BOTH friendly
     // bases), so a DEFEND/Turtle whose whole job is the rear flag↔elevator corridor isn't ejected.
     if (this._exitCoolT > 0) this._exitCoolT -= dt;
-    if (aiFobRearm && !this._exit && this._exitCoolT <= 0 && !v._move.ignoreWalls && fob && !v.ai._resup && !v.ai._hurt) {
+    // …and ONLY when the unit is actually FAILING to leave (grinding, no headway). The re-arm
+    // exists for a unit that can't thread the gate on its own — but it used to hijack a HEALTHY
+    // traveler too: a sieger path-following out through the fob ring got yanked to the gate
+    // waypoint, released, re-yanked every cooldown — the exit↔suppress two-master flap ("Rolling
+    // out the gate" ↔ "Lining up on their HQ") that pinned a Lurcher at its own base.
+    const exitFailing = this._stuckT > 1.2 || !(this._nav && this._nav.path && this._nav.path.length);
+    if (aiFobRearm && !this._exit && this._exitCoolT <= 0 && exitFailing && !v._move.ignoreWalls && fob && !v.ai._resup && !v.ai._hurt) {
       const dFob2 = (px - fob.center.x) ** 2 + (pz - fob.center.z) ** 2;
       const obj = this.strategy.objective(this), homeB = this.homeBasePos();
       const objOffensive = (obj.x - fob.center.x) ** 2 + (obj.z - fob.center.z) ** 2 > 30 * 30
@@ -4435,6 +4457,7 @@ class AICommander {
       // the Firebrat's runnerFlee reflex so an ordered-to-engage Firebrat actually closes +
       // shoots instead of dodging the instant an enemy is near.
       runnerMode: this.strategy.step === 'capture' || this.strategy.step === 'scout',
+      flagGrabbable: this.strategy.step === 'capture' && this.flagGrabbable(),   // endgame: sightings alone don't turn the runner around (runnerFlee)
       blockedAhead,
       blockedLeft: feeler(lx, lz),
       blockedRight: feeler(rx, rz),
@@ -6271,7 +6294,10 @@ function updateNavOverlay() {
     // Draw the A* route ONLY when the unit is in a state that actually follows it — else the path
     // is stale (combat/unstick steer by behavior, not nav.path). A combat/no-route unit draws a
     // straight line to what it's genuinely steering at (d.gx/gz), so the line points the right way.
-    const usingAstar = nav && nav.path && nav.path.length && d && NAV_ASTAR_STATES.has(d.state);
+    // suppress FAR-TRAVEL path-follows A* too (navOverride, >26u to the stand) — show its real
+    // route instead of a misleading "COMBAT · direct" line; close-in suppress stays combat-drawn.
+    const usingAstar = nav && nav.path && nav.path.length && d
+      && (NAV_ASTAR_STATES.has(d.state) || (d.state === 'suppress' && d.gd != null && d.gd > 30));
     _maybeProbeFirebratNav(cmd, v, d, nav);                  // ?nav: freeze + show A* when a firebrat has no route
     if (!usingAstar && (!d || d.gx == null)) continue;       // nothing meaningful to draw for this unit
     let o = navLines.get(cmd);

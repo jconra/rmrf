@@ -158,6 +158,13 @@ const CONDITIONS = {
   // attacked. There it engages instead (see the 'engaging' transition below).
   runnerFlee: (v) => {
     if (v.self.type !== 'firebrat' || !v.runnerMode || !v.seesEnemy || !v.enemy) return false;
+    // ENDGAME COMMIT ("go for the flag, don't stop for anything"): with the flag GRABBABLE and
+    // the runner healthy, a mere SIGHTING doesn't turn it around — only real incoming fire.
+    // Seed 25's runner danced 150s at FULL health, breaking off 170-270u from the flag every
+    // time any enemy appeared within 60u, while the whole match hung on the grab. A hurt
+    // runner (or one actually being shot) still evades; the 85u capture commit owns the final
+    // dash regardless.
+    if (v.flagGrabbable && v.self.hpFrac > 0.5 && !v.underFire) return false;
     const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
     return dx * dx + dz * dz < 60 * 60;
   },
