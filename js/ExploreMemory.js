@@ -28,9 +28,19 @@ export class ExploreMemory {
     // ocean from BOTH pickTarget and fraction fixes both. isLand(worldX,worldZ)->bool; null = all land.
     this.land = new Uint8Array(this.gw * this.gh);
     this.landTotal = 0; this.landSeen = 0;
+    // A cell counts as LAND only if MOST of it is land — sample the centre plus four
+    // quarter-offset points and require a majority. Sampling the centre alone marked a
+    // mostly-water cell "land" whenever a sliver of coast happened to sit dead-centre, so a
+    // scout would beeline out over open ocean toward that water-fringe speck and look stuck.
+    const q = cell / 4;
     for (let j = 0; j < this.gh; j++) for (let i = 0; i < this.gw; i++) {
       const c = this._cellCentre(i, j);
-      if (!isLand || isLand(c.x, c.z)) { this.land[j * this.gw + i] = 1; this.landTotal++; }
+      let hits = 0;
+      if (!isLand) { hits = 5; }
+      else for (const [dx, dz] of [[0, 0], [-q, -q], [q, -q], [-q, q], [q, q]]) {
+        if (isLand(c.x + dx, c.z + dz)) hits++;
+      }
+      if (hits >= 3) { this.land[j * this.gw + i] = 1; this.landTotal++; }
     }
   }
 
@@ -65,9 +75,13 @@ export class ExploreMemory {
   // safer ground so it doesn't dive at the enemy base. `minR` skips cells so close the caller
   // would clear them on the next tick (which froze the scout: arrived → stops, never repicks).
   // Returns a world point {x,z} at the cell centre, or null when everything's explored.
-  pickTarget(selfX, selfZ, homeX, homeZ, minR = 0) {
+  // enemyX/enemyZ (optional): the enemy base — scouting should sweep TOWARD it (that's where
+  // the intel worth having is), not back toward home. When omitted, falls back to a mild
+  // pull toward home (safer ground) so callers without an enemy anchor still don't ping-pong.
+  pickTarget(selfX, selfZ, homeX, homeZ, minR = 0, enemyX = null, enemyZ = null) {
     let best = -Infinity, target = null, nearBest = Infinity, near = null;
     const minR2 = minR * minR;
+    const toEnemy = enemyX != null && enemyZ != null;
     for (let j = 0; j < this.gh; j++) {
       for (let i = 0; i < this.gw; i++) {
         const k = j * this.gw + i;
@@ -77,10 +91,16 @@ export class ExploreMemory {
         if (d2 < nearBest) { nearBest = d2; near = c; }   // absolute nearest (fallback if all are inside minR)
         if (d2 < minR2) continue;
         const dSelf = Math.sqrt(d2);
-        const dHome = Math.hypot(c.x - homeX, c.z - homeZ);
-        const score = SWEEP_MODE === 'far'
-          ? dSelf - 1.35 * dHome        // OLD: far from me, near home (ping-ponged)
-          : -dSelf - 0.3 * dHome;       // NEW: nearest unexplored (forward sweep), mild pull toward safe ground
+        let score;
+        if (SWEEP_MODE === 'far') {
+          score = dSelf - 1.35 * Math.hypot(c.x - homeX, c.z - homeZ);   // OLD: far from me, near home (ping-ponged)
+        } else if (toEnemy) {
+          // nearest unexplored (forward sweep) but tilt the sweep toward the enemy base so the
+          // scout advances into enemy ground instead of loitering near home over the water.
+          score = -dSelf - 0.5 * Math.hypot(c.x - enemyX, c.z - enemyZ);
+        } else {
+          score = -dSelf - 0.3 * Math.hypot(c.x - homeX, c.z - homeZ);   // no enemy anchor: mild pull toward safe ground
+        }
         if (score > best) { best = score; target = c; }
       }
     }

@@ -205,15 +205,36 @@ class Capture extends Mission {
       ]); }
 }
 
-// DEFEND — hold the home base under tower cover; the brain still engages on sight. Once
-// the towers are gone there's no cover to hold, so switch to a Valkyrie's mobility.
+// DEFEND — patrol the approach lane (home front ↔ mid-field) and RESPOND: a hit on our
+// towers (homeAttack radio) or a seen/heard contact on our half pre-empts the patrol and
+// the defender runs it down — the ai_behavior ambush (catch the attacker while it's busy
+// engaging the towers, come in behind it). The brain still engages on sight. Once the
+// towers are gone there's no cover to hold, so switch to a Valkyrie's mobility.
 class Defend extends Mission {
   get key() { return 'defend'; }
   wantVehicle(cmd) { return cmd.ownTowersDown() ? 'valkyrie' : this.doc.role('defend'); }
-  objective(cmd) { return cmd.patrolSpot(); }
+  objective(cmd) {
+    const atk = cmd.homeAttack();                 // our structures are being SHOT — beats hearing range
+    if (atk) return atk;
+    const p = cmd.lastEnemyPos();                 // seen OR heard contact (team intel, ~12s fresh)
+    if (p) {
+      const home = cmd.homeBasePos(), en = cmd.enemyBasePos();
+      const dh = (p.x - home.x) ** 2 + (p.z - home.z) ** 2, de = (p.x - en.x) ** 2 + (p.z - en.z) ** 2;
+      if (dh < de) return p;                      // on OUR half → run it down; their half = bait, hold the lane
+    }
+    return cmd.patrolSpot();
+  }
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 8; }
-  label(cmd) { return 'patrolling the rear (flag↔elevator)'; }
+  label(cmd) {
+    if (cmd.homeAttack()) return 'responding — our towers are under fire!';
+    const p = cmd.lastEnemyPos();
+    if (p) {   // same our-half test as objective (patrolSpot() advances its route — don't re-call it here)
+      const home = cmd.homeBasePos(), en = cmd.enemyBasePos();
+      if ((p.x - home.x) ** 2 + (p.z - home.z) ** 2 < (p.x - en.x) ** 2 + (p.z - en.z) ** 2) return 'running down a contact on our ground';
+    }
+    return 'patrolling the lane (base↔mid-field)';
+  }
   cry(cmd) { return pickCry(cmd, [
     'Pull back and hold the line — protect the flag!',
     'They’re pushing hard — dig in under the towers and hold!',
@@ -272,6 +293,14 @@ function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 const URGENT = new Set(['capture', 'intercept']);
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
 
+// REPORT-CARD UNBLOCKERS — what to run instead when a mission is banned (two straight
+// total-failure deaths: no kills, no base damage, flag untouched — see cmd.missionBanned).
+// Each alternative REMOVES what was killing the units rather than re-rolling blindly:
+// runners fed into live towers → SIEGE the towers first; siegers dying with no damage
+// dealt → the enemy fleet is on them, ATTACK it; attackers dying without kills → stop
+// brawling and hit structures from range. defend/intercept are reactive — never banned.
+const FAIL_ALT = { capture: 'siege', siege: 'attack', attack: 'siege', scout: 'attack', scavenge: 'attack' };
+
 // Cycle a battle-cry pool deterministically (per-commander counter, no RNG) so the log reads
 // like a commander giving orders instead of "scout → attack". Bumped once per mission switch.
 function pickCry(cmd, pool) { cmd._cryN = (cmd._cryN || 0) + 1; return pool[cmd._cryN % pool.length]; }
@@ -308,30 +337,38 @@ class Doctrine {
     this.t += dt;
     this.mission.tick(cmd, dt);
     if (cmd._clearPathT > 0) cmd._clearPathT -= dt;   // countdown: clearing a downed runner's interceptor
-    let next = this._urgent(cmd);
+    // Every forced transition carries a WHY — it's appended to the switch log so a mission
+    // change always reads as decision + reason, not just a new battle cry out of nowhere.
+    let next = this._urgent(cmd), why = next ? 'our flag is on the move — run the thief down' : null;
     // PRESERVATION (any persona): losing the attrition war → hold under tower cover instead
     // of trading the last of the army out in the open — UNLESS we can win right now by
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
-    if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) next = 'defend';
+    if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; }
     // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
     // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
     // without a firebrat to actually grab the exposed flag).
-    if (!next && cmd.needsPartsRun && cmd.needsPartsRun()) next = 'scavenge';
+    if (!next && cmd.needsPartsRun && cmd.needsPartsRun()) { next = 'scavenge'; why = 'no runner left and no parts to build one'; }
     // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
     // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
     // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
     // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
-    if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) next = 'siege';
+    if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) { next = 'siege'; why = 'their towers are down — crack the HQ while it is open'; }
     // STALEMATE GAMBIT: the match dragged on with the enemy base untouched — stop grinding the
     // mid-field duel and commit to the "Valkyrie around the back" siege (the Siege mission reads
     // cmd._gambit to force the flyer + rear flank, and rushBase suppresses engaging en route).
-    if (!next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) next = 'siege';   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
+    if (!next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) { next = 'siege'; why = 'stalemate — committing to the rear-door gambit'; }   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
-    if (!next && cmd._clearPathT > 0) next = 'attack';
-    if (!next) next = this.choose(cmd);
-    if (next && next !== this.step && (this.t > DWELL || URGENT.has(next))) this._switch(next, cmd);
+    if (!next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; }
+    if (!next) { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
+    // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
+    // don't repeat the bad decision; run its unblocker (unless that's banned too).
+    if (next && cmd.missionBanned && cmd.missionBanned(next)) {
+      const alt = FAIL_ALT[next];
+      if (alt && !cmd.missionBanned(alt)) { why = `${next} is benched — two units lost on it for nothing`; next = alt; }
+    }
+    if (next && next !== this.step && (this.t > DWELL || URGENT.has(next))) this._switch(next, cmd, why);
   }
   // Emergencies that preempt any persona's plan: our flag's been lifted → run it down
   // (unless WE'RE the one carrying the enemy flag home — don't blow a winning run).
@@ -339,16 +376,16 @@ class Doctrine {
     if (cmd.ourFlagStolen() && !(cmd.flag() && cmd.flag().carrier === cmd.unit)) return 'intercept';
     return null;
   }
-  _switch(key, cmd) {
+  _switch(key, cmd, why = null) {
     if (!key || key === this.step) { this.t = 0; return; }
     const from = this.step;
     this.mission = makeMission(key);
     this.mission.enter(cmd, this);
     this.step = key; this.t = 0;
-    // Radio-chatter order instead of the terse "scout → attack". The mission's own cry()
-    // supplies a characterful line; it still names the intent, and the unit STATE lines
-    // carry the hard numbers (hp %, turrets left, ammo/fuel).
-    if (this.log) this.log(this.mission.cry(cmd));
+    // Radio-chatter order + a machine-readable decision trail: the cry() supplies the
+    // characterful line, the bracket names the transition and WHY it happened, so every
+    // mission change in the log is auditable (from → to — reason).
+    if (this.log) this.log(`${this.mission.cry(cmd)}   [${from} → ${key}${why ? ' — ' + why : ''}]`);
   }
   // Runner died storming the base → respond to WHY, instead of feeding another firebrat down
   // the same lane. Shot by an enemy VEHICLE → send an ATTACK to clear the interceptor first
@@ -359,7 +396,7 @@ class Doctrine {
     // Defenders still alive → switch to ATTACK NOW (so the NEXT deploy is a fighter, not
     // another firebrat) and hold it there for a window to clear them, then resume the grab.
     // No defenders left (pure tower gauntlet) → sneak in on a wide route instead.
-    if (enemyHasUnits) { cmd._clearPathT = 18; this._switch('attack', cmd); }
+    if (enemyHasUnits) { cmd._clearPathT = 18; this._switch('attack', cmd, 'runner intercepted — clear the defenders first'); }
     else cmd._stealthCapture = true;
   }
   get softenKey() { return 'siege'; }

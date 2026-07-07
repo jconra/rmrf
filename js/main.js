@@ -19,15 +19,15 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=6';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=94';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=104';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=79';
-import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=57';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=82';
+import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=5';
 import { AstarViz } from './AstarViz.js?v=3';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
@@ -1119,6 +1119,10 @@ const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie i
 let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
 let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hole (A/B via RR.setBreachCommit); off = old orbit-and-spray standoff
+// A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
+let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
+let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
+let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
 const CAPTURE_COMMIT = 55;   // within this of a grabbable flag, the runner beelines it and ignores turrets (final-dash commit)
 
 // Movement personality per type. cruise = rest altitude above the surface;
@@ -1820,7 +1824,24 @@ function updateProjectileHits() {
     const hitVeh = nearestEnemyVehicle(pos, 0.5, p.team, p.shooter);
     const hitGround = pos.y <= map.heightAt(pos.x, pos.z) + 0.2 && map.isLand(pos.x, pos.z);
     if (hitSolid || hitTree || hitVeh || hitGround) {
-      if (hitSolid) hitSolid.damage(p.dmg, pos);   // direct hit = full damage (splash adds a little more)
+      if (hitSolid) {
+        hitSolid.damage(p.dmg, pos);   // direct hit = full damage (splash adds a little more)
+        // BASE UNDER ATTACK radio: an enemy round striking a structure near a team's flag HQ or
+        // elevator stamps that team's commander, so its defender breaks patrol and responds even
+        // from beyond hearing range (Defend.objective reads homeAttack()).
+        if (p.team != null) for (const c of commanders) {
+          if (c.team === p.team) continue;
+          const hb = c.homeBasePos(), hf = c.homePos();
+          const nearHome = (pos.x - hb.x) ** 2 + (pos.z - hb.z) ** 2 < 70 * 70
+                        || (pos.x - hf.x) ** 2 + (pos.z - hf.z) ** 2 < 70 * 70;
+          if (!nearHome) continue;
+          c._homeAttack = { x: pos.x, z: pos.z, t: performance.now() };
+          if (c.strategy && c.strategy.step === 'defend' && (!c._homeAttackLogT || performance.now() - c._homeAttackLogT > 15000)) {
+            c._homeAttackLogT = performance.now();
+            aiLog(c.team, `${c.cname}: They're hitting our towers — get back there and jump them!`);
+          }
+        }
+      }
       const tagged = explodeAt(pos, p.blast, p.dmg, p.team, p.shooter);
       // SHOT FEEDBACK: for a round AIMED at an enemy vehicle, tell a clean hit (it tagged
       // someone, direct or splash) from one that detonated on terrain/cover short of the
@@ -2788,12 +2809,15 @@ function cellBlocked(v, i, j) {
   const m = v._move;
   if (m.water === 'sink' && !map.isLand(x, z)) {
     // A sinker fords only SHALLOW water, and only where the whole HULL clears deep water. A*
-    // checks the cell centre but the collision checks the hull radius — so plan with a margin,
-    // or the wide hull straddles an adjacent deep cell, the collision stops it, and it wedges at
-    // the shore following a path line out over water it can't cross (the "stuck fording" bug).
+    // plans on cell centres but the hull has radius VEH_R and can move DIAGONALLY, so check the
+    // full footprint (8 neighbours at full radius, matching the collision layer) — otherwise A*
+    // threads a sliver of shallows the hull can't actually follow: the collision stops it at the
+    // first deep lip and it grinds the shoreline, following a nav line out over water it can't
+    // cross ("dancing on the shore"). Tighter here = A* prefers a real land/bridge route.
     if (map.isDeepWater(x, z)) return true;
-    const r = VEH_R * 0.85;
+    const r = aiSoftFord ? VEH_R * 0.85 : VEH_R;
     if (map.isDeepWater(x + r, z) || map.isDeepWater(x - r, z) || map.isDeepWater(x, z + r) || map.isDeepWater(x, z - r)) return true;
+    if (!aiSoftFord && (map.isDeepWater(x + r, z + r) || map.isDeepWater(x + r, z - r) || map.isDeepWater(x - r, z + r) || map.isDeepWater(x - r, z - r))) return true;
   }
   if (!m.ignoreWalls) {
     const margin = VEH_R * 0.9;   // ≈ collision's full VEH_R, so A* won't route into a corner the hull can't enter
@@ -2803,14 +2827,17 @@ function cellBlocked(v, i, j) {
       if (dx * dx + dz * dz < rr * rr) return true;
     }
   }
-  if (m.tree === 'bump' && foliage && foliage.treeAt(x, z, VEH_R * 0.5)) return true;
+  // NOTE: trees do NOT hard-block here even for tree:'bump' vehicles — the Firebrat can shoot a
+  // tree clear, so a treed cell is merely EXPENSIVE (see vehCellCost). Hard-blocking meant that in
+  // dense woods every neighbouring cell was blocked, A* died instantly, and the unit fell back to
+  // a DIRECT beeline ("no A* route" while the forest was plainly routable-by-fire).
   return false;
 }
 // Nearest open cell to (gi,gj) within `R` rings — lets us aim at a goal that sits
 // inside a wall/water (snap to the closest spot the unit can actually stand).
-function nearestOpenCell(v, gi, gj, R) {
-  if (!cellBlocked(v, gi, gj)) return { i: gi, j: gj };
-  for (let r = 1; r <= R; r++)
+function nearestOpenCell(v, gi, gj, R, minR = 0) {
+  if (minR === 0 && !cellBlocked(v, gi, gj)) return { i: gi, j: gj };
+  for (let r = Math.max(1, minR); r <= R; r++)
     for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
       if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
       if (!cellBlocked(v, gi + di, gj + dj)) return { i: gi + di, j: gj + dj };
@@ -2831,6 +2858,36 @@ function forestHas(k) {
   }
   return forestCells.has(k);
 }
+// Per-vehicle A* cell cost. Infinity = impassable (blocked). SHARED by the live navigator
+// (planPath) AND the A* visualizer (buildAstarGrid) so the picture you inspect is EXACTLY the
+// cost the unit navigates on — the viz used to fall back to a generic representative unit, so a
+// Firebrat's tree-avoidance / a sinker's water penalty were invisible and the viz showed a route
+// the real unit's cost couldn't take ("no A* route" while the path tool looked fine).
+function vehCellCost(v, i, j) {
+  if (cellBlocked(v, i, j)) return Infinity;
+  const c = grid.cell, roads = roadNet.cells;
+  const onRoad = roads && (roads.has(i + ',' + j) || gateCells.has(i + ',' + j));
+  // SINK vehicles wade shallow water but bog there — make off-road shallows EXPENSIVE so A* keeps
+  // them on land/roads and only fords when there's genuinely no dry route (overrides archetype).
+  if (v._move.water === 'sink' && !onRoad && !map.isLand(i * c, j * c)) return 35;
+  // FIREBRAT (the flag runner) BUMPS trees but SKIMS water: route it AROUND the forest (tree-
+  // adjacent land is dear), over open water if that's clearer, instead of threading a tight gap.
+  if (v.type === 'firebrat') {
+    // A tree IN the cell is dear but PASSABLE — the Firebrat shoots trees clear now, so A* only
+    // threads a forest when there's no reasonable way around, and never returns "no route" for
+    // woods it could blast through.
+    if (foliage && foliage.treeAt(i * c, j * c, VEH_R * 0.5)) return 30;
+    if (onRoad) return 0.5;
+    const treeNear = forestHas((i + 1) + ',' + j) || forestHas((i - 1) + ',' + j) || forestHas(i + ',' + (j + 1)) || forestHas(i + ',' + (j - 1));
+    return treeNear ? 6 : 1;   // water == clean land (1); don't PREFER water, just skirt trees
+  }
+  // Personality terrain preference: Rogue sneaks over OCEAN, Hunter moves under FOREST cover,
+  // Warrior/default uses ROADS (only bites where the unit can traverse it — see cellBlocked).
+  const arch = v._archetype;
+  if (arch === 'rogue') return !map.isLand(i * c, j * c) ? 0.45 : (onRoad ? 0.8 : 1);
+  if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad ? 0.8 : 1);
+  return onRoad ? 0.5 : 1;
+}
 function planPath(v, dest) {
   if (PERF) _planCount++;
   const c = grid.cell;
@@ -2839,36 +2896,7 @@ function planPath(v, dest) {
   goal = nearestOpenCell(v, goal.i, goal.j, 7) || goal;
   const iMax = Math.ceil(map.worldW / 2 / c) + 10, jMax = Math.ceil(map.worldH / 2 / c) + 10;
   const inBounds = (i, j) => i >= -iMax && i <= iMax && j >= -jMax && j <= jMax;
-  const roads = roadNet.cells;
-  const arch = v._archetype;
-  const sinks = v._move.water === 'sink';   // Lurcher/Jotun: can ford shallows but bog down doing it
-  const onRoad = (i, j) => roads && (roads.has(i + ',' + j) || gateCells.has(i + ',' + j));
-  // Personality terrain preference (ai_behavior): each commander has its OWN cheap highway.
-  // Warrior (and the player/default) uses ROADS; the Rogue sneaks over OCEAN; the Hunter
-  // moves under FOREST cover. The preference only bites for units that can traverse it —
-  // cellBlocked already bars sinkers from deep water and light units from trees.
-  const cost = (i, j) => {
-    if (cellBlocked(v, i, j)) return Infinity;
-    // SINK vehicles wade through shallow water but bog there (slow, and they can drift into
-    // deep water and flood) — so make off-road shallows EXPENSIVE: A* keeps them on land/roads
-    // and only fords when there's genuinely no dry route. Overrides any archetype water love.
-    if (sinks && !onRoad(i, j) && !map.isLand(i * c, j * c)) return 35;   // fording is a LAST resort — heavily prefer land/bridges
-    // FIREBRAT (the flag runner): it BUMPS trees (can't crush them) but SKIMS across water. Route
-    // it AROUND the forest — over the open, tree-free water if that's clearer — instead of threading
-    // a gap too tight for its hull, where it boxes in on trees, won't shoot (runner), and wedges.
-    // Land hugging a tree is dear so A* keeps a berth. Overrides the commander's archetype lane
-    // (a Hunter's runner was even being pulled TOWARD forest). Depends only on the vehicle, not the doc.
-    if (v.type === 'firebrat') {
-      if (onRoad(i, j)) return 0.5;
-      const treeNear = forestHas((i + 1) + ',' + j) || forestHas((i - 1) + ',' + j) || forestHas(i + ',' + (j + 1)) || forestHas(i + ',' + (j - 1));
-      // Water and clean land cost the same (1) — don't PREFER water (that sent it on long detours),
-      // just make tree-adjacent land dear so it skirts the forest, over the water if that's shorter.
-      return treeNear ? 6 : 1;
-    }
-    if (arch === 'rogue') return !map.isLand(i * c, j * c) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
-    if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
-    return onRoad(i, j) ? 0.5 : 1;   // Warrior + default: roads are the cheap lane
-  };
+  const cost = (i, j) => vehCellCost(v, i, j);
   // Node budget scales with the grid: 9000 was tuned on smaller maps and left units on the big
   // default (480) map with NO route to a far goal (they then beelined into terrain and wedged).
   // Capped so a genuinely-unreachable search still bails cheaply. partial:true → on failure A*
@@ -2876,7 +2904,18 @@ function planPath(v, dest) {
   const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
   const maxNodes = Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4)));
   const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true });
-  if (!path || path.length < 2) return null;
+  if (!path || path.length < 2) {
+    // BOXED-IN START: parked hard against a wall/shoreline, every neighbouring cell can be
+    // blocked, so the search dies on the spot and the unit used to drop to a DIRECT beeline
+    // (sometimes straight at open water). Restart from the nearest open cell — the unit makes
+    // one short direct hop to that first waypoint, then follows a real A* route.
+    const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
+    if (s2) {
+      const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true });
+      if (p2 && p2.length >= 1) return p2.map(n => ({ x: n.i * c, z: n.j * c }));
+    }
+    return null;
+  }
   return path.map(n => ({ x: n.i * c, z: n.j * c }));
 }
 
@@ -2885,6 +2924,7 @@ function planPath(v, dest) {
 // you step/scrub through the frontier expansion. buildGrid(name) hands the viz the
 // SAME cost field the game uses, so what you watch is exactly what units/roads see.
 let _astarViz = null;
+let _astarVizVeh = null;   // when set (e.g. auto-probe on a Firebrat), the viz uses THIS unit's real cost
 function buildAstarGrid(name) {
   const c = grid.cell;
   if (name === 'road layout') {
@@ -2896,18 +2936,12 @@ function buildAstarGrid(name) {
       allowDiagonal: false, turnPenalty: 6,
     };
   }
-  // unit nav: reproduce planPath's cost for a representative live vehicle.
-  const rep = player || combatants[0] ||
-    { _move: { water: 'sink', ignoreWalls: false, tree: 'bump' }, _archetype: 'warrior' };
-  const arch = rep._archetype || 'warrior';
-  const roads = roadNet.cells;
-  const onRoad = (i, j) => roads && (roads.has(i + ',' + j) || gateCells.has(i + ',' + j));
-  const cost = (i, j) => {
-    if (cellBlocked(rep, i, j)) return Infinity;
-    if (arch === 'rogue') return !map.isLand(i * c, j * c) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
-    if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad(i, j) ? 0.8 : 1);
-    return onRoad(i, j) ? 0.5 : 1;
-  };
+  // unit nav: use the REAL per-vehicle cost (shared vehCellCost) so the viz matches the actual
+  // navigator exactly. Prefer the unit under inspection (_astarVizVeh), else the player, else a
+  // live combatant, else a plain ground stand-in.
+  const rep = _astarVizVeh || player || combatants[0] ||
+    { _move: { water: 'sink', ignoreWalls: false, tree: 'bump' }, _archetype: 'warrior', type: 'lurcher', holder: { position: { x: 0, z: 0 } } };
+  const cost = (i, j) => vehCellCost(rep, i, j);
   const iMax = Math.ceil(map.worldW / 2 / c) + 2, jMax = Math.ceil(map.worldH / 2 / c) + 2;
   return { cost, inBounds: (i, j) => i >= -iMax && i <= iMax && j >= -jMax && j <= jMax,
     bounds: { iMin: -iMax, iMax, jMin: -jMax, jMax }, allowDiagonal: true, turnPenalty: 3 };
@@ -3025,11 +3059,15 @@ class AICommander {
     this._eliminated = false;                         // true once the roster is empty (no more vehicles to field)
     this._rising = false; this._elev = null;          // FOB-lift deploy state
     this._exit = null; this._exitT = 0;               // post-deploy "drive out through the gate" waypoint
+    this._exitCoolT = 0;                              // re-arm cooldown after an exit clears (stops the exit↔advance spin flap)
     this._nav = { path: null, idx: 0, t: 0, dx: null, dz: null };   // A* path cache
     this._supply = null;                              // current rearm/refuel point (for nav)
     this._stepAtDeploy = null;                        // strategy step when this unit deployed (swap only on a NEW step)
     this._recalling = false;                          // unit is driving home to be swapped (not vanished mid-field)
+    this._recallForce = false;                        // committed recall (gambit/HQ-finisher): drive home even under fire
     this.failStreak = 0;                              // consecutive unit losses on the current plan (drives adaptive redraws)
+    this._mrec = null;                                // report card for the unit in the field (set on deploy, graded at death)
+    this._failStep = null; this._failN = 0; this._failT = 0;   // consecutive TOTAL-failure deaths per mission (drives missionBanned)
   }
 
   start(colorIndex) {
@@ -3071,6 +3109,27 @@ class AICommander {
     if (this.knownElev) parts.push('ELV');     // enemy elevator/FOB
     return parts.length ? parts.join(' ') : 'none';
   }
+  // "Sneak round the side" waypoint for a flag RUNNER. Take the perpendicular bisector of the line
+  // between the two flag bases and walk out along it to the last LAND cell before open water — the
+  // SIDE BEACH. Coming at the enemy flag via this point swings the runner WIDE around the defended
+  // middle/road (and the enemy FOB) instead of driving straight up it into the guns. Picks the side
+  // the runner is already on (shorter swing) and caches it for the approach (cleared on deploy).
+  _flankPoint(v) {
+    if (this._flankPt) return this._flankPt;
+    const home = this.homeBasePos(), enemy = this.enemyBasePos();
+    const mx = (home.x + enemy.x) / 2, mz = (home.z + enemy.z) / 2;
+    let dx = enemy.x - home.x, dz = enemy.z - home.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+    let px = -dz, pz = dx;   // unit vector perpendicular to the base-to-base line
+    if ((v.holder.position.x - mx) * px + (v.holder.position.z - mz) * pz < 0) { px = -px; pz = -pz; }   // the side we're already on
+    let best = { x: mx + px * 20, z: mz + pz * 20 };
+    for (let d = 20; d <= 340; d += 6) {   // march out to the last land before the water = the beach edge
+      const x = mx + px * d, z = mz + pz * d;
+      if (!map.isLand(x, z)) break;
+      best = { x, z };
+    }
+    this._flankPt = best;
+    return best;
+  }
   // Have we ever laid eyes on an enemy vehicle? (drives Hunter scout → attack)
   // "Found them" = seen an enemy VEHICLE or scouted their base (FOB/HQ). The base check matters:
   // a scout that reaches the enemy FOB but never happens to spot a unit used to count as still-
@@ -3081,6 +3140,20 @@ class AICommander {
   lastEnemyPos() {
     const s = this._lastEnemyPos;
     return s && (performance.now() - s.t) < 12000 ? { x: s.x, z: s.z } : null;
+  }
+  // "Our towers are being SHOT" — stamped by updateProjectileHits when an enemy round hits
+  // one of our structures near home. Unlike hearing this has no range limit (the tower
+  // radios for help), so a defender out on the mid-field lane responds immediately
+  // (ai_behavior Defend: ambush the attacker as it engages our towers).
+  homeAttack() {
+    const s = this._homeAttack;
+    return s && (performance.now() - s.t) < 15000 ? { x: s.x, z: s.z } : null;
+  }
+  // Report card verdict: this mission key lost two units in a row with ZERO progress —
+  // the doctrine should run its FAIL_ALT unblocker instead. Time-boxed: after 90s the
+  // field has usually changed enough that the plan deserves another look.
+  missionBanned(key) {
+    return this._failStep === key && this._failN >= 2 && performance.now() - this._failT < 90000;
   }
   // Is the target team out of the fight for good — no live unit AND its commander is
   // eliminated? (A human team has no commander and can always redeploy, so never "out".)
@@ -3129,23 +3202,30 @@ class AICommander {
     const FWD = 18, SIDE = 26;                                      // forward a touch, well to the side, still in tower range
     return { x: base.x + dx * FWD + px * SIDE * side, z: base.z + dz * FWD + pz * SIDE * side };
   }
-  // A patrol that sweeps the CORRIDOR between our two bases — the flag HQ (rear) and the
-  // elevator (forward) — so a defending Turtle covers everything it has to protect instead
-  // of pacing one base (the old loop huddled on the flag HQ, which read as too passive).
-  // Each waypoint is nudged toward the threat so the route hugs the enemy-facing side of
-  // the corridor (where an attacker comes from), still on home ground in tower cover. The
-  // index advances as the unit nears its waypoint, oscillating flag↔mid↔elevator↔mid, so it
-  // never settles. The brain still drops into engage the instant it spots an attacker —
-  // this only fills the idle "nothing in sight" time.
+  // A patrol that holds the APPROACH LANE — from the home front (between the flag HQ and
+  // the elevator, on the enemy-facing side) out to MID-FIELD — so a defender meets an
+  // incoming attack before it picks a target, instead of pacing flag↔elevator in the rear
+  // (where sitting at one base left the other undefended). The two mid-field waypoints are
+  // offset to opposite flanks so the sweep covers the lane's width, and the route returns
+  // through the home front between them so it never strays far from tower cover for long.
+  // The brain still drops into engage on sight — this only fills the idle time; a heard
+  // shot or a hit on our towers pre-empts the whole patrol (see Defend.objective).
   patrolSpot() {
     const flag = this.homeBasePos(), fob = this.homePos(), enemy = this.enemyBasePos();
     if (!this._patrol) {
-      const mid = { x: (flag.x + fob.x) / 2, z: (flag.z + fob.z) / 2 };
-      let tx = enemy.x - mid.x, tz = enemy.z - mid.z;
+      const front = { x: (flag.x + fob.x) / 2, z: (flag.z + fob.z) / 2 };
+      let tx = enemy.x - front.x, tz = enemy.z - front.z;
       const td = Math.hypot(tx, tz) || 1; tx /= td; tz /= td;       // unit vector toward the threat
-      const NUDGE = 16;                                             // lean the route toward the enemy-facing edge
-      const at = (b) => ({ x: b.x + tx * NUDGE, z: b.z + tz * NUDGE });
-      this._patrol = [ at(flag), at(mid), at(fob), at(mid) ];       // flag → mid → elevator → mid → …
+      const px = -tz, pz = tx;                                      // perpendicular — the lane's width
+      const mid = { x: (front.x + enemy.x) / 2, z: (front.z + enemy.z) / 2 };   // mid-field
+      const home = { x: front.x + tx * 14, z: front.z + tz * 14 };  // home front, still in tower reach
+      const SIDE = 30;
+      this._patrol = [
+        home,
+        { x: mid.x + px * SIDE, z: mid.z + pz * SIDE },             // mid-field, one flank
+        home,
+        { x: mid.x - px * SIDE, z: mid.z - pz * SIDE },             // mid-field, other flank
+      ];
       this._patrolI = 0;
     }
     const wp = this._patrol[this._patrolI];
@@ -3348,7 +3428,7 @@ class AICommander {
     }
     // minR beyond the clear radius so a fresh waypoint is always something to actually TRAVEL to
     // (never one that's cleared next tick → the scout keeps moving instead of freezing).
-    if (!this._exploreWp) { const home = this.homePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12); }
+    if (!this._exploreWp) { const home = this.homePos(), enemy = this.enemyBasePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12, enemy.x, enemy.z); }
     return this._exploreWp;
   }
 
@@ -3411,6 +3491,12 @@ class AICommander {
     v.ai = new Brain(this.personality);
     v._archetype = this.archetype;   // drives the nav terrain preference (Rogue ocean / Hunter forest)
     this.unit = v;
+    this._flankPt = null; this._flankDone = false;   // fresh "sneak round the side" approach for this unit
+    // MISSION REPORT CARD: snapshot the war state as this unit rolls out. If it dies having
+    // achieved NOTHING (no kills, no damage to their base, never touched the flag), that's a
+    // TOTAL failure — two in a row on the same mission bans it (missionBanned) so the doctrine
+    // tries something else instead of feeding identical units into the same guns.
+    this._mrec = { veh: type, kills0: this.kills, fort0: fortHpOf(this.targetTeam()), flagTouched: false };
     // Ride up the FOB elevator like the player does — it can't leave (or shoot)
     // until the lift tops out, so neither side gets a head start (see update()).
     const elev = elevators.find(e => e.team === this.team);
@@ -3515,6 +3601,12 @@ class AICommander {
       gx: dest ? Math.round(dest.x) : null, gz: dest ? Math.round(dest.z) : null, gd: destDist,   // where it's ACTUALLY headed + distance
       atHome: !!view.atHome, navPath: this._nav && this._nav.path ? this._nav.path.length : 0,   // in a supply/heal zone? has an A* route?
       towers: this.turretsLive(),   // enemy turrets still standing (tower-first ordering)
+      // Live detection (feeds the ?nav label's contact line): a rival vehicle in sight, an
+      // enemy turret sensed in range, or a heard-but-unseen contact.
+      foeT: view.enemy ? view.enemy.type : null,
+      foeD: view.enemy ? Math.round(Math.hypot(view.enemy.x - pX, view.enemy.z - pZ)) : null,
+      turD: view.threat ? Math.round(Math.hypot(view.threat.x - pX, view.threat.z - pZ)) : null,
+      heard: !!view.heard,
     };
     if (cmd.state !== prev) {
       // Plain-language state line: WHAT the unit is doing and WHERE/AT-WHAT, plus the
@@ -3541,13 +3633,28 @@ class AICommander {
         case 'engage':   line = `Contact! Enemy ${view.enemy ? view.enemy.type : 'vehicle'} in sight — engaging!`; break;
         case 'suppress': {
           const inPos = view.threatStand && Math.hypot(view.threatStand.x - v.holder.position.x, view.threatStand.z - v.holder.position.z) <= 6;
-          line = inPos ? `On target — hammering their turret! ${this.turretsLive()} left!` : `Working an angle on their turret — ${this.turretsLive()} left!`;
+          // With every turret down the suppress target is promoted to the flag HQ (hqThreat) —
+          // "their turret — 0 left" read like nonsense in the log, so name the real target.
+          line = view.hqThreat ? (inPos ? 'On target — pounding their HQ!' : 'Lining up on their HQ — crack it open!')
+                               : (inPos ? `On target — hammering their turret! ${this.turretsLive()} left!` : `Working an angle on their turret — ${this.turretsLive()} left!`);
           break;
         }
         case 'assault':  { const n = this.turretsLive(); line = `Danger close — on ${dest}! ${n} turret${n === 1 ? '' : 's'} left, pour it on!`; break; }
         default:         line = cmd.state;
       }
-      aiLog(this.team, `${this.cname} ${v.type}: ${line} [${card}]`);
+      // Anti-bounce filter: a state flickering A↔B (LOS blinking at the engage-range edge) used
+      // to re-log the same two lines several times a second and flood the feed. A bounce (going
+      // straight back to where we just came from within 8s) logs quietly — archive-only.
+      const nowS = (performance.now() - _t0) / 1000;
+      const bounce = this._lastFlip && this._lastFlip.from === cmd.state && this._lastFlip.to === prev
+        && nowS - this._lastFlip.t < 8;
+      this._lastFlip = { from: prev, to: cmd.state, t: nowS };
+      aiLog(this.team, `${this.cname} ${v.type}: ${line} [${card}]`, {
+        // structured ride-along for headless analysis (RR.aiEvents): what changed, where, how far to go
+        unit: v.type, from: prev, to: cmd.state, step: this.strategy.step,
+        x: this._dbg.px, z: this._dbg.pz, gd: this._dbg.gd, hp: this._dbg.hp, ammo: this._dbg.ammo,
+        quiet: bounce || undefined,
+      });
     }
   }
 
@@ -3569,7 +3676,30 @@ class AICommander {
     else if (st === 'retreat') dest = this._home;          // heal at own base (only place HP regens)
     else if (st === 'resupply') dest = this._supply;       // nearest fuel/ammo (own base or a depot)
     else if (st === 'assault') { dest = this.strategy.objective(this); slack = (view.engageRange || 36) * 0.7 * 1.25; }
-    else { if (st === 'unstick') this._nav.path = null; return; }   // engage/suppress: steer as-is; unstick: drop the route so it replans fresh after the jolt (not straight back into the wall)
+    // SUPPRESS far-travel: the trek TO a siege standoff can be 100u+ around terrain, and pure
+    // direct-steer + dodge feelers left jotuns shuttling between two spots for whole matches
+    // (richwatch: stagnant 30s+ at gd 75-185 in suppress). Path-follow with A* until close,
+    // then hand the final approach + the fire ladder back to the behavior. NAV_ASTAR_STATES
+    // stays without 'suppress' — the nav overlay treats the close-in fight as combat-steered.
+    else if (st === 'suppress' && view.threatStand
+             && (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2 > 26 * 26) {
+      dest = view.threatStand; slack = 14;
+    }
+    else {
+      if (st === 'unstick') {
+        this._nav.path = null;   // drop the route so it replans fresh after the jolt (not straight back into the wall)
+        // JOLT ESCALATION: the reverse-pivot used to loop forever (reverse, drive back into
+        // the same snag, reverse…) because the backward hop counts as movement and resets
+        // _stuckT — so the 6s blacklist below never fired. Second jolt in one episode means
+        // the reflex isn't working: blacklist the snag NOW and let A* route around it.
+        if ((v.ai._unstickN || 0) >= 2) {
+          const hx = -Math.sin(v.heading), hz = -Math.cos(v.heading);
+          avoidCell(v.holder.position.x + hx * VEH_R, v.holder.position.z + hz * VEH_R);
+          v.ai._unstickN = 0;
+        }
+      }
+      return;   // engage/suppress: steer as-is
+    }
     if (!dest) return;
     const d2 = (dest.x - v.holder.position.x) ** 2 + (dest.z - v.holder.position.z) ** 2;
     if (d2 < slack * slack) return;                 // close enough — hand back to the behavior
@@ -3613,6 +3743,7 @@ class AICommander {
     if (hqSwap) {   // commit the swap even with defenders near — a unit lost en route just respawns as the Valkyrie
       _hqSwapCount++;
       this._stepAtDeploy = this.strategy.step; this._recalling = true;
+      this._recallForce = true;   // COMMITTED: the threat-abort must not cancel this recall — aborting re-armed it same tick (log ×11k, Valkyrie never launched, stalemate stayed deadlocked)
       this._recallBestD = Infinity; this._recallStallT = 0; this._nav.path = null;
       aiLog(this.team, this.fortDown()
         ? `${this.cname}: Turrets are down — pull the ${this.unit.type} back, roll out a Valkyrie to crack that keep!`
@@ -3646,6 +3777,7 @@ class AICommander {
       if (!(ground && nearElev)) return;   // chase with the current unit — no recall home
     }
     this._recalling = true;
+    this._recallForce = false;                                     // a routine swap still defers to the threat-abort
     this._recallBestD = Infinity;                                  // closest we've gotten to home so far
     this._recallStallT = 0;                                        // time since we last made headway toward home
     this._nav.path = null;                                          // replan toward home
@@ -3658,7 +3790,7 @@ class AICommander {
     const v = this.unit;
     this.strategy.tick(this, dt);
     applyAltitude(v, dt); decayAim(v, dt); v.cooldown -= dt;
-    if (v.dead) { this.unit = null; this._recalling = false; this.respawnT = 3; return; }
+    if (v.dead) { this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 3; return; }
     const home = teamCenter(this.team, 'fob');
     const d = Math.hypot(v.holder.position.x - home.x, v.holder.position.z - home.z);
     const reach = (this._elev ? this._elev.padHalf : 8) + 5;
@@ -3672,7 +3804,7 @@ class AICommander {
     const stuck = this._recallStallT > RECALL_STALL;
     if (d < reach || stuck) {
       aiLog(this.team, d < reach ? `${this.cname}: ${v.type} is home — swapping it out now!` : `${this.cname}: ${v.type} can't get home, it's hung up — ditch it and swap!`);
-      removeCombatant(v); scene.remove(v.group); this.unit = null; this._recalling = false; this.respawnT = 1.0;
+      removeCombatant(v); scene.remove(v.group); this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 1.0;
       return;
     }
     const wp = navWaypoint(this._nav, v, home, dt) || home;
@@ -3705,6 +3837,22 @@ class AICommander {
         this.failStreak = (this.failStreak || 0) + 1;
         const lost = this.unit.type;                 // attrition: that vehicle is gone from the roster
         if (this.roster[lost] != null) this.roster[lost] = Math.max(0, this.roster[lost] - 1);
+        // MISSION REPORT CARD: grade the tour that just ended. Progress = any kill, any real
+        // damage to their base, or a hand on the flag. A total failure counts against the
+        // mission that was RUNNING AT DEATH; two straight total failures ban it for a while
+        // (missionBanned → the doctrine's FAIL_ALT unblocker) so the commander stops making
+        // the same bad decision over and over.
+        const rec = this._mrec; this._mrec = null;
+        if (rec) {
+          const step = this.strategy.step;
+          const progress = this.kills > rec.kills0 || rec.flagTouched
+            || rec.fort0 - fortHpOf(this.targetTeam()) > 60;   // more than a stray chip of base damage
+          if (!progress) {
+            if (this._failStep === step) this._failN++; else { this._failStep = step; this._failN = 1; }
+            this._failT = performance.now();
+            if (this._failN === 2) aiLog(this.team, `${this.cname}: That's two units lost on this ${step} plan with NOTHING to show — we're trying something else!`);
+          } else if (this._failStep === step) { this._failStep = null; this._failN = 0; }
+        }
         // A runner died storming the base → don't just feed another firebrat in. If the enemy
         // still has DEFENDING VEHICLES, they'll intercept the fragile runner — send a combat
         // unit to CLEAR THEM FIRST (better signal than the death's damage-split, which mislabels
@@ -3721,10 +3869,16 @@ class AICommander {
         if (!this.archetype && Math.random() < Math.min(0.85, 0.25 + this.failStreak * 0.2)) this.redraw();
       }
       this.unit = null;
-      this._rising = false; this._recalling = false;
+      this._rising = false; this._recalling = false; this._recallForce = false;
       this.respawnT -= dt;
       if (this.started && !this._eliminated && this.respawnT <= 0) { this.respawnT = 4 + Math.random() * 3; this.deploy(); }
       return;
+    }
+    // Report card: a hand on the enemy flag at ANY point counts as progress (even if the
+    // runner is later gunned down, the plan produced something — don't ban it).
+    if (this._mrec && !this._mrec.flagTouched) {
+      const f = this.flag();
+      if (f && f.carrier === this.unit) this._mrec.flagTouched = true;
     }
     // Still riding the FOB lift up? Hold (no driving/firing) until it tops, then
     // detach so the brain takes the wheel — mirrors the player's deploy handover.
@@ -3745,7 +3899,11 @@ class AICommander {
         if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
         if ((o.holder.position.x - up.x) ** 2 + (o.holder.position.z - up.z) ** 2 < 46 * 46) { threatened = true; break; }
       }
-      if (!threatened) { this._driveHome(dt); return; }
+      // A FORCED recall (gambit / HQ-finisher swap) drives home even under fire — that's what
+      // "commit" means. Aborting here re-armed the swap on the very next tick (_maybeRecall's
+      // hqSwap ignores defenders), producing an abort↔re-arm deadlock: thousands of log lines,
+      // a unit commanded only every other tick, and the stalemate-breaking Valkyrie never fielded.
+      if (!threatened || this._recallForce) { this._driveHome(dt); return; }
       this._recalling = false; this._stepAtDeploy = null;   // fall through to the brain to fight/flee
     }
     this.strategy.tick(this, dt);
@@ -3769,6 +3927,18 @@ class AICommander {
     }
     this._logTick(v, view, cmd);
     const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn, strafe: cmd.strafe || 0 }, dt);
+    // ANTI-SHORE-GRIND: a sinker commanded FORWARD into DEEP water it can't cross (a last leg past
+    // an inlet with no A* route) otherwise grinds the waterline forever — and the anti-wedge reflex
+    // spins it in place: the "dancing on the shore". Deep water is a hard wall for a sinker, so cut
+    // the forward throttle — it PLANTS at the shore instead of grinding. Turn is preserved, so it
+    // can still rotate to aim/fire from there, and as it turns to a clear heading forward returns
+    // (it skirts). Only OFF-ROAD deep water triggers this: shallow fords and bridges are unaffected
+    // (isDeepWater reads the floor even under a bridge, so the road-cell check must come first).
+    if (aiAntiGrind && v._move.water === 'sink' && out.fwd > 0.05) {
+      const ahx = v.holder.position.x - Math.sin(v.heading) * (VEH_R + 2);
+      const ahz = v.holder.position.z - Math.cos(v.heading) * (VEH_R + 2);
+      if (map.isDeepWater(ahx, ahz) && roadDeckY(ahx, ahz) == null) { out.fwd = 0; v.ai._wantMove = false; }
+    }
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
     v.speedMul = roadSpeedMul(v);
     v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
@@ -3841,6 +4011,13 @@ class AICommander {
     if (!seesEnemy && !heard && this._lastEnemyPos) {
       const dx = this._lastEnemyPos.x - px, dz = this._lastEnemyPos.z - pz;
       if (dx * dx + dz * dz < 12 * 12) this._lastEnemyPos = null;
+    }
+    // Same for the base-under-attack radio: the responder reached the spot and there's nobody
+    // to see or hear → the raid's over (or the raider moved on); resume the patrol now instead
+    // of standing on the crater for the full stale window.
+    if (!seesEnemy && !heard && this._homeAttack) {
+      const dx = this._homeAttack.x - px, dz = this._homeAttack.z - pz;
+      if (dx * dx + dz * dz < 12 * 12) this._homeAttack = null;
     }
     // Fog-of-war intel: remember what the enemy keeps fielding so counterVehicle() works.
     if (seen) this.seenTypes[seen.type] = (this.seenTypes[seen.type] || 0) + 1;
@@ -3937,6 +4114,22 @@ class AICommander {
       aiLog(this.team, `${this.cname} ${v.type}: “Salvage on our line — grabbing it.”`);
     }
     this._scrapDetourOn = this._scrapDetour;
+    // SNEAK ROUND THE SIDE (flag runner): a Firebrat headed for the enemy base swings WIDE to the
+    // side-beach flank point first, then comes at the flag from the flank/back — instead of driving
+    // up the middle road into the FOB's guns. Releases to the real objective once it's rounded the
+    // flank (reached the point) or is already close (commit the grab). Never overrides the detours above.
+    this._flanking = false;
+    if (v.type === 'firebrat' && !this._intercepting && !this._shielding && !this._scrapDetour
+        && !(this.flag() && this.flag().carrier === v)) {
+      const enemyB = this.enemyBasePos();
+      const goalToEnemy = Math.hypot(goal.x - enemyB.x, goal.z - enemyB.z);   // is its real goal the enemy base?
+      const dEnemy = Math.hypot(enemyB.x - px, enemyB.z - pz);
+      if (goalToEnemy < 70 && dEnemy > 70 && !this._flankDone) {
+        const fp = this._flankPoint(v);
+        if (Math.hypot(fp.x - px, fp.z - pz) < 16) this._flankDone = true;   // rounded the flank → now go for the flag
+        else { goal = fp; this._flanking = true; }
+      }
+    }
     // Where to rearm/refuel: the NEAREST valid source for what we need — own base
     // (always restocks fuel + ammo) OR a DISCOVERED neutral depot. A neutral depot gives
     // just ONE resource, so we only divert to one when topping it gets the unit combat-
@@ -3972,13 +4165,41 @@ class AICommander {
     if (fob) considerHome(fob.center.x, fob.center.z);
     if (home && flagBaseAlive(this.team)) considerHome(home.center.x, home.center.z);   // can't heal at a destroyed flag base
     this._home = healHome;
+    // RE-ARM THE GATE EXIT (anti-elevator-circle). A ground unit that's drifted back inside its
+    // own FOB and can't thread the gate on its own ends up circling on the elevator (the unstick
+    // reflex spins it in place — the "dancing on the elevator" bug). Hand it the same DETERMINISTIC
+    // gate-exit it gets on deploy: rotate to the throat, drive straight out.
+    //   Fires ONLY when the unit truly wants to be OUT and heading to the FIELD. Critically it must
+    // NOT fire while the brain is latched to resupply/heal (`_resup`/`_hurt`): forcing the exit
+    // ejects it mid-top-off, so `_resup` (which only clears at a FULL 99% base top-off) never
+    // clears — it turns around, gets ejected again, and yo-yos in/out the gate forever (RTB-to-
+    // refuel↔roll-out at 85% fuel). And the objective must be OFFENSIVE (far from BOTH friendly
+    // bases), so a DEFEND/Turtle whose whole job is the rear flag↔elevator corridor isn't ejected.
+    if (this._exitCoolT > 0) this._exitCoolT -= dt;
+    if (aiFobRearm && !this._exit && this._exitCoolT <= 0 && !v._move.ignoreWalls && fob && !v.ai._resup && !v.ai._hurt) {
+      const dFob2 = (px - fob.center.x) ** 2 + (pz - fob.center.z) ** 2;
+      const obj = this.strategy.objective(this), homeB = this.homeBasePos();
+      const objOffensive = (obj.x - fob.center.x) ** 2 + (obj.z - fob.center.z) ** 2 > 30 * 30
+        && (obj.x - homeB.x) ** 2 + (obj.z - homeB.z) ** 2 > 40 * 40;   // out on the field, not a rear/home patrol
+      const wantsOut = !needAmmo && !needFuel && v.hp > v.maxHp * 0.9;
+      if (dFob2 < 18 * 18 && wantsOut && objOffensive) {
+        // Two-goal spin guard: a unit standing 8-9u from the gate waypoint but still <18u of the
+        // fob used to flap — re-arm rotates it TO the gate point, the 8u clear fires instantly,
+        // advance rotates it BACK to the objective, re-arm fires again (the ~150° back-and-forth
+        // between two paths). Only arm an exit that's genuinely somewhere to GO, and cool down
+        // between evaluations either way so a cleared exit gets a free run at the field.
+        const e = this._computeExit();
+        if (e && (px - e.x) ** 2 + (pz - e.z) ** 2 > 10 * 10) { this._exit = e; this._exitT = 20; }
+        this._exitCoolT = 6;
+      }
+    }
     // Post-deploy: drive OUT through the gate first. mustGo forces the brain to head
     // straight for the exit waypoint (no engaging/firing) until it clears the gate.
     let mustGo = false;
     if (this._exit) {
       this._exitT -= dt;
       const dd = (px - this._exit.x) ** 2 + (pz - this._exit.z) ** 2;
-      if (dd < 8 * 8 || this._exitT <= 0) this._exit = null;   // cleared the gate (or timed out)
+      if (dd < 8 * 8 || this._exitT <= 0) { this._exit = null; this._exitCoolT = 6; }   // cleared the gate (or timed out) — cool the re-arm so advance gets a clean run
       else mustGo = true;
     }
     // The nearest LIVE enemy wall-turret this unit can actually SHOOT — sensed wide
@@ -4137,7 +4358,7 @@ class AICommander {
           if (t) { const d = (t.x - px) ** 2 + (t.z - pz) ** 2; if (!best || d < bestD) { best = t; ty = 3.0; } break; }
         }
       }
-      if (best) breakTarget = { x: best.x, y: map.heightAt(best.x, best.z) + ty, z: best.z };
+      if (best) breakTarget = { x: best.x, y: map.heightAt(best.x, best.z) + ty, z: best.z, tree: ty === 3.0 };   // tree vs wall — a Firebrat may blast a tree but never a structure
     }
     return {
       dt,
@@ -4402,9 +4623,21 @@ const AI_LOG_SEED = (() => {
 })();
 const AI_LOG_TAG = AI_LOG_BUILD + (AI_LOG_SEED ? ' · ' + AI_LOG_SEED : '');
 const _t0 = performance.now();
-function aiLog(team, msg) {
-  aiEvents.push({ t: (performance.now() - _t0) / 1000, team, msg });
-  while (aiEvents.length > 80) aiEvents.shift();   // deep enough to scroll back in full view
+// Full-match structured archive of every decision event — the display buffer above trims to 80
+// for the phone overlay, but headless analysis (RR.aiEvents()) needs the whole story. Callers
+// may attach a `data` object (unit/state/pos/goal…) that rides along invisibly: the overlay
+// only reads t/team/msg, while the archive keeps the structure for machine digestion.
+const aiArchive = [];
+function aiLog(team, msg, data = null) {
+  const e = { t: +((performance.now() - _t0) / 1000).toFixed(1), team, msg };
+  if (data) Object.assign(e, data);
+  // data.quiet → archive-only: keeps rapid-fire flicker (state A↔B bounces) out of the visible
+  // feed while the machine-readable archive still records every transition for analysis.
+  if (!(data && data.quiet)) {
+    aiEvents.push(e);
+    while (aiEvents.length > 80) aiEvents.shift();   // deep enough to scroll back in full view
+  }
+  if (aiArchive.length < 30000) aiArchive.push(e);
 }
 // Vehicle-vs-vehicle hits are HIGH-frequency, so they get their own buffer (kept out of the
 // decision feed so they don't flush the mission events) — shown only in the full/deep view.
@@ -5688,6 +5921,7 @@ window.RR = {
   recStop: () => recStop(),
   recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]
   aiConfig: (k, v) => v === undefined ? getBrainConfig(k) : setBrainConfig(k, v),   // read/set a brain knob at runtime (auto-tuning sweeps)
+  aiEvents: () => aiArchive,                                   // full structured decision-event archive (headless analysis)
   setFof: (team, patch) => Object.assign(fofFor(team), patch || {}),                // override this team's fight-or-flight weights (A/B self-play)
   getFof: (team) => ({ ...fofFor(team) }),
   fofDefault: () => ({ ...FOF_DEFAULT }),
@@ -5848,7 +6082,121 @@ const clock = new THREE.Clock();
 // the unit is actually using — the full A* route for a ground unit that has one, or a straight
 // line to its live brain-goal for a flyer / a unit skirting without a path. Toggle: g / RR.nav().
 let navDebug = QS.has('nav') || QS.has('navlines');
-let navLines = null;   // Map<commander, {line, posAttr, wp, dest}>
+let navLines = null;   // Map<commander, {line, posAttr, wp, dest, label, cells}>
+// The states where _navOverride actually STEERS the unit along its cached A* route. In any other
+// state (combat engage/suppress, unstick) the unit ignores nav.path and steers by the behavior —
+// so the overlay must NOT draw the stale path (it points wherever the unit last navigated, e.g.
+// back to base) and must NOT label it "A* route". Keep this in sync with _navOverride's switch.
+const NAV_ASTAR_STATES = new Set(['exit', 'advance', 'pursue', 'retreat', 'resupply', 'assault']);
+// ?nav auto-probe: the first time a FIREBRAT is trying to navigate but its A* came back empty,
+// freeze the sim and open the A* visualizer ON THAT FIREBRAT'S OWN COST from its cell to its goal
+// — so you can see whether a route actually exists and why the nav didn't take it. Fires once per
+// episode (re-arms once the unit gets a route again) and only while ?nav is on.
+const _fbNavProbed = new WeakSet();
+function _maybeProbeFirebratNav(cmd, v, d, nav) {
+  if (v.type !== 'firebrat') return;
+  const wantsNav = d && NAV_ASTAR_STATES.has(d.state) && d.gx != null;
+  const noRoute = !nav.path || !nav.path.length;
+  if (!wantsNav || !noRoute) { _fbNavProbed.delete(v); return; }   // it has a route now → re-arm the probe
+  if (_fbNavProbed.has(v) || (_astarViz && _astarViz.isOpen)) return;
+  _fbNavProbed.add(v);
+  _astarVizVeh = v;                                     // viz uses THIS firebrat's real cost
+  if (!_astarViz) _astarViz = new AstarViz();
+  _astarViz.open({ buildGrid: buildAstarGrid, gridNames: ['unit nav', 'road layout'], defaultGrid: 'unit nav',
+    three: THREE, scene, camera, domElement: renderer.domElement, cell: grid.cell, hoverY: astarHoverY() });
+  paused = true;
+  const cc = grid.cell;
+  const start = { i: Math.round(v.holder.position.x / cc), j: Math.round(v.holder.position.z / cc) };
+  let goal = { i: Math.round(d.gx / cc), j: Math.round(d.gz / cc) };
+  goal = nearestOpenCell(v, goal.i, goal.j, 7) || goal;   // snap to the same reachable cell planPath targets
+  const dbg = _astarViz.runFor(start, goal);
+  aiLog(cmd.team, `${cmd.cname} firebrat: ?nav A* PROBE — ${dbg.pathLen ? 'route EXISTS (' + dbg.pathLen + ' cells, ' + dbg.steps + ' nodes searched)' : 'genuinely NO route (' + dbg.steps + ' nodes searched)'} → goal (${Math.round(d.gx)},${Math.round(d.gz)})`);
+}
+// Most recent AI-log line for a team (shown on the floating nav label so you can read a
+// unit's latest "thinking" right over its head).
+function lastAiMsg(team) {
+  for (let i = aiEvents.length - 1; i >= 0; i--) if (aiEvents[i].team === team) return aiEvents[i].msg;
+  return null;
+}
+// A camera-facing text label (canvas texture) that floats over a unit. Redrawn only when the
+// text actually changes (cached key) so it costs nothing while a unit holds a decision.
+function _makeNavLabel() {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 320;
+  const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sp.renderOrder = 1001; sp.scale.set(20, 12.5, 1);   // world units, aspect 512:320
+  sp.center.set(0.5, 1);   // anchor at the TOP: the pill is sized to its content, so unused canvas hangs below transparently
+  scene.add(sp);
+  return { sprite: sp, canvas: cv, ctx: cv.getContext('2d'), tex, last: '' };
+}
+// lines: [{ text, color, size, bold, wrap }] — top-to-bottom on a dark pill. The old renderer
+// divided a FIXED canvas height evenly between lines and clipped anything wide, so a long
+// bottom line simply vanished. This one word-wraps `wrap` lines to the pill width, lays the
+// rows out top-down at their natural heights, and sizes the pill to what's actually drawn.
+function _drawNavLabel(lbl, lines) {
+  const key = lines.map(l => l.text + l.color).join('|');
+  if (lbl.last === key) return;   // unchanged → skip the canvas upload
+  lbl.last = key;
+  const ctx = lbl.ctx, W = lbl.canvas.width, H = lbl.canvas.height, PAD = 22;
+  // Expand wrapped lines FIRST so the pill height matches the real row count.
+  const rows = [];
+  for (const ln of lines) {
+    ctx.font = `${ln.bold ? 'bold ' : ''}${ln.size || 32}px "Courier New",monospace`;
+    if (!ln.wrap || ctx.measureText(ln.text).width <= W - PAD * 2) { rows.push(ln); continue; }
+    const words = ln.text.split(' ');
+    let cur = '', n = 0;
+    for (const w of words) {
+      const t = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(t).width > W - PAD * 2 && cur) {
+        rows.push({ ...ln, text: cur }); cur = w;
+        if (++n >= 3) { cur += '…'; break; }   // cap runaway messages at 3 wrapped rows
+      } else cur = t;
+    }
+    if (cur) rows.push({ ...ln, text: cur });
+  }
+  const rowH = (l) => Math.round((l.size || 32) * 1.18);
+  let total = 14;
+  const fit = [];
+  for (const r of rows) { const h = rowH(r); if (total + h > H - 10) break; fit.push(r); total += h; }
+  total += 8;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(8,12,18,0.74)';
+  ctx.fillRect(6, 6, W - 12, total - 6);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(6, 6, W - 12, 3);   // top hairline
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let y = 14;
+  for (const ln of fit) {
+    const h = rowH(ln);
+    ctx.fillStyle = ln.color || '#dfe8ef';
+    ctx.font = `${ln.bold ? 'bold ' : ''}${ln.size || 32}px "Courier New",monospace`;
+    ctx.fillText(ln.text, W / 2, y + h / 2);
+    y += h;
+  }
+  lbl.tex.needsUpdate = true;
+}
+// The grid cells a unit is actually CONFLICTING with — the ones lit red. Its blocked feelers
+// (what it's grinding right now) plus, for a unit beelining with no A* route, the blocked cells
+// its straight line runs through (e.g. the deep-water inlet it can't cross). v._blocked is the
+// same oracle the collision + A* use, so a red cell is a cell this unit truly can't enter.
+function _navConflictCells(v, d, onAstar) {
+  const c = grid.cell, out = [], seen = new Set();
+  const px = v.holder.position.x, pz = v.holder.position.z, h = v.heading;
+  const push = (x, z) => {
+    const ci = Math.round(x / c), cj = Math.round(z / c), k = ci + ',' + cj;
+    if (seen.has(k)) return; seen.add(k);
+    if (v._blocked(ci * c, cj * c)) out.push({ x: ci * c, z: cj * c });
+  };
+  for (const a of [0, 0.6, -0.6]) {   // forward / left / right feelers at the hull edge and 9u out
+    const ax = -Math.sin(h + a), az = -Math.cos(h + a);
+    push(px + ax * (VEH_R + 1), pz + az * (VEH_R + 1));
+    push(px + ax * 9, pz + az * 9);
+  }
+  if (!onAstar && d && d.gx != null) {                 // not on a route (combat/beeline) — flag the wall/water on the line to the target
+    const dx = d.gx - px, dz = d.gz - pz, len = Math.hypot(dx, dz) || 1, steps = Math.min(40, Math.ceil(len / c));
+    for (let i = 1; i <= steps && out.length < 26; i++) { const t = i / steps; push(px + dx * t, pz + dz * t); }
+  }
+  return out;
+}
 function _makeNavObj() {
   const geo = new THREE.BufferGeometry();
   const posAttr = new THREE.BufferAttribute(new Float32Array(256 * 3), 3);
@@ -5862,20 +6210,36 @@ function _makeNavObj() {
   dest.rotation.x = Math.PI;   // apex points DOWN at the destination cell
   dest.renderOrder = 999;
   scene.add(line); scene.add(wp); scene.add(dest);
-  return { line, posAttr, wp, dest };
+  return { line, posAttr, wp, dest, label: _makeNavLabel(), cells: [] };
+}
+// Lazily grow/reuse a pool of flat red squares marking conflict cells for one unit.
+function _navCell(o, i) {
+  if (!o.cells[i]) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(grid.cell * 0.9, grid.cell * 0.9),
+      new THREE.MeshBasicMaterial({ color: '#ff3222', transparent: true, opacity: 0.42, depthTest: false, side: THREE.DoubleSide }));
+    m.rotation.x = -Math.PI / 2; m.renderOrder = 997; scene.add(m); o.cells[i] = m;
+  }
+  return o.cells[i];
 }
 function updateNavOverlay() {
   if (!navDebug) return;
   if (!navLines) navLines = new Map();
-  for (const o of navLines.values()) { o.line.visible = false; o.wp.visible = false; o.dest.visible = false; }
+  for (const o of navLines.values()) {
+    o.line.visible = false; o.wp.visible = false; o.dest.visible = false; o.label.sprite.visible = false;
+    for (const cm of o.cells) cm.visible = false;
+  }
   if (!onField) return;
   const watched = spectateTarget || _specFocus || player;   // the watched unit draws bright, the rest dim
   for (const cmd of commanders) {
     const v = cmd.unit, nav = cmd._nav;
     if (!v || v.dead) continue;
-    const hasPath = nav && nav.path && nav.path.length;
     const d = cmd._dbg;
-    if (!hasPath && (!d || d.gx == null)) continue;          // nothing to draw for this unit
+    // Draw the A* route ONLY when the unit is in a state that actually follows it — else the path
+    // is stale (combat/unstick steer by behavior, not nav.path). A combat/no-route unit draws a
+    // straight line to what it's genuinely steering at (d.gx/gz), so the line points the right way.
+    const usingAstar = nav && nav.path && nav.path.length && d && NAV_ASTAR_STATES.has(d.state);
+    _maybeProbeFirebratNav(cmd, v, d, nav);                  // ?nav: freeze + show A* when a firebrat has no route
+    if (!usingAstar && (!d || d.gx == null)) continue;       // nothing meaningful to draw for this unit
     let o = navLines.get(cmd);
     if (!o) { o = _makeNavObj(); navLines.set(cmd, o); }
     const col = new THREE.Color(teamColor(cmd.team));
@@ -5884,7 +6248,41 @@ function updateNavOverlay() {
     o.line.material.opacity = hot ? 0.95 : 0.32;
     o.dest.material.opacity = hot ? 0.85 : 0.3;
     o.wp.material.opacity = hot ? 1 : 0.35; o.wp.material.transparent = true;
-    if (hasPath) {
+    // FLOATING LABEL: nav method (A* vs direct), state, stuck reason, latest log line.
+    const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
+    const combat = d && (d.state === 'engage' || d.state === 'suppress');
+    let method, mColor;
+    if (usingAstar) { method = `A* route · ${Math.max(0, nav.path.length - Math.min(nav.idx, nav.path.length))} wp left`; mColor = '#8fffa8'; }
+    else if (combat) { method = `COMBAT · ${d.state === 'suppress' ? 'holding range' : 'engaging'}`; mColor = '#ff9d6a'; }   // steering at the enemy/turret, not navigating
+    else if (flyer) { method = 'DIRECT · flies over'; mColor = '#8fd0ff'; }
+    else { method = 'DIRECT · no A* route'; mColor = '#ffcf6a'; }   // amber: grounder beelining, A* gave nothing
+    const lines = [{ text: `${v.type.toUpperCase()} · ${d ? d.state : '?'}${d && d.gd != null ? ' · ' + d.gd + 'u to go' : ''}`, color: col.getStyle(), size: 34, bold: true },
+                   { text: method, color: mColor, size: 30 }];
+    // CONTACT LINE — what the unit is DETECTING right now: ⚠ a rival vehicle in sight (with
+    // type + distance), ◎ an enemy turret sensed in range, ♪ a heard-but-unseen contact.
+    if (d && (d.foeD != null || d.turD != null || d.heard)) {
+      const parts = [];
+      if (d.foeD != null) parts.push(`⚠ ${d.foeT} ${d.foeD}u`);
+      if (d.turD != null) parts.push(`◎ turret ${d.turD}u`);
+      if (d.heard && d.foeD == null) parts.push('♪ hears trouble');
+      lines.push({ text: parts.join(' · '), color: d.foeD != null ? '#ff5f4a' : '#ffd24a', size: 28, bold: d.foeD != null });
+    }
+    if (d && d.stuck) lines.push({ text: `STUCK ${d.stuck}s${d.stuckWhy ? ' · ' + d.stuckWhy : ''}`, color: '#ff6a5a', size: 28 });
+    let msg = lastAiMsg(cmd.team);
+    if (msg) { const c = msg.indexOf(': '); if (c >= 0) msg = msg.slice(c + 2); lines.push({ text: msg, color: 'rgba(210,225,235,0.72)', size: 24, wrap: true }); }
+    _drawNavLabel(o.label, lines);
+    o.label.sprite.material.opacity = hot ? 1 : 0.5;
+    o.label.sprite.position.set(px, map.heightAt(px, pz) + (hot ? 17.5 : 15.5), pz);   // top-anchored sprite: position marks the label's TOP edge
+    o.label.sprite.visible = true;
+    // RED CONFLICT CELLS: the squares this unit truly can't enter that its heading/beeline hits.
+    const conflicts = _navConflictCells(v, d, usingAstar);
+    for (let i = 0; i < conflicts.length; i++) {
+      const cm = _navCell(o, i), cc = conflicts[i];
+      cm.position.set(cc.x, map.heightAt(cc.x, cc.z) + 0.4, cc.z);
+      cm.material.opacity = hot ? 0.5 : 0.22;
+      cm.visible = true;
+    }
+    if (usingAstar) {
       // GROUND unit on an A* route — trace the remaining path, bend marker + destination cone.
       const pts = nav.path, arr = o.posAttr.array;
       let n = 0;

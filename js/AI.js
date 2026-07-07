@@ -169,7 +169,7 @@ const CONDITIONS = {
   // (finishHim removed: "hurt but the rival's weaker → turn and finish" is now a term in
   // fightScore + the engaging-before-retreat ordering, so it needs no special condition.)
   resupLatched: (v, m) => m._resup,                        // heading home to rearm/refuel
-  shootGoal:    (v) => !!v.shootGoal,                      // the goal is a fortification
+  shootGoal:    (v) => !!v.shootGoal && v.self.type !== 'firebrat',   // the goal is a fortification — but a Firebrat NEVER assaults one (weak gun; it's the flag runner, not a sieger)
 
   // Fight-or-flight: only duel a spotted rival when the weighted odds favour it (good
   // hp/ammo/matchup), otherwise keep moving instead of trading into a loss.
@@ -220,8 +220,10 @@ const CONDITIONS = {
     const reach = (v.engageRange || 36) * 1.05;
     return dx * dx + dz * dz <= reach * reach;
   },
-  // A wall-turret is shelling us and we still have teeth → silence it first.
-  threatened: (v, m, p, cfg) => !!v.threat && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type),
+  // A wall-turret is shelling us and we still have teeth → silence it first. A FIREBRAT never does
+  // this: it's the flag runner, its pop-gun can't kill a turret, and stopping to trade just gets it
+  // shot to pieces (the "worked an angle on their turret and spun in circles" bug). It keeps running.
+  threatened: (v, m, p, cfg) => !!v.threat && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type) && v.self.type !== 'firebrat',
   // Chase a recent sighting, but only brave brains bother — and never chase a ghost once
   // the enemy fleet is gone (the commander redirects to the base instead of wasting time).
   pursuing: (v, m, p) => {
@@ -368,8 +370,15 @@ const BEHAVIORS = {
       // A ground unit can be physically barred from the standoff (water / coast / a
       // wall it must blow through first). If it's wedged on the way, stop trying to
       // skirt — square up and pour fire into whatever it can see (this fallback is
-      // what the earlier "march to the standoff cold" attempt lacked).
-      const barred = !view.flyer && mem._stillT > 0.5;
+      // what the earlier "march to the standoff cold" attempt lacked). Trips on the
+      // WEDGE timer too, not just still-time: a unit GRINDING along the base wall is
+      // technically moving (so _stillT never accrues) and used to loop suppress↔unstick
+      // jolts forever instead of planting and blasting the wall in front of it.
+      // …but ONLY when there's actually something to shoot from here (a bearing line on the
+      // tower, or a wall in range to flatten). Planting with NOTHING shootable just parks the
+      // sieger mid-route — richwatch caught jotuns doing exactly that for entire matches
+      // (a brief wedge → plant → timers reset → skirt → wedge again: a two-spot shuttle).
+      const barred = !view.flyer && (mem._stillT > 0.5 || mem._wedgeT > 0.5) && (canBear || demolish);
       if (atStand || barred || demolish) {
         const turn = clamp((demolish ? demoErr : err) * 2.2, -1, 1);   // square onto the wall (demolish) or tower
         const fwd = dist > want ? 0.4 : 0;                 // ease into range, then plant
@@ -493,7 +502,7 @@ const BEHAVIORS = {
 
   // advance / pursue / resupply / retreat — just get to the target.
   seek(ctx) {
-    const { view, mem, err, dist, mode } = ctx;
+    const { view, mem, self, err, dist, mode } = ctx;
     // Heading HOME to heal/rearm must actually REACH the base (its heal radius is
     // ~12u), so use a tight arrival here — NOT the card's objective standoff, which
     // can be large (e.g. ScoutSnatch parks 30u out to scout) and would otherwise
@@ -506,6 +515,26 @@ const BEHAVIORS = {
     // it, which parks it circling on top of its own FOB elevator. atHome (the real supply radius)
     // lets it settle anywhere in the zone and top up.
     const fwd = ((homeward && view.atHome) || dist < arrive) ? 0 : 1;
+    // FIGHT FROM THE PAD: a unit parked at base topping up used to sit BLIND, facing the
+    // base — a chaser (a Lurcher on a healing Valkyrie) out-damages the heal and the unit
+    // died waiting. Healing doesn't disarm the gun: pivot to face the pursuer (any rival
+    // in sight, else the last threat we fled from) and return fire while the base tops us
+    // up. Stays parked — leaving the heal radius to duel is what gets it killed.
+    if (homeward && fwd === 0) {
+      const foe = view.enemy;                      // visible + LOS → can actually shoot it
+      const face = foe || mem._fleeFrom;           // else at least FACE where the trouble was
+      if (face) {
+        const derr = wrapPi(Math.atan2(-(face.x - self.x), -(face.z - self.z)) - self.heading);
+        let fire = false;
+        if (foe) {
+          const range = view.engageRange || 36, fireCap = view.shotReach || 999;
+          const fd = Math.hypot(foe.x - self.x, foe.z - self.z);
+          if (Math.abs(derr) < 0.22 && fd < Math.min(range * 1.3, fireCap)) fire = mem.rng() < 0.7 * AI_HANDICAP.fireProb;
+        }
+        mem._wantMove = false;
+        return { fwd: 0, turn: clamp(derr * 2.2, -1, 1), fire, state: ctx.mode };
+      }
+    }
     mem._wantMove = Math.abs(fwd) > 0.3;
     return { fwd, turn, fire: false, state: ctx.mode };
   },
@@ -561,14 +590,22 @@ const BEHAVIORS = {
     // tries to skirt for a beat first and only shoots if it's still wedged. Combat
     // states keep their own targeting (the siege-flatten in `combat`), so skip those.
     const hasAmmo = view.self.ammoFrac == null || view.self.ammoFrac > 0;
-    // A RUNNER (Firebrat grabbing a flag / scouting) NEVER shoots its way through — it's fragile,
-    // its gun barely dents a wall, and breakAim disables A* routing (navOverride bails on it), so it
-    // noses the wall and ignores the gate/gap right beside it, burning the ammo it doesn't even need.
-    // Let it navigate AROUND instead (A* finds the gap). Combat states keep their own siege-flatten.
-    const canBreak = hasAmmo && !view.runnerMode && view.breakTarget && view.blockedAhead && cmd.state !== 'engage' && cmd.state !== 'suppress';
+    // Who may shoot a blocker out of the way:
+    //  • A FIREBRAT only breaks a TREE that's got it stuck (it can't crush trees like a heavy, so
+    //    fire is its only way out) — NEVER a structure (its pop-gun can't dent a wall, and trading
+    //    with a turret gets it killed). Fixes both "stuck in the trees forever" AND "shot the gate".
+    //  • Other ground units break either, unless they're on a flee-contact runner mission (a runner
+    //    noses the wall and ignores the gap beside it — let A* route it AROUND instead).
+    // breakAim disables A* routing (navOverride bails), so only commit when genuinely blocked ahead.
+    const isFirebrat = view.self.type === 'firebrat';
+    const canBreak = hasAmmo && view.breakTarget && view.blockedAhead && cmd.state !== 'engage' && cmd.state !== 'suppress'
+      && (isFirebrat ? view.breakTarget.tree : !view.runnerMode);
     if (canBreak) {
       mem._breakT = (mem._breakT || 0) + view.dt;
-      const patience = (1 - (p.triggerHappy ?? 0.5)) * cfg.breakPatience;   // eager → ~0s, patient → full
+      // A Firebrat stuck on a tree shoots NOW — patience up to 2.4s outlasted the 1.8s still-timer,
+      // so unstick fired first and it never got the shot off. Others keep the personality dial.
+      const patience = isFirebrat ? 0.15
+        : (1 - (p.triggerHappy ?? 0.5)) * cfg.breakPatience;   // eager → ~0s, patient → full
       if (mem._breakT > patience) {
         const bt = view.breakTarget, s = view.self;
         const berr = wrapPi(Math.atan2(-(bt.x - s.x), -(bt.z - s.z)) - s.heading);
@@ -609,6 +646,8 @@ export const DEFAULT_BRAIN = {
   type: 'unit-brain',
   config: {
     stillEps: 0.05,      // movement under this (units/tick) counts as "not moving"
+    engageGlow: 0.9,     // seconds a lost duel target stays "visible" (anti engage↔pursue flap)
+    fofStick: 0.25,      // fight-or-flight commitment bias while already engaging (anti boundary-strobe)
     stillLimit: 1.8,     // seconds wedged before the unstick jolt fires
     wedgeLimit: 1.6,     // seconds PRESSED on an obstacle with no gain on the goal before the jolt (a unit sliding along a wall/turret is "moving" but going nowhere)
     wedgeGain: 0.4,      // goal distance must shrink by at least this to count as progress
@@ -742,27 +781,53 @@ export function runBrain(graph, view, mem) {
     maybeRecord(view, mem, 'unstick', 'unstick', r);
     return r;
   }
-  if (mem._wantMove && moved < cfg.stillEps) mem._stillT += view.dt; else mem._stillT = 0;
+  // A unit deliberately squared up shooting a wall/tree clear (a breach) is intentionally
+  // pressed AND still — gate BOTH stall timers on it, or the reverse-pivot yanks the unit off
+  // the tree it was about to shoot (the Firebrat's endless pirouette in the woods). Mirrors the
+  // canBreak eligibility gates: no ammo / runner-on-a-wall / firebrat-on-a-structure is NOT a
+  // breach, so those still unstick normally.
+  const breaching = view.breakTarget && view.blockedAhead
+    && (view.self.ammoFrac == null || view.self.ammoFrac > 0)
+    && mem.state !== 'engage' && mem.state !== 'suppress'
+    && (view.self.type === 'firebrat' ? !!view.breakTarget.tree : !view.runnerMode);
+  if (mem._wantMove && moved < cfg.stillEps && !breaching) mem._stillT += view.dt; else mem._stillT = 0;
   // Progress wedge: a unit can SLIDE along a wall/turret at full speed (so the motion
   // check above never trips) yet make no headway toward its goal — it just grinds the
   // obstacle. If it's pressed against something AND its distance to the goal stops
   // shrinking, count that as a wedge too and fire the same reverse-pivot to spin free.
   const pressed = view.blockedAhead || view.blockedLeft || view.blockedRight;
-  // …unless it's deliberately squared up shooting a wall/tree clear (a breach) — that's
-  // intentional pressing, so let the breach/patience system own it instead of jolting.
-  const breaching = view.breakTarget && view.blockedAhead && mem.state !== 'engage' && mem.state !== 'suppress';
   const gd = view.goal ? Math.hypot(view.goal.x - self.x, view.goal.z - self.z) : 0;
   if (mem._wantMove && pressed && !breaching) {
     if (mem._bestGoalD == null || gd < mem._bestGoalD - cfg.wedgeGain) { mem._bestGoalD = gd; mem._wedgeT = 0; }
     else mem._wedgeT += view.dt;
   } else { mem._bestGoalD = gd; mem._wedgeT = 0; }
-  if (mem._stillT > cfg.stillLimit || mem._wedgeT > cfg.wedgeLimit) {
+  // Don't fire the reverse-pivot while the deterministic gate-exit is driving (view.mustGo):
+  // the exit behavior owns the motion — rotate to the throat, drive straight out — and the
+  // reverse-and-turn jolt is exactly the "dancing on the elevator" the exit path replaces.
+  if (!view.mustGo && (mem._stillT > cfg.stillLimit || mem._wedgeT > cfg.wedgeLimit)) {
     mem._unstick = cfg.unstickDur; mem._unstickTurn = mem.rng() < 0.5 ? -1 : 1;
     mem._stillT = 0; mem._wedgeT = 0; mem._bestGoalD = null;
+    // Escalation counter: jolts within ~8s of each other are the SAME stuck episode. The
+    // navigator watches this — a second jolt means the reflex isn't freeing the unit, so it
+    // blacklists the snag and A*-replans around it instead of letting the dance loop forever.
+    if (mem.t - (mem._unstickAt ?? -99) > 8) mem._unstickN = 0;
+    mem._unstickN = (mem._unstickN || 0) + 1; mem._unstickAt = mem.t;
   }
 
   // Remember the last confirmed sighting (fuels the 'pursuing' condition).
   if (view.seesEnemy && view.enemy) mem.lastSeen = { x: view.enemy.x, z: view.enemy.z, t: mem.t };
+
+  // ENGAGE AFTERGLOW (anti-flap hysteresis): in a real duel both hulls weave through cover, so
+  // line-of-sight blinks off for a tick or two constantly — and every blink used to bounce the
+  // state engage↔pursue/advance/suppress (richwatch: ×50 flips in 36s). If we were FIGHTING and
+  // the rival vanished less than engageGlow ago, keep treating it as visible at its last seen
+  // spot: the ladder stays in engage, steering stays on target, and the state only really
+  // changes once the target has been gone a beat. Entry into engage stays instant.
+  if (view.seesEnemy && view.enemy) { mem._lastEnemyView = { ...view.enemy }; mem._lastSeenT = mem.t; }
+  else if ((mem.state === 'engage' || mem.state === 'suppress') && mem._lastEnemyView
+           && mem.t - (mem._lastSeenT ?? -99) < cfg.engageGlow) {
+    view.seesEnemy = true; view.enemy = mem._lastEnemyView; view.enemyGhost = true;
+  }
 
   // Update latched interrupts (hysteresis).
   for (const L of graph.latches) {
@@ -773,6 +838,12 @@ export function runBrain(graph, view, mem) {
   // Fight-or-flight score for the rival in sight (null if none) — computed ONCE here so the
   // `engaging` condition, the log overlay and the flight recorder all read the same number.
   mem._fof = (view.seesEnemy && view.enemy) ? fightScore(view, p) : null;
+  // COMMITMENT BIAS (anti-flap): a score hovering AT the fight/flee boundary used to strobe the
+  // state every tick or two (richwatch: resupply↔engage ×38, pursue↔engage ×26 in 6s) — each
+  // tiny hp/distance change flipped the sign. Once fighting, it takes a clearly BAD score to
+  // disengage, not a marginal one; the decision to break off stays with the latches (hurt/flee)
+  // and a genuinely lost matchup, where it belongs.
+  if (mem._fof != null && mem.state === 'engage') mem._fof += cfg.fofStick;
 
   // Pick the active state: first transition whose condition holds.
   let rule = graph.transitions[graph.transitions.length - 1];
