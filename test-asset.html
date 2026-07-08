@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!-- test-asset.html — render ONE designed asset in an empty scene (debug tool).
+     Usage: test-asset.html?cfg=barracks (any js/<name>.config.js) [&accent=%23ff4444]
+     Screenshotted headlessly to verify a config builds and renders exactly as authored,
+     with none of the live-match noise (combat, wrecks, spectate camera). -->
+<html lang="en">
+<head><meta charset="UTF-8"><style>html,body{margin:0;height:100%;background:#182028}</style></head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+  import * as THREE from 'three';
+  import { buildAssetGroup } from './js/AssetBuilder.js?v=1';
+  const name = new URLSearchParams(location.search).get('cfg') || 'barracks';
+  const accent = new THREE.Color(new URLSearchParams(location.search).get('accent') || '#cf4a3a');
+  const CFG = (await import(`./js/${name}.config.js`)).default;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color('#182028');
+  scene.add(new THREE.HemisphereLight('#dfeaf2', '#4a4038', 1.1));
+  const sun = new THREE.DirectionalLight('#fff2dd', 1.6); sun.position.set(30, 45, 20); scene.add(sun);
+  const ground = new THREE.Mesh(new THREE.CylinderGeometry(14, 14, 0.3, 40),
+    new THREE.MeshStandardMaterial({ color: '#7a8a6a', roughness: 1 }));
+  ground.position.y = -0.15; scene.add(ground);
+  const g = buildAssetGroup(CFG, accent, { cell: 5 });
+  scene.add(g);
+  const box = new THREE.Box3().setFromObject(g), c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+  const r = Math.max(s.x, s.y, s.z);
+  const cam = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 500);
+  cam.position.set(c.x + r * 1.5, c.y + r * 1.1, c.z + r * 1.5); cam.lookAt(c);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight); document.body.appendChild(renderer.domElement);
+  let t = 0;
+  (function anim() { requestAnimationFrame(anim); t += 0.004;
+    cam.position.set(c.x + Math.cos(t) * r * 1.9, c.y + r * 1.1, c.z + Math.sin(t) * r * 1.9); cam.lookAt(c);
+    renderer.render(scene, cam); window.__assetReady = true; })();
+</script>
+</body>
+</html>

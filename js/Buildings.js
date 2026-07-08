@@ -5,8 +5,12 @@
 import * as THREE from 'three';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture } from './Textures.js?v=2';
 import { buildAssetGroup } from './AssetBuilder.js?v=1';
-import FLAGHQ_CFG from './flaghq.config.js?v=1';
+import FLAGHQ_CFG from './flaghq.config.js?v=2';
+import ADMIN_CFG from './admin.config.js?v=1';
 import TENT_CFG from './tent.config.js?v=1';
+import LOOKOUT_CFG from './lookout.config.js?v=1';
+import BARRACKS_CFG from './barracks.config.js?v=1';
+import QUONSET_CFG from './quonset.config.js?v=2';
 
 // Shared neutral plate map tinted per-material by the team accent (matches Walls.js).
 const ACCENT_TEX = accentPlateTexture();
@@ -39,16 +43,10 @@ export function makeFlagHQ(cell, accent) {
   return buildAssetGroup(FLAGHQ_CFG, accent, { cell });
 }
 
-// Low barracks hut with an accent door stripe.
+// Barracks (js/barracks.config.js): twin green fabric quonset huts with dark end
+// walls, redesigned in the asset-designer (replaces the old hand-coded box hut).
 export function makeBarracks(cell, accent) {
-  const g = new THREE.Group();
-  const body = box(cell * 1.4, cell * 0.5, cell * 0.8, STONE);
-  body.position.y = cell * 0.25; g.add(body);
-  const roof = box(cell * 1.45, cell * 0.15, cell * 0.85, ROOF);
-  roof.position.y = cell * 0.55; g.add(roof);
-  const door = box(cell * 0.22, cell * 0.32, cell * 0.06, accentMat(accent));
-  door.position.set(0, cell * 0.18, cell * 0.42); g.add(door);
-  return g;
+  return buildAssetGroup(BARRACKS_CFG, accent, { cell });
 }
 
 // Supply depot: a cluster of crates.
@@ -64,36 +62,28 @@ export function makeDepot(cell) {
   return g;
 }
 
-// Admin / office building — taller block with a team-colour window band.
+// Admin block (js/admin.config.js): the former flag-HQ tower, now a plain interior
+// structure — concrete stack with team-colour trim banners and a rooftop pennant.
 export function makeAdmin(cell, accent) {
-  const g = new THREE.Group();
-  const base = box(cell * 1.3, cell * 1.2, cell * 1.0, STONE);
-  base.position.y = cell * 0.6; g.add(base);
-  const band = box(cell * 1.34, cell * 0.26, cell * 1.04, accentMat(accent));
-  band.position.y = cell * 0.7; g.add(band);
-  const roof = box(cell * 1.36, cell * 0.12, cell * 1.06, ROOF);
-  roof.position.y = cell * 1.22; g.add(roof);
-  return g;
+  return buildAssetGroup(ADMIN_CFG, accent, { cell });
 }
 
 // Clamshell / quonset hut: a FULL cylinder lying on its side, sunk halfway so
-// the terrain hides the bottom and a clean dome shows above ground.
+// Quonset hut (js/quonset.config.js): a half-buried ribbed-steel barrel vault with a
+// dark end wall, redesigned in the asset-designer (replaces the hand-coded arch).
 export function makeQuonset(cell, accent) {
-  const g = new THREE.Group();
-  const r = cell * 0.45, L = cell * 1.3;
-  const shell = new THREE.Mesh(new THREE.CylinderGeometry(r, r, L, 16), QHUT);
-  shell.rotation.x = Math.PI / 2;   // axis along Z (lying down)
-  shell.position.y = 0;             // centre at ground level -> bottom half hidden
-  shell.castShadow = true;
-  g.add(shell);
-  const door = box(cell * 0.3, cell * 0.4, cell * 0.06, accentMat(accent));
-  door.position.set(0, cell * 0.18, L / 2 + 0.01); g.add(door);
-  return g;
+  return buildAssetGroup(QUONSET_CFG, accent, { cell });
 }
 
 // Canvas ridge tent (Return Fire style): a green triangular-prism A-frame.
 export function makeTent(cell, accent) {
   return buildAssetGroup(TENT_CFG, accent, { cell });
+}
+
+// Lookout tower (js/lookout.config.js): a raised observation deck on cross-braced
+// legs, camo skirt panels in the team colour, spotlight rig on the roof.
+export function makeLookout(cell, accent) {
+  return buildAssetGroup(LOOKOUT_CFG, accent, { cell });
 }
 
 // Surface elevator: a framed platform that vehicles rise onto (the underground

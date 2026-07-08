@@ -8,14 +8,17 @@ import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=5';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp, Wall } from './Walls.js?v=60';
-import { makeFlagHQ } from './Buildings.js?v=3';   // decoy HQ buildings on designed maps
+import { Camp, Wall } from './Walls.js?v=64';
+import { SoldierCorps } from './Soldiers.js?v=2';
+import { makeFlagHQ } from './Buildings.js?v=8';   // decoy HQ buildings on designed maps
+import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
+import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?v=1';
 import { RoadNetwork } from './Roads.js?v=85';
 import { Foliage } from './Foliage.js?v=4';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
 import { Elevator } from './Elevator.js?v=3';
-import { Garage, GARAGE_COUNTS } from './Garage.js?v=7';
+import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=3';
 import { Projectiles } from './Projectiles.js';
@@ -26,14 +29,14 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=84';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=86';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
-import { SUPPLY_ASSETS } from './assets.manifest.js?v=1';
+import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=5';
 
 // --- Renderer ----------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -454,6 +457,12 @@ const MAP_SEED = SHOT_SEED != null ? SHOT_SEED : SHOT ? null : (Math.random() * 
 // rules; placed assets/roads are authored but not yet honoured here). Decoded once;
 // drives the terrain (below) and the AI commanders (applyMapCfgRules).
 const MAP_CFG = (() => {
+  // ?maplocal=<storage key> — same-origin handoff from the map-designer (a real map's
+  // JSON blows past the server's URL length limit as a ?mapcfg= query, HTTP 414).
+  if (QS.has('maplocal')) {
+    try { const j = JSON.parse(localStorage.getItem(QS.get('maplocal'))); if (j) return j; }
+    catch (e) { console.warn('maplocal: could not read —', e && e.message); }
+  }
   if (!QS.has('mapcfg')) return null;
   try { return JSON.parse(decodeURIComponent(escape(atob(QS.get('mapcfg'))))); }
   catch (e) { console.warn('mapcfg: could not decode —', e && e.message); return null; }
@@ -481,6 +490,9 @@ const GARAGE = QS.has('garage') || !FIELD_DIRECT;   // render the hangar as the 
 // (pick PLAYER VS AI / AI VS AI). ?play jumps straight to the deploy garage (the menu
 // navigates here), and the headless/dev/spectate query flags bypass it entirely.
 const START_MENU = !FIELD_DIRECT && !SHOT && !QS.has('play') && !QS.has('garage');
+// ?campaign=<level id> — this match is a campaign level; a player win marks it complete
+// (unlocking the next). ?campaign with no id just reopens the menu on the campaign list.
+const CAMPAIGN_ID = QS.get('campaign') || null;
 // Attrition preview: ?losses=firebrat:3,jotun:1 — until match results feed this.
 const LOSSES = (() => {
   const raw = QS.get('losses');
@@ -698,6 +710,7 @@ let destructibles = new DestructibleManager();
 let camps = [];
 let configBases = false;   // true when bases came from a DESIGNED map (no procgen walls/roads)
 let placedWalls = [];      // designer-placed wall/tower/gate combat pieces (custom maps)
+let placedProps = [];        // designer-placed generic structures (cleanup on rebuild)
 let elevators = [];   // animated FOB surface lifts (one per forward base)
 let resupplies = [];  // neutral fuel/ammo/shield points of interest
 let scrapPiles = [];  // salvage piles — drive over one to collect it for your team (a gib-wreck is worth SCRAP_DROP[type])
@@ -733,6 +746,10 @@ const WIN_CINEMATIC_MS = 5200;   // how long the in-hangar victory cinematic pla
 // (indices into TEAM_COLORS: 4 = RED, 5 = BLUE).
 const TEAM_ACCENT = { red: '#c0392b', blue: '#2e6fc0' };
 const TEAM_CAMO   = { red: 4, blue: 5 };
+// Designer maps tag teams 'a'/'b'/'neutral'; the game runs on 'red'/'blue'/null.
+const gameTeamOf = (dt) => dt === 'a' ? 'red' : dt === 'b' ? 'blue' : null;
+// Build-time accent for a designer team code: its side's accent, or neutral grey.
+const accentForCode = (dt) => { const g = gameTeamOf(dt); return g ? TEAM_ACCENT[g] : '#8a8f8a'; };
 // Default vehicle each team fields (used for the plain-field player until a real
 // garage deploy chooses one).
 const FOB_RIDER = { red: 'jotun', blue: 'firebrat' };
@@ -856,6 +873,7 @@ function placeCamps() {
     scene.add(c.group);
     camps.push(c);
   }
+  wireSoldiers();
   scene.updateMatrixWorld(true);   // place groups in world space BEFORE measuring bounds
   destructibles.refreshAll();      // (else every worldCenter collapses near the origin)
   buildObstacles();
@@ -907,7 +925,8 @@ function placeCampsFromConfig(assets) {
   for (const w of placedWalls) scene.remove(w.group);
   for (const c of camps) scene.remove(c.group);
   for (const e of elevators) { scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
-  camps = []; elevators = []; placedWalls = []; destructibles = new DestructibleManager();
+  for (const g of placedProps) scene.remove(g);
+  camps = []; elevators = []; placedWalls = []; placedProps = []; destructibles = new DestructibleManager();
 
   const items = [];   // { cell, site, size, role, team }  (parallel to camps[])
   const pads = [];
@@ -934,6 +953,7 @@ function placeCampsFromConfig(assets) {
     const groundY = map.heightAt(it.site.x, it.site.z);
     const c = new Camp(grid, it.cell, it.size, it.team, destructibles, groundY, it.role, { bare: true });
     scene.add(c.group); camps.push(c);
+    wireSoldiers();
   }
   // Decoy HQs — same maker as the real one, registered as plain destructibles (no flag).
   for (const d of decoys) {
@@ -960,14 +980,35 @@ function placeCampsFromConfig(assets) {
     if (a.id !== 'wall' && a.id !== 'tower' && a.id !== 'gate') continue;
     const s = siteOfCell(a.cx, a.cz);
     const dtm = a.team || 'neutral';
-    const gameTeam = dtm === 'a' ? 'red' : dtm === 'b' ? 'blue' : null;
+    const gameTeam = gameTeamOf(dtm);
     const w = new Wall({
       type: wallType(a.id, a.rot), world: new THREE.Vector3(s.x, map.heightAt(s.x, s.z), s.z),
-      cell: grid.cell, team: gameTeam, accent: new THREE.Color(TEAM_ACCENT[dtm] || '#8a8f8a'),
+      cell: grid.cell, team: gameTeam, accent: new THREE.Color(accentForCode(dtm)),
       manager: destructibles, span: a.id === 'gate' ? 3 : 1,
     });
     w._team = gameTeam;   // turret targeting (null = neutral, fires on everyone)
     scene.add(w.group); placedWalls.push(w);
+  }
+  // GENERIC STRUCTURES: everything else the designer placed (barracks, lookout, water
+  // tower, containers, hedgehogs, …) — built from the shared manifest, exactly like the
+  // decoy HQs: positioned, accent-tinted, staged, and registered as blocking destructibles.
+  // Without this pass, only forts and supplies survived the trip from designer to game —
+  // a map's whole interior silently vanished when played.
+  for (const a of assets) {
+    const entry = ASSETS_BY_ID[a.id];
+    if (!entry || entry.category !== 'structure') continue;                      // specials/supplies handled above
+    if (a.id === 'wall' || a.id === 'tower' || a.id === 'gate') continue;        // real combat Wall pieces, placed above
+    const dtm = a.team || 'neutral';
+    const g = entry.make(grid.cell, new THREE.Color(accentForCode(dtm)));
+    g.userData.team = gameTeamOf(dtm);   // so the colour-lock can recolour its accent/camo mats
+    const s2 = siteOfCell(a.cx, a.cz);
+    g.position.set(s2.x, map.heightAt(s2.x, s2.z), s2.z);
+    g.rotation.y = (a.rot || 0) * Math.PI / 2;
+    scene.add(g);
+    applyStaging(g, a.id);
+    destructibles.add(new Destructible(g, { type: entry.destructible ? entry.destructible.type : 'building',
+      hp: entry.destructible ? entry.destructible.hp : 100, blocks: true, staged: true }));
+    placedProps.push(g);
   }
   scene.updateMatrixWorld(true);
   destructibles.refreshAll();
@@ -2003,7 +2044,7 @@ function updateRankStars(v) {
     else { const g = new THREE.Group(); g.add(sp); scene.add(g); v._rankGrp = g; }   // the player has no bar
   }
   const cv = v._rankSpr.userData.cv, ctx = cv.getContext('2d');
-  const col = k >= 7 ? '#ffd24a' : k >= 4 ? '#d7dee5' : '#d08a4a';
+  const col = k >= 7 ? '#ffd24a' : k >= 4 ? '#d7dee5' : '#8a5a30';   // bronze reads BROWN, not gold-adjacent (was #d08a4a — too close to gold at billboard size)
   const n = k >= 7 ? k - 6 : k >= 4 ? k - 3 : k;
   ctx.clearRect(0, 0, 96, 26);
   // Vector stars (not a text glyph — headless/odd fonts render \u2605 as tofu boxes).
@@ -2378,6 +2419,25 @@ function buildFlags() {
 // Tint a team's capturable flag to a chosen colour (player team-colour lock).
 function recolorFlag(team, hex) {
   for (const f of flags) if (f.team === team) { f.cloth.material.color.set(hex); f.cloth.material.emissive.set(hex); }
+}
+// Recolour one mesh group to a team colour, the same way Camp.setAccent does for base
+// structures: tint accent-flagged bands, and re-skin any baked camo (towers/lookouts).
+function recolorGroup(group, hex, accent) {
+  group.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (m.userData && m.userData.accent) m.color.set(hex);
+      if (m.userData && m.userData.camo) recolorCamo(m, accent);
+    }
+  });
+}
+// A team locked its colour → make its designed-map props AND standalone fort pieces
+// (walls/towers/bastions, which aren't part of a Camp) follow the exact chosen colour.
+function recolorPlaced(team, hex) {
+  const accent = new THREE.Color(hex);
+  for (const g of placedProps) if (g.userData.team === team) recolorGroup(g, hex, accent);
+  for (const w of placedWalls) if (w._team === team && w.group) recolorGroup(w.group, hex, accent);
 }
 // Nearest rival flag to `team`'s base (its steal target).
 function enemyFlagOf(team) {
@@ -2865,6 +2925,25 @@ function updateScrapHud() {
   }
 }
 
+// ── Base infantry (Soldiers.js): decorative minifigs — garrison patrols, and a squad
+// scattering out of every building that collapses. One InstancedMesh, no gameplay stats.
+let soldiers = null;
+function wireSoldiers() {
+  if (!soldiers) soldiers = new SoldierCorps(scene, map);
+  for (const c of camps) {
+    if (c._soldiersWired) continue;
+    c._soldiersWired = true;
+    c.onBuildingDown = (obj) => soldiers.scatterFrom(obj.position.x, obj.position.z, c.team, c.accent, 3 + (Math.random() * 3 | 0));
+    if (c.role === 'main') {
+      // a small garrison marching a rectangle inside the walls (clear of the road ring)
+      const r = 12, cx = c.center.x, cz = c.center.z;
+      soldiers.addPatrol([
+        { x: cx - r, z: cz - r }, { x: cx + r, z: cz - r },
+        { x: cx + r, z: cz + r }, { x: cx - r, z: cz + r },
+      ], c.team, c.accent, 3);
+    }
+  }
+}
 function updateScrap(dt) {
   const now = performance.now();
   for (let i = scrapPiles.length - 1; i >= 0; i--) {
@@ -3187,6 +3266,8 @@ class AICommander {
     const accent = TEAM_COLORS[colorIndex].hex;
     for (const c of camps) if (c.team === this.team) c.setAccent(accent);
     recolorFlag(this.team, accent);
+    recolorPlaced(this.team, accent);   // designed-map props + standalone forts follow the locked colour
+    if (soldiers) soldiers.retintTeam(this.team, accent);   // base infantry fatigues follow the locked colour
     const elev = elevators.find(e => e.team === this.team); if (elev) elev.setAccent(accent);
     this.fortHp0 = fortHpOf(this.targetTeam()) || 1;
     this.deploy();
@@ -3312,8 +3393,12 @@ class AICommander {
   // Valkyrie available; skips once we're already winning (flag exposed / enemy wiped → normal siege).
   gambitOn() {
     if (this._gambit) return true;
+    // ANY valkyrie arms it — not _pickAvailableType, whose save-the-last rule substitutes a
+    // lurcher whenever only ONE valkyrie remains, holding this escape hatch shut in exactly
+    // the endgame it exists for (seed 221: a full fleet + 14 scrap camped a stale contact for
+    // 40 minutes, gambit locked). A stalemate is THE moment to spend the last flyer.
     if (this._matchT > GAMBIT_AFTER && this.turretsLive() >= 3 && !this.flagExposed()
-        && !this.enemyEliminated() && this._pickAvailableType('valkyrie') === 'valkyrie') {
+        && !this.enemyEliminated() && (this.roster.valkyrie || 0) > 0) {
       this._gambit = true;
       aiLog(this.team, `${this.cname}: This slugfest's going nowhere — Valkyrie, swing around the back and crack their HQ! Don't stop to fight.`);
     }
@@ -3527,6 +3612,10 @@ class AICommander {
     // substitute first. (Firebrats are the only runner, so they have no stand-in and skip
     // this — the Hunter's own firebrat reserve handles saving those for the capture.)
     if (have(want) >= 2) return want;                      // plenty of the wanted type — use it
+    // GAMBIT OVERRIDE: the rear-door play IS the endgame the reserve was being saved for —
+    // a substituted lurcher can't fly the flank, so holding the last valkyrie back here
+    // just re-locks the stalemate the gambit exists to break (seed 221).
+    if (want === 'valkyrie' && this._gambit && have('valkyrie') > 0) return 'valkyrie';
     // Among abundant substitutes, POOL ORDER wins (it encodes role suitability — jotun first
     // for siege work). Sorting by count here sent a reach-42 lurcher to do a reach-80 jotun's
     // siege because the team happened to own one more lurcher (seed 11's pop-gun sieger,
@@ -5221,6 +5310,8 @@ function deployToFOB(type, colorIndex, rise) {
   const accent = TEAM_COLORS[colorIndex].hex;
   for (const c of camps) if (c.team === PLAYER_TEAM) c.setAccent(accent);
   recolorFlag(PLAYER_TEAM, accent);
+  recolorPlaced(PLAYER_TEAM, accent);   // designed-map props + standalone forts follow the locked colour
+  if (soldiers) soldiers.retintTeam(PLAYER_TEAM, accent);   // base infantry fatigues follow the locked colour
   playerElev = elevators.find(e => e.team === PLAYER_TEAM) || null;
   const cx = playerElev ? playerElev.center.x : 0;
   const cz = playerElev ? playerElev.center.z : 0;
@@ -5687,12 +5778,19 @@ function ensureMenuStyle() {
     #gamemenu button:hover { background:rgba(40,58,80,0.96); }
     #gamemenu button:active { transform:scale(0.97); }
     #gamemenu .gm-group { display:flex; flex-direction:column; align-items:center; gap:12px; }
-    /* CAMPAIGN — present but not playable yet */
+    /* Locked / upcoming buttons (campaign levels not yet unlocked, or with no map) */
     #gamemenu .gm-soon { position:relative; opacity:0.5; cursor:default; }
     #gamemenu .gm-soon:hover { background:rgba(20,30,42,0.88); }
     #gamemenu .gm-badge { position:absolute; top:-9px; right:-10px; background:#caa64a; color:#1a1208;
       font-size:8px; font-weight:bold; letter-spacing:1px; padding:2px 7px; border-radius:10px;
       transform:rotate(6deg); box-shadow:0 1px 4px rgba(0,0,0,0.5); }
+    #gamemenu .gm-badge.gm-done { background:#4ad968; }        /* CLEARED */
+    #gamemenu .gm-badge.gm-lock { background:#5a6674; color:#dfe8ef; }  /* LOCKED */
+    /* CAMPAIGN level list */
+    #gamemenu #gm-campaign-list { display:flex; flex-direction:column; align-items:center; gap:12px; }
+    #gamemenu .gm-lvl { position:relative; text-align:left; padding-left:20px; }
+    #gamemenu .gm-lvl-n { color:#7fe7a3; font-weight:bold; margin-right:6px; }
+    #gamemenu .gm-lvl.gm-soon .gm-lvl-n { color:#5a6674; }
     /* DEV TOOLS submenu */
     #gamemenu .gm-devhdr { color:#7fe7a3; font-size:13px; letter-spacing:6px; font-weight:bold;
       margin-bottom:2px; text-shadow:0 0 8px rgba(80,255,150,0.35); }
@@ -5716,6 +5814,22 @@ function ensureMenuStyle() {
     #gamemenu .gm-help .supply-row span { color:#9fb2c2; }`;
   document.head.appendChild(s);
 }
+// Fetch a campaign level's map JSON, stash it for the same-origin loader, and boot straight
+// into that level's deploy garage. `?campaign=<id>` rides along so a win marks it complete.
+async function startCampaignLevel(idx) {
+  const lvl = CAMPAIGN[idx];
+  if (!lvl || !lvl.file || !isUnlocked(idx)) return;
+  try {
+    const res = await fetch(lvl.file, { cache: 'no-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const txt = await res.text();
+    JSON.parse(txt);   // validate before we commit to a navigation
+    localStorage.setItem('rmrf-playmap', txt);
+    location.href = MENU_BASE + '?play&maplocal=rmrf-playmap&campaign=' + encodeURIComponent(lvl.id);
+  } catch (e) {
+    console.warn('campaign: could not load level', lvl.id, '—', e && e.message);
+  }
+}
 function ensureGameMenu() {
   let m = document.getElementById('gamemenu');
   if (m) return m;
@@ -5727,8 +5841,13 @@ function ensureGameMenu() {
     '<div class="gm-sub" id="gm-sub">ISLAND CTF</div>' +
     '<div class="gm-group" id="gm-main">' +
       '<button data-act="pva">PLAYER VS AI</button>' +
-      '<button class="gm-soon" disabled>CAMPAIGN<span class="gm-badge">COMING SOON</span></button>' +
+      '<button data-act="campaign">CAMPAIGN &#9656;</button>' +
       '<button data-act="dev">DEV TOOLS &#9656;</button>' +
+    '</div>' +
+    '<div class="gm-group" id="gm-campaign" style="display:none">' +
+      '<div class="gm-devhdr">CAMPAIGN</div>' +
+      '<div id="gm-campaign-list"></div>' +
+      '<button data-act="back">&#9666; BACK</button>' +
     '</div>' +
     '<div class="gm-group" id="gm-dev" style="display:none">' +
       '<div class="gm-devhdr">DEV TOOLS</div>' +
@@ -5757,18 +5876,36 @@ function ensureGameMenu() {
       ).join('') +
     '</div>';
   document.body.appendChild(m);
-  // Swap between the main buttons and the DEV TOOLS submenu (help hides in dev view).
-  function setDevView(on) {
-    m.querySelector('#gm-main').style.display = on ? 'none' : '';
-    m.querySelector('#gm-dev').style.display = on ? '' : 'none';
-    const help = m.querySelector('#gm-help'); if (help) help.style.display = on ? 'none' : '';
+  // Swap between the main buttons, the CAMPAIGN list, and the DEV TOOLS submenu
+  // (the help panel only shows on the main view).
+  function showView(v) {
+    m.querySelector('#gm-main').style.display = v === 'main' ? '' : 'none';
+    m.querySelector('#gm-dev').style.display = v === 'dev' ? '' : 'none';
+    m.querySelector('#gm-campaign').style.display = v === 'campaign' ? '' : 'none';
+    const help = m.querySelector('#gm-help'); if (help) help.style.display = v === 'main' ? '' : 'none';
+    if (v === 'campaign') renderCampaign();
   }
-  m._setDevView = setDevView;
+  // Build the level list fresh each open so unlocks/cleared badges reflect saved progress.
+  function renderCampaign() {
+    const list = m.querySelector('#gm-campaign-list');
+    list.innerHTML = CAMPAIGN.map((lvl, i) => {
+      const playable = isUnlocked(i) && !!lvl.file;
+      const badge = isCompleted(lvl.id) ? '<span class="gm-badge gm-done">CLEARED</span>'
+        : !lvl.file ? '<span class="gm-badge">SOON</span>'
+        : !playable ? '<span class="gm-badge gm-lock">LOCKED</span>' : '';
+      return `<button class="gm-lvl${playable ? '' : ' gm-soon'}" data-lvl="${i}"${playable ? '' : ' disabled'}>` +
+        `<span class="gm-lvl-n">${i + 1}.</span> ${lvl.name}${badge}</button>`;
+    }).join('');
+  }
+  m._showView = showView;
+  m._setDevView = (on) => showView(on ? 'dev' : 'main');   // back-compat with showGameMenu
   m.addEventListener('click', e => {
-    const b = e.target.closest('button'); if (!b || b.disabled) return;   // CAMPAIGN is disabled
+    const b = e.target.closest('button'); if (!b || b.disabled) return;   // locked levels are disabled
+    if (b.dataset.lvl != null) { startCampaignLevel(+b.dataset.lvl); return; }
     const act = b.dataset.act;
-    if (act === 'dev') { setDevView(true); return; }
-    if (act === 'back') { setDevView(false); return; }
+    if (act === 'campaign') { showView('campaign'); return; }
+    if (act === 'dev') { showView('dev'); return; }
+    if (act === 'back') { showView('main'); return; }
     if (act === 'ava') { location.href = MENU_BASE + '?aivsai'; return; }
     // PLAYER VS AI: reload into a fresh game after a match; on the first screen just open the hangar.
     if (m.dataset.reload === '1') { location.href = MENU_BASE + '?play'; return; }
@@ -5782,7 +5919,7 @@ function showGameMenu(opts = {}) {
   document.getElementById('gm-title').textContent = opts.header || 'RMRF';
   document.getElementById('gm-sub').textContent = opts.sub || 'ISLAND CTF';
   m.dataset.reload = opts.reload ? '1' : '0';
-  if (m._setDevView) m._setDevView(false);   // always (re)open on the main view
+  if (m._showView) m._showView(opts.campaign ? 'campaign' : 'main');   // campaign win → reopen the level list
   m.classList.add('show');
   setGarageOverlays(false);   // hide the deploy HUD behind the menu
 }
@@ -5793,9 +5930,13 @@ if (QS.has('win')) {
   // Preview the in-hangar victory cinematic without playing a match: ?win or ?win=jotun.
   setGarageOverlays(false);
   const c = teamColor(PLAYER_TEAM);
-  garage.playWin(QS.get('win') || 'firebrat', c);
+  // Flag cloth = the stolen enemy colour (matches the real win path). No commanders exist
+  // in this preview so teamColor(enemy) would fall through to white — fake a rival colour
+  // by picking the first palette entry that isn't the player's.
+  const rival = (TEAM_COLORS.find(tc => tc.hex !== c) || { hex: '#46d6ff' }).hex;
+  garage.playWin(QS.get('win') || 'firebrat', c, rival);
   showCelebTitle('VICTORY!', c, 'FLAG SECURED');
-} else if (START_MENU) showGameMenu();   // open the start screen over the hangar
+} else if (START_MENU) showGameMenu({ campaign: QS.has('campaign') });   // open the start screen (or campaign list) over the hangar
 
 // Garage → island handoff. Fired once the garage rise has fully faded to black
 // (garage.phase === 'done'). Builds the island ONCE (behind the black overlay), then
@@ -5873,12 +6014,16 @@ function returnToGarage() {
   // play-again menu (a pick reloads into a brand new world).
   if (matchOver) {
     if (matchWon) {
+      if (CAMPAIGN_ID) markCompleted(CAMPAIGN_ID);   // beat a campaign level → unlock the next
       // In-hangar victory cinematic: the winner presented on the lift with the flag
       // and 3D confetti, VICTORY title, then the menu pops over it after a beat.
       const c = teamColor(PLAYER_TEAM);
-      garage.playWin('firebrat', c);   // the Firebrat is the only flag-carrier, so it's always the winner on the lift
+      // The presented flag is the TROPHY — the enemy's flag we just carried home — so the
+      // cloth flies THEIR colour (confetti/title still celebrate in ours).
+      const stolen = teamColor(PLAYER_TEAM === 'red' ? 'blue' : 'red');
+      garage.playWin('firebrat', c, stolen);   // the Firebrat is the only flag-carrier, so it's always the winner on the lift
       showCelebTitle('VICTORY!', c, 'FLAG SECURED');
-      setTimeout(() => { hideCelebTitle(); showGameMenu({ header: 'VICTORY', sub: 'MATCH OVER', reload: true }); }, WIN_CINEMATIC_MS);
+      setTimeout(() => { hideCelebTitle(); showGameMenu({ header: 'VICTORY', sub: 'MATCH OVER', reload: true, campaign: !!CAMPAIGN_ID }); }, WIN_CINEMATIC_MS);
     } else {
       showGameMenu({ header: 'DEFEAT', sub: 'MATCH OVER', reload: true });
     }
@@ -6089,8 +6234,10 @@ window.RR = {
   THREE, scene, camera, map,
   mapCfg: () => MAP_CFG,                                       // debug: the decoded ?mapcfg (designed map), or null
   get destructibles() { return destructibles; },
+  get soldiers() { return soldiers; },                          // debug: the base-infantry corps (counts/behavior probes)
   get camps() { return camps; },
   get placedWalls() { return placedWalls; },                   // debug: designer-placed fort pieces (custom maps)
+  get placedProps() { return placedProps; },                   // debug: designer-placed generic structures (custom maps)
   damageTapAt: (x, y) => damageTapAt(x, y),
   rebuild: (patch) => rebuild(patch),
   frame: () => frameMap(),
@@ -6138,6 +6285,15 @@ window.RR = {
   roadCells: () => roadNet.cells,                              // road layout cells (headless parallel-road checks)
   setPaused: (v) => { paused = !!v; },                         // debug: freeze the sim (screenshots)
   setLogMode: (m) => setLogMode(m),                            // debug: drive the log overlay ('hidden'|'brief'|'full')
+  drawSonar: (sources) => {                                    // debug: render synthetic sources through the real sonar-arc pipeline (HUD geometry tests)
+    ensureSoundHud();
+    _sonarDebug = true;                                        // keep updateSoundHud from hiding/clearing the debug frame (no listener on the menu screen)
+    soundHudCanvas.style.display = '';
+    const W = window.innerWidth, H = window.innerHeight;
+    soundHudCanvas.width = W; soundHudCanvas.height = H;
+    const g = soundHudCtx; g.clearRect(0, 0, W, H);
+    return sources.map(s => drawSonarArcs(g, W, H, s));
+  },
   setRank: (i, k) => {                                         // debug: pin a rank on combatants[i] (promotion screenshots/tuning)
     const v = combatants[i]; if (!v || v.dead) return null;
     v.rankKills = Math.max(0, Math.min(RANK_MAX, k));
@@ -6165,6 +6321,7 @@ window.RR = {
       projectiles.update(dt); updateProjectileHits();
       destructibles.update(dt);
       updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateLock(dt);
+      if (soldiers) soldiers.update(dt, combatants);
     }
   },
   blockedAt: (x, z) => blockedAt(x, z),
@@ -6586,12 +6743,13 @@ function teamRGB(colorIndex) {
 // Sonar edge-HUD tuning (see drawSonarArcs). Distances are WORLD units; radii/lengths are px.
 const SONAR = {
   distNear: 25, distFar: 160,    // world distance → curvature: near=tight arc, far=flat
-  Rmin: 80, Rmax: 1500,          // screen curvature radius (px) at near / far
-  maxArcLen: 165,                // cap the drawn arc length so a far/flat arc stays a short streak
+  Rmin: 44, Rmax: 360,           // screen curvature radius (px) at near / far — capped LOW so even a far source stays a visibly curved "signal icon", never a flat streak
+  maxArcLen: 100,                // cap the drawn arc length — tight icon-sized arcs that don't run off the screen or stack across each other
   ringGap: 9, ringSpan: 3.2,     // louder → more concentric rings (loud*ringSpan), spaced ringGap px
   maxRings: 4, pad: 40,          // inset from the screen edge
 };
 let soundHudCanvas = null, soundHudCtx = null;
+let _sonarDebug = false;   // RR.drawSonar latch — freeze the HUD for geometry screenshots
 function ensureSoundHud() {
   if (soundHudCanvas) return;
   const c = document.createElement('canvas');
@@ -6659,7 +6817,11 @@ function drawSonarArcs(g, W, H, s) {
   // source exactly; when clamped, it stays on the true edge→source line.
   const sx = cx + nx * (W / 2), sy = cy - ny * (H / 2);       // source's projected screen position (raw NDC → px)
   let vX = sx - ex, vY = sy - ey; const vlen = Math.hypot(vX, vY) || 1; vX /= vlen; vY /= vlen;   // edge→source dir
-  const R = Math.min(SONAR.Rmax, Math.max(SONAR.Rmin, vlen));
+  // HALF the edge→source distance: the centre of curvature sits at the MIDPOINT of the
+  // edge→source line instead of on the source itself — same bearing (the arc still points
+  // straight at the noise), but twice the curvature, so the glyph reads as a tight
+  // signal-strength icon rather than a long sweeping ring.
+  const R = Math.min(SONAR.Rmax, Math.max(SONAR.Rmin, vlen * 0.5));
   const theta = Math.min(SONAR.maxArcLen / R, Math.PI / 2);   // arc angular extent: capped length AND ≤ 90°
   const Cx = ex + vX * R, Cy = ey + vY * R;                   // = the source itself when its off-screen dist is in range
   const base = Math.atan2(ey - Cy, ex - Cx);                  // centre→edge angle (arc centred here, curving around source)
@@ -6686,6 +6848,7 @@ function updateSoundHud(dt) {
     soundPings[i].life -= dt * SND.gunDecay;
     if (soundPings[i].life <= 0) soundPings.splice(i, 1);
   }
+  if (_sonarDebug) return;   // a debug frame is up (RR.drawSonar) — don't hide or clear it
   const listener = soundListener();
   if (!listener) { if (soundHudCanvas) soundHudCanvas.style.display = 'none'; return; }
   ensureSoundHud();
@@ -6694,7 +6857,18 @@ function updateSoundHud(dt) {
   if (soundHudCanvas.width !== W) soundHudCanvas.width = W;
   if (soundHudCanvas.height !== H) soundHudCanvas.height = H;
   const g = soundHudCtx; g.clearRect(0, 0, W, H);
-  for (const s of soundSources(listener)) drawSonarArcs(g, W, H, s);
+  // DE-CLUTTER: sources within ~18° of the same screen bearing draw on the same edge spot
+  // and used to stack into an unreadable pile — keep only the LOUDEST of each cluster
+  // (loudest-first pass; quieter arrivals inside an occupied bearing window are skipped).
+  const srcs = soundSources(listener).sort((a, b) => b.loud - a.loud);
+  const taken = [];
+  for (const s of srcs) {
+    _shv.set(s.pos.x, s.pos.y, s.pos.z).project(camera);
+    let bx = _shv.x, by = -_shv.y; if (_shv.z > 1) { bx = -bx; by = -by; }
+    const bear = Math.atan2(by, bx);
+    if (taken.some(t => Math.abs(Math.atan2(Math.sin(bear - t), Math.cos(bear - t))) < 0.32)) continue;
+    if (drawSonarArcs(g, W, H, s)) taken.push(bear);
+  }
 }
 
 let _splashHidden = false;
@@ -6739,6 +6913,7 @@ function animate() {
       updateResupplies(dt);                  // fuel/ammo/shield POIs + base resupply + shield FX
       updateScrap(dt);                       // salvage piles: bob + proximity pickup → team scrap
       updateGibs(dt);                        // fly the debris from just-destroyed vehicles until it settles
+      if (soldiers) soldiers.update(dt, combatants);   // base infantry: patrol march, wreck scatter, tread squish
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events

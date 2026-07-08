@@ -590,8 +590,10 @@ export class Garage {
   }
 
   // Stage the win: present the winning type's deploy vehicle up on the raised lift,
-  // facing the camera, with a flag + raining confetti in the team colour.
-  playWin(type, teamHex = '#ffd24a') {
+  // facing the camera, with a flag + raining confetti. Confetti celebrates in the
+  // WINNER's colour, but the flag cloth is the TROPHY — the flag just stolen, so it
+  // flies the ENEMY's colour (flagHex). Same-colour default keeps old callers working.
+  playWin(type, teamHex = '#ffd24a', flagHex = teamHex) {
     if (DEPLOY_SLOT[type] === undefined) type = 'firebrat';
     this.selType = type;
     const s = this.slots[DEPLOY_SLOT[type]];
@@ -607,8 +609,8 @@ export class Garage {
     this.selRing.visible = false;
     this.victoryFlag.visible = true;
     this.victoryFlag.position.set(-7, presentH, 5);
-    this.victoryCloth.material.color.set(teamHex);
-    this.victoryCloth.material.emissive.set(teamHex);
+    this.victoryCloth.material.color.set(flagHex);
+    this.victoryCloth.material.emissive.set(flagHex);
     this.victoryLight.intensity = 70;
     this._confPalette = [teamHex, teamHex, teamHex, '#ffffff', '#ffd24a'];
     this.confetti.visible = true;

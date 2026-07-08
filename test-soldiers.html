@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<!-- test-soldiers.html — render the SoldierCorps minifigs on an empty stage (debug tool).
+     A patrol squad marches a square; screenshot headlessly to verify geometry/animation. -->
+<html lang="en">
+<head><meta charset="UTF-8"><style>html,body{margin:0;height:100%;background:#182028}</style></head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+  import * as THREE from 'three';
+  import { SoldierCorps } from './js/Soldiers.js?v=2';
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color('#182028');
+  scene.add(new THREE.HemisphereLight('#dfeaf2', '#4a4038', 1.1));
+  const sun = new THREE.DirectionalLight('#fff2dd', 1.6); sun.position.set(30, 45, 20); scene.add(sun);
+  scene.add(new THREE.Mesh(new THREE.CylinderGeometry(12, 12, 0.3, 40),
+    new THREE.MeshStandardMaterial({ color: '#7a8a6a', roughness: 1 })).translateY(-0.15));
+  const corps = new SoldierCorps(scene, { heightAt: () => 0, isLand: () => true });
+  corps.addPatrol([{ x: -5, z: -5 }, { x: 5, z: -5 }, { x: 5, z: 5 }, { x: -5, z: 5 }], 'a', '#8a4ad0', 4);   // purple + yellow: NOT red/blue — proves fatigues follow any team colour
+  corps.scatterFrom(0, 0, 'b', '#d0b04a', 4);
+  const cam = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 200);
+  cam.position.set(10, 7, 10); cam.lookAt(0, 0.6, 0);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight); document.body.appendChild(renderer.domElement);
+  const clock = new THREE.Clock();
+  (function anim() { requestAnimationFrame(anim);
+    corps.update(Math.min(0.05, clock.getDelta()), []);
+    renderer.render(scene, cam); window.__ready = true; })();
+</script>
+</body>
+</html>

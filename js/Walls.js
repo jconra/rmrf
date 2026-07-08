@@ -7,9 +7,10 @@
 import * as THREE from 'three';
 import { Destructible } from './Destructible.js?v=5';
 import { applyStaging } from './AssetStaging.js?v=1';
-import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent } from './Buildings.js?v=3';
+import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent, makeLookout } from './Buildings.js?v=8';
 import { concreteTexture, accentPlateTexture } from './Textures.js?v=2';
 import { buildAssetGroup, recolorCamo } from './AssetBuilder.js?v=1';
+import { PROP_CONFIGS } from './assets.manifest.js?v=5';   // base-flavour props (containers/generator/drums/…)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
@@ -446,7 +447,9 @@ export class Camp {
       obj.rotation.y = yaw;
       this.group.add(obj);
       applyStaging(obj, id);   // authored crumble (if any) before the Destructible reads it
-      const d = new Destructible(obj, { type: 'building', hp, staged: true });   // pieces crumble (was: vanish→rubblePile)
+      const d = new Destructible(obj, { type: 'building', hp, staged: true,
+        // building down → tell the camp's owner (main.js spills soldiers out of the wreck)
+        onDestroyed: () => { if (this.onBuildingDown) this.onBuildingDown(obj); } });   // pieces crumble (was: vanish→rubblePile)
       manager.add(d);
       this.buildings.push(obj);
       return d;
@@ -470,6 +473,21 @@ export class Camp {
         addCell(makeQuonset(cell, accent), inHi, inHi, 140, 'quonset', Math.PI / 2);
         addCell(makeBarracks(cell, accent), inLo, inLo, 120, 'barracks');
         addCell(makeTent(cell, accent), inHi, inLo, 50, 'tent');
+        // Lookout tower on the perimeter row, OFF the axis lanes (the gate roads run
+        // along ix=0 / iz=0) and clear of the corner buildings.
+        addCell(makeLookout(cell, accent), inHi, 1, 200, 'lookout');
+        // BASE DRESSING: a few flavour props in the remaining off-axis perimeter cells,
+        // picked deterministically from the camp centre (same base → same clutter every
+        // load, different bases → different mixes). Slot A allows the 2-cell-wide props
+        // (they spill toward +x, which is open interior there); the others are 1×1 only.
+        const hash = Math.abs((centreX * 73856093) ^ (centreZ * 19349663)) | 0;
+        const dress = (names, ix, iz, slot) => {
+          const cfg = PROP_CONFIGS[names[(hash >> (slot * 3)) % names.length]];
+          addCell(buildAssetGroup(cfg, accent, { cell }), ix, iz, cfg.destructible.hp, cfg.id);
+        };
+        dress(['containers', 'range', 'sandbags'], inLo, 1, 0);        // 2x1-safe slot (spills +x)
+        dress(['generator', 'drums', 'watertower'], inLo, -1, 1);
+        dress(['jeep', 'checkpoint', 'drums', 'sandbags'], 1, inLo, 2);
       }
     }
   }
@@ -541,12 +559,10 @@ export function makeWall(cell = 5, accent = new THREE.Color('#c0392b')) {
   return wallStack(cell, accent, false).group;
 }
 export function makeTower(cell = 5, accent = new THREE.Color('#c0392b')) {
-  const { group, height, layerH } = wallStack(cell, accent, true);
-  const t = turretMesh(cell, accent, 0.1 + height + layerH * 0.5);
-  t.userData.turret = true;   // keystone: holds the bastion up + idle-sweeps under the generic crumble
-  t.userData.fallAt = 0.3;    // bastion stays intact until the gun is knocked out (~30% HP)
-  group.add(t);
-  return group;
+  // Build from the designed config — the same mesh the live game assembles. The old
+  // hand-coded wallStack+turretMesh stayed here after the corner-tower redesign, so the
+  // map-designer's placed preview showed the OLD tower while the game built the new one.
+  return buildAssetGroup(CORNER_TOWER_CFG, accent, { cell });
 }
 export function makeGate(cell = 5, accent = new THREE.Color('#c0392b'), span = 3) {
   const g = new THREE.Group();

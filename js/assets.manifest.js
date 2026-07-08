@@ -21,37 +21,58 @@
 
 import {
   makeFlagHQ, makeBarracks, makeDepot, makeAdmin,
-  makeQuonset, makeTent, makeElevator,
-} from './Buildings.js?v=3';
+  makeQuonset, makeTent, makeElevator, makeLookout,
+} from './Buildings.js?v=8';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
-import { makeWall, makeTower, makeGate } from './Walls.js?v=60';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
+import { makeWall, makeTower, makeGate } from './Walls.js?v=64';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';   // the designed corner tower, as shared data (designer + game read this one file)
+import LOOKOUT_CFG from './lookout.config.js?v=1';   // the designed lookout tower, same shared-data pattern
+import FLAGHQ_CFG from './flaghq.config.js?v=2';     // config refs let the asset-designer OPEN these for editing
+import ADMIN_CFG from './admin.config.js?v=1';       // former flag-HQ tower, now a decorative structure
+import TENT_CFG from './tent.config.js?v=1';
+import BARRACKS_CFG from './barracks.config.js?v=1';
+import QUONSET_CFG from './quonset.config.js?v=2';
+// Base-flavour prop set (shipping containers, water tower, motor pool, range, defences…):
+// each is a designer-format config built by the generic AssetBuilder — no bespoke maker code.
+import { buildAssetGroup } from './AssetBuilder.js?v=1';
+import CONTAINERS_CFG from './containers.config.js?v=2';
+import WATERTOWER_CFG from './watertower.config.js?v=1';
+import JEEP_CFG from './jeep.config.js?v=1';
+import RANGE_CFG from './range.config.js?v=2';
+import GENERATOR_CFG from './generator.config.js?v=1';
+import HEDGEHOGS_CFG from './hedgehogs.config.js?v=3';
+import DRUMS_CFG from './drums.config.js?v=1';
+import SANDBAGS_CFG from './sandbags.config.js?v=1';
+import CHECKPOINT_CFG from './checkpoint.config.js?v=1';
+import BASTION_CFG from './bastion.config.js?v=1';
+const cfgMake = (CFG) => (cell, accent) => buildAssetGroup(CFG, accent, { cell });
+export const PROP_CONFIGS = { containers: CONTAINERS_CFG, watertower: WATERTOWER_CFG, jeep: JEEP_CFG, range: RANGE_CFG, generator: GENERATOR_CFG, hedgehogs: HEDGEHOGS_CFG, drums: DRUMS_CFG, sandbags: SANDBAGS_CFG, checkpoint: CHECKPOINT_CFG };
 
 export const ASSETS = [
   // ── Structures ─────────────────────────────────────────────────────────────
   {
-    id: 'flagHQ', name: 'Flag HQ', make: makeFlagHQ,
+    id: 'flagHQ', name: 'Flag HQ', make: makeFlagHQ, config: FLAGHQ_CFG,
     footprint: { w: 2, d: 2 }, accent: true,
     destructible: { type: 'building', hp: 600 },
     category: 'special',   // the capturable flag hides inside until it falls
     desc: 'Command HQ flying the team flag. Destroy it to expose the capturable flag inside.',
   },
   {
-    id: 'admin', name: 'Admin Block', make: makeAdmin,
+    id: 'admin', name: 'Admin Block', make: makeAdmin, config: ADMIN_CFG,
     footprint: { w: 2, d: 2 }, accent: true,
     destructible: { type: 'building', hp: 160 },
     category: 'structure',
-    desc: 'A tall office block inside the compound.',
+    desc: 'A tall command tower with team banners — decorative interior structure.',
   },
   {
-    id: 'quonset', name: 'Quonset Hut', make: makeQuonset,
+    id: 'quonset', name: 'Quonset Hut', make: makeQuonset, config: QUONSET_CFG,
     footprint: { w: 1, d: 2 }, accent: true,
     destructible: { type: 'building', hp: 140 },
     category: 'structure',
     desc: 'A curved-roof storage shed.',
   },
   {
-    id: 'barracks', name: 'Barracks', make: makeBarracks,
+    id: 'barracks', name: 'Barracks', make: makeBarracks, config: BARRACKS_CFG,
     footprint: { w: 2, d: 1 }, accent: true,
     destructible: { type: 'building', hp: 120 },
     category: 'structure',
@@ -65,11 +86,18 @@ export const ASSETS = [
     desc: 'A cluster of stacked crates.',
   },
   {
-    id: 'tent', name: 'Ridge Tent', make: makeTent,
+    id: 'tent', name: 'Ridge Tent', make: makeTent, config: TENT_CFG,
     footprint: { w: 1, d: 2 }, accent: true,
     destructible: { type: 'building', hp: 50 },
     category: 'structure',
     desc: 'A canvas A-frame shelter.',
+  },
+  {
+    id: 'lookout', name: 'Lookout Tower', make: makeLookout, config: LOOKOUT_CFG,
+    footprint: { w: 1, d: 1 }, accent: true,
+    destructible: { type: 'building', hp: 200 },
+    category: 'structure',
+    desc: 'A raised observation deck on braced legs, skirted in team camo.',
   },
   {
     id: 'elevator', name: 'Surface Elevator', make: makeElevator,
@@ -101,6 +129,39 @@ export const ASSETS = [
     category: 'structure',
     desc: 'A drive-through gateway: two posts under a team-colour lintel.',
   },
+
+  // ── Base-flavour props (designer-config assets; the map palette + base dressing) ──
+  { id: 'containers', name: 'Container Stack', make: cfgMake(CONTAINERS_CFG), config: CONTAINERS_CFG,
+    footprint: { w: 2, d: 1 }, accent: true, destructible: { type: 'building', hp: 90 },
+    category: 'structure', desc: 'Stacked shipping containers; the top one wears a team-colour door.' },
+  { id: 'watertower', name: 'Water Tower', make: cfgMake(WATERTOWER_CFG), config: WATERTOWER_CFG,
+    footprint: { w: 1, d: 1 }, accent: true, destructible: { type: 'building', hp: 150 },
+    category: 'structure', desc: 'A tall four-leg water tower with a team-colour tank band — a landmark.' },
+  { id: 'jeep', name: 'Utility Jeep', make: cfgMake(JEEP_CFG), config: JEEP_CFG,
+    footprint: { w: 1, d: 1 }, accent: false, destructible: { type: 'building', hp: 40 },
+    category: 'structure', desc: 'A parked olive jeep. Decorative, and not built to take a shell.' },
+  { id: 'range', name: 'Firing Range', make: cfgMake(RANGE_CFG), config: RANGE_CFG,
+    footprint: { w: 2, d: 1 }, accent: false, destructible: { type: 'building', hp: 30 },
+    category: 'structure', desc: 'Sandbag firing line and three silhouette targets downrange.' },
+  { id: 'generator', name: 'Power Generator', make: cfgMake(GENERATOR_CFG), config: GENERATOR_CFG,
+    footprint: { w: 1, d: 1 }, accent: true, destructible: { type: 'building', hp: 60 },
+    category: 'structure', desc: 'A skid-mounted diesel genset with an exhaust stack and fuel tank.' },
+  { id: 'hedgehogs', name: 'Czech Hedgehogs', make: cfgMake(HEDGEHOGS_CFG), config: HEDGEHOGS_CFG,
+    footprint: { w: 1, d: 1 }, accent: false, destructible: { type: 'wall', hp: 80 },
+    category: 'structure', desc: 'Crossed-beam anti-tank obstacles. Slow to chew through; blocks a lane.' },
+  { id: 'drums', name: 'Fuel Drums', make: cfgMake(DRUMS_CFG), config: DRUMS_CFG,
+    footprint: { w: 1, d: 1 }, accent: false, destructible: { type: 'building', hp: 30 },
+    category: 'structure', desc: 'A cluster of fuel drums — one tipped, one stacked, one hazard-striped.' },
+  { id: 'sandbags', name: 'Sandbag Nest', make: cfgMake(SANDBAGS_CFG), config: SANDBAGS_CFG,
+    footprint: { w: 1, d: 1 }, accent: false, destructible: { type: 'wall', hp: 60 },
+    category: 'structure', desc: 'An L-shaped two-course sandbag position.' },
+  { id: 'checkpoint', name: 'Checkpoint', make: cfgMake(CHECKPOINT_CFG), config: CHECKPOINT_CFG,
+    footprint: { w: 1, d: 1 }, accent: true, destructible: { type: 'building', hp: 50 },
+    category: 'structure', desc: 'A guard booth with a hazard barrier arm (it snaps off first).' },
+
+  { id: 'bastion', name: 'Bastion (No Gun)', make: cfgMake(BASTION_CFG), config: BASTION_CFG,
+    footprint: { w: 1, d: 1 }, accent: true, destructible: { type: 'wall', hp: 340 },
+    category: 'structure', desc: 'The corner tower without its gun — hard cover for easier maps.' },
 
   // ── Supply POIs (neutral; either team can use them, or blow one to deny it) ──
   {

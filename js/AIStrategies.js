@@ -292,6 +292,10 @@ function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // the old linear step machine that could never let go of a finished objective.
 const URGENT = new Set(['capture', 'intercept']);
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
+// Odds a persona breaks off its field plan when its own base is being shelled (rolled once
+// per 25s raid window in tick()). Identity, not balance: the turtle is a homebody, the
+// rogue's whole doctrine is "their base falls before ours does" — it plays the race.
+const HOME_RESPONSE = { turtle: 1.0, warrior: 0.7, hunter: 0.55, rogue: 0.25 };
 
 // REPORT-CARD UNBLOCKERS — what to run instead when a mission is banned (two straight
 // total-failure deaths: no kills, no base damage, flag untouched — see cmd.missionBanned).
@@ -347,6 +351,27 @@ class Doctrine {
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
     if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; }
+    // HOME UNDER ATTACK (persona-weighted): enemy rounds are hitting our structures. The
+    // tower's radio call used to be consumed only by a commander ALREADY in defend, so any
+    // offense-minded persona simply never heard it: a Hunter idled at a stale mid-field goal
+    // for 141s while a lone valkyrie levelled its whole main base (census seeds 151/123 —
+    // 187s/234s zero-kill stomps). But an ALWAYS-enforced retreat would be its own exploit
+    // (poke a tower every few seconds and the enemy commander yo-yos home forever) and it
+    // outlaws the base RACE — a legitimate play. So it's a dice roll per raid window,
+    // weighted by who the commander IS: a turtle always turns back, a rogue almost never
+    // breaks off its own attack. And a commander whose assault is about to pay off (their
+    // towers down / keep cracked / flag grabbable) stays committed regardless of the dice —
+    // winning the race beats saving towers.
+    if (!next && cmd.homeAttack && cmd.homeAttack()
+        && !cmd.flagGrabbable() && !(cmd.fortDown && cmd.fortDown()) && !cmd.flagExposed()) {
+      const now = performance.now();
+      if (!cmd._homeRollAt || now - cmd._homeRollAt > 25000) {   // one decision per raid window, not per tick (mood can shift on the next window)
+        cmd._homeRollAt = now;
+        cmd._homeRollGo = this.rng() < (HOME_RESPONSE[cmd.archetype] ?? 0.6);
+        if (!cmd._homeRollGo && this.log) this.log(`They're shelling our base — let them! We finish THEIRS first.`);
+      }
+      if (cmd._homeRollGo) { next = 'defend'; why = 'our base is under fire — get back there and stop them'; }
+    }
     // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
     // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
     // without a firebrat to actually grab the exposed flag).
