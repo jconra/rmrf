@@ -29,6 +29,7 @@ export class Foliage {
     // Destructible palms: each = { x,y,z, r, hp, dead, fell, axis, parts:[{inst,i,orig}] }.
     // (Only palms/trees are shootable; grass + bushes stay pure cosmetic instancing.)
     this.trees = [];
+    this._tgrid = null;   // spatial hash for treeAt(); built by scatter()→_buildTreeGrid()
   }
 
   // Build all procedural props (synchronous). Several randomized variants per
@@ -169,6 +170,30 @@ export class Foliage {
         this.group.add(sInst);
       }
     }
+    this._buildTreeGrid();   // spatial hash so treeAt() is O(nearby) not O(all trees) — see below
+  }
+
+  // A uniform spatial hash over the (static) tree scatter. treeAt() is called per A* cell during
+  // pathfinding, so a linear scan of every palm was the frame-stutter hotspot (perf trace: 550ms
+  // in treeAt while a Firebrat re-planned an ocean crossing). Trees never move and are only ever
+  // REMOVED (felled/dead, skipped by flag), so the grid is built once per scatter and never edited.
+  _buildTreeGrid() {
+    this._tgrid = null;
+    if (this.trees.length < 40) return;   // a linear scan of a sparse scatter beats grid overhead
+    let maxR = 0;
+    for (const t of this.trees) if (t.r > maxR) maxR = t.r;
+    this._tmaxR = maxR;
+    // Bucket sized so a query (reach = maxR + pad, pad ≤ vehicle radius ~3) touches ~2×2 buckets.
+    // Numeric keys (i*STRIDE+j) avoid per-lookup string allocation on this hot path.
+    const B = Math.max(10, Math.ceil((maxR + 3) * 1.5));
+    this._tcell = B;
+    const g = new Map();
+    for (const t of this.trees) {
+      const key = Math.floor(t.x / B) * 8192 + Math.floor(t.z / B);
+      let b = g.get(key); if (!b) { b = []; g.set(key, b); }
+      b.push(t);
+    }
+    this._tgrid = g;
   }
 
   // Damage palms within `radius` of a world point. amount>=hp fells the tree.
@@ -187,12 +212,29 @@ export class Foliage {
     return hit;
   }
 
-  // Is there a live tree overlapping (x,z) within pad? Returns it or null.
+  // Is there a live tree overlapping (x,z) within pad? Returns it or null. Uses the spatial
+  // hash (only scans buckets a tree could overlap from) — the linear fallback covers a
+  // pre-scatter call. reachMax = biggest tree radius + pad bounds how many buckets to touch.
   treeAt(x, z, pad = 0) {
-    for (const t of this.trees) {
-      if (t.dead || t.fell > 0) continue;
-      const dx = t.x - x, dz = t.z - z, reach = t.r + pad;
-      if (dx * dx + dz * dz <= reach * reach) return t;
+    const g = this._tgrid;
+    if (!g) {
+      for (const t of this.trees) {
+        if (t.dead || t.fell > 0) continue;
+        const dx = t.x - x, dz = t.z - z, reach = t.r + pad;
+        if (dx * dx + dz * dz <= reach * reach) return t;
+      }
+      return null;
+    }
+    const B = this._tcell, reachMax = this._tmaxR + pad;
+    const i0 = Math.floor((x - reachMax) / B), i1 = Math.floor((x + reachMax) / B);
+    const j0 = Math.floor((z - reachMax) / B), j1 = Math.floor((z + reachMax) / B);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const bucket = g.get(i * 8192 + j); if (!bucket) continue;
+      for (const t of bucket) {
+        if (t.dead || t.fell > 0) continue;
+        const dx = t.x - x, dz = t.z - z, reach = t.r + pad;
+        if (dx * dx + dz * dz <= reach * reach) return t;
+      }
     }
     return null;
   }

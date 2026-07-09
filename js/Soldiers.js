@@ -159,7 +159,7 @@ export class SoldierCorps {
       for (const v of vehicles) {
         if (v.dead || (v._move && v._move.ignoreWalls)) continue;
         const p = v.holder.position;
-        if ((p.x - u.x) ** 2 + (p.z - u.z) ** 2 < SQUASH_R * SQUASH_R) { u.squash = 0.001; break; }
+        if ((p.x - u.x) ** 2 + (p.z - u.z) ** 2 < SQUASH_R * SQUASH_R) { u.squash = 0.001; if (this.onSquish) this.onSquish(u.x, 0, u.z); break; }
       }
     }
     for (const u of dead) this._retire(u);

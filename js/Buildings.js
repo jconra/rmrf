@@ -7,9 +7,9 @@ import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofT
 import { buildAssetGroup } from './AssetBuilder.js?v=1';
 import FLAGHQ_CFG from './flaghq.config.js?v=2';
 import ADMIN_CFG from './admin.config.js?v=1';
-import TENT_CFG from './tent.config.js?v=1';
+import TENT_CFG from './tent.config.js?v=2';
 import LOOKOUT_CFG from './lookout.config.js?v=1';
-import BARRACKS_CFG from './barracks.config.js?v=1';
+import BARRACKS_CFG from './barracks.config.js?v=2';
 import QUONSET_CFG from './quonset.config.js?v=2';
 
 // Shared neutral plate map tinted per-material by the team accent (matches Walls.js).

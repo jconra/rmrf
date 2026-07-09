@@ -8,19 +8,21 @@ import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=5';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp, Wall } from './Walls.js?v=64';
-import { SoldierCorps } from './Soldiers.js?v=2';
-import { makeFlagHQ } from './Buildings.js?v=8';   // decoy HQ buildings on designed maps
+import { Camp, Wall } from './Walls.js?v=65';
+import { SoldierCorps } from './Soldiers.js?v=3';
+import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=3';
+import { makeFlagHQ } from './Buildings.js?v=9';   // decoy HQ buildings on designed maps
 import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
 import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?v=1';
 import { RoadNetwork } from './Roads.js?v=85';
-import { Foliage } from './Foliage.js?v=4';
+import { Foliage } from './Foliage.js?v=5';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
 import { Elevator } from './Elevator.js?v=3';
+import { Sub } from './Submarine.js?v=3';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
-import { SoundManager } from './SoundManager.js?v=3';
+import { SoundManager } from './SoundManager.js?v=4';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
@@ -29,14 +31,14 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher } from './AIStrategies.js?v=86';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate } from './AIStrategies.js?v=88';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
-import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=5';
+import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=6';
 
 // --- Renderer ----------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -263,6 +265,8 @@ const keys = {};
 window.addEventListener('keydown', e => {
   keys[e.key.toLowerCase()] = true;   // firing is on the LEFT mouse / tap, not SPACE
   if (e.key.toLowerCase() === 'v' && !e.repeat) toggleAstarViz();   // A* search visualizer overlay
+  if (e.key.toLowerCase() === 'm' && !e.repeat) deployMine();       // Firebrat: lay a land mine
+  if (e.key.toLowerCase() === 'n' && !e.repeat) deployPod();        // Firebrat: drop a sensor pod
 });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
@@ -719,6 +723,8 @@ const teamScrap = { red: 0, blue: 0 };   // scrap banked per team; spent in the 
 const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
 let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
+let aiScrapTightArrive = true;   // salvage-detouring units close to within the pickup radius instead of halting at mission arriveDist (A/B via RR.setScrapTightArrive)
+let aiPostKillMoveOn = true;   // on a kill, drop the killer's engage-afterglow ghost so it doesn't linger "searching" the corpse (A/B via RR.setPostKillMoveOn)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
 const LOOT_RANGE = 28;         // after a KILL, how far the killer will swing over to grab the wreck it just made
@@ -828,7 +834,7 @@ function placeCamps() {
   for (const w of placedWalls) scene.remove(w.group);
   placedWalls = [];
   for (const c of camps) scene.remove(c.group);
-  for (const e of elevators) { scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
+  for (const e of elevators) { if (e._snd) { e._snd.stop(); e._snd = null; } scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
   camps = [];
   elevators = [];
   destructibles = new DestructibleManager();
@@ -898,6 +904,7 @@ function placeCamps() {
   buildFlags();        // capturable flag at each main base
   placeResupplies();   // neutral fuel/ammo/shield points of interest
   scatterScrap();      // salvage piles out toward the map rim (scouting reward)
+  configureSubZone();   // arm the deep-water sub zone (the sub itself spawns on demand)
 }
 
 // World site (with ground height) of a build cell.
@@ -924,7 +931,7 @@ function placeCampsFromConfig(assets) {
 
   for (const w of placedWalls) scene.remove(w.group);
   for (const c of camps) scene.remove(c.group);
-  for (const e of elevators) { scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
+  for (const e of elevators) { if (e._snd) { e._snd.stop(); e._snd = null; } scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
   for (const g of placedProps) scene.remove(g);
   camps = []; elevators = []; placedWalls = []; placedProps = []; destructibles = new DestructibleManager();
 
@@ -1026,9 +1033,13 @@ function placeCampsFromConfig(assets) {
   buildFlags();
   placeResupplies();
   scatterScrap();
+  configureSubZone();
 }
 // Use the designed bases when a map carries placed assets; else procedural placement.
 function placeCampsAuto() {
+  if (minefield) minefield.reset();   // clear any mines/pods from a prior match
+  if (sensorNet) sensorNet.reset();
+  resetGadgetStats();
   const assets = MAP_CFG && MAP_CFG.overrides && MAP_CFG.overrides.assets;
   if (assets && assets.length) placeCampsFromConfig(assets);
   else placeCamps();
@@ -1168,6 +1179,7 @@ let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hol
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
 let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
+let aiMineAvoid = !QS.has('nomineavoid'); // soft-steer AI ground units around mines their team has spotted
 let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
 const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beelines it and ignores turrets/fire (final-dash commit).
                              // MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
@@ -1712,6 +1724,11 @@ function explodeAt(point, blast, dmg, team, shooter) {
   destructibles.damageAt(point, blast, dmg);
   if (foliage) foliage.hitTreesAt(point, blast, dmg);
   const tagged = damageVehiclesAt(point, blast, dmg, team, shooter);
+  // Area damage clears mines + sensor pods in the blast. A Valkyrie rocket that dives to a
+  // ground hit takes a mine out directly; flat tracers never detonate at the mine, so they
+  // sail over it. (Mine self-detonations route through here too → adjacent mines chain-clear.)
+  if (minefield) minefield.damageAt(point, blast);
+  if (sensorNet) sensorNet.damageAt(point, blast);
   spawnImpact(point, blast);
   return tagged;
 }
@@ -2102,6 +2119,10 @@ function destroyVehicle(veh, cause, killer = null) {
       const cmd = commanders.find(c => c.team === killer.team && c.unit === killer);
       if (cmd && !wreck.overWater && cmd.wantsLoot()) { cmd._lootPile = wreck; cmd._lootUntil = performance.now() + LOOT_MS; }
     }
+    // Drop the killer's engage-afterglow ghost: that hysteresis holds a target at its last-seen
+    // spot through LOS blinks, but a KILLED enemy shouldn't be "searched for" — it made the killer
+    // stand and stare at the corpse (and its fresh wreck) for a beat instead of moving on/looting.
+    if (aiPostKillMoveOn && killer && killer.ai) killer.ai._lastEnemyView = null;
   }
   if (veh.isPlayer) { killPlayer(); return; }
   // Surface what happened to the AI unit — drowned/destroyed units used to just vanish.
@@ -2325,6 +2346,95 @@ function updatePlayerHud() {
   const shRow = document.getElementById('shield-row'), sh = document.getElementById('shield-fill');
   if (shRow) shRow.style.display = player.shield > 0 ? 'flex' : 'none';
   if (sh) sh.style.width = (Math.max(0, player.shield / player.maxShield) * 100) + '%';
+  updateGadgetButtons();
+}
+
+// ── Firebrat gadget deploy: LAND MINE + SENSOR POD ───────────────────────────
+// Two buttons appear at the bottom while you drive a Firebrat. Mines are limited (2 per
+// trip, 12 per team); pods are FIFO-capped at 3 per team. Also bound to M (mine) / N (pod).
+function playerIsFirebrat() { return onField && player && !player.dead && player.type === 'firebrat'; }
+let gadgetBar = null;
+function ensureGadgetButtons() {
+  if (gadgetBar) return;
+  const st = document.createElement('style');
+  st.textContent =
+    '#gadget-bar{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:58;display:none;gap:14px;}' +
+    '#gadget-bar.show{display:flex;}' +
+    '#gadget-bar button{font-family:inherit;min-width:96px;padding:10px 12px;border-radius:12px;cursor:pointer;' +
+    'background:rgba(18,26,34,0.82);border:1px solid rgba(120,150,180,0.4);color:#dfeaf2;box-shadow:0 2px 8px rgba(0,0,0,0.45);' +
+    'font-size:12px;letter-spacing:1px;line-height:1.3;transition:background .1s,transform .06s;}' +
+    '#gadget-bar button:active{transform:scale(0.95);}' +
+    '#gadget-bar button:disabled{opacity:0.4;cursor:default;}' +
+    '#gadget-bar button .g-n{display:block;font-size:16px;font-weight:bold;color:#8fd3ff;}' +
+    '#gadget-bar button.ok{background:rgba(40,90,60,0.9);} #gadget-bar button.no{background:rgba(96,36,32,0.9);}';
+  document.head.appendChild(st);
+  gadgetBar = document.createElement('div');
+  gadgetBar.id = 'gadget-bar';
+  gadgetBar.innerHTML =
+    '<button id="mine-btn" title="Lay a land mine (M)">MINE<span class="g-n" id="mine-n">2</span></button>' +
+    '<button id="pod-btn" title="Drop a sensor pod (N)">SENSOR<span class="g-n" id="pod-n">0/3</span></button>';
+  document.body.appendChild(gadgetBar);
+  document.getElementById('mine-btn').addEventListener('pointerdown', e => { e.preventDefault(); deployMine(); });
+  document.getElementById('pod-btn').addEventListener('pointerdown', e => { e.preventDefault(); deployPod(); });
+}
+// Master volume knob, top-left. Persists to localStorage('rmrf-volume') and pushes the value
+// into the SoundManager (which also seeds itself from the same key if audio starts later). A
+// speaker glyph toggles a slider so it stays out of the way until you want it.
+let volCtl = null;
+function ensureVolumeControl() {
+  if (volCtl) return;
+  const saved = parseFloat(localStorage.getItem('rmrf-volume'));
+  const v0 = isFinite(saved) ? Math.max(0, Math.min(1, saved)) : 1;
+  const st = document.createElement('style');
+  st.textContent =
+    '#vol-ctl{position:fixed;top:12px;left:12px;z-index:120;display:flex;align-items:center;gap:8px;' +
+    'background:rgba(18,26,34,0.72);border:1px solid rgba(120,150,180,0.35);border-radius:10px;padding:6px 9px;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,0.4);font-family:inherit;}' +
+    '#vol-ctl .vico{cursor:pointer;font-size:16px;line-height:1;color:#cfe0ee;user-select:none;}' +
+    '#vol-ctl input[type=range]{width:96px;accent-color:#8fd3ff;cursor:pointer;}' +
+    '#vol-ctl.mini input{display:none;}';
+  document.head.appendChild(st);
+  volCtl = document.createElement('div');
+  volCtl.id = 'vol-ctl';
+  volCtl.innerHTML = '<span class="vico" title="Volume">' + (v0 <= 0 ? '🔇' : '🔊') + '</span>' +
+    '<input type="range" min="0" max="1" step="0.02" value="' + v0 + '">';
+  document.body.appendChild(volCtl);
+  const ico = volCtl.querySelector('.vico'), slider = volCtl.querySelector('input');
+  const apply = v => { localStorage.setItem('rmrf-volume', String(v)); if (sound) sound.setMasterVolume(v); ico.textContent = v <= 0 ? '🔇' : '🔊'; };
+  slider.addEventListener('input', () => apply(parseFloat(slider.value)));
+  ico.addEventListener('click', () => volCtl.classList.toggle('mini'));
+}
+function flashGadget(id, ok) {
+  const b = document.getElementById(id); if (!b) return;
+  b.classList.remove('ok', 'no'); void b.offsetWidth; b.classList.add(ok ? 'ok' : 'no');
+  setTimeout(() => b.classList.remove('ok', 'no'), 260);
+}
+function updateGadgetButtons() {
+  ensureGadgetButtons();
+  const show = playerIsFirebrat();
+  gadgetBar.classList.toggle('show', show);
+  if (!show) return;
+  const charges = player._mineCharges || 0;
+  const teamMines = minefield ? minefield.count(PLAYER_TEAM) : 0;
+  const mineBtn = document.getElementById('mine-btn'), mineN = document.getElementById('mine-n');
+  if (mineN) mineN.textContent = String(charges);
+  if (mineBtn) mineBtn.disabled = charges <= 0 || teamMines >= MINE.teamCap;
+  const podN = document.getElementById('pod-n');
+  if (podN) podN.textContent = (sensorNet ? sensorNet.count(PLAYER_TEAM) : 0) + '/' + POD.teamCap;
+}
+function deployMine() {
+  if (!playerIsFirebrat() || (player._mineCharges || 0) <= 0) { flashGadget('mine-btn', false); return; }
+  const p = player.holder.position;
+  const m = minefield.place(p.x, p.z, PLAYER_TEAM, teamColor(PLAYER_TEAM), player);
+  if (m) { player._mineCharges--; gadgetStats.minesLaid++; flashGadget('mine-btn', true); } else flashGadget('mine-btn', false);
+  updateGadgetButtons();
+}
+function deployPod() {
+  if (!playerIsFirebrat()) return;
+  const p = player.holder.position;
+  if (sensorNet.place(p.x, p.z, PLAYER_TEAM, teamColor(PLAYER_TEAM))) gadgetStats.podsLaid++;
+  flashGadget('pod-btn', true);
+  updateGadgetButtons();
 }
 
 // --- Teams, flags, and AI commanders -----------------------------------
@@ -2637,9 +2747,17 @@ function rearm(v, dt) {
     if (v.isPlayer) updatePlayerHud();
   }
 }
+// A hunter tending a live mine trap doesn't top all the way up — it holds a killable mid-health so
+// it keeps luring pursuers onto the mines (the provoke phase does the actual wounding via tower fire).
+function repairCap(v) {
+  const cmd = commanders.find(c => c.unit === v);
+  if (cmd && cmd._trapMode && !cmd._trapDone && cmd.strategy && cmd.strategy.step === 'trap') return v.maxHp * 0.55;
+  return v.maxHp;
+}
 function repair(v, dt) {
-  if (v.hp >= v.maxHp) return;
-  v.hp = Math.min(v.maxHp, v.hp + REPAIR_RATE * dt);
+  const cap = repairCap(v);
+  if (v.hp >= cap) return;
+  v.hp = Math.min(cap, v.hp + REPAIR_RATE * dt);
   if (v.bar) updateHealthBar(v);
   if (v.isPlayer) updatePlayerHud();
 }
@@ -2780,7 +2898,8 @@ function addScrapPile(x, z, kind = 'parts', colorIndex = null) {
   g.position.set(x, gy + 0.04, z);
   g.rotation.y = Math.random() * Math.PI * 2;
   scene.add(g);
-  const pile = { group: g, pos: new THREE.Vector3(x, gy, z), kind, bob: Math.random() * Math.PI * 2 };
+  const pile = { group: g, pos: new THREE.Vector3(x, gy, z), kind, bob: Math.random() * Math.PI * 2,
+    overWater: !map.isLand(x, z) };
   scrapPiles.push(pile);
   return pile;
 }
@@ -2928,8 +3047,14 @@ function updateScrapHud() {
 // ── Base infantry (Soldiers.js): decorative minifigs — garrison patrols, and a squad
 // scattering out of every building that collapses. One InstancedMesh, no gameplay stats.
 let soldiers = null;
+// Firebrat deployables (mines + sensor pods). Bound to the live scene/map; reset per match.
+let minefield = new Minefield(scene, map);
+let sensorNet = new SensorNet(scene, map);
+// Per-match gadget telemetry (headless analysis / devblog): does the minefield earn its keep?
+let gadgetStats = { minesLaid: 0, podsLaid: 0, detonations: 0, kills: 0, enemyKills: 0, friendlyKills: 0, damage: 0 };
+function resetGadgetStats() { gadgetStats = { minesLaid: 0, podsLaid: 0, detonations: 0, kills: 0, enemyKills: 0, friendlyKills: 0, damage: 0 }; }
 function wireSoldiers() {
-  if (!soldiers) soldiers = new SoldierCorps(scene, map);
+  if (!soldiers) { soldiers = new SoldierCorps(scene, map); soldiers.onSquish = (x, y, z) => { if (sound) sound.squishAt(x, y, z); }; }
   for (const c of camps) {
     if (c._soldiersWired) continue;
     c._soldiersWired = true;
@@ -2944,10 +3069,192 @@ function wireSoldiers() {
     }
   }
 }
+// Flyers (Valkyrie) hover over mines; only ground vehicles trip them.
+function isFlyer(v) { return !!(v._move && v._move.ignoreWalls); }
+// SOFT mine avoidance: a turn bias (never an A* block — that boxes units in) that curves an AI
+// ground unit around the nearest ARMED mine its team has spotted and that lies close AHEAD. Fades
+// with distance/bearing so it doesn't fight the brain's steering; head-on mines get a fixed side.
+const MINE_LOOK = MINE.R * 3.5;
+function mineAvoidNudge(v) {
+  if (!aiMineAvoid || isFlyer(v) || !minefield.items.length) return 0;
+  const px = v.holder.position.x, pz = v.holder.position.z, h = v.heading;
+  let best = null, bestD = Infinity;
+  for (const m of minefield.items) {
+    if (m.safe || !m.spottedBy.has(v.team)) continue;
+    const dx = m.group.position.x - px, dz = m.group.position.z - pz, d = Math.hypot(dx, dz);
+    if (d > MINE_LOOK || d < 0.01) continue;
+    const err = wrapPi(Math.atan2(-dx, -dz) - h);   // bearing to the mine, relative to our nose
+    if (Math.abs(err) > 1.0) continue;              // >~57° off our heading → we pass it clear
+    if (d < bestD) { bestD = d; best = { err, w: (1 - d / MINE_LOOK) * (1 - Math.abs(err)) }; }
+  }
+  if (!best || best.w <= 0) return 0;
+  const side = Math.abs(best.err) < 0.12 ? 1 : -Math.sign(best.err);   // steer AWAY (head-on → pick a side)
+  return side * best.w * 0.9;
+}
+const MINE_DETECT = MINE.R * 4;      // how close a ground unit must get to roll for spotting a mine
+const AI_MINE_COOLDOWN = 2.2;        // s between an AI Firebrat's mine drops (lay fast, hand off quick)
+function aiHandleGadgets(dt) {
+  if (matchOver) return;
+  for (const cmd of commanders) {
+    const v = cmd.unit; if (!v || v.dead || !cmd.team) continue;
+    // (a) DETECTION: each ground unit gets ONE 50% roll per mine as it comes near — spot it and
+    // its whole team then routes around it (blockedFor); miss and the team may drive right in.
+    if (!isFlyer(v)) {
+      for (const m of minefield.items) {
+        if (m.spottedBy.has(v.team) || m.rolled.has(v)) continue;
+        const p = m.group.position, dx = v.holder.position.x - p.x, dz = v.holder.position.z - p.z;
+        if (dx * dx + dz * dz > MINE_DETECT * MINE_DETECT) continue;
+        m.rolled.add(v);
+        // TARGET FIXATION: a unit locked on a chase (pursue) is tunnel-visioned — slimmer chance to
+        // notice the mine it's barrelling toward, so a hunter's bait can lure it right onto the trap.
+        const chance = v._aiState === 'pursue' ? 0.3 : MINE.spotChance;
+        if (Math.random() < chance) m.spottedBy.add(v.team);
+      }
+    }
+    // (b) MISSION: an AI Firebrat seeds the contested ground with mines + one sensor pod per trip.
+    if (v.type === 'firebrat') aiLayGadgets(cmd, v, dt);
+  }
+}
+// Out-and-back flank sortie: drive to the FAR flank point, then lay mines on the way BACK toward
+// base (so the Firebrat never re-crosses a mine it just dropped), drop a sensor pod on the lane
+// front, and finish — the brain then recalls it for the real opening. Also scouts that flank as a
+// side effect (the drive paints the recon memory), so it may turn up a shield generator out there.
+function aiLayGadgets(cmd, v, dt) {
+  if (v._mineCharges == null) v._mineCharges = MINE.perTrip;
+  if (!v._sapPhase) v._sapPhase = 'out';
+  v._layCd = (v._layCd || 0) - dt;
+  const p = v.holder.position, g = cmd._sapGeo();
+  const near = (t, r) => (p.x - t.x) ** 2 + (p.z - t.z) ** 2 < r * r;
+  if (v._sapPhase === 'out') {
+    if (near(g.far, 12)) v._sapPhase = 'back';            // reached the deep flank → turn back, laying as we go
+  } else if (v._sapPhase === 'back') {
+    if (v._mineCharges > 0 && v._layCd <= 0 && map.isLand(p.x, p.z)) {
+      if (minefield.place(p.x, p.z, cmd.team, teamColor(cmd.team), v)) {
+        v._mineCharges--; v._layCd = AI_MINE_COOLDOWN; gadgetStats.minesLaid++;
+      }
+    }
+    if (v._mineCharges <= 0) v._sapPhase = 'pod';
+  } else if (v._sapPhase === 'pod') {
+    if (!v._laidPod && near(g.podW, 15) && sensorNet.count(cmd.team) < POD.teamCap && map.isLand(p.x, p.z)) {
+      if (sensorNet.place(p.x, p.z, cmd.team, teamColor(cmd.team))) {
+        v._laidPod = true; gadgetStats.podsLaid++;
+        aiLog(cmd.team, `${cmd.cname}: Sensor pod down — eyes on the approach.`);
+      }
+    }
+    if (v._laidPod) v._sapPhase = 'done';
+  } else {
+    cmd._sapDone = true;   // sortie complete → recall for the real mission
+  }
+}
+// Servo whir while a lift is moving. Watches each elevator's phase: on entering rising/
+// lowering it starts the positioned ELEVATOR patch and follows the deck up/down; on arrival
+// (top/down) it stops. Guarded so the headless sim (no audio) skips it.
+function updateElevatorSound(e) {
+  if (!sound) return;
+  const moving = (e.phase === 'rising' || e.phase === 'lowering');
+  if (moving) {
+    const y = e.lift ? e.lift.position.y : 0;
+    if (!e._snd) e._snd = sound.elevatorAt(e.center.x, y, e.center.z);
+    else e._snd.move(e.center.x, y, e.center.z);
+  } else if (e._snd) {
+    e._snd.stop(); e._snd = null;
+  }
+}
+// ── Deep-water submarine (Submarine.js) ─────────────────────────────────────
+// A single sub, spawned ON DEMAND: when a Valkyrie/Firebrat strays past the deep-water rim, a
+// sub surfaces right beside them (seaward, herding them back to land) and shells them with guided
+// missiles. Flee back inshore and it dives and is removed from the scene — it doesn't exist the
+// rest of the time. A player deterrent (the AI mostly stays inshore; rogue over-water routing is
+// nudged off the deep zone in vehCellCost). Team-neutral: the missile hits whoever wandered out.
+let activeSub = null;    // the on-demand sub while one is up, else null
+let subsOn = true;       // A/B knob (RR.setSubs): gate the whole hazard so a tournament can measure AI impact
+let DEEP_DANGER_R = 0;   // radius past which deep water is sub territory (set at map build)
+const SUB_MISSILE_DMG = 55, SUB_MISSILE_BLAST = 4.0;
+function subDanger(x, z) {   // is (x,z) inside the deep zone the sub patrols? (cheap gate for nav cost)
+  return subsOn && DEEP_DANGER_R > 0 && (x * x + z * z) > DEEP_DANGER_R * DEEP_DANGER_R && map.isDeepWater(x, z);
+}
+function configureSubZone() {   // called at map build; the sub itself spawns on demand
+  if (activeSub) { activeSub.dispose(); activeSub = null; }
+  // Danger ring sits clearly OUTSIDE the bases (outermost camp ≈ islandBound-70), so the hazard
+  // is the far rim — a player deterrent, not something the AI runs into during normal base play.
+  DEEP_DANGER_R = islandBound ? Math.max(70, islandBound - 50) : 0;
+}
+// A deep-water spot to surface at: a touch SEAWARD of the intruder (between them and open water),
+// so the sub cuts off the escape further out and herds them back toward land.
+function subSurfaceSpot(tx, tz) {
+  const rl = Math.hypot(tx, tz) || 1, ox = tx / rl, oz = tz / rl;   // outward from map centre
+  for (const [dx, dz] of [[ox * 26, oz * 26], [oz * 24, -ox * 24], [-oz * 24, ox * 24], [0, 0]]) {
+    if (map.isDeepWater(tx + dx, tz + dz)) return { x: tx + dx, z: tz + dz };
+  }
+  return { x: tx, z: tz };
+}
+function subFire(sub, target) {
+  const m = sub.muzzle(), tp = target.holder.position;
+  const dir = new THREE.Vector3(tp.x - m.x, (tp.y + 1) - m.y, tp.z - m.z).normalize();
+  projectiles.spawn(2, m, dir, '#ff3a2a');   // missile visual (index 2), hot red
+  const shot = projectiles.items[projectiles.items.length - 1];
+  if (shot) {
+    shot.dmg = SUB_MISSILE_DMG; shot.blast = SUB_MISSILE_BLAST; shot.team = null; shot.shooter = null; shot.atVehicle = true;
+    if (shot.setHoming) shot.setHoming(() => (target && !target.dead) ? target.holder.position : null, MISSILE_TURN);
+  }
+  if (sound && sound.fireGunAt) sound.fireGunAt(2, m.x, m.y, m.z);   // reuse the Valkyrie missile launch report
+}
+function updateSubmarines(dt) {
+  if (!subsOn) { if (activeSub) { activeSub.dispose(); activeSub = null; } return; }
+  // Nearest intruder out past the deep rim (only the sea-crossers are exposed).
+  let tgt = null, bd = Infinity;
+  for (const v of combatants) {
+    if (v.dead) continue;
+    if (!isFlyer(v) && v.type !== 'firebrat') continue;
+    const x = v.holder.position.x, z = v.holder.position.z;
+    if ((x * x + z * z) < DEEP_DANGER_R * DEEP_DANGER_R) continue;   // still inshore → safe
+    if (!map.isDeepWater(x, z)) continue;
+    const d = x * x + z * z;
+    if (d < bd) { bd = d; tgt = v; }
+  }
+  // Surface a sub beside a fresh intruder; update the one that's up; remove it once it's dived.
+  if (tgt && !activeSub) {
+    const s = subSurfaceSpot(tgt.holder.position.x, tgt.holder.position.z);
+    const yaw = Math.atan2(tgt.holder.position.x - s.x, tgt.holder.position.z - s.z);
+    activeSub = new Sub(scene, s.x, s.z, yaw);
+  }
+  if (activeSub && activeSub.update(dt, tgt, { fire: subFire })) { activeSub.dispose(); activeSub = null; }
+}
+function updateGadgets(dt) {
+  if (sensorNet) sensorNet.update(dt);
+  if (!minefield) return;
+  aiHandleGadgets(dt);
+  const booms = minefield.update(dt, combatants, isFlyer);
+  for (const b of booms) {
+    const p = new THREE.Vector3(b.x, b.y + 0.4, b.z);
+    // Snapshot the living so we can attribute this mine's damage/kills (friendly vs enemy).
+    const snap = combatants.filter(v => !v.dead).map(v => ({ v, hp: v.hp, team: v.team }));
+    explodeAt(p, MINE.blast, MINE.dmg, null, null);   // both teams (never a flyer); explodeAt chain-clears nearby mines/pods
+    if (sound) sound.explosionAt(b.x, b.y, b.z);
+    gadgetStats.detonations++;
+    for (const s of snap) {
+      const dealt = s.hp - s.v.hp;
+      if (dealt > 0) gadgetStats.damage += dealt;
+      if (s.v.dead && s.hp > 0) {   // this blast finished it
+        gadgetStats.kills++;
+        if (s.team === b.mine.team) gadgetStats.friendlyKills++; else gadgetStats.enemyKills++;
+      }
+    }
+  }
+}
 function updateScrap(dt) {
   const now = performance.now();
   for (let i = scrapPiles.length - 1; i >= 0; i--) {
     const p = scrapPiles[i];
+    // Debris that landed over water sinks below the surface and despawns instead of floating —
+    // it's unreachable for ground units anyway. Wait out the hot (airborne) window first so a
+    // mid-air wreck finishes its arc, then slide it under and remove it.
+    if (p.overWater && (!p.hotUntil || now >= p.hotUntil)) {
+      p.sink = (p.sink || 0) + dt;
+      p.group.position.y = p.pos.y + 0.04 - p.sink * 3;   // ~3 u/s under
+      if (p.sink > 1.6) { scene.remove(p.group); p._gone = true; scrapPiles.splice(i, 1); }
+      continue;   // not collectable while sinking
+    }
     if (!p.noBob) {   // parts pallets bob gently as a pickup; scattered gib-wrecks sit still
       p.bob += dt * 2;
       p.group.position.y = p.pos.y + 0.04 + Math.sin(p.bob) * 0.05;   // no spin — a heavy wreck/pallet shouldn't rotate
@@ -3073,9 +3380,56 @@ function vehCellCost(v, i, j) {
   // Personality terrain preference: Rogue sneaks over OCEAN, Hunter moves under FOREST cover,
   // Warrior/default uses ROADS (only bites where the unit can traverse it — see cellBlocked).
   const arch = v._archetype;
-  if (arch === 'rogue') return !map.isLand(i * c, j * c) ? 0.45 : (onRoad ? 0.8 : 1);
+  if (arch === 'rogue') {
+    const water = !map.isLand(i * c, j * c);
+    if (water && subDanger(i * c, j * c)) return 8;   // sub territory — sneak along the coast, not out to sea
+    return water ? 0.45 : (onRoad ? 0.8 : 1);
+  }
   if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad ? 0.8 : 1);
   return onRoad ? 0.5 : 1;
+}
+// Closest point on segment A→B to point P (clamped to the segment).
+function _closestOnSeg(ax, az, bx, bz, px, pz) {
+  const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz || 1;
+  let t = ((px - ax) * dx + (pz - az) * dz) / L2; t = Math.max(0, Math.min(1, t));
+  return { x: ax + dx * t, z: az + dz * t };
+}
+// Post-process an A* route so it steps AROUND any mine this team knows about: where a leg passes
+// too close to a known mine, splice in a side waypoint (the leg becomes two clean legs around it).
+// A* itself never treats a mine as blocked (that boxed units in), so the route always exists — this
+// only bends it. There's no excuse for a ROUTED unit hitting its own mine; only combat maneuvering
+// (not on a route) can, which is the intended "heat of battle" exception. Flyers ignore mines.
+function detourMines(v, pts) {
+  if (!pts || pts.length < 2 || isFlyer(v) || !minefield.items.length) return pts;
+  const known = minefield.items.filter(m => !m.safe && m.spottedBy.has(v.team));
+  if (!known.length) return pts;
+  const clr = MINE.R + VEH_R + 2.5;                 // keep the route at least this far from a mine centre
+  const out = pts.slice();
+  let s = 0, inserted = 0;
+  while (s < out.length - 1 && inserted < 8) {
+    const A = out[s], B = out[s + 1];
+    let hit = null, hitP = null, best = clr;
+    for (const m of known) {
+      const M = m.group.position;
+      const P = _closestOnSeg(A.x, A.z, B.x, B.z, M.x, M.z);
+      const d = Math.hypot(P.x - M.x, P.z - M.z);
+      if (d < best) { best = d; hit = M; hitP = P; }
+    }
+    if (!hit) { s++; continue; }
+    let sx = B.x - A.x, sz = B.z - A.z; const sl = Math.hypot(sx, sz) || 1; sx /= sl; sz /= sl;
+    const perpx = -sz, perpz = sx;
+    const sd = (hit.x - A.x) * perpx + (hit.z - A.z) * perpz;   // which side of the leg the mine sits on
+    const sign = Math.abs(sd) < 1 ? 1 : -Math.sign(sd);        // push the detour to the far side (head-on → pick one)
+    const off = clr + 1.5;
+    let D = { x: hitP.x + perpx * sign * off, z: hitP.z + perpz * sign * off };
+    if (v._blocked(D.x, D.z)) {                                // that side's blocked (wall/water) → try the other
+      D = { x: hitP.x - perpx * sign * off, z: hitP.z - perpz * sign * off };
+      if (v._blocked(D.x, D.z)) { s++; continue; }             // both blocked → accept the risk, don't wedge
+    }
+    out.splice(s + 1, 0, D);                                    // re-check A→D next (may pass another mine)
+    inserted++;
+  }
+  return out;
 }
 function planPath(v, dest) {
   if (PERF) _planCount++;
@@ -3101,11 +3455,11 @@ function planPath(v, dest) {
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
       const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true });
-      if (p2 && p2.length >= 1) return p2.map(n => ({ x: n.i * c, z: n.j * c }));
+      if (p2 && p2.length >= 1) return detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c })));
     }
     return null;
   }
-  return path.map(n => ({ x: n.i * c, z: n.j * c }));
+  return detourMines(v, path.map(n => ({ x: n.i * c, z: n.j * c })));
 }
 
 // --- A* search visualizer (debug overlay) ------------------------------------
@@ -3416,6 +3770,67 @@ class AICommander {
     const FWD = 18, SIDE = 26;                                      // forward a touch, well to the side, still in tower range
     return { x: base.x + dx * FWD + px * SIDE * side, z: base.z + dz * FWD + pz * SIDE * side };
   }
+  // Sapper geometry (mine placement): a FLANK approach line just outside our own base, off the
+  // lane our own units travel — where an attacker swings wide to angle on our towers. The sapper
+  // drives to the FAR point, then lays on the way BACK toward `ret` (so it never re-crosses a mine
+  // it just dropped — Jacob's rule). `podW` = a forward spot on the lane that watches the approach.
+  _sapGeo() {
+    if (this._sapGeoC) return this._sapGeoC;
+    const base = this.homeBasePos(), enemy = this.enemyBasePos();
+    let dx = enemy.x - base.x, dz = enemy.z - base.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+    const px = -dz, pz = dx, side = this.team === 'red' ? 1 : -1;
+    const snap = (x, z) => { const c = grid.cell;
+      const oc = this.unit ? nearestOpenCell(this.unit, Math.round(x / c), Math.round(z / c), 5) : null;
+      return oc ? { x: oc.i * c, z: oc.j * c } : { x, z }; };
+    let g;
+    if (this._trapMode) {
+      // TRAP (Hunter): a tight cluster ON the lane at ~35% out — a kill-zone the enemy crosses.
+      // Approach from just past it and lay on the way back so both land at the spot; our own units
+      // route around it (path detour). Remember the centroid for the trap behaviour.
+      const spot = { x: base.x + dx * L * 0.35, z: base.z + dz * L * 0.35 };
+      g = { far: snap(spot.x + dx * 8, spot.z + dz * 8), ret: snap(spot.x - dx * 8, spot.z - dz * 8),
+            podW: snap(spot.x - dx * 22, spot.z - dz * 22) };
+      this._trap = snap(spot.x, spot.z);
+    } else {
+      // Mode A (defensive): a flank approach just outside our base, off our own lane.
+      const FWD = 18;
+      g = { far: snap(base.x + dx * FWD + px * side * 46, base.z + dz * FWD + pz * side * 46),
+            ret: snap(base.x + dx * FWD + px * side * 10, base.z + dz * FWD + pz * side * 10),
+            podW: snap(base.x + dx * 34, base.z + dz * 34) };
+    }
+    if (this.unit) this._sapGeoC = g;   // base geometry is constant for the match; cache once we can snap
+    return g;
+  }
+  // Where the opening sapper should drive right now, by its route phase (out → back → pod → home).
+  sapTarget(v) {
+    const g = this._sapGeo();
+    if (v._sapPhase === 'back') return g.ret;
+    if (v._sapPhase === 'pod') return g.podW;
+    if (v._sapPhase === 'done') return this.homePos();
+    return g.far;   // 'out' (default): head to the deep flank / just past the trap first
+  }
+  // ── Hunter trap (Mode B) — the Lurcher tends a mine kill-zone (cmd._trap) ──
+  // Ambush anchor: just home-side of the trap, where the bait Lurcher waits.
+  trapAnchor() {
+    const t = this._trap; if (!t) return this.homePos();
+    const home = this.homeBasePos();
+    let dx = home.x - t.x, dz = home.z - t.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+    return { x: t.x + dx * 15, z: t.z + dz * 15 };
+  }
+  // Fall-back spot that puts the trap BETWEEN us and the enemy — a chaser must cross the mines.
+  trapShield() {
+    const t = this._trap; if (!t) return this.homePos();
+    const e = this.lastEnemyPos() || this.enemyBasePos();
+    let dx = t.x - e.x, dz = t.z - e.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+    return { x: t.x + dx * 16, z: t.z + dz * 16 };
+  }
+  // Trap spent = no live team mine remains near the kill-zone (blew or got cleared) → resume play.
+  trapSpent() {
+    const t = this._trap; if (!t) return true;
+    for (const m of minefield.items)
+      if (m.team === this.team && (m.group.position.x - t.x) ** 2 + (m.group.position.z - t.z) ** 2 < 30 * 30) return false;
+    return true;
+  }
   // A patrol that holds the APPROACH LANE — from the home front (between the flag HQ and
   // the elevator, on the enemy-facing side) out to MID-FIELD — so a defender meets an
   // incoming attack before it picks a target, instead of pacing flag↔elevator in the rear
@@ -3502,6 +3917,24 @@ class AICommander {
     let dx = base.x - from.x, dz = base.z - from.z;
     const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
     return { x: base.x + dx * 30, z: base.z + dz * 30 };
+  }
+  // Live turrets on the FAR (rear) side of the enemy flag base — the guns a back-door runner
+  // must drive past. A Firebrat should only sneak around the back when this is 0; if only the
+  // FRONT towers are down it's suicide to loop into live rear guns, so it takes the front (Capture).
+  rearTowersLive() {
+    const tt = this.targetTeam(), base = this.enemyBasePos(), from = this.homePos();
+    let dx = base.x - from.x, dz = base.z - from.z;
+    const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+    let n = 0;
+    for (const c of camps) {
+      if (c.team !== tt || c.role !== 'main') continue;
+      for (const w of c.walls) {
+        const t = w.turret; if (!t || t.dead || t.falling) continue;
+        const p = w.group.position;
+        if ((p.x - base.x) * dx + (p.z - base.z) * dz > 2) n++;   // beyond base centre on the approach axis = rear side
+      }
+    }
+    return n;
   }
   // A point just outside the enemy base's lowest-HP wall — where to punch through.
   weakestApproach() {
@@ -4223,6 +4656,8 @@ class AICommander {
       const ahz = v.holder.position.z - Math.cos(v.heading) * (VEH_R + 2);
       if (map.isDeepWater(ahx, ahz) && roadDeckY(ahx, ahz) == null) { out.fwd = 0; v.ai._wantMove = false; }
     }
+    const mineTurn = mineAvoidNudge(v);   // soft-steer around a spotted mine dead ahead (no A* block)
+    if (mineTurn) out.turn = Math.max(-1, Math.min(1, out.turn + mineTurn));
     v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
     v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);   // road boost × promotion (bronze stars)
     v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
@@ -4695,7 +5130,10 @@ class AICommander {
       })(),
 
       shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
-      arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),
+      // Salvage detour: drive ONTO the pile (within SCRAP_PICKUP_R) instead of stopping at the
+      // mission's arriveDist — Scout(12)/Attack(10) exceed the 8u pickup, so the unit used to halt
+      // just short and idle for seconds before drifting into range. Tight like the shield/intercept grabs.
+      arriveDist: this._intercepting ? 4 : this._shielding ? 6 : (this._scrapDetour && aiScrapTightArrive) ? 4 : this.strategy.arriveDist(this),
       // Is this unit on a flee-contact RUNNER mission (grab the flag / scout — avoid fights)
       // vs one the commander sent it out to FIGHT on (attack/siege/defend/intercept)? Gates
       // the Firebrat's runnerFlee reflex so an ordered-to-engage Firebrat actually closes +
@@ -5088,7 +5526,9 @@ function buildLogExport() {
   const ver = (((document.querySelector('script[src*="main.js"]') || {}).src || '').match(/v=(\d+)/) || [])[1] || '?';
   const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
   const t = ((performance.now() - _t0) / 1000).toFixed(0);
-  let s = `=== RMRF LOG (v${ver}) ===\nmode: ${human ? 'Player vs AI' : 'AI vs AI'}   t: ${t}s\n`;
+  // The seed rides in the header so a pasted deep log is reproducible — the brief-log title shows
+  // it too but that text isn't selectable on a phone; this copyable overlay is where it's grabbable.
+  let s = `=== RMRF LOG (v${ver}${AI_LOG_SEED ? ' · ' + AI_LOG_SEED : ''}) ===\nmode: ${human ? 'Player vs AI' : 'AI vs AI'}   t: ${t}s\n`;
   if (player && !player.dead) {
     const pp = player.holder.position;
     s += `player: ${player.type} hp ${Math.round(player.hp / player.maxHp * 100)}% ammo ${player.ammo} @ (${Math.round(pp.x)},${Math.round(pp.z)})\n`;
@@ -5321,6 +5761,7 @@ function deployToFOB(type, colorIndex, rise) {
   v.setScale(0.72);
   v.setCamo(colorIndex);
   v.setTeamColor(accent);
+  if (type === 'firebrat') v._mineCharges = MINE.perTrip;   // 2 mines to lay this trip
 
   if (playerElev) playerElev.setAccent(accent);
   if (rise && playerElev) {
@@ -6235,6 +6676,12 @@ window.RR = {
   mapCfg: () => MAP_CFG,                                       // debug: the decoded ?mapcfg (designed map), or null
   get destructibles() { return destructibles; },
   get soldiers() { return soldiers; },                          // debug: the base-infantry corps (counts/behavior probes)
+  get minefield() { return minefield; },                        // debug: Firebrat land mines
+  get sensorNet() { return sensorNet; },                        // debug: Firebrat sensor pods
+  get gadgetStats() { return gadgetStats; },                    // debug: per-match mine/pod telemetry
+  liveMines: () => minefield.items.length,
+  layMine: (x, z, team = PLAYER_TEAM) => minefield.place(x, z, team, teamColor(team)),
+  dropPod: (x, z, team = PLAYER_TEAM) => sensorNet.place(x, z, team, teamColor(team)),
   get camps() { return camps; },
   get placedWalls() { return placedWalls; },                   // debug: designer-placed fort pieces (custom maps)
   get placedProps() { return placedProps; },                   // debug: designer-placed generic structures (custom maps)
@@ -6246,6 +6693,9 @@ window.RR = {
   get roadNet() { return roadNet; },
   get vehicles() { return vehicles; },
   get elevators() { return elevators; },
+  get submarines() { return activeSub ? [activeSub] : []; },        // debug: the on-demand sub (0 or 1)
+  deepDangerR: () => DEEP_DANGER_R,                             // debug: radius past which subs patrol
+  setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
   spawnPlayer: (type = 'firebrat', colorIndex = 4, rise = false) => deployToFOB(type, colorIndex, rise),
   get garage() { return garage; },
@@ -6307,6 +6757,7 @@ window.RR = {
   fofDefault: () => ({ ...FOF_DEFAULT }),
   setRunnerMode: (m) => setRunnerMode(m),   // 'old' | 'new' — A/B the runner-lost response on paired matchups
   setRogueRearSiege: (v) => setRogueRearSiege(v),   // true|false — A/B the Rogue Valkyrie rear-siege (HQ from behind)
+  setRearSneakGate: (v) => setRearSneakGate(v),   // true|false — A/B: gate the Firebrat back-door sneak on the rear towers being dead
   exploreFrac: (i = 0) => { const c = commanders[i]; return c && c.explore ? c.explore.fraction() : null; },   // debug: fraction of map this team has scouted
   exploreWp: (i = 0) => { const c = commanders[i]; return c ? c._exploreWp : null; },                          // debug: current recon waypoint
   aiRoster: (i = 0) => { const c = commanders[i]; return c ? { roster: { ...c.roster }, left: c.fleetLeft(), eliminated: c._eliminated } : null; },   // debug: remaining fleet
@@ -6322,6 +6773,8 @@ window.RR = {
       destructibles.update(dt);
       updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateLock(dt);
       if (soldiers) soldiers.update(dt, combatants);
+      updateGadgets(dt);
+      updateSubmarines(dt);
     }
   },
   blockedAt: (x, z) => blockedAt(x, z),
@@ -6359,6 +6812,8 @@ window.RR = {
   setTeamScrap: (team, n) => { if (team in teamScrap) teamScrap[team] = n | 0; return teamScrap[team]; },
   buildVehicle: (type) => buildVehicle(type),     // spend scrap → replace a lost vehicle (garage)
   setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
+  setScrapTightArrive: (v) => { aiScrapTightArrive = !!v; return aiScrapTightArrive; },   // A/B: salvage detour closes to pickup range vs mission arriveDist
+  setPostKillMoveOn: (v) => { aiPostKillMoveOn = !!v; return aiPostKillMoveOn; },   // A/B: drop engage-afterglow ghost on a kill (no post-kill linger)
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setBreachCommit: (v) => { aiBreachCommit = !!v; return aiBreachCommit; },   // A/B: siegers latch one wall + push in vs orbit-and-spray
@@ -6869,6 +7324,49 @@ function updateSoundHud(dt) {
     if (taken.some(t => Math.abs(Math.atan2(Math.sin(bear - t), Math.cos(bear - t))) < 0.32)) continue;
     if (drawSonarArcs(g, W, H, s)) taken.push(bear);
   }
+  drawSensorContacts(g, W, H);
+}
+
+function roundRect(g, x, y, w, h, r) {
+  if (g.roundRect) { g.beginPath(); g.roundRect(x, y, w, h, r); return; }
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+const _scv = new THREE.Vector3();
+// SENSOR POD contacts: any enemy within range of the player team's pods shows as a chip on
+// the screen edge — vehicle TYPE + distance, in the enemy's colour, a chevron pointing its way.
+function drawSensorContacts(g, W, H) {
+  if (!onField || TEAM_CTRL[PLAYER_TEAM] !== 'human' || !sensorNet) return;
+  const cons = sensorNet.contacts(PLAYER_TEAM, combatants).sort((a, b) => a.dist - b.dist);
+  if (!cons.length) return;
+  const cx = W / 2, cy = H / 2, pad = 56, taken = [];
+  for (const c of cons) {
+    _scv.set(c.pos.x, c.pos.y, c.pos.z).project(camera);
+    let nx = _scv.x, ny = _scv.y; if (_scv.z > 1) { nx = -nx; ny = -ny; }
+    let dx = nx, dy = -ny; const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+    const bear = Math.atan2(dy, dx);
+    if (taken.some(t => Math.abs(Math.atan2(Math.sin(bear - t), Math.cos(bear - t))) < 0.28)) continue;
+    taken.push(bear);
+    const sc = Math.min(dx !== 0 ? (W / 2 - pad) / Math.abs(dx) : Infinity,
+                        dy !== 0 ? (H / 2 - pad) / Math.abs(dy) : Infinity);
+    const ex = cx + dx * sc, ey = cy + dy * sc;
+    const rgb = teamRGB(c.colorIndex);
+    const label = c.type.toUpperCase() + '  ' + Math.round(c.dist);
+    g.save();
+    g.translate(ex, ey);
+    g.font = 'bold 12px monospace';
+    const bw = g.measureText(label).width + 24, bh = 20;
+    g.fillStyle = 'rgba(10,16,22,0.82)'; g.strokeStyle = `rgba(${rgb},0.95)`; g.lineWidth = 1.5;
+    roundRect(g, -bw / 2, -bh / 2, bw, bh, 6); g.fill(); g.stroke();
+    g.fillStyle = `rgb(${rgb})`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(label, 0, 1);
+    const px = dx * (bw / 2 + 7), py = dy * (bh / 2 + 7), perpx = -dy, perpy = dx;   // chevron outward
+    g.beginPath(); g.moveTo(px, py);
+    g.lineTo(px - dx * 9 + perpx * 5, py - dy * 9 + perpy * 5);
+    g.lineTo(px - dx * 9 - perpx * 5, py - dy * 9 - perpy * 5);
+    g.closePath(); g.fill();
+    g.restore();
+  }
 }
 
 let _splashHidden = false;
@@ -6898,7 +7396,7 @@ function animate() {
       if (!driveUpdate(dt)) spectateUpdate(dt) || panUpdate(dt);   // player, else follow the action / free cam
       trackVelocities(dt);                 // per-vehicle velocity for AI aim-leading
       _pfT('ai', () => { if (!matchOver) updateCommanders(dt); });  // AI teams (fog-of-war) + A* nav + flag carry
-      _pfT('structs', () => { for (const c of camps) c.update(dt); for (const w of placedWalls) w.update(dt); for (const e of elevators) e.update(dt); for (const v of vehicles) v.idle(dt); });
+      _pfT('structs', () => { for (const c of camps) c.update(dt); for (const w of placedWalls) w.update(dt); for (const e of elevators) { e.update(dt); updateElevatorSound(e); } for (const v of vehicles) v.idle(dt); updateSubmarines(dt); });
       _pfT('shadows', () => updateShadows());  // ground-projected vehicle silhouette shadows
       _pfT('projectiles', () => { projectiles.update(dt); updateProjectileHits(); });
       if (foliage) foliage.update(dt);       // tree topple animations
@@ -6914,6 +7412,7 @@ function animate() {
       updateScrap(dt);                       // salvage piles: bob + proximity pickup → team scrap
       updateGibs(dt);                        // fly the debris from just-destroyed vehicles until it settles
       if (soldiers) soldiers.update(dt, combatants);   // base infantry: patrol march, wreck scatter, tread squish
+      updateGadgets(dt);                     // mines (proximity detonate) + sensor pods (blink)
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
@@ -6962,4 +7461,5 @@ function animate() {
   }
 }
 updateCamera();
+ensureVolumeControl();
 animate();

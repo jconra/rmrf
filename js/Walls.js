@@ -7,10 +7,10 @@
 import * as THREE from 'three';
 import { Destructible } from './Destructible.js?v=5';
 import { applyStaging } from './AssetStaging.js?v=1';
-import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent, makeLookout } from './Buildings.js?v=8';
+import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent, makeLookout } from './Buildings.js?v=9';
 import { concreteTexture, accentPlateTexture } from './Textures.js?v=2';
 import { buildAssetGroup, recolorCamo } from './AssetBuilder.js?v=1';
-import { PROP_CONFIGS } from './assets.manifest.js?v=5';   // base-flavour props (containers/generator/drums/…)
+import { PROP_CONFIGS } from './assets.manifest.js?v=6';   // base-flavour props (containers/generator/drums/…)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
@@ -487,7 +487,26 @@ export class Camp {
         };
         dress(['containers', 'range', 'sandbags'], inLo, 1, 0);        // 2x1-safe slot (spills +x)
         dress(['generator', 'drums', 'watertower'], inLo, -1, 1);
-        dress(['jeep', 'checkpoint', 'drums', 'sandbags'], 1, inLo, 2);
+        dress(['jeep', 'drums', 'sandbags'], 1, inLo, 2);              // checkpoint moved OUTSIDE (below)
+
+        // OUTSIDE DRESSING: a checkpoint on the shoulder just outside each gate (barrier arm
+        // pointing at the road) and Czech hedgehogs tucked against the outer wall corners. These
+        // sit BEYOND the wall ring and OFF the gate lanes, so they read as approach defences
+        // without obstructing the road a unit drives out on.
+        const cp = PROP_CONFIGS.checkpoint;
+        for (const g of this.gates) {
+          const out = g.outward, side = new THREE.Vector3(out.z, 0, -out.x);   // perpendicular to the road
+          const wx = g.pos.x + out.x * cell * 1.15 + side.x * cell * 0.95;      // just outside the gate, on the shoulder
+          const wz = g.pos.z + out.z * cell * 1.15 + side.z * cell * 0.95;
+          const armDir = side.clone().multiplyScalar(-1);   // arm (local +X) faces back across the road
+          const yaw = Math.atan2(-armDir.z, armDir.x);
+          addAt(buildAssetGroup(cp, accent, { cell }), wx, wz, cp.destructible.hp, cp.id, yaw);
+        }
+        const hg = PROP_CONFIGS.hedgehogs, hoff = (h + 0.55) * cell;
+        for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+          const yaw = (((Math.abs((centreX * sx) ^ (centreZ * sz)) | 0) % 100) / 100) * Math.PI;
+          addAt(buildAssetGroup(hg, accent, { cell }), centreX + sx * hoff, centreZ + sz * hoff, hg.destructible.hp, hg.id, yaw);
+        }
       }
     }
   }

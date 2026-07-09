@@ -22,15 +22,15 @@
 import {
   makeFlagHQ, makeBarracks, makeDepot, makeAdmin,
   makeQuonset, makeTent, makeElevator, makeLookout,
-} from './Buildings.js?v=8';
+} from './Buildings.js?v=9';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
-import { makeWall, makeTower, makeGate } from './Walls.js?v=64';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
+import { makeWall, makeTower, makeGate } from './Walls.js?v=65';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';   // the designed corner tower, as shared data (designer + game read this one file)
 import LOOKOUT_CFG from './lookout.config.js?v=1';   // the designed lookout tower, same shared-data pattern
 import FLAGHQ_CFG from './flaghq.config.js?v=2';     // config refs let the asset-designer OPEN these for editing
 import ADMIN_CFG from './admin.config.js?v=1';       // former flag-HQ tower, now a decorative structure
-import TENT_CFG from './tent.config.js?v=1';
-import BARRACKS_CFG from './barracks.config.js?v=1';
+import TENT_CFG from './tent.config.js?v=2';
+import BARRACKS_CFG from './barracks.config.js?v=2';
 import QUONSET_CFG from './quonset.config.js?v=2';
 // Base-flavour prop set (shipping containers, water tower, motor pool, range, defences…):
 // each is a designer-format config built by the generic AssetBuilder — no bespoke maker code.
@@ -73,7 +73,7 @@ export const ASSETS = [
   },
   {
     id: 'barracks', name: 'Barracks', make: makeBarracks, config: BARRACKS_CFG,
-    footprint: { w: 2, d: 1 }, accent: true,
+    footprint: { w: 1, d: 1 }, accent: true,
     destructible: { type: 'building', hp: 120 },
     category: 'structure',
     desc: 'Troop housing with a team-colour door.',
@@ -87,7 +87,7 @@ export const ASSETS = [
   },
   {
     id: 'tent', name: 'Ridge Tent', make: makeTent, config: TENT_CFG,
-    footprint: { w: 1, d: 2 }, accent: true,
+    footprint: { w: 1, d: 1 }, accent: true,
     destructible: { type: 'building', hp: 50 },
     category: 'structure',
     desc: 'A canvas A-frame shelter.',

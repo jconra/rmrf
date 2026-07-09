@@ -23,7 +23,7 @@
 // stands alone. The Sound Lab is still where these patches are authored — after tuning a preset
 // there, re-sync with:  cp ../sound-lab/patch.js js/patch.js  (run from the Sound Lab's parent).
 
-import { playPatch, PATCH_PRESETS } from './patch.js';
+import { playPatch, PATCH_PRESETS } from './patch.js?v=2';
 
 // Each vehicle's engine + gun plays a Sound Lab modular patch (authored in the Sound Lab) by index:
 // 0 Lurcher, 1 Firebrat, 2 Valkyrie, 3 Jotun. RPM_RANGE = [idle, max] the driving throttle maps to.
@@ -437,7 +437,18 @@ export class SoundManager {
     limiter.threshold.value = -6;
     limiter.ratio.value = 12;
     this.limiter = limiter;
-    this.master.connect(limiter).connect(this.ctx.destination);
+    // MASTER VOLUME — one knob after the limiter that scales the whole mix (engines, guns,
+    // spatial SFX, explosions, everything). The top-left UI slider drives setMasterVolume().
+    this.masterVol = this.ctx.createGain();
+    if (this._volPref == null) {   // seed from the saved slider setting (top-left UI) if the game set one before audio started
+      const saved = (typeof localStorage !== 'undefined') ? parseFloat(localStorage.getItem('rmrf-volume')) : NaN;
+      if (isFinite(saved)) this._volPref = Math.max(0, Math.min(1, saved));
+    }
+    this.masterVol.gain.value = (this._volPref != null ? this._volPref : 1);
+    this.master.connect(limiter);
+    limiter.connect(this.masterVol);
+    this.masterVol.connect(this.ctx.destination);
+    this._loadSquish();   // decode the soldier-squish sample so it's ready before the first crush
 
     // Separate SFX bus for gun shots — independent of the engine master, so guns
     // sound whether or not the engine toggle is on.
@@ -663,6 +674,76 @@ export class SoundManager {
     else makeShot(this.ctx, this.noiseBuffer, lpf, this.reverbInput, GUN_CONFIGS[soundIndex] || GUN_CONFIGS[0]);
     // The shot's voice auto-stops (~1-1.5s); free the nodes after the tail.
     setTimeout(() => { try { panner.disconnect(); lpf.disconnect(); } catch (e) {} }, 4000);
+  }
+
+  // ── Master volume (top-left UI slider) ─────────────────────────────────────
+  // 0..1, applied after the limiter so it scales the entire mix. Remembered even
+  // before the context exists (the UI can set it on load; _ensureCtx picks it up).
+  setMasterVolume(v) {
+    this._volPref = Math.max(0, Math.min(1, v));
+    if (this.masterVol) this.masterVol.gain.setTargetAtTime(this._volPref, this.ctx.currentTime, 0.03);
+  }
+  getMasterVolume() { return this._volPref != null ? this._volPref : 1; }
+
+  // ── World SFX: mine explosion, elevator rise, soldier squish ────────────────
+
+  // A positioned MINE detonation (one-shot). Same panner/distance-muffle chain as a gun shot,
+  // but with the WORLD "MINE — EXPLOSION" patch. The limiter tames its hot/clipped peaks.
+  explosionAt(x, y, z) {
+    this._ensureSpatial();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const patch = PATCH_PRESETS['MINE — EXPLOSION']; if (!patch) return;
+    const panner = this.ctx.createPanner();
+    panner.panningModel = 'equalpower'; panner.distanceModel = 'inverse';
+    panner.refDistance = 45; panner.maxDistance = 650; panner.rolloffFactor = 1.0;
+    this._setPannerPos(panner, x, y, z);
+    const lpf = this.ctx.createBiquadFilter(); lpf.type = 'lowpass';
+    lpf.frequency.value = muffleHz(this._distToListener(x, y, z) / GUN_MUFFLE_DIST, GUN_FAR_HZ);
+    lpf.connect(panner); panner.connect(this.spatialSfxBus);
+    playPatch(this.ctx, this.noiseBuffer, lpf, this.reverbInput, patch);
+    setTimeout(() => { try { panner.disconnect(); lpf.disconnect(); } catch (e) {} }, 5000);
+  }
+
+  // Start the ELEVATOR servo whir at a base's lift. Returns a handle: move(x,y,z) to follow the
+  // rising platform, stop() when it arrives. The lift owns the timing, so it runs exactly the
+  // length of the animation (the patch also self-stops at its dur as a fallback).
+  elevatorAt(x, y, z) {
+    this._ensureSpatial();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const patch = PATCH_PRESETS['ELEVATOR — SERVO']; if (!patch) return { move() {}, stop() {} };
+    const panner = this.ctx.createPanner();
+    panner.panningModel = 'equalpower'; panner.distanceModel = 'inverse';
+    panner.refDistance = 28; panner.maxDistance = 420; panner.rolloffFactor = 1.0;
+    this._setPannerPos(panner, x, y, z);
+    panner.connect(this.spatialSfxBus);
+    const h = playPatch(this.ctx, this.noiseBuffer, panner, this.reverbInput, patch);
+    return {
+      move: (nx, ny, nz) => this._setPannerPos(panner, nx, ny, nz),
+      stop: () => { try { h.stop(0.2); } catch (e) {} setTimeout(() => { try { panner.disconnect(); } catch (e) {} }, 1800); },
+    };
+  }
+
+  // Soldier SQUISH — a decoded SAMPLE (rmrf/sounds/squish.mp3), played positioned. Synthesis
+  // couldn't do a convincing wet squish, so this is the one sampled voice in the game.
+  _loadSquish() {
+    if (this._squishBuf || this._squishLoading || !this.ctx) return;
+    this._squishLoading = true;
+    fetch('sounds/squish.mp3').then(r => r.arrayBuffer()).then(ab => this.ctx.decodeAudioData(ab))
+      .then(buf => { this._squishBuf = buf; }).catch(() => { this._squishLoading = false; });
+  }
+  squishAt(x, y, z) {
+    this._ensureSpatial();
+    if (!this._squishBuf) { this._loadSquish(); return; }   // not decoded yet → skip this one
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const src = this.ctx.createBufferSource(); src.buffer = this._squishBuf;
+    const panner = this.ctx.createPanner();
+    panner.panningModel = 'equalpower'; panner.distanceModel = 'inverse';
+    panner.refDistance = 24; panner.maxDistance = 300; panner.rolloffFactor = 1.2;
+    this._setPannerPos(panner, x, y, z);
+    const g = this.ctx.createGain(); g.gain.value = 0.9;
+    src.connect(g).connect(panner); panner.connect(this.spatialSfxBus);
+    src.start();
+    src.onended = () => { try { src.disconnect(); g.disconnect(); panner.disconnect(); } catch (e) {} };
   }
 
 }

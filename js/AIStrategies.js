@@ -63,6 +63,60 @@ class Scout extends Mission {
   ]); }
 }
 
+// SAP — the opening sortie: send a Firebrat out to a forward point to seed the contested
+// ground with mines and drop a sensor pod (the actual laying is in the game's aiLayGadgets,
+// which fires for any Firebrat; this mission just gets one out EARLY and keeps it out of
+// fights until the loadout's down). Completes via cmd._sapDone (set when it's laid its kit,
+// or on the sap budget timeout in Doctrine.tick).
+class Sap extends Mission {
+  get key() { return 'sap'; }
+  wantVehicle(cmd) { return 'firebrat'; }
+  shoot(cmd) { return false; }               // it's laying + scouting, not brawling
+  arriveDist(cmd) { return 8; }
+  // Drive to the far end of a home-side FLANK, then lay mines on the way back (main.js sapTarget/
+  // aiLayGadgets run the out→back→pod route). Off our own lane, so we don't mine our own advance.
+  objective(cmd) { return cmd.unit ? cmd.sapTarget(cmd.unit) : cmd.homeBasePos(); }
+  label(cmd) { return 'a flank recon-and-mine run'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Send a Firebrat wide — scout the flank and mine it on the way back.',
+    'Recon the flank and seed it with mines before they probe it.',
+    'Firebrat out to the side — eyes on that approach, mines on the return.',
+  ]); }
+}
+
+// TRAP (Hunter, Mode B) — after the sapper mines the lane, field a Lurcher as BAIT and lure the
+// enemy across the kill-zone. Three sub-phases (main.js sets the geometry via cmd._trap):
+//   anchor  — hold just behind the mines, quiet.
+//   provoke — no enemy seen for 10s → push toward their base, suppress a tower to draw attention
+//             (and take a few tower hits → the mid-health that spikes the enemy's chase instinct).
+//   shield  — enemy in sight → fall back so the MINES sit between us and them; keep firing so a
+//             tunnel-visioned pursuer (target-fixation: slimmer mine-spot roll) barrels onto them.
+class Trap extends Mission {
+  get key() { return 'trap'; }
+  wantVehicle(cmd) { return 'lurcher'; }
+  enter(cmd, doc) { super.enter(cmd, doc); this._phase = 'anchor'; this._idleT = 0; }
+  tick(cmd, dt) {
+    super.tick(cmd, dt);
+    const sees = cmd.lastEnemyPos && cmd.lastEnemyPos();
+    if (sees) { this._idleT = 0; this._phase = 'shield'; }
+    else { this._idleT += dt; this._phase = this._idleT > 10 ? 'provoke' : 'anchor'; }
+  }
+  objective(cmd) {
+    if (this._phase === 'shield') return cmd.trapShield();
+    if (this._phase === 'provoke') return cmd.enemyBasePos();   // draw them out (engages towers en route)
+    return cmd.trapAnchor();
+  }
+  shoot(cmd) { return this._phase !== 'anchor'; }
+  arriveDist(cmd) { return this._phase === 'anchor' ? 6 : 10; }
+  label(cmd) { return this._phase === 'shield' ? 'luring them onto the mines'
+    : this._phase === 'provoke' ? 'baiting them out' : 'set in ambush behind the trap'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Set the trap — get behind the mines and draw them onto it.',
+    'Bait them across the minefield.',
+    'Hunter\'s game — lure them onto the mines.',
+  ]); }
+}
+
 // ATTACK — recall the enemy's last-known position and hunt them down; with no recent
 // sighting, fall back to where they emerge (the elevator).
 class Attack extends Mission {
@@ -164,13 +218,24 @@ class Siege extends Mission {
 class Capture extends Mission {
   get key() { return 'capture'; }
   wantVehicle(cmd) { return 'firebrat'; }
+  // Should THIS runner sneak in the back? Only a Rogue / post-death stealth run AND only when the
+  // REAR is clear of live towers — otherwise looping around drives it straight into fresh guns (the
+  // "feed Firebrats to the back-door death" bug). Latched per unit so the count dropping mid-run
+  // can't flip a committed front approach into a back one (or vice-versa).
+  _sneak(cmd) {
+    if (!cmd.unit) return false;
+    if (cmd.unit._sneakBack === undefined)
+      cmd.unit._sneakBack = (cmd.archetype === 'rogue' || cmd._stealthCapture)
+        && (!REAR_SNEAK_GATE || cmd.rearTowersLive() === 0);
+    return cmd.unit._sneakBack;
+  }
   objective(cmd) {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return cmd.homePos();            // carrying → run it home
     const flagPt = f ? { x: f.group.position.x, z: f.group.position.z } : cmd.enemyBasePos();
-    // Stealth run: a Rogue always sneaks in the back; ANY commander does after a runner was
-    // shot on the direct approach (cmd._stealthCapture), to take a wide route around the hot zone.
-    if ((cmd.archetype === 'rogue' || cmd._stealthCapture) && cmd.unit) {   // loop to the rear, THEN grab
+    // Stealth run: sneak the runner in the back — but only when the rear is undefended (_sneak).
+    // If the back towers are still up (only the front fell), go straight in the front instead.
+    if (this._sneak(cmd) && cmd.unit) {   // loop to the rear, THEN grab
       const u = cmd.unit.holder.position, rear = cmd.enemyRearApproach();
       // Head for the rear staging point first, but LATCH the handoff to the flag once we
       // reach the rear OR we're already on the doorstep — otherwise the two far-apart goals
@@ -190,10 +255,10 @@ class Capture extends Mission {
   label(cmd) {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return 'home with the flag';
-    if ((cmd.archetype === 'rogue' || cmd._stealthCapture) && !(cmd.unit && cmd.unit._rearReached)) return 'sneaking round the back';
+    if (this._sneak(cmd) && !(cmd.unit && cmd.unit._rearReached)) return 'sneaking round the back';
     return 'snatching the flag';
   }
-  cry(cmd) { return (cmd.archetype === 'rogue' || cmd._stealthCapture)
+  cry(cmd) { return this._sneak(cmd)
     ? pickCry(cmd, [
         'Flag’s open — sneaking a runner in the back door. Quiet now!',
         'Go, go — slip round the back and grab that flag!',
@@ -282,7 +347,7 @@ class Scavenge extends Mission {
   ]); }
 }
 
-const MISSIONS = { scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge };
+const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 
 // ---- DOCTRINE — a persona running one mission at a time ------------------------------
@@ -290,8 +355,13 @@ function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // has run a short dwell (anti-thrash) — except URGENT transitions (grab the flag now),
 // which fire immediately. This is what makes missions complete/abort cleanly instead of
 // the old linear step machine that could never let go of a finished objective.
-const URGENT = new Set(['capture', 'intercept']);
+const URGENT = new Set(['capture', 'intercept', 'sap']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
+const SAP_BUDGET = 40;   // s the opening sapper gets to lay its kit before we move on regardless
+const TRAP_BUDGET = 120; // s a hunter tends its mine trap (bait/lure) before resuming normal play
+// Chance a commander opens with a recon-and-mine sapper sortie, by persona (rolled once at start).
+// Not every match pays the opening tax — hunters/turtles favour it, warriors mostly just push.
+const SAP_CHANCE = { hunter: 0.7, turtle: 0.6, rogue: 0.4, warrior: 0.2 };
 // Odds a persona breaks off its field plan when its own base is being shelled (rolled once
 // per 25s raid window in tick()). Identity, not balance: the turtle is a homebody, the
 // rogue's whole doctrine is "their base falls before ours does" — it plays the race.
@@ -329,10 +399,16 @@ export function setHqFinisher(v) { HQ_FINISHER = !!v; return HQ_FINISHER; }
 let ROGUE_REAR_SIEGE = true;
 export function setRogueRearSiege(v) { ROGUE_REAR_SIEGE = !!v; }
 
+// A back-door runner only sneaks around the rear when the REAR towers are dead; if the back is
+// still defended it takes the front instead (stops feeding Firebrats to live back-door guns).
+// A/B knob: off = old behaviour (always sneak on a stealth run, rear towers or not).
+let REAR_SNEAK_GATE = true;
+export function setRearSneakGate(v) { REAR_SNEAK_GATE = !!v; }
+
 class Doctrine {
   constructor(rng = Math.random, log = null) {
     this.rng = rng; this.log = log; this.t = 0;
-    this.mission = makeMission(this.opening);
+    this.mission = makeMission(this.opening);   // persona opening; a sapper sortie may preempt it (see tick, _sapOn)
     this.mission.enter(null, this);
     this.step = this.mission.key;
   }
@@ -340,6 +416,15 @@ class Doctrine {
   tick(cmd, dt) {
     this.t += dt;
     this.mission.tick(cmd, dt);
+    if (cmd._sapOn === undefined) {   // one-time roll: does this commander open with a sapper sortie?
+      cmd._sapOn = this.rng() < (SAP_CHANCE[cmd.archetype] ?? 0.35);
+      // A HUNTER that saps may turn it into a baited TRAP: mines on the lane + a Lurcher that lures.
+      cmd._trapMode = cmd.archetype === 'hunter' && cmd._sapOn && this.rng() < 0.7;
+      if (!cmd._sapOn) cmd._sapDone = true;
+    }
+    if (this.step === 'sap' && this.mission.t > SAP_BUDGET) cmd._sapDone = true;   // sortie ran long — move on
+    // The trap ends when its mines are spent (blew/cleared) or after a budget → resume normal play.
+    if (this.step === 'trap' && ((cmd.trapSpent() && this.mission.t > 8) || this.mission.t > TRAP_BUDGET)) cmd._trapDone = true;
     if (cmd._clearPathT > 0) cmd._clearPathT -= dt;   // countdown: clearing a downed runner's interceptor
     if (cmd._softenT > 0) cmd._softenT -= dt;         // countdown: silencing the towers that keep killing runners
     if (cmd._softenT > 0 && cmd.fortDown && cmd.fortDown()) cmd._softenT = 0;   // towers are down — job done, go grab
@@ -391,6 +476,11 @@ class Doctrine {
     // Tower-soften window (see onRunnerLost): the towers keep shredding runners → hold SIEGE
     // until they're silenced, instead of rebuilding a firebrat into the same guns each lap.
     if (!next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; }
+    // OPENING SAPPER (persona-rolled): a Firebrat out to a home flank — lay mines on the way back,
+    // drop a pod, scout that side — then fall through to the persona's real playbook.
+    if (!next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; }
+    // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
+    if (!next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; }
     if (!next) { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
     // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
     // don't repeat the bad decision; run its unblocker (unless that's banned too).
