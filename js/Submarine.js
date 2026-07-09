@@ -22,14 +22,17 @@ export function makeSubmarine() {
 
   // Main hull: a long hexagonal prism (flat deck + keel faces) — faceted, not round.
   const hull = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 11, 6), HULL());
+  // Clock the hexagon (rotation.y = roll about the cylinder's own long axis) BEFORE laying it
+  // down (rotation.x). Doing the clock on Z instead would tilt the whole prism and yaw it off the
+  // sub's forward axis — the parts would no longer line up as one body.
+  hull.rotation.y = Math.PI / 6;          // flat face up (deck) / down (keel)
   hull.rotation.x = Math.PI / 2;          // lie along Z
-  hull.rotation.z = Math.PI / 6;          // flat face up (deck) / down (keel)
   g.add(hull);
   // Sharp angular bow (6-sided cone) and a stubbier stern cone.
   const bow = new THREE.Mesh(new THREE.ConeGeometry(1.5, 5, 6), HULL());
-  bow.rotation.x = Math.PI / 2; bow.rotation.z = Math.PI / 6; bow.position.z = 8; g.add(bow);
+  bow.rotation.y = Math.PI / 6; bow.rotation.x = Math.PI / 2; bow.position.z = 8; g.add(bow);
   const stern = new THREE.Mesh(new THREE.ConeGeometry(1.5, 2.6, 6), HULL());
-  stern.rotation.x = -Math.PI / 2; stern.rotation.z = Math.PI / 6; stern.position.z = -6.3; g.add(stern);
+  stern.rotation.y = Math.PI / 6; stern.rotation.x = -Math.PI / 2; stern.position.z = -6.3; g.add(stern);
   // Dark keel belly to ground the silhouette.
   const keel = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.8, 12), KEEL());
   keel.position.y = -1.15; g.add(keel);

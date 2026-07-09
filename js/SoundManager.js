@@ -23,7 +23,7 @@
 // stands alone. The Sound Lab is still where these patches are authored — after tuning a preset
 // there, re-sync with:  cp ../sound-lab/patch.js js/patch.js  (run from the Sound Lab's parent).
 
-import { playPatch, PATCH_PRESETS } from './patch.js?v=2';
+import { playPatch, PATCH_PRESETS } from './patch.js?v=3';
 
 // Each vehicle's engine + gun plays a Sound Lab modular patch (authored in the Sound Lab) by index:
 // 0 Lurcher, 1 Firebrat, 2 Valkyrie, 3 Jotun. RPM_RANGE = [idle, max] the driving throttle maps to.
@@ -721,6 +721,17 @@ export class SoundManager {
       move: (nx, ny, nz) => this._setPannerPos(panner, nx, ny, nz),
       stop: () => { try { h.stop(0.2); } catch (e) {} setTimeout(() => { try { panner.disconnect(); } catch (e) {} }, 1800); },
     };
+  }
+
+  // NON-SPATIAL elevator whir for the GARAGE deploy rise. The garage is its own scene/camera,
+  // so the spatial listener position is stale there — this routes the same ELEVATOR patch through
+  // the flat sfx bus (full volume, camera-independent). Returns a stop() handle.
+  elevatorUI() {
+    this._ensureCtx();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const patch = PATCH_PRESETS['ELEVATOR — SERVO']; if (!patch) return { stop() {} };
+    const h = playPatch(this.ctx, this.noiseBuffer, this.sfx, this.reverbInput, patch);
+    return { stop: () => { try { h.stop(0.2); } catch (e) {} } };
   }
 
   // Soldier SQUISH — a decoded SAMPLE (rmrf/sounds/squish.mp3), played positioned. Synthesis

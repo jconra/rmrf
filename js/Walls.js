@@ -5,12 +5,12 @@
 // and the corner gun are separately destructible.
 
 import * as THREE from 'three';
-import { Destructible } from './Destructible.js?v=5';
+import { Destructible } from './Destructible.js?v=6';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent, makeLookout } from './Buildings.js?v=9';
 import { concreteTexture, accentPlateTexture } from './Textures.js?v=2';
 import { buildAssetGroup, recolorCamo } from './AssetBuilder.js?v=1';
-import { PROP_CONFIGS } from './assets.manifest.js?v=6';   // base-flavour props (containers/generator/drums/…)
+import { PROP_CONFIGS } from './assets.manifest.js?v=7';   // base-flavour props (containers/generator/drums/…)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });

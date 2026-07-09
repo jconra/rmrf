@@ -117,6 +117,30 @@ export class Destructible {
     if (this.hp <= 0) this._destroy();
   }
 
+  // Restore HP (a repair). Walks the visible battle-damage BACK toward the new, healthier
+  // level: relights the scorched colour and, if the heal crosses a crack stage, redraws the
+  // texture with fewer fractures. onDamage re-runs the owner's staging (a Wall at high HP frac
+  // sheds nothing, so this just settles it at the repaired look). No-op on a dead object —
+  // rubble doesn't un-break; only a still-standing structure can be patched.
+  heal(amount) {
+    if (this.dead || amount <= 0) return;
+    this.hp = Math.min(this.maxHp, this.hp + amount);
+    const sev = this.maxHp ? 1 - Math.max(0, this.hp) / this.maxHp : 0;
+    if (this._unique) {
+      for (const u of this._unique) if (u.base) u.mat.color.copy(u.base).lerp(SCORCH, sev * 0.65);
+      const stage = Math.min(CRACK_STAGES, Math.ceil(sev * CRACK_STAGES));
+      if (stage < this._stage && this._unique.some(u => u.ctx)) {
+        this._stage = stage;
+        for (const u of this._unique) if (u.ctx && u.clean) {
+          u.ctx.putImageData(u.clean, 0, 0);                        // repaint the pristine surface
+          if (stage > 0) drawCracks(u.ctx, u.w, u.h, stage / CRACK_STAGES);   // then only the remaining cracks
+          u.tex.needsUpdate = true;
+        }
+      }
+    }
+    if (this.onDamage) this.onDamage(this);
+  }
+
   // ── Staged crumble ──────────────────────────────────────────────────────────
   _initStaged() {
     this._pieces = [];
@@ -194,7 +218,9 @@ export class Destructible {
           const tex = new THREE.CanvasTexture(cv);
           tex.colorSpace = c.map.colorSpace; tex.wrapS = c.map.wrapS; tex.wrapT = c.map.wrapT;
           tex.repeat.copy(c.map.repeat); tex.anisotropy = c.map.anisotropy;
-          c.map = tex; u.ctx = ctx; u.tex = tex; u.w = w; u.h = h;
+          // snapshot the pristine surface so heal() can wind cracks back off (redraw fewer)
+          let clean = null; try { clean = ctx.getImageData(0, 0, w, h); } catch (e) { /* tainted canvas */ }
+          c.map = tex; u.ctx = ctx; u.tex = tex; u.w = w; u.h = h; u.clean = clean;
         }
         this._unique.push(u);
         return c;
@@ -269,6 +295,17 @@ export class DestructibleManager {
       }
     });
     return d;
+  }
+
+  // Drop a Destructible from tracking (a transient like a repair-crew jeep that has left
+  // the field). Prunes it from the item list and the raycast maps so it stops being a target.
+  remove(d) {
+    const i = this.items.indexOf(d); if (i >= 0) this.items.splice(i, 1);
+    d.mesh.traverse(o => {
+      if (!o.isMesh) return;
+      this._byMesh.delete(o.uuid);
+      const j = this._meshes.indexOf(o); if (j >= 0) this._meshes.splice(j, 1);
+    });
   }
 
   // Recompute all bounds (after bases/props are placed in the scene).

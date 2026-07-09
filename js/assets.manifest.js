@@ -25,6 +25,7 @@ import {
 } from './Buildings.js?v=9';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
 import { makeWall, makeTower, makeGate } from './Walls.js?v=65';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
+import { makeSubmarine } from './Submarine.js?v=4';   // deep-water hazard sub (code-built mesh; ?v matches main.js so the module dedupes)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';   // the designed corner tower, as shared data (designer + game read this one file)
 import LOOKOUT_CFG from './lookout.config.js?v=1';   // the designed lookout tower, same shared-data pattern
 import FLAGHQ_CFG from './flaghq.config.js?v=2';     // config refs let the asset-designer OPEN these for editing
@@ -162,6 +163,13 @@ export const ASSETS = [
   { id: 'bastion', name: 'Bastion (No Gun)', make: cfgMake(BASTION_CFG), config: BASTION_CFG,
     footprint: { w: 1, d: 1 }, accent: true, destructible: { type: 'wall', hp: 340 },
     category: 'structure', desc: 'The corner tower without its gun — hard cover for easier maps.' },
+
+  // Code-built (no config): the deep-water hazard sub. Spawned by the game on demand, not
+  // grid-placed — this entry is so the asset designer can view/measure the model. make() ignores
+  // the (cell, accent) args; the sub owns its own dark palette + red sensor eye (team-neutral).
+  { id: 'submarine', name: 'Hazard Submarine', make: makeSubmarine,
+    footprint: { w: 1, d: 4 }, accent: false,
+    category: 'special', desc: 'Deep-water deterrent: surfaces to shell anyone who strays too far to sea.' },
 
   // ── Supply POIs (neutral; either team can use them, or blow one to deny it) ──
   {

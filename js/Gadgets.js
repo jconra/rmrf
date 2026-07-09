@@ -80,6 +80,16 @@ class GadgetSet {
     }
     return n;
   }
+  // First gadget within `r` of a point HORIZONTALLY (height-agnostic — a flat tank round at any
+  // height still connects, so you can't shoot clean over a short pod), else null. Direct hits.
+  queryHit(point, r) {
+    for (const it of this.items) {
+      const p = it.group.position;
+      if ((p.x - point.x) ** 2 + (p.z - point.z) ** 2 <= r * r) return it;
+    }
+    return null;
+  }
+  takeHit(it) { this._drop(it); }   // destroy one gadget outright (a direct projectile hit)
 }
 
 export class Minefield extends GadgetSet {

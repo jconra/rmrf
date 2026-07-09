@@ -124,6 +124,19 @@ export class SoldierCorps {
     }
   }
 
+  // A construction-crew member: walks from (x,z) to a work spot (tx,tz) beside a tower and
+  // then shuffles in place (the "building" motion). Lives until the repair job retires it via
+  // remove(). Returns the unit so the caller can track it (and notice if it gets squished).
+  addWorker(x, z, tx, tz, team, accent) {
+    return this._spawn({
+      mode: 'work', team, x, z, tx, tz,
+      speed: WALK_SPEED * (0.9 + Math.random() * 0.2), color: this._fatigue(accent),
+      life: Infinity, t: Math.random() * 6.28, squash: 0,
+    });
+  }
+  // Retire a specific figure (repair job done/cancelled). Safe if it's already gone.
+  remove(u) { if (u && this.units.includes(u)) this._retire(u); }
+
   update(dt, vehicles) {
     const dead = [];
     for (const u of this.units) {
@@ -131,7 +144,11 @@ export class SoldierCorps {
       if (u.squash > 0) { u.squash += dt; if (u.squash > 2.5) dead.push(u); continue; }
       // --- steering ---
       let dx = 0, dz = 0, moving = false;
-      if (u.mode === 'flee') {
+      if (u.mode === 'work') {                          // construction crew: march to the spot, then work in place
+        dx = u.tx - u.x; dz = u.tz - u.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 0.6) { dx /= d; dz /= d; moving = true; }   // else: arrived → idle-shuffle reads as "building"
+      } else if (u.mode === 'flee') {
         dx = u.tx - u.x; dz = u.tz - u.z;
         const d = Math.hypot(dx, dz);
         if (d > 0.4) { dx /= d; dz /= d; moving = true; }

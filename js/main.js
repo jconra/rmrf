@@ -5,12 +5,13 @@
 import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
 import { Controls } from './Controls.js';
-import { DestructibleManager, Destructible } from './Destructible.js?v=5';
+import { DestructibleManager, Destructible } from './Destructible.js?v=6';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
 import { Camp, Wall } from './Walls.js?v=65';
-import { SoldierCorps } from './Soldiers.js?v=3';
-import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=3';
+import { SoldierCorps } from './Soldiers.js?v=4';
+import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=2';
+import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=4';
 import { makeFlagHQ } from './Buildings.js?v=9';   // decoy HQ buildings on designed maps
 import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
 import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?v=1';
@@ -19,10 +20,10 @@ import { Foliage } from './Foliage.js?v=5';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
 import { Elevator } from './Elevator.js?v=3';
-import { Sub } from './Submarine.js?v=3';
+import { Sub } from './Submarine.js?v=4';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
-import { SoundManager } from './SoundManager.js?v=4';
+import { SoundManager } from './SoundManager.js?v=5';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
@@ -38,7 +39,7 @@ import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
-import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=6';
+import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=7';
 
 // --- Renderer ----------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -742,6 +743,7 @@ let flagsCaptured = 0;  // enemy flags the player has extracted into the garage 
 let deploy = null;    // { type, colorIndex } captured when a deploy is confirmed
 let fieldFadeT = 0;   // counts up after handoff to fade the black deploy overlay out
 let garageFadeT = null; // when set, fades the garage in from black (on return)
+let _garageElevSnd = null; // handle for the garage deploy-lift servo whir (started on rise)
 let waterT = 0;         // elapsed seconds driving the animated water ripples (pauses with the game)
 let victoryReturn = false; // the current lift descent is a winning flag extraction (run the cinematic)
 let victoryHoldT = 0;      // beat held at the bottom of a victory descent before fading out
@@ -905,6 +907,7 @@ function placeCamps() {
   placeResupplies();   // neutral fuel/ammo/shield points of interest
   scatterScrap();      // salvage piles out toward the map rim (scouting reward)
   configureSubZone();   // arm the deep-water sub zone (the sub itself spawns on demand)
+  resetRepairs();       // clear any repair crews + refill the jeep pools for the new match
 }
 
 // World site (with ground height) of a build cell.
@@ -1034,6 +1037,7 @@ function placeCampsFromConfig(assets) {
   placeResupplies();
   scatterScrap();
   configureSubZone();
+  resetRepairs();
 }
 // Use the designed bases when a map carries placed assets; else procedural placement.
 function placeCampsAuto() {
@@ -1912,7 +1916,9 @@ function updateProjectileHits() {
     const hitTree = foliage && p.team != null && foliage.treeAt(pos.x, pos.z, 0.3);
     const hitVeh = nearestEnemyVehicle(pos, 0.5, p.team, p.shooter);
     const hitGround = pos.y <= map.heightAt(pos.x, pos.z) + 0.2 && map.isLand(pos.x, pos.z);
-    if (hitSolid || hitTree || hitVeh || hitGround) {
+    const hitPod = sensorNet ? sensorNet.queryHit(pos, 2.0) : null;   // sensor pods are shootable (horizontal, any height); radius > projectile step so a fast shell can't skip over it
+    if (hitSolid || hitTree || hitVeh || hitGround || hitPod) {
+      if (hitPod) sensorNet.takeHit(hitPod);   // a direct round kills the pod outright (splash still clears neighbours)
       if (hitSolid) {
         hitSolid.damage(p.dmg, pos);   // direct hit = full damage (splash adds a little more)
         // BASE UNDER ATTACK radio: an enemy round striking a structure near a team's flag HQ or
@@ -3220,6 +3226,222 @@ function updateSubmarines(dt) {
   }
   if (activeSub && activeSub.update(dt, tgt, { fire: subFire })) { activeSub.dispose(); activeSub = null; }
 }
+// ── Tower repair crews (RepairCrew.js) ──────────────────────────────────────
+// A base sends a JEEP + soldier crew to patch a wounded corner tower — it heals a tier over
+// ~60s. The jeep is a killable target the whole time it's out: destroy it (or squish the crew)
+// and the repair is cancelled AND that jeep is lost. A team can only repair while it has jeeps in
+// its pool, so hunting the enemy's jeeps denies their fortification. PROTOTYPE ("feel it" slice):
+// auto-ordered so it shows up in AI-vs-AI without input; economy + AI targeting come next. The
+// knob defaults ON for visibility — flip it OFF for A/B tournaments so it can't skew resolution.
+let repairsOn = true;
+let repairJobs = [];                              // active RepairJob instances
+const MOTOR_JEEPS = 3;                            // jeeps parked in each main base's motor pool
+const JEEP_HP = 40;                               // a jeep is fragile — a couple of shells
+let motorPool = { red: [], blue: [] };            // parked jeeps: [{ mesh, dest, state, x, z, y, yaw, accent }]
+let _repairCd = { red: 0, blue: 0 };              // per-team auto-order cooldown
+const REPAIR_WOUND = 0.7;                         // order a repair once a tower dips below this HP frac
+// The AI waits a RANDOM spell between repair sorties, so its cadence is unpredictable — you can't
+// park on a tower and pick off each crew on a fixed clock (and you won't just sit there when the
+// next crew might be 5s or 45s away). Set when a sortie ENDS (crew home or lost).
+const REPAIR_CD_MIN = 5, REPAIR_CD_MAX = 45;
+const randRepairCd = () => REPAIR_CD_MIN + Math.random() * (REPAIR_CD_MAX - REPAIR_CD_MIN);
+
+// (Re)park a jeep in its lot slot: build the mesh + a shootable Destructible at the stored spot.
+function parkSlot(s) {
+  const mesh = makeJeepMesh(s.accent);
+  mesh.position.set(s.x, s.y, s.z); mesh.rotation.y = s.yaw;
+  scene.add(mesh);
+  s.mesh = mesh;
+  s.dest = new Destructible(mesh, { type: 'building', hp: JEEP_HP });
+  destructibles.add(s.dest);                      // parked jeeps are raidable
+  s.state = 'parked';
+}
+
+function clearMotorPool() {
+  for (const team of ['red', 'blue']) {
+    for (const s of motorPool[team]) {
+      if (s.dest) destructibles.remove(s.dest);
+      if (s.mesh && s.mesh.parent) s.mesh.parent.remove(s.mesh);
+    }
+    motorPool[team] = [];
+  }
+}
+
+// Park MOTOR_JEEPS jeeps in a row toward the BACK of each main base (away from the gate) — a
+// visible, raidable motor pool the repair crews draw from.
+function buildMotorPool() {
+  clearMotorPool();
+  for (const c of camps) {
+    if (c.role !== 'main') continue;
+    const out = (c.gates && c.gates[0] && c.gates[0].outward) || new THREE.Vector3(0, 0, 1);
+    const bx = -out.x, bz = -out.z;               // back direction (unit)
+    const px = -bz, pz = bx;                      // perpendicular = the row axis
+    const ax = c.center.x + bx * 12, az = c.center.z + bz * 12;
+    const yaw = Math.atan2(bx, bz);               // face the jeeps toward the field (out the gate)
+    for (let i = 0; i < MOTOR_JEEPS; i++) {
+      const off = (i - (MOTOR_JEEPS - 1) / 2) * 4;
+      const x = ax + px * off, z = az + pz * off;
+      const s = { x, z, y: map ? map.heightAt(x, z) : 0, yaw, accent: c.accent, team: c.team, mesh: null, dest: null, state: '' };
+      parkSlot(s);
+      motorPool[c.team].push(s);
+    }
+  }
+}
+
+function parkedCount(team) { return motorPool[team].filter(s => s.state === 'parked').length; }
+
+function resetRepairs() {
+  for (const j of repairJobs) j.dispose();
+  repairJobs = [];
+  _repairCd = { red: 0, blue: 0 };
+  buildMotorPool();
+}
+
+// The most-wounded STILL-STANDING corner tower for a team (gun up = worth defending, and healing
+// the body while the gun stands restores it cleanly). Null if nothing needs work.
+function findWoundedTower(team) {
+  let best = null, bestFrac = REPAIR_WOUND;
+  for (const c of camps) {
+    if (c.team !== team) continue;
+    for (const w of c.walls) {
+      if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+      const frac = w.body.hp / w.maxHp;
+      if (frac < bestFrac) { bestFrac = frac; best = { camp: c, wall: w }; }
+    }
+  }
+  return best;
+}
+
+// Debug: any STANDING corner tower for a team (regardless of HP), so a test can bang one up.
+function findWoundedTowerAny(team) {
+  for (const c of camps) {
+    if (c.team !== team) continue;
+    for (const w of c.walls) if (w.turret && !w.turret.dead && w.body && !w.body.dead) return { camp: c, wall: w };
+  }
+  return null;
+}
+
+// Roll a crew out to a team's most-wounded tower — if one's worth fixing, a jeep is free, and no
+// crew is already out for that team. Returns true if a job started.
+// Deploy a crew to a SPECIFIC tower (a player's click, or the AI's auto-pick). Guards: repairs
+// enabled, no crew already out for this team, a jeep parked, and the target is a standing gun-up
+// wall. Returns true if a crew rolled out.
+function deployRepair(team, camp, wall) {
+  if (!repairsOn || !soldiers) return false;
+  if (repairJobs.some(j => j.team === team)) return false;   // one crew out per team at a time (slice)
+  if (!wall || !wall.turret || wall.turret.dead || !wall.body || wall.body.dead) return false;
+  const slot = motorPool[team].find(s => s.state === 'parked');
+  if (!slot) return false;                                   // no jeeps left in the lot
+  // Pull this jeep OUT of the lot; the mobile RepairJob jeep takes over from its slot.
+  slot.state = 'deployed';
+  destructibles.remove(slot.dest);
+  if (slot.mesh && slot.mesh.parent) slot.mesh.parent.remove(slot.mesh);
+  const job = new RepairJob(scene, map, {
+    start: { x: slot.x, z: slot.z },
+    tower: { x: wall.group.position.x, y: wall.group.position.y, z: wall.group.position.z },
+    wall, team, accent: camp.accent, soldiers,
+  });
+  job.slot = slot;                                           // remember where to re-park on return
+  destructibles.add(job.jeepDest);
+  repairJobs.push(job);
+  return true;
+}
+
+// AI auto-order: pick the most-wounded tower and send a crew (human teams repair by CLICK).
+function orderRepair(team) {
+  const hit = findWoundedTower(team);
+  return hit ? deployRepair(team, hit.camp, hit.wall) : false;
+}
+
+function updateRepairs(dt, camera) {
+  // Raid check: a jeep destroyed while parked in the lot is lost for good.
+  for (const team of ['red', 'blue']) {
+    for (const s of motorPool[team]) {
+      if (s.state === 'parked' && s.dest && s.dest.dead) {
+        s.state = 'lost';
+        destructibles.remove(s.dest);
+        if (s.mesh && s.mesh.parent) s.mesh.parent.remove(s.mesh);
+      }
+    }
+  }
+  for (let i = repairJobs.length - 1; i >= 0; i--) {
+    const j = repairJobs[i];
+    const st = j.update(dt, camera);
+    if (st === 'done' || st === 'cancelled') {
+      destructibles.remove(j.jeepDest);
+      if (j.slot) { if (j.survived()) parkSlot(j.slot); else j.slot.state = 'lost'; }   // home safe → re-park; shot out → gone
+      if (TEAM_CTRL[j.team] === 'ai') _repairCd[j.team] = randRepairCd();   // AI: random gap before the NEXT sortie (unpredictable → uncampable)
+      repairJobs.splice(i, 1);
+    }
+  }
+  if (!repairsOn || matchOver) return;
+  for (const team of ['red', 'blue']) {
+    if (TEAM_CTRL[team] !== 'ai') continue;   // a HUMAN team repairs by CLICKING a tower — never auto (don't send jeeps into a crossfire)
+    if (repairJobs.some(j => j.team === team)) continue;   // a crew is already out — one at a time
+    _repairCd[team] = (_repairCd[team] || 0) - dt;
+    if (_repairCd[team] > 0) continue;                     // still inside the randomised gap between sorties
+    if (!orderRepair(team)) _repairCd[team] = 1.0;         // nothing to fix / no jeep → re-check soon (a sortie's gap is set when it ENDS)
+  }
+}
+
+// ── Player repair control: a clickable 🔧 icon floats over each damaged friendly tower ─────────
+// It's a DOM button projected to the tower's screen position (not a world-space click), so it
+// captures its own tap and works while driving on phone (where the open field is inert). Tapping
+// it sends a repair crew to THAT tower. Only for a HUMAN player's own towers, and only when a jeep
+// is available and no crew is already out.
+const _projV = new THREE.Vector3();
+let repairIconWrap = null;
+const repairIcons = new Map();   // wall -> { el, camp }
+
+// Player-team towers worth a repair icon: standing, gun up, actually damaged, not already being
+// worked. Hidden entirely while a crew is out (only one per team) or the jeep pool is empty.
+function repairEligible(team) {
+  if (repairJobs.some(j => j.team === team)) return [];
+  if (parkedCount(team) <= 0) return [];
+  const out = [];
+  for (const c of camps) {
+    if (c.team !== team) continue;
+    for (const w of c.walls) {
+      if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+      if (w.body.hp >= w.maxHp * 0.85) continue;      // barely scratched → not worth a jeep run
+      out.push({ camp: c, wall: w });
+    }
+  }
+  return out;
+}
+
+function updateRepairIcons() {
+  const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
+  const list = (human && onField && !matchOver && repairsOn) ? repairEligible(PLAYER_TEAM) : [];
+  if (!repairIconWrap) {
+    repairIconWrap = document.createElement('div');
+    repairIconWrap.id = 'repair-icons';
+    repairIconWrap.style.cssText = 'position:fixed;inset:0;z-index:70;pointer-events:none';
+    document.body.appendChild(repairIconWrap);
+  }
+  const live = new Set(list.map(e => e.wall));
+  for (const [w, rec] of repairIcons) if (!live.has(w)) { rec.el.remove(); repairIcons.delete(w); }
+  const W = window.innerWidth, H = window.innerHeight;
+  for (const { camp, wall } of list) {
+    let rec = repairIcons.get(wall);
+    if (!rec) {
+      const el = document.createElement('button');
+      el.textContent = '🔧'; el.title = 'Send a repair crew';
+      el.style.cssText = 'position:absolute;pointer-events:auto;transform:translate(-50%,-50%);width:42px;height:42px;border-radius:50%;border:2px solid #5fd66a;background:rgba(8,16,10,0.82);color:#bff5c0;font-size:20px;line-height:1;cursor:pointer;display:none;padding:0;box-shadow:0 0 10px rgba(95,214,106,0.4)';
+      const fire = (ev) => { ev.preventDefault(); ev.stopPropagation(); deployRepair(PLAYER_TEAM, rec.camp, wall); };
+      el.addEventListener('pointerdown', fire);   // one handler for mouse + touch, before any canvas listener
+      repairIconWrap.appendChild(el);
+      rec = { el, camp }; repairIcons.set(wall, rec);
+    } else { rec.camp = camp; }
+    const p = wall.group.position;
+    _projV.set(p.x, (p.y || 0) + 6, p.z).project(camera);
+    if (_projV.z > 1) { rec.el.style.display = 'none'; continue; }   // behind the camera
+    rec.el.style.left = ((_projV.x * 0.5 + 0.5) * W) + 'px';
+    rec.el.style.top = ((-_projV.y * 0.5 + 0.5) * H) + 'px';
+    rec.el.style.display = '';
+  }
+}
+
 function updateGadgets(dt) {
   if (sensorNet) sensorNet.update(dt);
   if (!minefield) return;
@@ -6680,9 +6902,22 @@ window.RR = {
   get sensorNet() { return sensorNet; },                        // debug: Firebrat sensor pods
   get gadgetStats() { return gadgetStats; },                    // debug: per-match mine/pod telemetry
   liveMines: () => minefield.items.length,
+  livePods: () => sensorNet.items.length,
   layMine: (x, z, team = PLAYER_TEAM) => minefield.place(x, z, team, teamColor(team)),
   dropPod: (x, z, team = PLAYER_TEAM) => sensorNet.place(x, z, team, teamColor(team)),
   get camps() { return camps; },
+  // Tower repair crews (prototype)
+  setRepairs: (v) => { repairsOn = !!v; return repairsOn; },   // A/B: enable/disable jeep repair crews
+  orderRepair: (team = PLAYER_TEAM) => orderRepair(team),      // force a repair for a team (debug/testing)
+  repairStatus: () => { const pool = (t) => ({ parked: motorPool[t].filter(s => s.state === 'parked').length, deployed: motorPool[t].filter(s => s.state === 'deployed').length, lost: motorPool[t].filter(s => s.state === 'lost').length }); return { on: repairsOn, jobs: repairJobs.map(j => ({ team: j.team, state: j.state, progress: +j.progress.toFixed(1), jeepDead: j.jeepDest.dead })), jeeps: { red: pool('red'), blue: pool('blue') }, cd: { red: +(_repairCd.red || 0).toFixed(1), blue: +(_repairCd.blue || 0).toFixed(1) } }; },
+  woundTower: (team, frac = 0.4) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(h.wall.maxHp * (1 - frac)); return !!h; },  // debug: bang up a tower to test repair
+  killRepairJeep: (team = PLAYER_TEAM) => { const j = repairJobs.find(x => x.team === team); if (!j) return false; j.jeepDest.damage(1e9); return true; },  // debug: blow the crew's jeep (test cancel)
+  raidJeep: (team = PLAYER_TEAM) => { const s = motorPool[team].find(x => x.state === 'parked'); if (!s) return false; s.dest.damage(1e9); return true; },  // debug: destroy a jeep parked in the lot (test raid)
+  refillJeeps: (team = PLAYER_TEAM) => { let n = 0; for (const s of motorPool[team]) if (s.state === 'lost') { parkSlot(s); n++; } return n; },   // debug: restore lost jeeps to the lot
+  get motorPool() { return motorPool; },                        // debug: parked-jeep slots per team
+  setTeamHuman: (team) => { TEAM_CTRL[team] = 'human'; return { ...TEAM_CTRL }; },   // debug: test the player click path
+  repairIconInfo: () => ({ icons: repairIcons.size, eligible: TEAM_CTRL[PLAYER_TEAM] === 'human' ? repairEligible(PLAYER_TEAM).length : 0 }),
+  clickRepairIcon: (i = 0) => { const els = repairIconWrap ? [...repairIconWrap.children] : []; if (!els[i]) return false; els[i].dispatchEvent(new PointerEvent('pointerdown')); return true; },   // debug: fire an icon's click path
   get placedWalls() { return placedWalls; },                   // debug: designer-placed fort pieces (custom maps)
   get placedProps() { return placedProps; },                   // debug: designer-placed generic structures (custom maps)
   damageTapAt: (x, y) => damageTapAt(x, y),
@@ -6774,6 +7009,7 @@ window.RR = {
       updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateLock(dt);
       if (soldiers) soldiers.update(dt, combatants);
       updateGadgets(dt);
+      updateRepairs(dt);
       updateSubmarines(dt);
     }
   },
@@ -7377,6 +7613,12 @@ function animate() {
   const fade = document.getElementById('deployfade');
   if (garage && !onField) {
     garage.update(dt);
+    // Elevator servo whir the moment the deploy lift starts climbing inside the garage,
+    // stopped once it reaches the top (phase leaves 'rising'). Non-spatial (garage scene).
+    if (sound) {
+      if (garage.phase === 'rising') { if (!_garageElevSnd) _garageElevSnd = sound.elevatorUI(); }
+      else if (_garageElevSnd) { _garageElevSnd.stop(); _garageElevSnd = null; }
+    }
     if (fade) {
       if (garageFadeT != null) {           // returned to base → fade the garage in from black
         garageFadeT += dt;
@@ -7413,6 +7655,8 @@ function animate() {
       updateGibs(dt);                        // fly the debris from just-destroyed vehicles until it settles
       if (soldiers) soldiers.update(dt, combatants);   // base infantry: patrol march, wreck scatter, tread squish
       updateGadgets(dt);                     // mines (proximity detonate) + sensor pods (blink)
+      updateRepairs(dt, camera);             // tower repair crews: jeep drives out, crew builds, tower heals
+      updateRepairIcons();                   // player: clickable 🔧 over each damaged friendly tower
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
