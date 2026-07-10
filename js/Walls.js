@@ -5,12 +5,12 @@
 // and the corner gun are separately destructible.
 
 import * as THREE from 'three';
-import { Destructible } from './Destructible.js?v=6';
+import { Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { makeFlagHQ, makeBarracks, makeDepot, makeElevator, makeAdmin, makeQuonset, makeTent, makeLookout } from './Buildings.js?v=9';
 import { concreteTexture, accentPlateTexture } from './Textures.js?v=2';
 import { buildAssetGroup, recolorCamo } from './AssetBuilder.js?v=1';
-import { PROP_CONFIGS } from './assets.manifest.js?v=7';   // base-flavour props (containers/generator/drums/…)
+import { PROP_CONFIGS } from './assets.manifest.js?v=8';   // base-flavour props (containers/generator/drums/…)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';
 
 const STONE = new THREE.MeshStandardMaterial({ color: '#ffffff', map: concreteTexture('#9a948a'), roughness: 0.95 });
@@ -268,10 +268,15 @@ export class Wall {
     }
     if (this._authoredCrumble) {                       // designer tower: shed by authored fallAt
       for (const p of this.layers) if (!p.falling && (p.fallAt ?? 0) >= frac) this._fall(p);
+      // REBUILD: a repair crew heal()ing the body walks frac back UP through the same authored
+      // thresholds — so pieces re-seat in exactly the reverse of the crumble, bottom course
+      // first, upper layers stacking on as the HP climbs. (Damage mid-repair re-fells them.)
+      for (const p of this.layers) if (p.falling && (p.fallAt ?? 0) < frac) this._restore(p);
     } else {                                           // procedural wall/tower: peel top-down
       const lost = Math.floor((1 - frac) * this.layers.length);
       for (let i = this.layers.length - 1, k = 0; i >= 0; i--, k++) {
         if (k < lost && !this.layers[i].falling) this._fall(this.layers[i]);
+        else if (k >= lost && this.layers[i].falling) this._restore(this.layers[i]);   // rebuild: bottom-up
       }
     }
   }
@@ -294,12 +299,45 @@ export class Wall {
     this._killTurret();
   }
 
-  // Kick a layer/turret loose: outward + up, with tumble.
+  // Kick a layer/turret loose: outward + up, with tumble. Snapshots the piece's intact
+  // transform first, so a repair crew can seat it back exactly where it stood (_restore).
   _fall(obj) {
+    const m = obj.mesh || obj.group;
+    if (!obj.home) obj.home = { pos: m.position.clone(), rot: m.rotation.clone() };
     obj.falling = true;
     const a = Math.random() * Math.PI * 2;
     obj.vel.set(Math.cos(a) * 2.2, 2.6, Math.sin(a) * 2.2);
     obj.ang.set((Math.random() - 0.5) * 6, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 6);
+  }
+
+  // Seat a crumbled piece back on the stack (the rebuild mirror of _fall).
+  _restore(obj) {
+    if (!obj.home) return;
+    const m = obj.mesh || obj.group;
+    m.position.copy(obj.home.pos); m.rotation.copy(obj.home.rot);
+    obj.falling = false; obj.settled = false;
+    obj.vel.set(0, 0, 0); obj.ang.set(0, 0, 0);
+  }
+
+  // Re-mount a (purchased) gun on the tower top: reset the topple, re-seat the head at its
+  // pivot, and restore its own HP. It resumes aiming/firing on the next tick — tickWallTurret
+  // gates only on dead/falling. No-op unless the gun is actually down.
+  mountGun() {
+    const t = this.turret;
+    if (!t || !t.dead) return false;
+    if (t.home) { t.group.position.copy(t.home.pos); t.group.rotation.copy(t.home.rot); }
+    t.vel.set(0, 0, 0); t.ang.set(0, 0, 0);
+    t.falling = false; t.settled = false; t.dead = false;
+    if (t.head) {
+      t.head.rotation.set(0, 0, 0);
+      if (t.head.parent !== t.group) t.group.add(t.head);
+    }
+    if (this.turretDest) {
+      if (this.turretDest.dead) this.turretDest.revive(this.turretDest.maxHp);
+      this.turretDest.hp = this.turretDest.maxHp;
+      this.turretDest.refresh();
+    }
+    return true;
   }
 
   _animate(o, dt) {

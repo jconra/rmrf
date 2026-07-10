@@ -578,11 +578,20 @@ export class Jotun {
   update(delta, forwardInput = 0, turnInput = 0) {
     this.hoverTime += delta;
     this.group.position.y = (Math.abs(forwardInput) + Math.abs(turnInput)) * Math.sin(this.hoverTime * 22) * 0.005;
-    // Idle units SCAN (sweep the head). A controlled unit instead eases the head to
-    // its aim (`aimYaw`, 0 = forward) so the front reads while driving / firing.
+    // Idle units SCAN (sweep the head). A controlled unit instead slews the head to its
+    // aim (`aimYaw`, 0 = forward) — shortest angular path at a fixed rate, same fix as
+    // the Lurcher (the numeric exponential ease unwound the long way across the ±180°
+    // seam and read as a flick on big snaps). The heavy head turns faster than the
+    // Lurcher's ring mount but only sweeps its narrow 30° arc anyway.
     if (this.turretGroup) {
       if (this.autoScan === false) {
-        this.turretGroup.rotation.y += ((this.aimYaw || 0) - this.turretGroup.rotation.y) * Math.min(1, delta * 8);
+        const cur = this.turretGroup.rotation.y;
+        let d = (this.aimYaw || 0) - cur;
+        while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+        const step = Math.PI * 2.2 * delta;
+        let ny = cur + Math.max(-step, Math.min(step, d));
+        while (ny > Math.PI) ny -= 2 * Math.PI; while (ny < -Math.PI) ny += 2 * Math.PI;
+        this.turretGroup.rotation.y = ny;
       } else {
         this.turretGroup.rotation.y = Math.sin(this.hoverTime * 0.6) * 0.6;
       }

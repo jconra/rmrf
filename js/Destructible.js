@@ -242,8 +242,25 @@ export class Destructible {
     }
   }
 
+  // Bring a destroyed object back at `hp` (a rebuild). Re-attaches the intact mesh where it was
+  // and clears any dropped rubble; the caller then heal()s it up (heal no-ops while dead, so a
+  // rebuild is always revive-then-heal). The owner is responsible for restoring its own staging
+  // (e.g. a Wall snaps crumbled layers back as its HP climbs — see Wall._restage's rebuild branch).
+  revive(hp = 1) {
+    if (!this.dead) return;
+    this.dead = false;
+    this.hp = Math.min(this.maxHp, Math.max(1, hp));
+    if (!this.mesh.parent && this._parent) this._parent.add(this.mesh);
+    if (this.rubble && this.rubble.parent) { this.rubble.parent.remove(this.rubble); this.rubble = null; }
+    this._flash = 0;
+    this._applyWear();     // battered look for the (low) revived HP; heal() relights it from here
+    this.refresh();
+    if (this.onDamage) this.onDamage(this);   // let the owner re-run its staging at the new HP
+  }
+
   _destroy() {
     this.dead = true;
+    this._parent = this.mesh.parent;   // remembered so revive() can re-attach the mesh
     if (this.staged) {           // pieces ARE the rubble — drop whatever's still standing, keep them in place
       this._restageFall();
       if (this.onDestroyed) this.onDestroyed(this);

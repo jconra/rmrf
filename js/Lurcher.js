@@ -309,10 +309,21 @@ export class Lurcher {
       ? Math.sin(this.hoverTime * moving * 14) * 0.010
       : 0;
 
-    // Idle units sweep the turret around forward; a controlled unit eases it to its
-    // aim (`aimYaw`, 0 = forward) so the front stays readable while driving / firing.
+    // Idle units sweep the turret around forward; a controlled unit slews it to its
+    // aim (`aimYaw`, 0 = forward). The slew takes the SHORTEST angular path at a fixed
+    // rate — the old numeric exponential ease had two ugly failure modes: an aim that
+    // crossed the ±180° seam behind the hull unwound the LONG way (a full spin through
+    // the front, always via the same side), and a big snap crossed ~180° in a third of
+    // a second (the AI looked like it was flicking its shots). A steady rate reads as a
+    // deliberate motorised mount, with no preferred direction.
     if (this.autoScan === false) {
-      this.turretGroup.rotation.y += ((this.aimYaw || 0) - this.turretGroup.rotation.y) * Math.min(1, delta * 8);
+      const cur = this.turretGroup.rotation.y;
+      let d = (this.aimYaw || 0) - cur;
+      while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+      const step = Math.PI * 1.2 * delta;               // rad/s — a shade over the player's aim slew
+      let ny = cur + Math.max(-step, Math.min(step, d));
+      while (ny > Math.PI) ny -= 2 * Math.PI; while (ny < -Math.PI) ny += 2 * Math.PI;
+      this.turretGroup.rotation.y = ny;
     } else {
       this.turretGroup.rotation.y = Math.sin(this.hoverTime * 0.6) * 0.6;
     }

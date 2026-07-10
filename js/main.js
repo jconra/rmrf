@@ -5,12 +5,12 @@
 import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
 import { Controls } from './Controls.js';
-import { DestructibleManager, Destructible } from './Destructible.js?v=6';
+import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp, Wall } from './Walls.js?v=65';
+import { Camp, Wall } from './Walls.js?v=66';
 import { SoldierCorps } from './Soldiers.js?v=4';
-import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=2';
+import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=7';
 import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=4';
 import { makeFlagHQ } from './Buildings.js?v=9';   // decoy HQ buildings on designed maps
 import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
@@ -39,7 +39,7 @@ import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
 import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
-import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=7';
+import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=8';
 
 // --- Renderer ----------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -1278,7 +1278,11 @@ function aimDir(veh, targetPoint) {
   const aimAng = Math.atan2(-(targetPoint.x - hp.x), -(targetPoint.z - hp.z));   // world yaw of the target dir
   const arc = SHOT_ARC[veh.type] ?? Math.PI / 5;
   const rel = Math.max(-arc, Math.min(arc, wrapPi(aimAng - veh.heading)));
-  if (veh.model && veh.model.turretGroup) { veh.model.autoScan = false; veh.model.aimYaw = rel; veh._aimHold = 1.4; }
+  // Hold the bearing well past the fire cadence (~2s) so the turret STAYS trained on the
+  // threat between shots — at 1.4s it started easing home after every round and then had
+  // to swing back out for the next one, which read as an erratic flick (the model slews
+  // the visual turret at a fixed rate; this only sets where it's heading).
+  if (veh.model && veh.model.turretGroup) { veh.model.autoScan = false; veh.model.aimYaw = rel; veh._aimHold = 4.0; }
   const ang = veh.heading + rel;
   return _aimDir.set(-Math.sin(ang), 0, -Math.cos(ang)).normalize();
 }
@@ -1293,7 +1297,7 @@ function aimFireDir(veh, targetPoint, mpos) {
   const pitch = Math.atan2(to.y, horiz);                       // vertical aim, kept as-is
   const arc = SHOT_ARC[veh.type] ?? Math.PI / 5;
   const rel = Math.max(-arc, Math.min(arc, wrapPi(Math.atan2(-to.x, -to.z) - veh.heading)));
-  if (veh !== player && veh.model && veh.model.turretGroup) { veh.model.autoScan = false; veh.model.aimYaw = rel; veh._aimHold = 1.4; }
+  if (veh !== player && veh.model && veh.model.turretGroup) { veh.model.autoScan = false; veh.model.aimYaw = rel; veh._aimHold = 4.0; }   // long hold — stay trained between shots (see aimDir)
   const yaw = veh.heading + rel, cy = Math.cos(pitch);
   return _aimDir.set(-Math.sin(yaw) * cy, Math.sin(pitch), -Math.cos(yaw) * cy).normalize();
 }
@@ -1323,7 +1327,11 @@ function aimPlayerTurret(veh, dt) {
   const cur = veh.model.aimYaw || 0;
   let d = wrapPi(desired - cur);
   d = Math.max(-slew, Math.min(slew, d));
-  veh.model.aimYaw = cur + d;
+  // Keep the accumulated aim WRAPPED: circling the cursor used to wind aimYaw up past ±π
+  // (…2π, 3π…), and anything comparing/easing against it numerically then unwound with a
+  // full-circle spin — the "turret prefers one side" look. Wrapped + the models' own
+  // shortest-path slew, there's no winding to unwind.
+  veh.model.aimYaw = wrapPi(cur + d);
   veh.model.autoScan = false;
   veh._turretRel = veh.model.aimYaw;
   veh._aligned = Math.abs(wrapPi(desired - veh.model.aimYaw)) < 0.06;
@@ -3245,6 +3253,20 @@ const REPAIR_WOUND = 0.7;                         // order a repair once a tower
 // next crew might be 5s or 45s away). Set when a sortie ENDS (crew home or lost).
 const REPAIR_CD_MIN = 5, REPAIR_CD_MAX = 45;
 const randRepairCd = () => REPAIR_CD_MIN + Math.random() * (REPAIR_CD_MAX - REPAIR_CD_MIN);
+// Body work (masonry) is FREE — the crew's exposed minutes are the cost. The GUN is hardware:
+// a replacement costs scrap, rides out on the jeep, and is LOST WITH THE JEEP if it's shot en
+// route (no refund — cargo goes down with the truck). The AI only shops for a gun when it's
+// comfortable: a healthy fleet and a scrap buffer, so gun purchases never starve vehicle rebuilds.
+const GUN_COST = 3;         // scrap for a replacement tower gun
+const AI_GUN_SCRAP = 10;    // AI buys a gun only with at least this much banked
+const AI_GUN_FLEET = 5;     // ...and at least this many vehicles left in its fleet
+
+// Cumulative repair telemetry (per match — reset with the pools). Answers "what did the
+// crews actually DO all game": sorties, HP healed, rubble rebuilds, guns bought vs actually
+// mounted (a jeep can die carrying one), and how the jeeps fared (hits taken, losses).
+const mkRepairStats = () => ({ jobs: 0, done: 0, cancelled: 0, gunsBought: 0, gunsMounted: 0,
+  scrapSpent: 0, hpHealed: 0, rebuilds: 0, jeepHits: 0, jeepsLostField: 0, jeepsLostLot: 0 });
+let repairStats = { red: mkRepairStats(), blue: mkRepairStats() };
 
 // (Re)park a jeep in its lot slot: build the mesh + a shootable Destructible at the stored spot.
 function parkSlot(s) {
@@ -3253,6 +3275,7 @@ function parkSlot(s) {
   scene.add(mesh);
   s.mesh = mesh;
   s.dest = new Destructible(mesh, { type: 'building', hp: JEEP_HP });
+  s.dest.onDamage = () => { repairStats[s.team].jeepHits++; };   // telemetry: hits on the parked lot
   destructibles.add(s.dest);                      // parked jeeps are raidable
   s.state = 'parked';
 }
@@ -3277,11 +3300,11 @@ function buildMotorPool() {
     const bx = -out.x, bz = -out.z;               // back direction (unit)
     const px = -bz, pz = bx;                      // perpendicular = the row axis
     const ax = c.center.x + bx * 12, az = c.center.z + bz * 12;
-    const yaw = Math.atan2(bx, bz);               // face the jeeps toward the field (out the gate)
+    const yaw = Math.atan2(out.x, out.z);         // nose the parked jeeps out the gate toward the field
     for (let i = 0; i < MOTOR_JEEPS; i++) {
       const off = (i - (MOTOR_JEEPS - 1) / 2) * 4;
       const x = ax + px * off, z = az + pz * off;
-      const s = { x, z, y: map ? map.heightAt(x, z) : 0, yaw, accent: c.accent, team: c.team, mesh: null, dest: null, state: '' };
+      const s = { x, z, y: map ? jeepGroundY(x, z) : 0, yaw, accent: c.accent, team: c.team, mesh: null, dest: null, state: '' };   // road-aware, in case the lot overlaps a road
       parkSlot(s);
       motorPool[c.team].push(s);
     }
@@ -3294,6 +3317,7 @@ function resetRepairs() {
   for (const j of repairJobs) j.dispose();
   repairJobs = [];
   _repairCd = { red: 0, blue: 0 };
+  repairStats = { red: mkRepairStats(), blue: mkRepairStats() };
   buildMotorPool();
 }
 
@@ -3324,14 +3348,21 @@ function findWoundedTowerAny(team) {
 // Roll a crew out to a team's most-wounded tower — if one's worth fixing, a jeep is free, and no
 // crew is already out for that team. Returns true if a job started.
 // Deploy a crew to a SPECIFIC tower (a player's click, or the AI's auto-pick). Guards: repairs
-// enabled, no crew already out for this team, a jeep parked, and the target is a standing gun-up
-// wall. Returns true if a crew rolled out.
-function deployRepair(team, camp, wall) {
+// enabled, no crew already out for this team, a jeep parked, and the target needs the work:
+// a FREE job wants a damaged-or-collapsed body; a GUN job wants a downed gun + GUN_COST scrap
+// (deducted here — the gun rides the jeep, so shooting the jeep destroys the cargo too).
+// Returns true if a crew rolled out.
+function deployRepair(team, camp, wall, wantGun = false) {
   if (!repairsOn || !soldiers) return false;
   if (repairJobs.some(j => j.team === team)) return false;   // one crew out per team at a time (slice)
-  if (!wall || !wall.turret || wall.turret.dead || !wall.body || wall.body.dead) return false;
+  if (!wall || !wall.body) return false;
+  if (wantGun) {
+    if (!wall.turret || !wall.turret.dead) return false;     // gun's fine (or this wall never had one)
+    if ((teamScrap[team] || 0) < GUN_COST) return false;     // can't afford the hardware
+  } else if (!wall.body.dead && wall.body.hp >= wall.maxHp) return false;   // nothing to fix for free
   const slot = motorPool[team].find(s => s.state === 'parked');
   if (!slot) return false;                                   // no jeeps left in the lot
+  if (wantGun) { teamScrap[team] -= GUN_COST; updateScrapHud(); }
   // Pull this jeep OUT of the lot; the mobile RepairJob jeep takes over from its slot.
   slot.state = 'deployed';
   destructibles.remove(slot.dest);
@@ -3339,18 +3370,72 @@ function deployRepair(team, camp, wall) {
   const job = new RepairJob(scene, map, {
     start: { x: slot.x, z: slot.z },
     tower: { x: wall.group.position.x, y: wall.group.position.y, z: wall.group.position.z },
-    wall, team, accent: camp.accent, soldiers,
+    wall, team, accent: camp.accent, soldiers, nav: makeJeepNav(team), gun: wantGun,
+    groundY: jeepGroundY,
   });
   job.slot = slot;                                           // remember where to re-park on return
   destructibles.add(job.jeepDest);
+  job.jeepDest.onDamage = () => { repairStats[team].jeepHits++; };   // telemetry: rounds that found the truck
   repairJobs.push(job);
+  const st = repairStats[team];
+  st.jobs++;
+  if (wantGun) { st.gunsBought++; st.scrapSpent += GUN_COST; }
   return true;
 }
 
-// AI auto-order: pick the most-wounded tower and send a crew (human teams repair by CLICK).
+// Road-aware ground height for the jeeps — the SAME rule the driven vehicles use (drape on the
+// road slab's top where there is one, else the terrain), so a jeep rides ON a road, not in it.
+const jeepGroundY = (x, z) => { const r = roadDeckY(x, z); return r != null ? r : map.heightAt(x, z); };
+
+// A nav adapter that lets a repair jeep route with the game's A* (roads-preferred, wall-avoiding)
+// without RepairCrew.js depending on main.js internals. It plans as a ground vehicle that keeps to
+// roads and skirts water, so the jeep drives the roads instead of phasing through walls.
+function makeJeepNav(team) {
+  const c = () => grid.cell;
+  const stub = {
+    team, type: 'jeep',
+    _move: { water: 'sink', ignoreWalls: false, tree: 'bump' },   // ground unit: avoids walls + deep water
+    _archetype: 'warrior',                                        // prefers roads in vehCellCost
+    holder: { position: { x: 0, y: 0, z: 0 } },
+    _blocked: (x, z) => cellBlocked(stub, Math.round(x / c()), Math.round(z / c())),
+  };
+  return {
+    plan: (fx, fz, tx, tz) => {
+      stub.holder.position.x = fx; stub.holder.position.z = fz;
+      return planPath(stub, { x: tx, z: tz });
+    },
+  };
+}
+
+// A corner tower whose gun is down (toppled or shot off) — the gun-purchase target. The body
+// may be standing, wounded, or full rubble; the job rebuilds whatever's needed, then mounts.
+function findGunDeadTower(team) {
+  for (const c of camps) {
+    if (c.team !== team) continue;
+    for (const w of c.walls) if (w.type === 'CORNER' && w.turret && w.turret.dead) return { camp: c, wall: w };
+  }
+  return null;
+}
+
+// AI gun-purchase appetite: only shop for tower hardware from a position of strength — a
+// healthy fleet (vehicles are always the first claim on scrap) and a comfortable bank.
+function aiWantsGun(team) {
+  if ((teamScrap[team] || 0) < AI_GUN_SCRAP) return false;
+  const cmd = commanders.find(c => c.team === team);
+  return !!cmd && cmd.fleetLeft() >= AI_GUN_FLEET;
+}
+
+// AI auto-order (human teams repair by CLICK). Priorities: patch a wounded LIVE gun first
+// (free, keeps the defense shooting), then — if fleet-healthy and scrap-rich — buy a
+// replacement gun for a downed tower (rebuilding its body on the way, all in one job).
 function orderRepair(team) {
   const hit = findWoundedTower(team);
-  return hit ? deployRepair(team, hit.camp, hit.wall) : false;
+  if (hit) return deployRepair(team, hit.camp, hit.wall, false);
+  if (aiWantsGun(team)) {
+    const g = findGunDeadTower(team);
+    if (g) return deployRepair(team, g.camp, g.wall, true);
+  }
+  return false;
 }
 
 function updateRepairs(dt, camera) {
@@ -3359,6 +3444,7 @@ function updateRepairs(dt, camera) {
     for (const s of motorPool[team]) {
       if (s.state === 'parked' && s.dest && s.dest.dead) {
         s.state = 'lost';
+        repairStats[team].jeepsLostLot++;
         destructibles.remove(s.dest);
         if (s.mesh && s.mesh.parent) s.mesh.parent.remove(s.mesh);
       }
@@ -3371,6 +3457,11 @@ function updateRepairs(dt, camera) {
       destructibles.remove(j.jeepDest);
       if (j.slot) { if (j.survived()) parkSlot(j.slot); else j.slot.state = 'lost'; }   // home safe → re-park; shot out → gone
       if (TEAM_CTRL[j.team] === 'ai') _repairCd[j.team] = randRepairCd();   // AI: random gap before the NEXT sortie (unpredictable → uncampable)
+      const ts = repairStats[j.team];                                       // telemetry: book the finished sortie
+      ts.hpHealed += j.healed;
+      if (j.rebuilt) ts.rebuilds++;
+      if (j.gunMounted) ts.gunsMounted++;
+      if (st === 'done') ts.done++; else { ts.cancelled++; ts.jeepsLostField++; }
       repairJobs.splice(i, 1);
     }
   }
@@ -3393,8 +3484,12 @@ const _projV = new THREE.Vector3();
 let repairIconWrap = null;
 const repairIcons = new Map();   // wall -> { el, camp }
 
-// Player-team towers worth a repair icon: standing, gun up, actually damaged, not already being
-// worked. Hidden entirely while a crew is out (only one per team) or the jeep pool is empty.
+// Player-team towers worth an icon, with what the click buys:
+//   kind 'repair' — free body work: a damaged gun-up tower, a gunless-but-damaged body, or a
+//                   fully collapsed tower (rebuilt from rubble, layer by layer).
+//   kind 'gun'    — the gun is down and the team can afford a replacement (GUN_COST scrap):
+//                   one job rebuilds the body if needed, then mounts the new gun.
+// Hidden entirely while a crew is out (only one per team) or the jeep pool is empty.
 function repairEligible(team) {
   if (repairJobs.some(j => j.team === team)) return [];
   if (parkedCount(team) <= 0) return [];
@@ -3402,9 +3497,16 @@ function repairEligible(team) {
   for (const c of camps) {
     if (c.team !== team) continue;
     for (const w of c.walls) {
-      if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+      if (!w.turret || !w.body) continue;             // corner towers only (the only walls with guns)
+      if (w.turret.dead) {
+        // Downed gun: offer the purchase if affordable; otherwise offer free body work if needed.
+        if ((teamScrap[team] || 0) >= GUN_COST) out.push({ camp: c, wall: w, kind: 'gun' });
+        else if (w.body.dead || w.body.hp < w.maxHp) out.push({ camp: c, wall: w, kind: 'repair' });
+        continue;
+      }
+      if (w.body.dead) { out.push({ camp: c, wall: w, kind: 'repair' }); continue; }
       if (w.body.hp >= w.maxHp * 0.85) continue;      // barely scratched → not worth a jeep run
-      out.push({ camp: c, wall: w });
+      out.push({ camp: c, wall: w, kind: 'repair' });
     }
   }
   return out;
@@ -3422,17 +3524,26 @@ function updateRepairIcons() {
   const live = new Set(list.map(e => e.wall));
   for (const [w, rec] of repairIcons) if (!live.has(w)) { rec.el.remove(); repairIcons.delete(w); }
   const W = window.innerWidth, H = window.innerHeight;
-  for (const { camp, wall } of list) {
+  for (const { camp, wall, kind } of list) {
     let rec = repairIcons.get(wall);
     if (!rec) {
       const el = document.createElement('button');
-      el.textContent = '🔧'; el.title = 'Send a repair crew';
-      el.style.cssText = 'position:absolute;pointer-events:auto;transform:translate(-50%,-50%);width:42px;height:42px;border-radius:50%;border:2px solid #5fd66a;background:rgba(8,16,10,0.82);color:#bff5c0;font-size:20px;line-height:1;cursor:pointer;display:none;padding:0;box-shadow:0 0 10px rgba(95,214,106,0.4)';
-      const fire = (ev) => { ev.preventDefault(); ev.stopPropagation(); deployRepair(PLAYER_TEAM, rec.camp, wall); };
+      el.style.cssText = 'position:absolute;pointer-events:auto;transform:translate(-50%,-50%);min-width:42px;height:42px;border-radius:21px;border:2px solid #5fd66a;background:rgba(8,16,10,0.82);color:#bff5c0;font-size:20px;line-height:1;cursor:pointer;display:none;padding:0 6px;box-shadow:0 0 10px rgba(95,214,106,0.4)';
+      const fire = (ev) => { ev.preventDefault(); ev.stopPropagation(); deployRepair(PLAYER_TEAM, rec.camp, wall, rec.kind === 'gun'); };
       el.addEventListener('pointerdown', fire);   // one handler for mouse + touch, before any canvas listener
       repairIconWrap.appendChild(el);
-      rec = { el, camp }; repairIcons.set(wall, rec);
+      rec = { el, camp, kind: null }; repairIcons.set(wall, rec);
     } else { rec.camp = camp; }
+    if (rec.kind !== kind) {   // free wrench vs priced gun purchase (kind flips as scrap comes and goes)
+      rec.kind = kind;
+      if (kind === 'gun') {
+        rec.el.textContent = `🔧${GUN_COST}⛭`; rec.el.title = `Rebuild + new gun (${GUN_COST} scrap)`;
+        rec.el.style.borderColor = '#e8c35a'; rec.el.style.boxShadow = '0 0 10px rgba(232,195,90,0.4)'; rec.el.style.color = '#f5e3b0';
+      } else {
+        rec.el.textContent = '🔧'; rec.el.title = 'Send a repair crew (free)';
+        rec.el.style.borderColor = '#5fd66a'; rec.el.style.boxShadow = '0 0 10px rgba(95,214,106,0.4)'; rec.el.style.color = '#bff5c0';
+      }
+    }
     const p = wall.group.position;
     _projV.set(p.x, (p.y || 0) + 6, p.z).project(camera);
     if (_projV.z > 1) { rec.el.style.display = 'none'; continue; }   // behind the camera
@@ -6909,8 +7020,13 @@ window.RR = {
   // Tower repair crews (prototype)
   setRepairs: (v) => { repairsOn = !!v; return repairsOn; },   // A/B: enable/disable jeep repair crews
   orderRepair: (team = PLAYER_TEAM) => orderRepair(team),      // force a repair for a team (debug/testing)
-  repairStatus: () => { const pool = (t) => ({ parked: motorPool[t].filter(s => s.state === 'parked').length, deployed: motorPool[t].filter(s => s.state === 'deployed').length, lost: motorPool[t].filter(s => s.state === 'lost').length }); return { on: repairsOn, jobs: repairJobs.map(j => ({ team: j.team, state: j.state, progress: +j.progress.toFixed(1), jeepDead: j.jeepDest.dead })), jeeps: { red: pool('red'), blue: pool('blue') }, cd: { red: +(_repairCd.red || 0).toFixed(1), blue: +(_repairCd.blue || 0).toFixed(1) } }; },
+  repairStatus: () => { const pool = (t) => ({ parked: motorPool[t].filter(s => s.state === 'parked').length, deployed: motorPool[t].filter(s => s.state === 'deployed').length, lost: motorPool[t].filter(s => s.state === 'lost').length }); return { on: repairsOn, jobs: repairJobs.map(j => ({ team: j.team, state: j.state, gun: j.gun, progress: +j.progress.toFixed(1), pathLen: j.path ? j.path.length : 0, jeepDead: j.jeepDest.dead, jx: +j.jx.toFixed(1), jz: +j.jz.toFixed(1), jy: +j.jeep.position.y.toFixed(2) })), jeeps: { red: pool('red'), blue: pool('blue') }, scrap: { ...teamScrap }, cd: { red: +(_repairCd.red || 0).toFixed(1), blue: +(_repairCd.blue || 0).toFixed(1) } }; },
   woundTower: (team, frac = 0.4) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(h.wall.maxHp * (1 - frac)); return !!h; },  // debug: bang up a tower to test repair
+  killTowerGun: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.turretDest.damage(1e9); return !!h; },   // debug: shoot a tower's gun off (test gun purchase)
+  destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
+  grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
+  repairStats: () => JSON.parse(JSON.stringify(repairStats)),   // cumulative per-match repair telemetry (sorties/heals/guns/jeep fates)
+  roadDeckY: (x, z) => roadDeckY(x, z),                         // debug: road-surface height at a point (null off-road)
   killRepairJeep: (team = PLAYER_TEAM) => { const j = repairJobs.find(x => x.team === team); if (!j) return false; j.jeepDest.damage(1e9); return true; },  // debug: blow the crew's jeep (test cancel)
   raidJeep: (team = PLAYER_TEAM) => { const s = motorPool[team].find(x => x.state === 'parked'); if (!s) return false; s.dest.damage(1e9); return true; },  // debug: destroy a jeep parked in the lot (test raid)
   refillJeeps: (team = PLAYER_TEAM) => { let n = 0; for (const s of motorPool[team]) if (s.state === 'lost') { parkSlot(s); n++; } return n; },   // debug: restore lost jeeps to the lot
@@ -7154,6 +7270,11 @@ const clock = new THREE.Clock();
 // the unit is actually using — the full A* route for a ground unit that has one, or a straight
 // line to its live brain-goal for a flyer / a unit skirting without a path. Toggle: g / RR.nav().
 let navDebug = QS.has('nav') || QS.has('navlines');
+// The routeless-Firebrat AUTO-FREEZE (below) is now its own opt-in (?navprobe), decoupled from the
+// ?nav overlay — the overlay draws routes without ever pausing; the freeze-and-inspect only arms
+// when you explicitly ask for it, so watching nav no longer slams a pause the instant a Firebrat is
+// momentarily routeless.
+const navProbe = QS.has('navprobe');
 let navLines = null;   // Map<commander, {line, posAttr, wp, dest, label, cells}>
 // The states where _navOverride actually STEERS the unit along its cached A* route. In any other
 // state (combat engage/suppress, unstick) the unit ignores nav.path and steers by the behavior —
@@ -7163,9 +7284,10 @@ const NAV_ASTAR_STATES = new Set(['exit', 'advance', 'pursue', 'retreat', 'resup
 // ?nav auto-probe: the first time a FIREBRAT is trying to navigate but its A* came back empty,
 // freeze the sim and open the A* visualizer ON THAT FIREBRAT'S OWN COST from its cell to its goal
 // — so you can see whether a route actually exists and why the nav didn't take it. Fires once per
-// episode (re-arms once the unit gets a route again) and only while ?nav is on.
+// episode (re-arms once the unit gets a route again) and only while ?navprobe is set (opt-in).
 const _fbNavProbed = new WeakSet();
 function _maybeProbeFirebratNav(cmd, v, d, nav) {
+  if (!navProbe) return;                 // opt-in only (?navprobe) — never auto-pauses under plain ?nav
   if (v.type !== 'firebrat') return;
   const wantsNav = d && NAV_ASTAR_STATES.has(d.state) && d.gx != null;
   const noRoute = !nav.path || !nav.path.length;

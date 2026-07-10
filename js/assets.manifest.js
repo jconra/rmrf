@@ -24,7 +24,7 @@ import {
   makeQuonset, makeTent, makeElevator, makeLookout,
 } from './Buildings.js?v=9';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
-import { makeWall, makeTower, makeGate } from './Walls.js?v=65';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
+import { makeWall, makeTower, makeGate } from './Walls.js?v=66';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
 import { makeSubmarine } from './Submarine.js?v=4';   // deep-water hazard sub (code-built mesh; ?v matches main.js so the module dedupes)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';   // the designed corner tower, as shared data (designer + game read this one file)
 import LOOKOUT_CFG from './lookout.config.js?v=1';   // the designed lookout tower, same shared-data pattern
@@ -45,7 +45,7 @@ import HEDGEHOGS_CFG from './hedgehogs.config.js?v=3';
 import DRUMS_CFG from './drums.config.js?v=1';
 import SANDBAGS_CFG from './sandbags.config.js?v=1';
 import CHECKPOINT_CFG from './checkpoint.config.js?v=1';
-import BASTION_CFG from './bastion.config.js?v=1';
+import BASTION_CFG from './bastion.config.js?v=2';
 const cfgMake = (CFG) => (cell, accent) => buildAssetGroup(CFG, accent, { cell });
 export const PROP_CONFIGS = { containers: CONTAINERS_CFG, watertower: WATERTOWER_CFG, jeep: JEEP_CFG, range: RANGE_CFG, generator: GENERATOR_CFG, hedgehogs: HEDGEHOGS_CFG, drums: DRUMS_CFG, sandbags: SANDBAGS_CFG, checkpoint: CHECKPOINT_CFG };
 
