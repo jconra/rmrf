@@ -23,7 +23,7 @@ import { Elevator } from './Elevator.js?v=3';
 import { Sub } from './Submarine.js?v=4';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
-import { SoundManager } from './SoundManager.js?v=5';
+import { SoundManager } from './SoundManager.js?v=7';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
@@ -175,8 +175,13 @@ function updateCamera() {
     lx = x; ly = y;
     updateCamera();
   };
+  // FOG-OF-WAR camera lock: in a HUMAN (PvAI) game the field camera is FIXED at the deploy
+  // angle — no orbit, no zoom, no pan. Free look would let the player drop the camera low and
+  // scout the far side of the map for free, which defeats the recon layer (sensor pods, sound
+  // HUD, sight ranges). Spectator games (AI-vs-AI) keep full camera control.
+  const camLocked = () => onField && TEAM_CTRL[PLAYER_TEAM] === 'human';
   el.addEventListener('mousedown', e => {
-    if (e.button === 2 || e.button === 1) { dragging = true; lx = e.clientX; ly = e.clientY; return; }   // right/middle = look
+    if (e.button === 2 || e.button === 1) { if (camLocked()) return; dragging = true; lx = e.clientX; ly = e.clientY; return; }   // right/middle = look (spectator only)
     if (e.button !== 0) return;
     if (onField && player && !player.dead) {            // LEFT = fire
       if (playerIsValkyrie()) acquireLock(e.clientX, e.clientY);   // lock the box; held missiles home onto it
@@ -187,7 +192,7 @@ function updateCamera() {
   window.addEventListener('mouseup', e => { if (e.button === 0) fireHeld = false; else dragging = false; });
   el.addEventListener('contextmenu', e => e.preventDefault());   // right-drag look, no menu popup
   el.addEventListener('wheel', e => {
-    if (humanDriving()) return;   // zoom is a SPECTATOR control — the camera tracks the player at a fixed distance while driving
+    if (humanDriving() || camLocked()) return;   // zoom is a SPECTATOR control — locked in a human game (even between lives)
     orbit.dist = Math.max(8, Math.min(zoomMax, orbit.dist + e.deltaY * 0.12));
     updateCamera();
   }, { passive: true });
@@ -210,8 +215,9 @@ function updateCamera() {
   el.addEventListener('touchstart', e => {
     // While driving, the two on-screen sticks own control (left = drive, right = aim);
     // the open field is inert (the camera auto-follows). Touches on the sticks hit their
-    // own pointer handlers, not this canvas listener.
-    if (humanDriving()) return;
+    // own pointer handlers, not this canvas listener. camLocked also swallows the
+    // one-finger PAN between lives in a human game (no free map scouting while dead).
+    if (humanDriving() || camLocked()) return;
     if (e.touches.length === 1) {
       const t = e.touches[0];
       touchPan.active = true; touchPan.x = touchPan.sx = t.clientX; touchPan.y = touchPan.sy = t.clientY;
@@ -3325,13 +3331,10 @@ function resetRepairs() {
 // the body while the gun stands restores it cleanly). Null if nothing needs work.
 function findWoundedTower(team) {
   let best = null, bestFrac = REPAIR_WOUND;
-  for (const c of camps) {
-    if (c.team !== team) continue;
-    for (const w of c.walls) {
-      if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
-      const frac = w.body.hp / w.maxHp;
-      if (frac < bestFrac) { bestFrac = frac; best = { camp: c, wall: w }; }
-    }
+  for (const { camp, wall: w } of fortWallsOf(team)) {
+    if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+    const frac = w.body.hp / w.maxHp;
+    if (frac < bestFrac) { bestFrac = frac; best = { camp, wall: w }; }
   }
   return best;
 }
@@ -3370,7 +3373,7 @@ function deployRepair(team, camp, wall, wantGun = false) {
   const job = new RepairJob(scene, map, {
     start: { x: slot.x, z: slot.z },
     tower: { x: wall.group.position.x, y: wall.group.position.y, z: wall.group.position.z },
-    wall, team, accent: camp.accent, soldiers, nav: makeJeepNav(team), gun: wantGun,
+    wall, team, accent: (camp && camp.accent) || wall.accent, soldiers, nav: makeJeepNav(team), gun: wantGun,
     groundY: jeepGroundY,
   });
   job.slot = slot;                                           // remember where to re-park on return
@@ -3386,6 +3389,31 @@ function deployRepair(team, camp, wall, wantGun = false) {
 // Road-aware ground height for the jeeps — the SAME rule the driven vehicles use (drape on the
 // road slab's top where there is one, else the terrain), so a jeep rides ON a road, not in it.
 const jeepGroundY = (x, z) => { const r = roadDeckY(x, z); return r != null ? r : map.heightAt(x, z); };
+
+// An enemy repair jeep in THIS unit's gun reach — a target of OPPORTUNITY only (Jacob's rule:
+// no hunting mission, no chasing — a unit that happens to have a jeep in range, in its firing
+// arc, with a clear line, kills it in passing; commanders never get distracted from the win).
+// Covers both a crew's jeep out on a job and the jeeps parked in the enemy motor pool.
+// Flyers are skipped: a homing missile on a 40hp truck is a waste of the Valkyrie's magazine.
+function jeepShotTarget(v) {
+  if (!repairsOn || isFlyer(v)) return null;
+  const range = ENGAGE_RANGE[v.type] || 36, arc = SHOT_ARC[v.type] ?? Math.PI / 5;
+  const px = v.holder.position.x, pz = v.holder.position.z;
+  let best = null, bestD = range * range;
+  const consider = (x, y, z) => {
+    const d = (x - px) ** 2 + (z - pz) ** 2;
+    if (d >= bestD) return;
+    if (Math.abs(wrapPi(Math.atan2(-(x - px), -(z - pz)) - v.heading)) > arc + 0.02) return;   // outside the gun's swing
+    if (!hasLOS(px, pz, x, z)) return;                    // a wall would just soak the shell
+    best = { x, y, z }; bestD = d;
+  };
+  for (const team of ['red', 'blue']) {
+    if (team === v.team) continue;
+    for (const j of repairJobs) if (j.team === team && !j.jeepDest.dead) consider(j.jx, j.jeep.position.y + 1.0, j.jz);
+    for (const s of motorPool[team]) if (s.state === 'parked' && s.dest && !s.dest.dead) consider(s.x, s.y + 1.0, s.z);
+  }
+  return best;
+}
 
 // A nav adapter that lets a repair jeep route with the game's A* (roads-preferred, wall-avoiding)
 // without RepairCrew.js depending on main.js internals. It plans as a ground vehicle that keeps to
@@ -3407,14 +3435,217 @@ function makeJeepNav(team) {
   };
 }
 
-// A corner tower whose gun is down (toppled or shot off) — the gun-purchase target. The body
-// may be standing, wounded, or full rubble; the job rebuilds whatever's needed, then mounts.
+// Every repairable fortification a team owns: its camps' wall ring PLUS any placed forts
+// (designer maps and player construction both land in placedWalls, carrying _team). Placed
+// pieces have no camp — callers take the accent off the wall itself.
+function* fortWallsOf(team) {
+  for (const c of camps) { if (c.team !== team) continue; for (const w of c.walls) yield { camp: c, wall: w }; }
+  for (const w of placedWalls) if (w._team === team) yield { camp: null, wall: w };
+}
+
+// A corner tower whose gun is down (toppled, shot off, or never bought) — the gun-purchase
+// target. The body may be standing, wounded, or rubble; the job rebuilds, then mounts.
 function findGunDeadTower(team) {
-  for (const c of camps) {
-    if (c.team !== team) continue;
-    for (const w of c.walls) if (w.type === 'CORNER' && w.turret && w.turret.dead) return { camp: c, wall: w };
-  }
+  for (const { camp, wall } of fortWallsOf(team))
+    if (wall.type === 'CORNER' && wall.turret && wall.turret.dead) return { camp, wall };
   return null;
+}
+
+// ── Player fort CONSTRUCTION (build-a-tower) ────────────────────────────────────────────
+// Placement is an ORDER, construction is a jeep run: accepting a site takes the scrap and
+// sends a crew; the fort GROWS bottom-up as the crew works (the rebuild machinery pointed
+// at a brand-new 1hp Wall whose courses start hidden). Shoot the jeep and the site stays
+// a foundation — the risk lives on the truck, same as repairs and gun deliveries.
+const FORT_COST = { wall: 2, bastion: 3 };   // 'armed' = bastion + GUN_COST (one jeep carries both)
+function fortCostOf(kind) { return (FORT_COST[kind === 'armed' ? 'bastion' : kind] || 99) + (kind === 'armed' ? GUN_COST : 0); }
+// Can `team` build at cell (cx,cz)? Land, off-road, clear of standing obstacles + vehicles.
+function fortSiteOk(cx, cz) {
+  const x = cx * grid.cell, z = cz * grid.cell;
+  if (!map.isLand(x, z)) return { ok: false, why: 'not on land' };
+  if (roadNet.cells && roadNet.cells.has(cx + ',' + cz)) return { ok: false, why: 'blocks the road' };
+  if (gateCells.has(cx + ',' + cz)) return { ok: false, why: 'blocks a gate' };
+  for (const o of obstacles) {
+    if (o.body && o.body.dead) continue;
+    const dx = x - o.x, dz = z - o.z, rr = o.r + grid.cell * 0.5;
+    if (dx * dx + dz * dz < rr * rr) return { ok: false, why: 'occupied' };
+  }
+  for (const v of combatants) if (!v.dead && Math.hypot(v.holder.position.x - x, v.holder.position.z - z) < grid.cell) return { ok: false, why: 'vehicle in the way' };
+  return { ok: true };
+}
+// kind: 'wall' (rot 0/2 = EW run, 1/3 = NS) | 'bastion' (gunless tower) | 'armed' (bastion+gun).
+function constructFort(team, kind, cx, cz, rot = 0) {
+  if (!repairsOn || !soldiers) return { ok: false, why: 'no crews' };
+  const cost = fortCostOf(kind);
+  if ((teamScrap[team] || 0) < cost) return { ok: false, why: `need ${cost} scrap` };
+  if (repairJobs.some(j => j.team === team)) return { ok: false, why: 'crew already out' };
+  if (!motorPool[team].some(s => s.state === 'parked')) return { ok: false, why: 'no jeeps left' };
+  const site = fortSiteOk(cx, cz);
+  if (!site.ok) return site;
+  const base = kind === 'armed' ? 'bastion' : kind;
+  const type = base === 'bastion' ? 'CORNER' : (((rot || 0) % 2) === 0 ? 'EW' : 'NS');
+  const x = cx * grid.cell, z = cz * grid.cell;
+  const mainCamp = camps.find(c => c.team === team && c.role === 'main');
+  const accent = (mainCamp && mainCamp.accent) ? mainCamp.accent.clone() : new THREE.Color(teamColor(team));
+  const w = new Wall({ type, world: new THREE.Vector3(x, map.heightAt(x, z), z), cell: grid.cell, team, accent, manager: destructibles });
+  w._team = team;
+  if (type === 'CORNER') w.removeGun();     // hardware is a separate purchase (or rides along on 'armed')
+  w.beginConstruction();
+  scene.add(w.group); placedWalls.push(w);
+  // Direct obstacle registration — the one live list nav/collision/LOS all consult.
+  obstacles.push({ x, z, team, body: w.body, r: grid.cell * (type === 'CORNER' ? 0.7 : 0.5) });
+  if (!deployRepair(team, null, w, kind === 'armed')) {
+    // No crew could roll (shouldn't happen past the guards) — tear the site back down, no charge.
+    destructibles.remove(w.body); if (w.turretDest) destructibles.remove(w.turretDest);
+    scene.remove(w.group);
+    placedWalls.splice(placedWalls.indexOf(w), 1);
+    obstacles.splice(obstacles.findIndex(o => o.body === w.body), 1);
+    return { ok: false, why: 'no crew available' };
+  }
+  teamScrap[team] -= FORT_COST[base];       // the gun's share was deducted by deployRepair
+  updateScrapHud();
+  return { ok: true, wall: w };
+}
+
+// ── Fort PLACEMENT mode (the Scrap Shop's build flow) ──────────────────────────────────
+// Entered from the garage shop: the view swaps to a locked aerial over the player's own
+// base (fog-of-war safe — you can't scout with it), a translucent hologram follows the
+// pointer snapped to the build grid, and ✓ BUILD / ✕ CANCEL commit or bail. The garage
+// already freezes the field sim, so placing is calm; the RISK is the construction run
+// that follows on the field. Build radius is capped around the main base.
+const FORT_BUILD_RADIUS = 80;            // u from the main camp centre
+let fortPlace = null;                    // { kind, rot, cx, cz, ghost, ring, ok, why }
+const FORT_GHOST_ASSET = { wall: 'wall', bastion: 'bastion', armed: 'tower' };
+const _fpRay = new THREE.Raycaster(); const _fpNdc = new THREE.Vector2();
+
+function fortHomeCamp() { return camps.find(c => c.team === PLAYER_TEAM && c.role === 'main'); }
+
+function makeFortGhost(kind) {
+  const camp = fortHomeCamp();
+  const accent = (camp && camp.accent) ? camp.accent : new THREE.Color(teamColor(PLAYER_TEAM));
+  const entry = ASSETS_BY_ID[FORT_GHOST_ASSET[kind]];
+  const g = entry.make(grid.cell, accent);
+  g.traverse(o => {
+    if (o.material) {
+      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) { m.transparent = true; m.opacity = 0.55; m.depthWrite = false; }
+    }
+  });
+  return g;
+}
+
+function enterFortPlace(kind) {
+  const camp = fortHomeCamp();
+  if (!camp) return false;
+  const ghost = makeFortGhost(kind);
+  // validity ring under the hologram: green = buildable, red = not here
+  const ring = new THREE.Mesh(new THREE.RingGeometry(grid.cell * 0.55, grid.cell * 0.75, 28),
+    new THREE.MeshBasicMaterial({ color: '#58d17a', transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }));
+  ring.rotation.x = -Math.PI / 2;
+  scene.add(ghost); scene.add(ring);
+  fortPlace = { kind, rot: 0, cx: Math.round(camp.center.x / grid.cell) + 3, cz: Math.round(camp.center.z / grid.cell), ghost, ring, ok: false, why: '', hidden: [] };
+  // FOG OF WAR: the aerial is a frozen frame — hide every enemy unit (vehicles' health bars
+  // ride their holder; enemy repair jeeps too) so pausing to place can't be used to spy.
+  // Prior visibility is saved per-object (a unit hidden down a lift shaft must STAY hidden).
+  for (const v of combatants) if (v.team !== PLAYER_TEAM) { fortPlace.hidden.push([v.holder, v.holder.visible]); v.holder.visible = false; }
+  for (const j of repairJobs) if (j.team !== PLAYER_TEAM) { fortPlace.hidden.push([j.jeep, j.jeep.visible]); j.jeep.visible = false; }
+  // locked aerial over the player's own base
+  orbit.target.set(camp.center.x, 0, camp.center.z);
+  orbit.dist = 120; orbit.pitch = 1.25; orbit.yaw = 0;
+  updateCamera();
+  setGarageOverlays(false);
+  ensureFortPlaceUI();
+  document.getElementById('fortplace-ui').style.display = '';
+  refreshFortPlace();
+  return true;
+}
+
+function exitFortPlace() {
+  if (!fortPlace) return;
+  scene.remove(fortPlace.ghost); scene.remove(fortPlace.ring);
+  for (const [obj, vis] of fortPlace.hidden) obj.visible = vis;   // reveal the enemy again, exactly as they were
+  fortPlace = null;
+  const ui = document.getElementById('fortplace-ui');
+  if (ui) ui.style.display = 'none';
+  setGarageOverlays(true);   // also refreshes the shop panel (scrap changed)
+}
+
+// Recompute ghost pose + validity (and the UI hint) for the current cell.
+function refreshFortPlace() {
+  const fp = fortPlace; if (!fp) return;
+  const camp = fortHomeCamp();
+  const x = fp.cx * grid.cell, z = fp.cz * grid.cell;
+  const inRange = camp && Math.hypot(x - camp.center.x, z - camp.center.z) <= FORT_BUILD_RADIUS;
+  const site = inRange ? fortSiteOk(fp.cx, fp.cz) : { ok: false, why: 'too far from base' };
+  const cost = fortCostOf(fp.kind);
+  const afford = (teamScrap[PLAYER_TEAM] || 0) >= cost;
+  const jeep = motorPool[PLAYER_TEAM] && motorPool[PLAYER_TEAM].some(s => s.state === 'parked');
+  const busy = repairJobs.some(j => j.team === PLAYER_TEAM);
+  fp.ok = site.ok && afford && jeep && !busy;
+  fp.why = !site.ok ? site.why : !afford ? `need ${cost} scrap` : !jeep ? 'no jeeps left' : busy ? 'crew already out' : '';
+  fp.ghost.position.set(x, map.heightAt(x, z), z);
+  fp.ghost.rotation.y = fp.rot * Math.PI / 2;
+  fp.ring.position.set(x, map.heightAt(x, z) + 0.25, z);
+  fp.ring.material.color.set(fp.ok ? '#58d17a' : '#ff6a5a');
+  const hint = document.getElementById('fp-hint');
+  if (hint) hint.textContent = fp.ok ? 'crew will drive out and build it' : fp.why;
+  const btn = document.getElementById('fp-build');
+  if (btn) btn.disabled = !fp.ok;
+}
+
+function fortPlacePointer(ev) {
+  const fp = fortPlace; if (!fp) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  _fpNdc.x = ((ev.clientX - r.left) / r.width) * 2 - 1;
+  _fpNdc.y = -((ev.clientY - r.top) / r.height) * 2 + 1;
+  _fpRay.setFromCamera(_fpNdc, camera);
+  const hit = _fpRay.intersectObjects(map.chunks, false)[0];
+  if (!hit) return;
+  fp.cx = Math.round(hit.point.x / grid.cell); fp.cz = Math.round(hit.point.z / grid.cell);
+  refreshFortPlace();
+}
+
+function ensureFortPlaceUI() {
+  if (document.getElementById('fortplace-ui')) return;
+  const ui = document.createElement('div');
+  ui.id = 'fortplace-ui';
+  ui.innerHTML = `
+    <div id="fp-title">PLACE FORTIFICATION — drag / tap the ground &nbsp;·&nbsp; PAUSED</div>
+    <div id="fp-row">
+      <button id="fp-rot">&#8635; ROTATE</button>
+      <button id="fp-build">&#10003; BUILD</button>
+      <button id="fp-cancel">&#10005; CANCEL</button>
+    </div>
+    <div id="fp-hint"></div>`;
+  ui.style.cssText = 'position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:140;text-align:center;' +
+    'font:12px ui-monospace,monospace;color:#dfe8ef;';
+  const st = document.createElement('style');
+  st.textContent = `
+    #fp-title { letter-spacing:0.14em; color:#8fa3b3; margin-bottom:8px; text-shadow:0 1px 3px rgba(0,0,0,0.7); }
+    #fp-row button { padding:10px 16px; margin:0 5px; cursor:pointer; border-radius:6px;
+      font:bold 13px ui-monospace,monospace; letter-spacing:0.1em;
+      background:rgba(8,16,11,0.85); border:1px solid #1f6b3f; color:#8ff0b0; }
+    #fp-row button:disabled { opacity:0.4; border-color:#444; color:#789; }
+    #fp-row #fp-cancel { border-color:#6b1f1f; color:#f0a08f; }
+    #fp-hint { margin-top:7px; min-height:14px; color:#ffcf6a; letter-spacing:0.08em; text-shadow:0 1px 3px rgba(0,0,0,0.7); }`;
+  document.head.appendChild(st);
+  document.body.appendChild(ui);
+  document.getElementById('fp-rot').addEventListener('click', () => { if (fortPlace) { fortPlace.rot = (fortPlace.rot + 1) % 4; refreshFortPlace(); } });
+  document.getElementById('fp-cancel').addEventListener('click', () => exitFortPlace());
+  document.getElementById('fp-build').addEventListener('click', () => {
+    const fp = fortPlace; if (!fp || !fp.ok) return;
+    const res = constructFort(PLAYER_TEAM, fp.kind, fp.cx, fp.cz, fp.rot);
+    if (res.ok) exitFortPlace();
+    else { const hint = document.getElementById('fp-hint'); if (hint) hint.textContent = res.why; }
+  });
+  // pointer: move the hologram to the cell under the cursor / finger
+  renderer.domElement.addEventListener('pointermove', e => { if (fortPlace) fortPlacePointer(e); });
+  renderer.domElement.addEventListener('pointerdown', e => { if (fortPlace && e.button === 0) fortPlacePointer(e); });
+  window.addEventListener('keydown', e => {
+    if (!fortPlace) return;
+    if (e.key === 'r' || e.key === 'R') { fortPlace.rot = (fortPlace.rot + 1) % 4; refreshFortPlace(); }
+    else if (e.key === 'Escape') exitFortPlace();
+  });
 }
 
 // AI gun-purchase appetite: only shop for tower hardware from a position of strength — a
@@ -3494,20 +3725,17 @@ function repairEligible(team) {
   if (repairJobs.some(j => j.team === team)) return [];
   if (parkedCount(team) <= 0) return [];
   const out = [];
-  for (const c of camps) {
-    if (c.team !== team) continue;
-    for (const w of c.walls) {
-      if (!w.turret || !w.body) continue;             // corner towers only (the only walls with guns)
-      if (w.turret.dead) {
-        // Downed gun: offer the purchase if affordable; otherwise offer free body work if needed.
-        if ((teamScrap[team] || 0) >= GUN_COST) out.push({ camp: c, wall: w, kind: 'gun' });
-        else if (w.body.dead || w.body.hp < w.maxHp) out.push({ camp: c, wall: w, kind: 'repair' });
-        continue;
-      }
-      if (w.body.dead) { out.push({ camp: c, wall: w, kind: 'repair' }); continue; }
-      if (w.body.hp >= w.maxHp * 0.85) continue;      // barely scratched → not worth a jeep run
-      out.push({ camp: c, wall: w, kind: 'repair' });
+  for (const { camp, wall: w } of fortWallsOf(team)) {
+    if (!w.turret || !w.body) continue;             // corner towers only (the only walls with guns)
+    if (w.turret.dead) {
+      // Downed gun: offer the purchase if affordable; otherwise offer free body work if needed.
+      if ((teamScrap[team] || 0) >= GUN_COST) out.push({ camp, wall: w, kind: 'gun' });
+      else if (w.body.dead || w.body.hp < w.maxHp) out.push({ camp, wall: w, kind: 'repair' });
+      continue;
     }
+    if (w.body.dead) { out.push({ camp, wall: w, kind: 'repair' }); continue; }
+    if (w.body.hp >= w.maxHp * 0.85) continue;      // barely scratched → not worth a jeep run
+    out.push({ camp, wall: w, kind: 'repair' });
   }
   return out;
 }
@@ -5012,6 +5240,12 @@ class AICommander {
       else if (view.enemy) { tp = leadAim(v.holder.position, view.enemy, v.def.soundIndex, v.ai.p.jitter).clone(); atEnemy = true; }   // lead a moving target (Lurcher/Valkyrie/Jotun; charge-compensated for the railgun)
       else if (cmd.breakAim) tp = _aimDir.set(cmd.breakAim.x, cmd.breakAim.y, cmd.breakAim.z).clone();   // blasting a blocker out of the way
       fireVehicle(v, false, tp, null, atEnemy);
+    } else if (v.cooldown <= 0 && !view.enemy && v.ammo > 1) {
+      // No fight on and the gun's idle: pot-shot any enemy REPAIR JEEP that happens to be in
+      // range/arc/line — a target of opportunity, never a mission (the unit doesn't steer at
+      // it, so it can't be lured off its actual job). Keeps the last round for real trouble.
+      const jt = jeepShotTarget(v);
+      if (jt) fireVehicle(v, false, _aimDir.set(jt.x, jt.y, jt.z).clone(), null, false);
     }
   }
 
@@ -6119,7 +6353,7 @@ function deployToFOB(type, colorIndex, rise) {
   parkT = 0;
 
   orbit.target.set(cx, 0, cz);
-  orbit.dist = 64; orbit.pitch = 0.9;
+  orbit.dist = 64; orbit.pitch = 0.9; orbit.yaw = 0;   // the locked PvAI angle — always deploy at the same view
   updateCamera();
 }
 
@@ -6362,7 +6596,7 @@ let teamColorLocked = false;
 // Toggle the garage overlays (CCTV / HUD / team selector) and the field UI (title +
 // touch joystick) when switching between the hangar view and the island.
 function setGarageOverlays(show) {
-  for (const id of ['cctv', 'hud-name', 'hud-stats', 'teamsel', 'build-panel']) {
+  for (const id of ['cctv', 'hud-name', 'hud-stats', 'teamsel', 'build-panel', 'garage-paused']) {
     const el = document.getElementById(id);
     if (!el) continue;
     // Once locked, never re-reveal the colour swatches on later garage visits.
@@ -6834,7 +7068,7 @@ function mountCCTV() {
 function mountHangarHud(garage) {
   const style = document.createElement('style');
   style.textContent = `
-    #hud-name { position:fixed; top:18px; left:20px; z-index:58; pointer-events:none;
+    #hud-name { position:fixed; top:64px; left:20px; z-index:58; pointer-events:none;
       font:13px ui-monospace, monospace; color:#00eeff; text-shadow:0 0 6px rgba(0,238,255,0.4); }
     #hud-name .nm { font-size:24px; font-weight:bold; letter-spacing:0.22em; }
     #hud-name .cnt { font-size:14px; font-weight:bold; margin-left:10px; color:#e8c84a; text-shadow:0 0 6px rgba(232,200,74,0.4); }
@@ -6846,18 +7080,33 @@ function mountHangarHud(garage) {
     #hud-stats .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:5px 0; }
     #hud-stats .lab { letter-spacing:0.15em; color:#5a7a8a; }
     #hud-stats .bar { font-size:14px; letter-spacing:0.08em; color:#00eeff; }
+    #garage-paused { position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:58;
+      pointer-events:none; font:bold 13px ui-monospace,monospace; letter-spacing:0.45em; text-indent:0.45em;
+      color:#ffcf4a; text-shadow:0 0 8px rgba(255,207,74,0.35); padding:6px 14px;
+      border:1px solid rgba(255,207,74,0.35); border-radius:6px; background:rgba(5,12,20,0.6); }
     #build-panel { position:fixed; top:132px; right:20px; z-index:59;
-      background:rgba(5,12,20,0.78); border:1px solid #0e2030; padding:10px 14px; min-width:190px;
+      background:rgba(5,12,20,0.78); border:1px solid #0e2030; padding:10px 12px; width:216px;
       font:11px ui-monospace, monospace; }
     #build-panel .scrap { color:#ffcf4a; letter-spacing:0.12em; margin-bottom:8px; }
     #build-panel .scrap b { font-size:15px; }
-    #build-panel .bp-btn { display:block; width:100%; padding:8px 6px; cursor:pointer;
-      background:#123020; border:1px solid #1f6b3f; color:#8ff0b0; font:bold 11px ui-monospace,monospace;
-      letter-spacing:0.1em; border-radius:4px; }
-    #build-panel .bp-btn:hover:not(:disabled) { background:#1a4a30; }
-    #build-panel .bp-btn:disabled { opacity:0.4; cursor:default; border-color:#333; color:#778; }
+    #build-panel .shop-sec { color:#5a7a8a; letter-spacing:0.18em; font-size:9px; margin:7px 0 4px; }
+    #build-panel .shop-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+    #build-panel .shop-tile { position:relative; cursor:pointer; border:1px solid #1f6b3f; border-radius:5px;
+      background:#0b1c12; padding:4px 4px 3px; text-align:center; }
+    #build-panel .shop-tile:hover:not(.off) { background:#143524; }
+    #build-panel .shop-tile.off { opacity:0.38; cursor:default; border-color:#333; }
+    #build-panel .shop-tile img { width:100%; height:56px; object-fit:contain; display:block; }
+    #build-panel .shop-tile .tl { display:block; font-size:9px; letter-spacing:0.08em; color:#8ff0b0; margin-top:2px; }
+    #build-panel .shop-tile .pr { position:absolute; top:3px; right:5px; color:#ffcf4a; font-weight:bold; font-size:11px; }
+    #build-panel .shop-tile .ct { position:absolute; top:3px; left:5px; color:#6fa9c9; font-size:10px; }
     #build-panel .bp-hint { margin-top:6px; min-height:13px; color:#7089; letter-spacing:0.08em; }`;
   document.head.appendChild(style);
+
+  // The garage freezes the field sim — say so, so nobody wonders if the war rages on unseen.
+  const paused = document.createElement('div');
+  paused.id = 'garage-paused';
+  paused.textContent = 'PAUSED';
+  document.body.appendChild(paused);
 
   const name = document.createElement('div');
   name.id = 'hud-name';
@@ -6871,11 +7120,19 @@ function mountHangarHud(garage) {
     `<div class="row"><span class="lab">${k.toUpperCase()}</span><span class="bar" id="hud-${k}"></span></div>`).join('');
   document.body.appendChild(stats);
 
-  // BUILD panel — spend collected scrap to replace a lost vehicle of the selected type.
+  // SCRAP SHOP — spend collected scrap: replace lost vehicles, or order fortifications
+  // (wall / bastion / armed bastion) placed via the hologram flow (enterFortPlace).
   const panel = document.createElement('div');
   panel.id = 'build-panel';
-  panel.innerHTML = `<div class="scrap">⚙ SCRAP <b id="bp-scrap">0</b></div>`
-    + `<button id="bp-build" class="bp-btn">BUILD</button>`
+  const vehTile = t => `<div class="shop-tile" data-veh="${t}"><span class="ct" id="shop-ct-${t}"></span>` +
+    `<span class="pr">${BUILD_COST[t]}⚙</span><img src="thumbnails/${t}.png" alt=""><span class="tl">${VEHICLE_TYPES[t].label.toUpperCase()}</span></div>`;
+  const fortTile = (kind, thumb, label) => `<div class="shop-tile" data-fort="${kind}">` +
+    `<span class="pr">${fortCostOf(kind)}⚙</span><img src="thumbnails/${thumb}.png" alt=""><span class="tl">${label}</span></div>`;
+  panel.innerHTML = `<div class="scrap">⚙ SCRAP SHOP <b id="bp-scrap">0</b></div>`
+    + `<div class="shop-sec">VEHICLES</div>`
+    + `<div class="shop-grid">${['firebrat', 'lurcher', 'valkyrie', 'jotun'].map(vehTile).join('')}</div>`
+    + `<div class="shop-sec">FORTIFICATIONS</div>`
+    + `<div class="shop-grid">${fortTile('wall', 'wall', 'WALL')}${fortTile('bastion', 'bastion', 'BASTION')}${fortTile('armed', 'tower', 'GUN TOWER')}</div>`
     + `<div class="bp-hint" id="bp-hint"></div>`;
   document.body.appendChild(panel);
 
@@ -6890,23 +7147,39 @@ function mountHangarHud(garage) {
     for (const k of ROWS) document.getElementById('hud-' + k).textContent = bar(def.stat[k]);
     updateBuild();
   };
+  const hint = msg => { document.getElementById('bp-hint').textContent = msg; };
   const updateBuild = () => {
-    const s = garage.selected();
-    if (!s) return;
-    const type = s.type, cost = BUILD_COST[type] || 0, have = teamScrap[PLAYER_TEAM] || 0;
-    const lost = (playerLosses[type] || 0) > 0, afford = have >= cost, ok = lost && afford;
+    const have = teamScrap[PLAYER_TEAM] || 0;
     document.getElementById('bp-scrap').textContent = have;
-    const btn = document.getElementById('bp-build');
-    btn.textContent = `BUILD ${VEHICLE_TYPES[type].label.toUpperCase()} · ${cost}`;
-    btn.disabled = !ok;
-    const wiped = garage.remaining(type) <= 0;
-    document.getElementById('bp-hint').textContent = !lost ? 'roster full'
-      : !afford ? `need ${cost - have} more scrap`
-      : wiped ? 'type wiped out — rebuild it from salvage' : 'salvage a replacement';
+    for (const tile of panel.querySelectorAll('[data-veh]')) {
+      const t = tile.dataset.veh;
+      const lost = (playerLosses[t] || 0) > 0, afford = have >= (BUILD_COST[t] || 0);
+      tile.classList.toggle('off', !(lost && afford));
+      document.getElementById('shop-ct-' + t).textContent = '×' + garage.remaining(t);
+    }
+    const crewFree = !repairJobs.some(j => j.team === PLAYER_TEAM)
+      && motorPool[PLAYER_TEAM] && motorPool[PLAYER_TEAM].some(sl => sl.state === 'parked');
+    for (const tile of panel.querySelectorAll('[data-fort]')) {
+      tile.classList.toggle('off', have < fortCostOf(tile.dataset.fort) || !crewFree);
+    }
   };
-  panel.querySelector('#bp-build').addEventListener('click', () => {
-    const s = garage.selected();
-    if (s && buildVehicle(s.type)) { update(); }
+  panel.addEventListener('click', e => {
+    const tile = e.target.closest('.shop-tile');
+    if (!tile) return;
+    const have = teamScrap[PLAYER_TEAM] || 0;
+    if (tile.dataset.veh) {
+      const t = tile.dataset.veh;
+      if ((playerLosses[t] || 0) <= 0) { hint('no lost ' + VEHICLE_TYPES[t].label.toUpperCase() + ' to replace'); return; }
+      if (have < (BUILD_COST[t] || 0)) { hint(`need ${(BUILD_COST[t] || 0) - have} more scrap`); return; }
+      if (buildVehicle(t)) { hint(VEHICLE_TYPES[t].label.toUpperCase() + ' rebuilt from salvage'); update(); }
+      return;
+    }
+    const kind = tile.dataset.fort;
+    if (!fortHomeCamp()) { hint('deploy once first — the island is not built yet'); return; }
+    if (have < fortCostOf(kind)) { hint(`need ${fortCostOf(kind) - have} more scrap`); return; }
+    if (repairJobs.some(j => j.team === PLAYER_TEAM)) { hint('construction crew already out'); return; }
+    if (!motorPool[PLAYER_TEAM].some(sl => sl.state === 'parked')) { hint('no jeeps left in the pool'); return; }
+    enterFortPlace(kind);
   });
   _refreshBuildPanel = updateBuild;
   garage.onSelect(update);
@@ -7026,7 +7299,13 @@ window.RR = {
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
   repairStats: () => JSON.parse(JSON.stringify(repairStats)),   // cumulative per-match repair telemetry (sorties/heals/guns/jeep fates)
-  roadDeckY: (x, z) => roadDeckY(x, z),                         // debug: road-surface height at a point (null off-road)
+  jeepShotTarget: (v) => jeepShotTarget(v),                     // debug: the enemy jeep this unit would pot-shot (null = none in reach)
+  constructFort: (kind, cx, cz, rot = 0, team = PLAYER_TEAM) => constructFort(team, kind, cx, cz, rot),   // build-a-tower: order a wall/bastion/armed build
+  enterFortPlace: (kind) => enterFortPlace(kind), exitFortPlace: () => exitFortPlace(),   // debug: drive the hologram flow
+  fortPlaceInfo: () => fortPlace && { kind: fortPlace.kind, cx: fortPlace.cx, cz: fortPlace.cz, ok: fortPlace.ok, why: fortPlace.why },
+  fortCost: (kind) => fortCostOf(kind),
+  fortSiteOk: (cx, cz) => fortSiteOk(cx, cz),
+  get placedWalls() { return placedWalls; },                    // debug: player/designer-built forts
   killRepairJeep: (team = PLAYER_TEAM) => { const j = repairJobs.find(x => x.team === team); if (!j) return false; j.jeepDest.damage(1e9); return true; },  // debug: blow the crew's jeep (test cancel)
   raidJeep: (team = PLAYER_TEAM) => { const s = motorPool[team].find(x => x.state === 'parked'); if (!s) return false; s.dest.damage(1e9); return true; },  // debug: destroy a jeep parked in the lot (test raid)
   refillJeeps: (team = PLAYER_TEAM) => { let n = 0; for (const s of motorPool[team]) if (s.state === 'lost') { parkSlot(s); n++; } return n; },   // debug: restore lost jeeps to the lot
@@ -7734,6 +8013,14 @@ function animate() {
   const _pfStart = PERF ? performance.now() : 0;
   const fade = document.getElementById('deployfade');
   if (garage && !onField) {
+    // FORT PLACEMENT (Scrap Shop): swap to the locked aerial over the player's base and
+    // show the hologram instead of the hangar. The field sim stays frozen, same as the
+    // garage always is — placing is calm; the construction run after deploy is the risk.
+    if (fortPlace) {
+      waterT += dt; map.tickWater(waterT);   // keep the water alive so the aerial doesn't read as a freeze-frame
+      renderer.render(scene, camera);
+      return;   // rAF is already queued at the top of animate()
+    }
     garage.update(dt);
     // Elevator servo whir the moment the deploy lift starts climbing inside the garage,
     // stopped once it reaches the top (phase leaves 'rising'). Non-spatial (garage scene).

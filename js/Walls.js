@@ -164,8 +164,32 @@ export class Wall {
       this.group.add(group);
       const thr = head.children.map(m => m.userData.fallAt ?? 0).filter(v => v > 0);
       this._turretFallAt = thr.length ? Math.min(...thr) : 0.5;
-      this.turret = { group, head, dead: false, falling: false, vel: new THREE.Vector3(), ang: new THREE.Vector3(), sweep: Math.random() * 6.28 };
+      this.turret = { group, head, dead: false, falling: false, vel: new THREE.Vector3(), ang: new THREE.Vector3(), sweep: Math.random() * 6.28,
+        home: { pos: group.position.clone(), rot: group.rotation.clone() } };   // seat for mountGun (a bought gun may be the FIRST — no _fall to snapshot it)
     }
+  }
+
+  // Start this piece GUN-ABSENT (a player-built bastion: the mount exists, the hardware
+  // doesn't). The turret is flagged dead + hidden — a purchased gun (mountGun) reveals it.
+  removeGun() {
+    const t = this.turret;
+    if (!t) return;
+    t.dead = true; t.group.visible = false;
+    if (this.turretDest) { this.turretDest.dead = true; this.turretDest.hp = 0; }
+  }
+
+  // Turn a freshly-built Wall into a CONSTRUCTION SITE: 1 HP, every course hidden. As a
+  // crew heals it (1%/s), _restage's rebuild branch restores each piece past its fallAt —
+  // so the structure GROWS bottom-up out of the ground, the crumble played forward.
+  beginConstruction() {
+    this.body.hp = 1;
+    for (const p of this.layers) {
+      const m = p.mesh || p.group;
+      if (!p.home) p.home = { pos: m.position.clone(), rot: m.rotation.clone() };
+      p.falling = true; p.settled = true;
+      m.visible = false;
+    }
+    if (this.body.onDamage) this.body.onDamage(this.body);   // settle the staging at ~0 HP
   }
 
   // A clean capstone lip the same footprint as the top layer (no overhang),
@@ -310,11 +334,13 @@ export class Wall {
     obj.ang.set((Math.random() - 0.5) * 6, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 6);
   }
 
-  // Seat a crumbled piece back on the stack (the rebuild mirror of _fall).
+  // Seat a crumbled piece back on the stack (the rebuild mirror of _fall). Also reveals
+  // pieces hidden by beginConstruction — a new build GROWS by restoring invisible courses.
   _restore(obj) {
     if (!obj.home) return;
     const m = obj.mesh || obj.group;
     m.position.copy(obj.home.pos); m.rotation.copy(obj.home.rot);
+    m.visible = true;
     obj.falling = false; obj.settled = false;
     obj.vel.set(0, 0, 0); obj.ang.set(0, 0, 0);
   }
@@ -326,6 +352,7 @@ export class Wall {
     const t = this.turret;
     if (!t || !t.dead) return false;
     if (t.home) { t.group.position.copy(t.home.pos); t.group.rotation.copy(t.home.rot); }
+    t.group.visible = true;   // a gun-absent bastion (removeGun) keeps its hidden mount until armed
     t.vel.set(0, 0, 0); t.ang.set(0, 0, 0);
     t.falling = false; t.settled = false; t.dead = false;
     if (t.head) {

@@ -23,7 +23,7 @@
 // stands alone. The Sound Lab is still where these patches are authored — after tuning a preset
 // there, re-sync with:  cp ../sound-lab/patch.js js/patch.js  (run from the Sound Lab's parent).
 
-import { playPatch, PATCH_PRESETS } from './patch.js?v=3';
+import { playPatch, PATCH_PRESETS } from './patch.js?v=5';
 
 // Each vehicle's engine + gun plays a Sound Lab modular patch (authored in the Sound Lab) by index:
 // 0 Lurcher, 1 Firebrat, 2 Valkyrie, 3 Jotun. RPM_RANGE = [idle, max] the driving throttle maps to.
