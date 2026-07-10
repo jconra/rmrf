@@ -23,7 +23,7 @@
 // stands alone. The Sound Lab is still where these patches are authored — after tuning a preset
 // there, re-sync with:  cp ../sound-lab/patch.js js/patch.js  (run from the Sound Lab's parent).
 
-import { playPatch, PATCH_PRESETS } from './patch.js?v=5';
+import { playPatch, PATCH_PRESETS } from './patch.js?v=7';
 
 // Each vehicle's engine + gun plays a Sound Lab modular patch (authored in the Sound Lab) by index:
 // 0 Lurcher, 1 Firebrat, 2 Valkyrie, 3 Jotun. RPM_RANGE = [idle, max] the driving throttle maps to.
@@ -734,9 +734,22 @@ export class SoundManager {
     return { stop: () => { try { h.stop(0.2); } catch (e) {} } };
   }
 
-  // Soldier SQUISH — a decoded SAMPLE (rmrf/sounds/squish.mp3), played positioned. Synthesis
-  // couldn't do a convincing wet squish, so this is the one sampled voice in the game.
-  _loadSquish() {
+  // One-shot relay clack when the player switches vehicle in the garage (the selection light
+  // moves). The patch is hot on purpose (Jacob's tuning peaks ~6x full scale), so route it
+  // through a trim gain so it sits UNDER the engines rather than slamming the limiter.
+  vehicleSelectUI() {
+    this._ensureCtx();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const patch = PATCH_PRESETS['WORLD — RELAY CLANK']; if (!patch) return;
+    const trim = this.ctx.createGain(); trim.gain.value = 0.16; trim.connect(this.sfx);
+    playPatch(this.ctx, this.noiseBuffer, trim, this.reverbInput, patch);
+    setTimeout(() => { try { trim.disconnect(); } catch (e) {} }, 700);
+  }
+
+  // Soldier SQUISH — now a SYNTH patch ('WORLD — SQUISH (synth)', Jacob's 2026-07-10 design),
+  // played positioned. The old rmrf/sounds/squish.mp3 SAMPLE path (_loadSquish + _squishBuf) is
+  // retained just below as the quick revert: point squishAt back at the buffer to use it again.
+  _loadSquish() {   // fallback only — unused while squishAt plays the synth patch
     if (this._squishBuf || this._squishLoading || !this.ctx) return;
     this._squishLoading = true;
     fetch('sounds/squish.mp3').then(r => r.arrayBuffer()).then(ab => this.ctx.decodeAudioData(ab))
@@ -744,17 +757,16 @@ export class SoundManager {
   }
   squishAt(x, y, z) {
     this._ensureSpatial();
-    if (!this._squishBuf) { this._loadSquish(); return; }   // not decoded yet → skip this one
     if (this.ctx.state === 'suspended') this.ctx.resume();
-    const src = this.ctx.createBufferSource(); src.buffer = this._squishBuf;
+    const patch = PATCH_PRESETS['WORLD — SQUISH (synth)']; if (!patch) return;
     const panner = this.ctx.createPanner();
     panner.panningModel = 'equalpower'; panner.distanceModel = 'inverse';
     panner.refDistance = 24; panner.maxDistance = 300; panner.rolloffFactor = 1.2;
     this._setPannerPos(panner, x, y, z);
-    const g = this.ctx.createGain(); g.gain.value = 0.9;
-    src.connect(g).connect(panner); panner.connect(this.spatialSfxBus);
-    src.start();
-    src.onended = () => { try { src.disconnect(); g.disconnect(); panner.disconnect(); } catch (e) {} };
+    const g = this.ctx.createGain(); g.gain.value = 5.5;   // makeup: the resonant patch peaks ~0.14
+    g.connect(panner); panner.connect(this.spatialSfxBus);
+    playPatch(this.ctx, this.noiseBuffer, g, this.reverbInput, patch);
+    setTimeout(() => { try { g.disconnect(); panner.disconnect(); } catch (e) {} }, 1200);
   }
 
 }

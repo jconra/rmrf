@@ -20,10 +20,10 @@ import { Foliage } from './Foliage.js?v=5';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
 import { Elevator } from './Elevator.js?v=3';
-import { Sub } from './Submarine.js?v=4';
+import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
-import { SoundManager } from './SoundManager.js?v=7';
+import { SoundManager } from './SoundManager.js?v=9';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
@@ -353,7 +353,7 @@ function spectateUpdate(dt) {
   if (spectateFree) { _specFocus = null; if (spectateTagEl) spectateTagEl.style.display = 'none'; return false; }
   let focus = spectateTarget;
   if (!focus) for (const f of flags) if (f.carried && f.carrier && !f.carrier.dead) { focus = f.carrier; break; }
-  if (!focus) for (const cmd of commanders) if (cmd.unit && !cmd.unit.dead) { focus = cmd.unit; break; }
+  if (!focus) for (const cmd of commanders) { const u = cmd.liveUnits()[0]; if (u) { focus = u; break; } }
   _specFocus = focus || null;     // the watched unit = the sound HUD's listener in spectate
   if (!focus) { if (spectateTagEl) spectateTagEl.style.display = 'none'; return false; }
   _spec.set(focus.holder.position.x, 0, focus.holder.position.z);
@@ -426,6 +426,15 @@ function updateSpectateTeamButtons() {
 // render rig stays fast on the software-GL box. Gameplay defaults are untouched.
 const QS = new URLSearchParams(location.search);
 const SHOT = QS.has('shot');
+// ?units=N (1-3): procedural maps build N elevator pads per team — the main lift inside the
+// FOB plus satellite pads flanking it — and the unit cap (one fielded vehicle per lift, see
+// AICommander.unitCap) follows. Designed maps instead count the elevators placed in the editor.
+const UNITS_PER_TEAM = Math.max(1, Math.min(3, (+QS.get('units') || 1)));
+// FOB wall ring / gates / corner towers around the elevator. DEFAULT by mode: ON for a 1v1
+// (a single unit wants a fortified home) and OFF for multi-unit, where the elevator anti-camp
+// shield already covers a rising vehicle and open FOBs resolve faster (A/B in VERDICT-multiunit:
+// same win rate, ~20% faster, less idle). ?fobwalls=0/1 forces it either way.
+const FOB_WALLS = QS.has('fobwalls') ? QS.get('fobwalls') !== '0' : UNITS_PER_TEAM === 1;
 // ?dseed=N seeds the DOCTRINE SETUP (which archetypes + personalities each side gets) with a
 // deterministic PRNG, so two builds/variants can play the EXACT same matchup for a paired A/B
 // — otherwise Math.random gives every run a different Warrior-vs-Turtle-etc game and the noise
@@ -774,8 +783,14 @@ const PLAYER_TEAM = 'red';   // the garage / player's side
 const TEAM_CTRL = { red: 'human', blue: 'ai' };
 if (QS.has('aivsai') || QS.has('spectate') || QS.has('ai')) { TEAM_CTRL.red = 'ai'; TEAM_CTRL.blue = 'ai'; }
 
-// Nearest gate (object) of a camp to a world point.
+// Nearest gate (object) of a camp to a world point. A BARE camp (?fobwalls=0 — no ring,
+// no gates) still gets a road: synthesize an endpoint just off the lift pad's edge,
+// facing the point, so the road runs up to the pad instead of crashing the builder.
 function nearestGate(camp, point) {
+  if (!camp.gates.length) {
+    const out = point.clone().sub(camp.center).setY(0).normalize();
+    return { pos: camp.center.clone().addScaledVector(out, 8), outward: out };
+  }
   let best = camp.gates[0], bd = Infinity;
   for (const g of camp.gates) { const d = g.pos.distanceToSquared(point); if (d < bd) { bd = d; best = g; } }
   return best;
@@ -852,7 +867,8 @@ function placeCamps() {
   const items = [];   // { site, size, role, team }
   const pads = [];
 
-  map.findCampSites(2).forEach((mainSite, i) => {
+  const mainSites = map.findCampSites(2);
+  mainSites.forEach((mainSite, i) => {
     const mainPad = padFor(mainSite, CAMP_SIZE);
     items.push({ site: mainSite, size: CAMP_SIZE, role: 'main', team: teams[i] });
     pads.push(mainPad);
@@ -874,8 +890,51 @@ function placeCamps() {
       if (map.isLand(cand.x, cand.z)) { fobSite = cand; break; }
     }
     fobSite.y = map.heightAt(fobSite.x, fobSite.z);
-    items.push({ site: fobSite, size: FOB_SIZE, role: 'fob', team: teams[i] });
+    const fobItem = { site: fobSite, size: FOB_SIZE, role: 'fob', team: teams[i] };
+    items.push(fobItem);
     pads.push(padFor(fobSite, FOB_SIZE));
+    // ?units=N: SATELLITE deploy pads just outside the FOB ring (the 25u courtyard only
+    // fits the one lift) — each extra elevator fields one more simultaneous unit
+    // (AICommander.unitCap counts them). Flank the compound perpendicular to its facing,
+    // rear as the fallback; a direction in the water is skipped, so a cramped shoreline
+    // FOB just supports fewer lifts (the cap follows what actually got built).
+    if (UNITS_PER_TEAM > 1) {
+      // SATELLITE PADS spread across the team's SIDE of the island — separate forward
+      // spawn points, not lifts squished against the FOB (Jacob: "smart places on that
+      // side of the map"). Candidates ring the FOB at 45-90u; each must be dry (pad
+      // corners too), solidly on OUR side (closer to our main than theirs), and clear of
+      // both bases. Greedy pick maximizes the spread (min distance to everything already
+      // placed), so two pads cover different flanks instead of stacking.
+      const enemyMain = mainSites[1 - i] || origin;
+      const anchors = [fobSite, mainSite];                    // keep-clear + spread anchors
+      fobItem.satSites = [];
+      for (let k = UNITS_PER_TEAM - 1; k > 0; k--) {
+        let best = null, bestScore = -Infinity;
+        for (let r = 45; r <= 90; r += 15) {
+          for (let a = 0; a < 24; a++) {
+            const th = a * Math.PI / 12;
+            const x = fobSite.x + Math.sin(th) * r, z = fobSite.z + Math.cos(th) * r;
+            if (!map.isLand(x, z)) continue;
+            let dry = true;                                    // whole pad on land, not a beach lip
+            for (const [ox, oz] of [[7, 7], [7, -7], [-7, 7], [-7, -7]]) if (!map.isLand(x + ox, z + oz)) { dry = false; break; }
+            if (!dry) continue;
+            const dOwn = (x - mainSite.x) ** 2 + (z - mainSite.z) ** 2;
+            const dEnemy = (x - enemyMain.x) ** 2 + (z - enemyMain.z) ** 2;
+            if (dOwn > dEnemy * 0.64) continue;                // our side of the map, with margin (0.8²)
+            if (dOwn < 40 * 40) continue;                      // outside the main base's footprint
+            let spread = Infinity;                             // min distance to bases + already-picked pads
+            for (const s of [...anchors, ...fobItem.satSites]) spread = Math.min(spread, (x - s.x) ** 2 + (z - s.z) ** 2);
+            if (spread < 34 * 34) continue;                    // never crowd anything
+            if (spread > bestScore) { bestScore = spread; best = { x, z }; }
+          }
+        }
+        if (!best) break;                                      // cramped island — fewer pads, cap follows
+        const c = grid.worldToCell(best.x, best.z);            // snap to the build grid like the camps
+        const sv = grid.cellToWorld(c.cx, c.cz);
+        fobItem.satSites.push(sv);
+        pads.push(padFor(sv, 3));                              // flatten a small pad of its own
+      }
+    }
   });
 
   map.flattenPads(pads);
@@ -883,7 +942,8 @@ function placeCamps() {
   for (const it of items) {
     const cell = grid.worldToCell(it.site.x, it.site.z);
     const groundY = map.heightAt(it.site.x, it.site.z);   // flattened pad height
-    const c = new Camp(grid, cell, it.size, it.team, destructibles, groundY, it.role);
+    // ?fobwalls=0 → FOBs go up BARE (no ring/gates/towers; the lift shield is the anti-camp)
+    const c = new Camp(grid, cell, it.size, it.team, destructibles, groundY, it.role, { bare: it.role === 'fob' && !FOB_WALLS });
     scene.add(c.group);
     camps.push(c);
   }
@@ -901,12 +961,18 @@ function placeCamps() {
     if (it.role !== 'fob') return;
     const camp = camps[i];   // camps were pushed in items order
     const accent = TEAM_ACCENT[it.team] || '#c0392b';
-    const elev = new Elevator(map, { x: camp.center.x, z: camp.center.z }, accent);
-    elev.team = it.team;     // so deploy can find the player's lift
-    elev.phase = 'top';      // idle FOBs sit flush
-    elev.lift.position.y = elev.groundY;
-    scene.add(elev.group);
-    elevators.push(elev);
+    // Main lift in the courtyard first (slot 0 / the player ride), then any ?units=N
+    // satellite pads outside the ring — per-team ORDER matters: slot i deploys on the
+    // team's i-th elevator (see AICommander.deploy).
+    const sites = [{ x: camp.center.x, z: camp.center.z }, ...(it.satSites || [])];
+    for (const sc of sites) {
+      const elev = new Elevator(map, { x: sc.x, z: sc.z }, accent);
+      elev.team = it.team;     // so deploy can find the player's lift
+      elev.phase = 'top';      // idle FOBs sit flush
+      elev.lift.position.y = elev.groundY;
+      scene.add(elev.group);
+      elevators.push(elev);
+    }
   });
 
   buildFlags();        // capturable flag at each main base
@@ -1945,7 +2011,7 @@ function updateProjectileHits() {
                         || (pos.x - hf.x) ** 2 + (pos.z - hf.z) ** 2 < 70 * 70;
           if (!nearHome) continue;
           c._homeAttack = { x: pos.x, z: pos.z, t: performance.now() };
-          if (c.strategy && c.strategy.step === 'defend' && (!c._homeAttackLogT || performance.now() - c._homeAttackLogT > 15000)) {
+          if (c._slots.some(s => s.strategy && s.strategy.step === 'defend') && (!c._homeAttackLogT || performance.now() - c._homeAttackLogT > 15000)) {
             c._homeAttackLogT = performance.now();
             aiLog(c.team, `${c.cname}: They're hitting our towers — get back there and jump them!`);
           }
@@ -2136,8 +2202,9 @@ function destroyVehicle(veh, cause, killer = null) {
     // it just dropped — it's close and the fight's (locally) over. Whether it bothers is a mood +
     // dice roll with mission exceptions (see wantsLoot). Only its OWN commander's current unit.
     if (wreck && killer && killer.team && killer.team !== veh.team) {
-      const cmd = commanders.find(c => c.team === killer.team && c.unit === killer);
-      if (cmd && !wreck.overWater && cmd.wantsLoot()) { cmd._lootPile = wreck; cmd._lootUntil = performance.now() + LOOT_MS; }
+      const cmd = commanders.find(c => c.team === killer.team && c.ownsUnit(killer));
+      const slot = cmd && cmd._slotFor(killer);   // the loot order goes to the KILLER's slot, not whichever was bound last
+      if (cmd && slot && !wreck.overWater && cmd.wantsLoot(killer)) { slot._lootPile = wreck; slot._lootUntil = performance.now() + LOOT_MS; }
     }
     // Drop the killer's engage-afterglow ghost: that hysteresis holds a target at its last-seen
     // spot through LOS blinks, but a KILLED enemy shouldn't be "searched for" — it made the killer
@@ -2156,7 +2223,8 @@ function destroyVehicle(veh, cause, killer = null) {
     if (by) {
       const parts = Object.entries(by).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${Math.round(n)}`);
       const cmdr = commanders.find(c => c.team === veh.team);
-      const mis = cmdr && cmdr.strategy ? cmdr.strategy.step : '';
+      const sl = cmdr && cmdr._slotFor ? cmdr._slotFor(veh) : null;   // the DEAD unit's own card, not whichever slot ran last
+      const mis = sl && sl.strategy ? sl.strategy.step : (cmdr && cmdr.strategy ? cmdr.strategy.step : '');
       const pp = veh.holder.position;
       logCombat(veh.team, `${teamLabel(veh.colorIndex)} ${veh.type} DOWN${mis ? ` (${mis})` : ''} @(${Math.round(pp.x)},${Math.round(pp.z)}) — ${parts.join(', ') || 'unknown'}`);
     }
@@ -2770,8 +2838,10 @@ function rearm(v, dt) {
 // A hunter tending a live mine trap doesn't top all the way up — it holds a killable mid-health so
 // it keeps luring pursuers onto the mines (the provoke phase does the actual wounding via tower fire).
 function repairCap(v) {
-  const cmd = commanders.find(c => c.unit === v);
-  if (cmd && cmd._trapMode && !cmd._trapDone && cmd.strategy && cmd.strategy.step === 'trap') return v.maxHp * 0.55;
+  const cmd = commanders.find(c => c.ownsUnit(v));
+  const sl = cmd && cmd._slotFor(v);
+  const strat = (sl && sl.strategy) || (cmd && cmd.strategy);
+  if (cmd && cmd._trapMode && !cmd._trapDone && strat && strat.step === 'trap') return v.maxHp * 0.55;
   return v.maxHp;
 }
 function repair(v, dt) {
@@ -3116,7 +3186,8 @@ const AI_MINE_COOLDOWN = 2.2;        // s between an AI Firebrat's mine drops (l
 function aiHandleGadgets(dt) {
   if (matchOver) return;
   for (const cmd of commanders) {
-    const v = cmd.unit; if (!v || v.dead || !cmd.team) continue;
+    if (!cmd.team) continue;
+    for (const v of cmd.liveUnits()) {
     // (a) DETECTION: each ground unit gets ONE 50% roll per mine as it comes near — spot it and
     // its whole team then routes around it (blockedFor); miss and the team may drive right in.
     if (!isFlyer(v)) {
@@ -3133,6 +3204,7 @@ function aiHandleGadgets(dt) {
     }
     // (b) MISSION: an AI Firebrat seeds the contested ground with mines + one sensor pod per trip.
     if (v.type === 'firebrat') aiLayGadgets(cmd, v, dt);
+    }
   }
 }
 // Out-and-back flank sortie: drive to the FAR flank point, then lay mines on the way BACK toward
@@ -4129,6 +4201,57 @@ function steerToward(v, wx, wz) {
   return { fwd, turn };
 }
 
+// ── MULTI-UNIT SLOTS ─────────────────────────────────────────────────────────
+// A commander fields one vehicle per SLOT; the slot count ("unit cap") is the number of
+// elevators its team owns on the map (each lift supports one unit in the field), min 1 —
+// so a designed/3v3 map with three lifts per side fields three simultaneous units.
+// Everything about ONE fielded vehicle (its nav cache, elevator ride, gate exit, recall
+// trip, detour latches, stuck tracking, report card, debug snapshot) lives in a slot
+// record. The commander's per-unit methods were written against `this._nav`-style fields,
+// so update() BINDS a slot (copies its record onto `this`), runs the existing logic
+// unchanged, then UNBINDS (copies back). Team-level state — roster, scrap, doctrine,
+// intel (seen types / known POIs / explore memory), kills, the gambit — stays plain on
+// the commander and is shared by every slot. freshSlot() is the single source of truth
+// for what is per-unit: add any new per-unit field HERE, not in the constructor, or it
+// will bleed between units.
+// PER-SLOT DOCTRINE — each slot fields its own mission card, so a 3-lift army splits into
+// ROLES instead of blobbing on one shared objective (the 3v3 tournament's idle-at-goal
+// tripled with a shared card). Slot 0 runs the commander's own archetype; extra slots draw
+// from the persona's role deck below — every persona splits its army differently, so the
+// commander identities survive multi-unit. (Cycled if the cap ever exceeds the deck.)
+const ROLE_DECK = {
+  warrior: ['hunter', 'turtle'],   // main fist + an interceptor hunting their units + a home guard
+  turtle:  ['turtle', 'warrior'],  // two guards walking the corridor + one counter-puncher
+  hunter:  ['warrior', 'turtle'],  // the hunt + siege pressure + a home guard
+  rogue:   ['hunter', 'turtle'],   // the sneak + an interceptor + a home guard
+};
+function freshSlot() {
+  return {
+    unit: null, respawnT: 0,
+    strategy: null,                                    // this slot's OWN doctrine card (set at slot creation)
+    _failStep: null, _failN: 0, _failT: 0, _failSnap: null,   // per-mission total-failure bans (per slot — each card banks its own lessons)
+    _rising: false, _elev: null,                       // FOB-lift deploy state
+    _exit: null, _exitT: 0, _exitCoolT: 0,             // post-deploy gate-exit waypoint
+    _nav: { path: null, idx: 0, t: 0, dx: null, dz: null },   // A* path cache
+    _supply: null, _supplyHeals: false, _home: null,   // resolved resupply/heal points (set per tick in _view)
+    _stepAtDeploy: null,                               // strategy step when this unit deployed
+    _recalling: false, _recallForce: false, _recallBestD: Infinity, _recallStallT: 0,
+    _mrec: null,                                       // mission report card for the unit in the field
+    _flankPt: null, _flankDone: false, _flanking: false,   // runner "sneak round the side" approach
+    _intercepting: false, _shielding: false, _shieldRun: false, _shieldGen: null, _shieldRunOn: false,
+    _scrapDetour: false, _scrapDetourOn: false, _scrapTargetPile: null,
+    _lootPile: null, _lootUntil: 0,                    // fresh-kill wreck grab
+    _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
+    _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
+    _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
+    _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
+    _lastFlip: null,                                   // log anti-bounce
+    _patrolI: 0,                                       // position on the (shared) patrol route
+  };
+}
+const SLOT_FIELDS = Object.keys(freshSlot());
+let aiUnitCap = null;   // debug override (RR.setUnitCap): force the per-team unit cap regardless of elevators
+
 class AICommander {
   constructor(team, archetype = null) {
     this.team = team;
@@ -4141,8 +4264,6 @@ class AICommander {
     if (this.personality.aggression < aggMin) this.personality.aggression = aggMin;
     this.colorIndex = null;
     this.started = false;
-    this.unit = null;
-    this.respawnT = 0;
     this._matchT = 0;          // seconds this commander has been fighting (drives the stalemate gambit)
     this._gambit = false;      // latched: gave up on the mid-field grind → send a Valkyrie around to crack the HQ
     this.deaths = 0;
@@ -4161,18 +4282,54 @@ class AICommander {
     this._exploreWp = null;                           // current recon waypoint (held until reached)
     this.roster = { ...GARAGE_COUNTS };               // finite fleet, same numbers as the player's garage; a death removes one
     this._eliminated = false;                         // true once the roster is empty (no more vehicles to field)
-    this._rising = false; this._elev = null;          // FOB-lift deploy state
-    this._exit = null; this._exitT = 0;               // post-deploy "drive out through the gate" waypoint
-    this._exitCoolT = 0;                              // re-arm cooldown after an exit clears (stops the exit↔advance spin flap)
-    this._nav = { path: null, idx: 0, t: 0, dx: null, dz: null };   // A* path cache
-    this._supply = null;                              // current rearm/refuel point (for nav)
-    this._stepAtDeploy = null;                        // strategy step when this unit deployed (swap only on a NEW step)
-    this._recalling = false;                          // unit is driving home to be swapped (not vanished mid-field)
-    this._recallForce = false;                        // committed recall (gambit/HQ-finisher): drive home even under fire
     this.failStreak = 0;                              // consecutive unit losses on the current plan (drives adaptive redraws)
-    this._mrec = null;                                // report card for the unit in the field (set on deploy, graded at death)
-    this._failStep = null; this._failN = 0; this._failT = 0;   // consecutive TOTAL-failure deaths per mission (drives missionBanned)
+    // Per-unit state lives in slot records (see freshSlot); mirror slot 0 onto `this`
+    // so pre-start external reads (debug hooks) see sane defaults.
+    this._slots = [freshSlot()];
+    this._slots[0].strategy = this.strategy;          // slot 0 fields the archetype's own doctrine
+    Object.assign(this, this._slots[0]);
+    this._slotI = 0; this._lead = true;
   }
+
+  // The doctrine a given slot fields: slot 0 = the archetype itself, extras from its
+  // ROLE_DECK (see above). Legacy no-archetype commanders draw random cards as ever.
+  _slotDoctrine(i) {
+    const deck = ROLE_DECK[this.archetype] || [];
+    const role = i === 0 || !deck.length ? this.archetype : deck[(i - 1) % deck.length];
+    return makeDoctrine(role, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`));
+  }
+
+  // ── slot plumbing (multi-unit) ─────────────────────────────────────────
+  // The team's unit cap: one fielded vehicle per elevator it owns (min 1), or the
+  // RR.setUnitCap debug override. Losing an elevator (future maps) shrinks the army.
+  unitCap() {
+    if (aiUnitCap != null) return aiUnitCap;
+    let n = 0; for (const e of elevators) if (e.team === this.team) n++;
+    return Math.max(1, n);
+  }
+  _bind(i) { const s = this._slots[i]; for (const k of SLOT_FIELDS) this[k] = s[k]; this._slotI = i; this._lead = i === 0; }
+  _unbind(i) { const s = this._slots[i]; for (const k of SLOT_FIELDS) s[k] = this[k]; }
+  // Grow to the cap (staggered respawn timers so fresh slots don't fight over a lift);
+  // shrink by dropping EMPTY slots only — a live overflow unit keeps fighting and its
+  // slot retires when it dies (see the respawn gate in _updateSlot).
+  _syncSlots() {
+    const cap = this.unitCap();
+    while (this._slots.length < cap) {
+      const s = freshSlot();
+      s.respawnT = 2 + this._slots.length * 2.5;
+      s.strategy = this._slotDoctrine(this._slots.length);   // its own role card (see ROLE_DECK)
+      this._slots.push(s);
+    }
+    if (this._slots.length > cap)
+      for (let i = this._slots.length - 1; i >= 0 && this._slots.length > cap; i--)
+        if (!this._slots[i].unit || this._slots[i].unit.dead) this._slots.splice(i, 1);
+  }
+  // Does any of this commander's slots own vehicle v? (External code — kill credit,
+  // repair caps — used to test `c.unit === v`, which only saw the last-bound slot.)
+  ownsUnit(v) { return this._slots.some(s => s.unit === v) || this.unit === v; }
+  _slotFor(v) { return this._slots.find(s => s.unit === v) || null; }
+  dbgFor(v) { const s = this._slotFor(v); return s ? s._dbg : (this.unit === v ? this._dbg : null); }   // per-unit log snapshot (tourney/probe attribution)
+  liveUnits() { const out = []; for (const s of this._slots) if (s.unit && !s.unit.dead) out.push(s.unit); return out; }
 
   start(colorIndex) {
     if (this.started) return;
@@ -4183,9 +4340,9 @@ class AICommander {
     recolorFlag(this.team, accent);
     recolorPlaced(this.team, accent);   // designed-map props + standalone forts follow the locked colour
     if (soldiers) soldiers.retintTeam(this.team, accent);   // base infantry fatigues follow the locked colour
-    const elev = elevators.find(e => e.team === this.team); if (elev) elev.setAccent(accent);
+    for (const e of elevators) if (e.team === this.team) e.setAccent(accent);   // ALL the team's lifts (satellite pads too)
     this.fortHp0 = fortHpOf(this.targetTeam()) || 1;
-    this.deploy();
+    this._bind(0); this.deploy(); this._unbind(0);   // slot 0 rolls out first; extra slots stagger in via update()
   }
 
   // --- intel the strategy cards read (all fog-of-war honest) -------------
@@ -4563,11 +4720,12 @@ class AICommander {
   //  • our flag stolen → go contest it, not loot
   // (The longer OUT-OF-THE-WAY detours for distant scrap keep their mood/RNG gating; this is
   // only the free grab at a fresh kill.)
-  wantsLoot() {
+  wantsLoot(v = this.unit) {   // v: the unit that made the kill (multi-unit: not necessarily the bound slot's)
     if (!aiKillLoot) return false;
-    const v = this.unit; if (!v || v.dead) return false;
+    if (!v || v.dead) return false;
     if (this.flag() && this.flag().carrier === v) return false;
-    if (this.strategy.step === 'capture' || this.strategy.key === 'capture') return false;
+    const sl = this._slotFor(v), strat = (sl && sl.strategy) || this.strategy;   // the KILLER's own card
+    if (strat.step === 'capture' || strat.key === 'capture') return false;
     if (this.ourFlagStolen()) return false;
     for (const f of flags) if (f.carried) return false;
     return true;
@@ -4721,7 +4879,12 @@ class AICommander {
     this._mrec = { veh: type, kills0: this.kills, fort0: fortHpOf(this.targetTeam()), flagTouched: false };
     // Ride up the FOB elevator like the player does — it can't leave (or shoot)
     // until the lift tops out, so neither side gets a head start (see update()).
-    const elev = elevators.find(e => e.team === this.team);
+    // Each slot prefers its OWN lift (slot i → the team's i-th elevator); if that
+    // one's carrying someone (cap > lifts under the debug override), take any free
+    // lift, else fall through to the ground spawn below.
+    const teamElevs = elevators.filter(e => e.team === this.team);
+    let elev = teamElevs.length ? teamElevs[this._slotI % teamElevs.length] : null;
+    if (elev && this._elevBusy(elev)) elev = teamElevs.find(e => !this._elevBusy(e)) || null;
     if (elev && !this._elevBusy(elev)) {
       // Face the gate it will drive out of (not just map centre) so heavies roll
       // straight through the opening instead of grinding into a corner wall.
@@ -4767,7 +4930,17 @@ class AICommander {
     const dx = best.x - fob.center.x, dz = best.z - fob.center.z, m = Math.hypot(dx, dz) || 1;
     return { x: best.x + dx / m * 16, z: best.z + dz / m * 16 };
   }
-  _planExit() { this._exit = this._computeExit(); this._exitT = this._exit ? 8 : 0; }
+  _planExit() {
+    // A unit that rose on a SATELLITE pad (outside the FOB wall ring) has no gate to
+    // thread — driving to a gate waypoint from out there would loop it back INTO the base.
+    const fob = teamCamp(this.team, 'fob');
+    if (fob && this._elev) {
+      const wallR = (FOB_SIZE / 2) * grid.cell + 2;
+      const d2 = (this._elev.center.x - fob.center.x) ** 2 + (this._elev.center.z - fob.center.z) ** 2;
+      if (d2 > wallR * wallR) { this._exit = null; this._exitT = 0; return; }
+    }
+    this._exit = this._computeExit(); this._exitT = this._exit ? 8 : 0;
+  }
 
   // Snapshot for the AI log overlay + an event when the unit changes its mind.
   _logTick(v, view, cmd) {
@@ -5061,7 +5234,7 @@ class AICommander {
   // the next deploy rolls out the wanted vehicle — a clean role change, not a suicide.
   _driveHome(dt) {
     const v = this.unit;
-    this.strategy.tick(this, dt);
+    this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
     applyAltitude(v, dt); decayAim(v, dt); v.cooldown -= dt;
     if (v.dead) { this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 3; return; }
     const home = teamCenter(this.team, 'fob');
@@ -5104,6 +5277,13 @@ class AICommander {
       this._enemyGoneAnnounced = true;
       aiLog(this.team, `${this.cname}: Their whole fleet's down — the field is OURS! All units, press the base!`);
     }
+    this._syncSlots();
+    for (let i = 0; i < this._slots.length; i++) { this._bind(i); this._updateSlot(dt); this._unbind(i); }
+  }
+
+  // One slot's tick — the pre-multi-unit update() body, run with the slot's record
+  // BOUND onto `this` (see _bind). Only the LEAD slot advances the shared doctrine.
+  _updateSlot(dt) {
     if (!this.unit || this.unit.dead) {
       if (this.unit && this.unit.dead) {
         this.deaths++;
@@ -5149,7 +5329,9 @@ class AICommander {
       this.unit = null;
       this._rising = false; this._recalling = false; this._recallForce = false;
       this.respawnT -= dt;
-      if (this.started && !this._eliminated && this.respawnT <= 0) { this.respawnT = 4 + Math.random() * 3; this.deploy(); }
+      // Respawn only while this slot is inside the cap — an overflow slot (cap shrank
+      // under it) retires here instead of redeploying (_syncSlots prunes it once empty).
+      if (this.started && !this._eliminated && this.respawnT <= 0 && this._slotI < this.unitCap()) { this.respawnT = 4 + Math.random() * 3; this.deploy(); }
       return;
     }
     // Report card: a hand on the enemy flag at ANY point counts as progress (even if the
@@ -5184,7 +5366,7 @@ class AICommander {
       if (!threatened || this._recallForce) { this._driveHome(dt); return; }
       this._recalling = false; this._stepAtDeploy = null;   // fall through to the brain to fight/flee
     }
-    this.strategy.tick(this, dt);
+    this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
     this._maybeRecall();
     if (this._recalling) return;   // just started the trip home
     const v = this.unit;
@@ -6035,28 +6217,35 @@ function updateAiLog() {
   // identified by its colour, instead of all status then a shared event feed.
   for (const cmd of commanders) {
     const col = teamLogColor(cmd.team);
-    const d = cmd._dbg;
-    const mission = (cmd.strategy && cmd.strategy.step ? cmd.strategy.step : '—').toUpperCase();
     const known = cmd._knownSummary ? cmd._knownSummary() : 'none';
-    const type = d ? d.type.toUpperCase() : 'DEPLOYING';
-    const card = d ? d.card : (cmd.strategy ? (cmd.strategy.constructor.name || '').replace('Strategy', '') : '');
     html += `<div class="tbox" style="border-color:${col}">`;
-    // Header: COLOUR · VEHICLE · MISSION · PERSONALITY — all dot-separated, no brackets.
-    html += `<div class="tb-h" style="color:${col}">${cmd.cname} · ${type} · ${mission}${card ? ` · ${card.toUpperCase()}` : ''}</div>`;
-    if (d) {
-      const fof = d.fof != null ? ` · <span style="color:${d.fof > 0 ? '#7fffb8' : '#ff9d7f'}">fof ${d.fof > 0 ? '+' : ''}${d.fof}</span>` : '';
-      html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}/${d.maxFuel}${fof} · fob ${d.distFob}</div>`;
-      // WHERE it's headed (stable line) then, on its OWN line, the per-tick DRIVE readout —
-      // blk first, then fwd/turn. Both are kept off the position line and fixed-width so the
-      // rapidly-changing numbers can't wrap/resize the box and scramble everything above.
-      const to = d.gx != null ? `(${d.gx},${d.gz}) ${d.gd}u` : '—';
-      const flags = (d.atHome ? ' · atBase' : '') + (d.navPath ? ` · path ${d.navPath}` : '');
-      const sgn = n => (Number(n) >= 0 ? ' ' : '') + Number(n).toFixed(2);   // fixed 5-char width (leading space for +)
-      html += `<div class="tb-l">@(${d.px},${d.pz}) → ${to}${flags}</div>`;
-      html += `<div class="tb-l" style="opacity:0.6">blk ${d.blk} · drive ${sgn(d.fwd)}/${sgn(d.turn)}</div>`;
-      if (d.stuck) html += `<div class="tb-l" style="color:#ffb030">⚠ STUCK ${d.stuck}s — ${d.stuckWhy}</div>`;
-    }
-    html += `<div class="tb-l">twrs ${d ? d.towers : '?'} · knows ${known}</div>`;
+    // One status block PER SLOT (multi-unit: each fielded unit runs its own role card).
+    // Single-slot teams render exactly the old one-unit box.
+    const multi = cmd._slots.length > 1;
+    cmd._slots.forEach((sl, i) => {
+      const d = sl._dbg && sl.unit ? sl._dbg : null;   // a dead/respawning slot shows DEPLOYING, not its ghost's last stats
+      const strat = sl.strategy;
+      const mission = (strat && strat.step ? strat.step : '—').toUpperCase();
+      const type = d ? d.type.toUpperCase() : 'DEPLOYING';
+      const card = d ? d.card : (strat ? (strat.constructor.name || '').replace('Strategy', '') : '');
+      // Header: COLOUR · VEHICLE · MISSION · PERSONALITY (slot rows after the first drop the colour name).
+      html += `<div class="tb-h" style="color:${col}">${i === 0 ? cmd.cname + ' · ' : ''}${multi ? (i + 1) + '· ' : ''}${type} · ${mission}${card ? ` · ${card.toUpperCase()}` : ''}</div>`;
+      if (d) {
+        const fof = d.fof != null ? ` · <span style="color:${d.fof > 0 ? '#7fffb8' : '#ff9d7f'}">fof ${d.fof > 0 ? '+' : ''}${d.fof}</span>` : '';
+        html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}/${d.maxFuel}${fof} · fob ${d.distFob}</div>`;
+        // WHERE it's headed (stable line) then, on its OWN line, the per-tick DRIVE readout —
+        // blk first, then fwd/turn. Both are kept off the position line and fixed-width so the
+        // rapidly-changing numbers can't wrap/resize the box and scramble everything above.
+        const to = d.gx != null ? `(${d.gx},${d.gz}) ${d.gd}u` : '—';
+        const flags = (d.atHome ? ' · atBase' : '') + (d.navPath ? ` · path ${d.navPath}` : '');
+        const sgn = n => (Number(n) >= 0 ? ' ' : '') + Number(n).toFixed(2);   // fixed 5-char width (leading space for +)
+        html += `<div class="tb-l">@(${d.px},${d.pz}) → ${to}${flags}</div>`;
+        html += `<div class="tb-l" style="opacity:0.6">blk ${d.blk} · drive ${sgn(d.fwd)}/${sgn(d.turn)}</div>`;
+        if (d.stuck) html += `<div class="tb-l" style="color:#ffb030">⚠ STUCK ${d.stuck}s — ${d.stuckWhy}</div>`;
+      }
+    });
+    const dAny = cmd._slots.map(s => s._dbg).find(Boolean);
+    html += `<div class="tb-l">twrs ${dAny ? dAny.towers : '?'} · knows ${known}</div>`;
     html += `<div class="tb-l">fleet ${fleetStr(cmd)}</div>`;
     const ev = latestFor(cmd.team);
     // The box already names the team/vehicle/personality, so the event shows only the
@@ -6101,19 +6290,26 @@ function buildLogExport() {
     s += `player: ${player.type} hp ${Math.round(player.hp / player.maxHp * 100)}% ammo ${player.ammo} @ (${Math.round(pp.x)},${Math.round(pp.z)})\n`;
   }
   for (const cmd of commanders) {
-    const d = cmd._dbg;
-    const mission = ((cmd.strategy && cmd.strategy.step) || '—').toUpperCase();
     const known = cmd._knownSummary ? cmd._knownSummary() : 'none';
-    const goalLbl = cmd._intercepting ? 'intercept runner' : cmd._shielding ? 'grab shield'
-      : (cmd.strategy && cmd.strategy.objectiveLabel ? cmd.strategy.objectiveLabel(cmd) : '—');
-    s += `\n[${cmd.cname}] ${d ? d.type : 'deploying'} · ${mission}${d ? ` [${d.card}]` : ''}\n`;
-    if (d) {
-      s += `  ${d.state} → ${goalLbl}\n`;
-      s += `  hp ${d.hp}% ammo ${d.ammo} fuel ${d.fuel} shld ${d.shield}\n`;
-      s += `  pos (${d.px},${d.pz}) goal (${d.gx},${d.gz}) fob ${d.distFob}u blk ${d.blk} f/t ${d.fwd}/${d.turn}\n`;
-      if (d.stuck) s += `  STUCK ${d.stuck}s — ${d.stuckWhy}\n`;
-    }
-    s += `  enemy twrs ${d ? d.towers : '?'} · knows ${known} · fleet ${fleetStr(cmd)}\n`;
+    // One block per SLOT (multi-unit: each fielded unit runs its own role card). The slot
+    // is BOUND while its lines build so objectiveLabel reads the right unit's context.
+    cmd._slots.forEach((sl, i) => {
+      cmd._bind(i);
+      const d = cmd._dbg && cmd.unit ? cmd._dbg : null;
+      const mission = ((cmd.strategy && cmd.strategy.step) || '—').toUpperCase();
+      const goalLbl = cmd._intercepting ? 'intercept runner' : cmd._shielding ? 'grab shield'
+        : (cmd.strategy && cmd.strategy.objectiveLabel ? cmd.strategy.objectiveLabel(cmd) : '—');
+      s += `\n[${cmd.cname}${cmd._slots.length > 1 ? ' ' + (i + 1) : ''}] ${d ? d.type : 'deploying'} · ${mission}${d ? ` [${d.card}]` : ''}\n`;
+      if (d) {
+        s += `  ${d.state} → ${goalLbl}\n`;
+        s += `  hp ${d.hp}% ammo ${d.ammo} fuel ${d.fuel} shld ${d.shield}\n`;
+        s += `  pos (${d.px},${d.pz}) goal (${d.gx},${d.gz}) fob ${d.distFob}u blk ${d.blk} f/t ${d.fwd}/${d.turn}\n`;
+        if (d.stuck) s += `  STUCK ${d.stuck}s — ${d.stuckWhy}\n`;
+      }
+      cmd._unbind(i);
+    });
+    const dAny = cmd._slots.map(sl => sl._dbg).find(Boolean);
+    s += `  enemy twrs ${dAny ? dAny.towers : '?'} · knows ${known} · fleet ${fleetStr(cmd)}\n`;
   }
   s += `\n--- events (newest first) ---\n`;
   for (let i = aiEvents.length - 1; i >= 0; i--) s += `${aiEvents[i].t.toFixed(0)}s ${aiEvents[i].msg}\n`;
@@ -6330,7 +6526,7 @@ function deployToFOB(type, colorIndex, rise) {
   v.setTeamColor(accent);
   if (type === 'firebrat') v._mineCharges = MINE.perTrip;   // 2 mines to lay this trip
 
-  if (playerElev) playerElev.setAccent(accent);
+  for (const e of elevators) if (e.team === PLAYER_TEAM) e.setAccent(accent);   // ALL the team's lifts (satellite pads too)
   if (rise && playerElev) {
     playerElev.loop = false;
     playerElev.phase = 'down';
@@ -6860,6 +7056,8 @@ function ensureGameMenu() {
     '<div class="gm-group" id="gm-dev" style="display:none">' +
       '<div class="gm-devhdr">DEV TOOLS</div>' +
       '<button data-act="ava">AI VS AI</button>' +
+      '<button data-act="ava3">AI VS AI &middot; 3 UNITS EACH</button>' +
+      '<button data-act="pva3">PLAYER VS AI &middot; 3 UNITS EACH</button>' +
       '<div class="gm-toollbl">EDITORS &amp; LABS</div>' +
       '<a class="gm-tool" href="https://asset-designer.rmrfbase.com" target="_blank" rel="noopener">ASSET DESIGNER &#8599;</a>' +
       '<a class="gm-tool" href="https://map-designer.rmrfbase.com" target="_blank" rel="noopener">MAP DESIGNER &#8599;</a>' +
@@ -6915,6 +7113,10 @@ function ensureGameMenu() {
     if (act === 'dev') { showView('dev'); return; }
     if (act === 'back') { showView('main'); return; }
     if (act === 'ava') { location.href = MENU_BASE + '?aivsai'; return; }
+    // Multi-unit (?units=3): each side gets 3 elevators = 3 simultaneous units. Dev-menu
+    // only while it bakes; PvAI 3v3 is currently YOU vs three of them — no wingmen yet.
+    if (act === 'ava3') { location.href = MENU_BASE + '?aivsai&units=3'; return; }
+    if (act === 'pva3') { location.href = MENU_BASE + '?play&units=3'; return; }
     // PLAYER VS AI: reload into a fresh game after a match; on the first screen just open the hangar.
     if (m.dataset.reload === '1') { location.href = MENU_BASE + '?play'; return; }
     hideGameMenu();
@@ -7183,6 +7385,15 @@ function mountHangarHud(garage) {
   });
   _refreshBuildPanel = updateBuild;
   garage.onSelect(update);
+  // Relay clack when the player switches to a different vehicle (the selection light moves).
+  // Deduped by slot index so it doesn't fire on the initial pick or on roster rebuilds that
+  // keep the same selection.
+  let _lastSelIdx = garage.selIndex;
+  garage.onSelect(idx => {
+    if (idx === _lastSelIdx) return;
+    _lastSelIdx = idx;
+    if (sound) sound.vehicleSelectUI();
+  });
   update();
 }
 
@@ -7299,6 +7510,10 @@ window.RR = {
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
   repairStats: () => JSON.parse(JSON.stringify(repairStats)),   // cumulative per-match repair telemetry (sorties/heals/guns/jeep fates)
+  // Multi-unit slots (elevator = one fielded unit)
+  setUnitCap: (n) => { aiUnitCap = n == null ? null : Math.max(1, n | 0); return aiUnitCap; },   // A/B: force the per-team unit cap (null = back to counting elevators)
+  unitCap: (i = 0) => { const c = commanders[i]; return c ? c.unitCap() : null; },
+  slots: (i = 0) => { const c = commanders[i]; return c ? c._slots.map(s => ({ type: s.unit ? s.unit.type : null, dead: s.unit ? !!s.unit.dead : null, respawnT: +s.respawnT.toFixed(1), rising: s._rising, recalling: s._recalling, state: s._dbg ? s._dbg.state : null, px: s._dbg ? s._dbg.px : null, pz: s._dbg ? s._dbg.pz : null, card: s.strategy ? (s.strategy.constructor.name || '') : null, step: s.strategy ? s.strategy.step : null })) : null; },   // debug: per-slot fielded unit + its role card
   jeepShotTarget: (v) => jeepShotTarget(v),                     // debug: the enemy jeep this unit would pot-shot (null = none in reach)
   constructFort: (kind, cx, cz, rot = 0, team = PLAYER_TEAM) => constructFort(team, kind, cx, cz, rot),   // build-a-tower: order a wall/bastion/armed build
   enterFortPlace: (kind) => enterFortPlace(kind), exitFortPlace: () => exitFortPlace(),   // debug: drive the hologram flow
@@ -7419,6 +7634,8 @@ window.RR = {
   emitSoundPing: (x, y, z, idx, team) => emitSoundPing(x, y, z, idx, team),
   get projectiles() { return projectiles; },
   get combatants() { return combatants; },
+  get elevators() { return elevators; },
+  lookAt: (x, z, dist = 90, pitch = 1.0, yaw = 0) => { orbit.target.set(x, 0, z); orbit.dist = dist; orbit.pitch = pitch; orbit.yaw = yaw; updateCamera(); },   // debug: frame a spot (headless screenshots)
   terrainAt: (x, z) => map.heightAt(x, z),   // debug/tools: world surface height (<=0 = underwater) for shore-stuck analysis
   get commanders() { return commanders; },
   get flags() { return flags; },
@@ -7704,9 +7921,10 @@ function updateNavOverlay() {
   if (!onField) return;
   const watched = spectateTarget || _specFocus || player;   // the watched unit draws bright, the rest dim
   for (const cmd of commanders) {
-    const v = cmd.unit, nav = cmd._nav;
+   for (const slot of cmd._slots) {   // one nav line per fielded unit (multi-unit slots)
+    const v = slot.unit, nav = slot._nav;
     if (!v || v.dead) continue;
-    const d = cmd._dbg;
+    const d = slot._dbg;
     // Draw the A* route ONLY when the unit is in a state that actually follows it — else the path
     // is stale (combat/unstick steer by behavior, not nav.path). A combat/no-route unit draws a
     // straight line to what it's genuinely steering at (d.gx/gz), so the line points the right way.
@@ -7716,8 +7934,8 @@ function updateNavOverlay() {
       && (NAV_ASTAR_STATES.has(d.state) || (d.state === 'suppress' && d.gd != null && d.gd > 30));
     _maybeProbeFirebratNav(cmd, v, d, nav);                  // ?nav: freeze + show A* when a firebrat has no route
     if (!usingAstar && (!d || d.gx == null)) continue;       // nothing meaningful to draw for this unit
-    let o = navLines.get(cmd);
-    if (!o) { o = _makeNavObj(); navLines.set(cmd, o); }
+    let o = navLines.get(slot);   // keyed per SLOT so each fielded unit gets its own line
+    if (!o) { o = _makeNavObj(); navLines.set(slot, o); }
     const col = new THREE.Color(teamColor(cmd.team));
     const hot = v === watched;
     o.line.material.color.copy(col); o.dest.material.color.copy(col);
@@ -7800,6 +8018,7 @@ function updateNavOverlay() {
       o.wp.visible = false;                                    // no route bends on a direct line
       o.dest.position.set(d.gx, gy + 3.2, d.gz); o.dest.visible = true;
     }
+   }
   }
 }
 
