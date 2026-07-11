@@ -2701,6 +2701,35 @@ function turretCountOf(team, role = null) {
 // Capturable flag at every main base. Stolen by any rival unit touching it;
 // captured when carried home to the thief's own main base.
 const flags = [];
+// Woven-fabric texture for the flag cloth — a near-white weave (tinted by the team colour via
+// the material's `color`) with a darker vertical HOIST band at the pole edge (UV u=0).
+let _flagTex = null;
+function flagFabricTexture() {
+  if (_flagTex) return _flagTex;
+  const S = 64, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#ededed'; ctx.fillRect(0, 0, S, S);
+  ctx.globalAlpha = 0.10;                                   // subtle woven cross-hatch
+  for (let i = 0; i < S; i += 3) { ctx.fillStyle = (i / 3) % 2 ? '#ffffff' : '#9a9a9a'; ctx.fillRect(i, 0, 1.5, S); ctx.fillRect(0, i, S, 1.5); }
+  ctx.globalAlpha = 0.5; ctx.fillStyle = '#3a3a3a'; ctx.fillRect(0, 0, 4, S);   // hoist band
+  _flagTex = new THREE.CanvasTexture(cv);
+  return _flagTex;
+}
+// Ripple a segmented cloth with a travelling sine wave — amplitude grows toward the free (fly)
+// end so it's pinned at the pole and flaps at the tip. z is the out-of-plane axis (the cloth
+// faces +z), so this reads as fabric waving; the carried orientation aims that wave rearward.
+function flapCloth(cloth, t, amp) {
+  const g = cloth.geometry, pos = g.attributes.position;
+  if (!g.userData.base) g.userData.base = pos.array.slice();
+  const base = g.userData.base;
+  for (let i = 0; i < pos.count; i++) {
+    const x = base[i * 3], y = base[i * 3 + 1];
+    const hoist = (x + 1.4) / 2.8;                          // 0 at the pole, 1 at the fly end
+    pos.setZ(i, (Math.sin(x * 3 + t * 7) * amp + Math.sin(y * 4 + t * 5) * amp * 0.3) * hoist);
+  }
+  pos.needsUpdate = true; g.computeVertexNormals();
+}
+
 function buildFlags() {
   for (const f of flags) scene.remove(f.group);
   flags.length = 0;
@@ -2710,13 +2739,14 @@ function buildFlags() {
     // on the flag too — not a hard-coded red/blue. Recoloured on team-colour lock.
     const hex = '#' + c.accent.getHexString();
     const g = new THREE.Group();
+    const tilt = new THREE.Group(); g.add(tilt);   // inner group: leans back when carried, so the outer yaw + this lean don't fight in one Euler
     const H = 8;
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, H, 6),
       new THREE.MeshStandardMaterial({ color: 0x9a9a9a, metalness: 0.6, roughness: 0.4 }));
-    pole.position.y = H / 2; g.add(pole);
-    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(2.8, 1.6),
-      new THREE.MeshStandardMaterial({ color: hex, emissive: hex, emissiveIntensity: 0.3, side: THREE.DoubleSide }));
-    cloth.position.set(1.4, H - 1.1, 0); g.add(cloth);
+    pole.position.y = H / 2; tilt.add(pole);
+    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(2.8, 1.6, 14, 5),
+      new THREE.MeshStandardMaterial({ color: hex, map: flagFabricTexture(), emissive: hex, emissiveIntensity: 0.16, roughness: 0.85, metalness: 0, side: THREE.DoubleSide }));
+    cloth.position.set(1.4, H - 1.1, 0); tilt.add(cloth);
     const gx = c.center.x, gz = c.center.z, gy = map.heightAt(gx, gz);
     g.position.set(gx, gy, gz);
     // The HQ wears the flag on its roof; this capturable pole stays HIDDEN inside
@@ -2724,7 +2754,7 @@ function buildFlags() {
     // to the ground (see updateFlags) for a Firebrat to grab.
     g.visible = false;
     scene.add(g);
-    flags.push({ team: c.team, group: g, cloth, hqBody: c.flagHQ || null, revealed: false, dropT: 0,
+    flags.push({ team: c.team, group: g, tilt, cloth, hqBody: c.flagHQ || null, revealed: false, dropT: 0,
       home: { x: gx, y: gy, z: gz }, carried: false, carrier: null, returnT: 0 });
   }
 }
@@ -2775,6 +2805,10 @@ function updateFlags(dt) {
         showBanner(`${flagColorName(f)} HQ DOWN — FLAG EXPOSED`, { color: '#ffd0a0' });
       } else if (!f.carried) { continue; }   // still entombed and not in play — skip
     }
+    // Ripple the cloth every frame it's in play (bigger amplitude when carried — it's
+    // streaming through the air); a standing flag stays upright.
+    flapCloth(f.cloth, performance.now() / 1000, f.carried ? 0.42 : 0.14);
+    if (!f.carried) { f.group.rotation.y = 0; f.tilt.rotation.z = 0; }
     if (f.dropT > 0 && !f.carried) {          // gravity-ish drop into the rubble
       f.dropT = Math.max(0, f.dropT - dt);
       const e = 1 - f.dropT / DROP_DUR;       // 0 (top) -> 1 (ground)
@@ -2788,8 +2822,12 @@ function updateFlags(dt) {
         f.group.position.set(c.x, map.heightAt(c.x, c.z) + 0.2, c.z);
         f.carried = false; f.carrier = null;
       } else {
-        const c = f.carrier.holder.position;
-        f.group.position.set(c.x, c.y + 4.5, c.z);
+        const c = f.carrier.holder.position, hd = f.carrier.heading || 0;
+        // Trail the flag up and a touch BEHIND the carrier, yaw it so the fly streams to the
+        // REAR, and lean the pole back — a captured banner flapping off the tail.
+        f.group.position.set(c.x - Math.sin(hd) * 1.8, c.y + 3.4, c.z - Math.cos(hd) * 1.8);
+        f.group.rotation.y = hd + Math.PI / 2;   // local +x (the fly) points to the carrier's rear
+        f.tilt.rotation.z = -0.9;                // pole leans back
         // AI carriers score by reaching their own base. The PLAYER must EXTRACT it —
         // ride the flag down the FOB lift into the secure garage (see returnToGarage).
         if (f.carrier !== player) {
@@ -3091,17 +3129,23 @@ function updateResupplies(dt) {
 let _bloodTex = null;
 function bloodTexture() {
   if (_bloodTex) return _bloodTex;
-  const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const S = 256, cv = document.createElement('canvas'); cv.width = cv.height = S;
   const ctx = cv.getContext('2d');
-  const blob = (cx, cz, r, a) => {
-    const g = ctx.createRadialGradient(cx, cz, 0, cx, cz, r);
-    g.addColorStop(0, `rgba(150,14,14,${a})`); g.addColorStop(0.55, `rgba(105,8,8,${a * 0.75})`); g.addColorStop(1, 'rgba(90,6,6,0)');
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cz, r, 0, 7); ctx.fill();
-  };
-  blob(S / 2, S / 2, S * 0.34, 0.92);                       // main splat
-  for (let i = 0; i < 8; i++) {                             // scattered droplets
-    const a = Math.random() * 7, d = S * (0.26 + Math.random() * 0.2);
-    blob(S / 2 + Math.cos(a) * d, S / 2 + Math.sin(a) * d, S * (0.025 + Math.random() * 0.06), 0.85);
+  // SOLID splat — no soft gradients (they read as fuzzy). A hard-edged irregular main pool
+  // (a wobbly polygon) + a few solid droplets. Only the shapes' own antialiased rims are soft.
+  ctx.fillStyle = '#8f0f0f';
+  ctx.beginPath();
+  const lobes = 11;
+  for (let i = 0; i <= lobes; i++) {
+    const a = (i / lobes) * Math.PI * 2, rr = S * (0.24 + Math.random() * 0.13);
+    const x = S / 2 + Math.cos(a) * rr, y = S / 2 + Math.sin(a) * rr;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#6e0a0a';
+  for (let i = 0; i < 9; i++) {                             // solid scattered droplets
+    const a = Math.random() * 7, d = S * (0.28 + Math.random() * 0.18), r = S * (0.02 + Math.random() * 0.05);
+    ctx.beginPath(); ctx.arc(S / 2 + Math.cos(a) * d, S / 2 + Math.sin(a) * d, r, 0, 7); ctx.fill();
   }
   _bloodTex = new THREE.CanvasTexture(cv);
   return _bloodTex;
@@ -3464,6 +3508,19 @@ function configureSubZone() {   // called at map build; the sub itself spawns on
   // is the far rim — a player deterrent, not something the AI runs into during normal base play.
   DEEP_DANGER_R = islandBound ? Math.max(70, islandBound - 50) : 0;
 }
+// NO-SUB ZONE: a bubble around every flag base. A coastal base sits near the deep rim, so a
+// Valkyrie/Firebrat orbiting it to assault the flag would otherwise stray into sub water and get
+// blasted (Jacob — hits the player AND the AI). Inside this radius the sub won't target you, so
+// an already-surfaced sub also dives once you swing back toward the base.
+const NO_SUB_R2 = 95 * 95;
+function inNoSubZone(x, z) {
+  for (const c of camps) {
+    if (c.role !== 'main') continue;
+    const dx = x - c.center.x, dz = z - c.center.z;
+    if (dx * dx + dz * dz < NO_SUB_R2) return true;
+  }
+  return false;
+}
 // A deep-water spot to surface at: a touch SEAWARD of the intruder (between them and open water),
 // so the sub cuts off the escape further out and herds them back toward land.
 function subSurfaceSpot(tx, tz) {
@@ -3494,6 +3551,7 @@ function updateSubmarines(dt) {
     const x = v.holder.position.x, z = v.holder.position.z;
     if ((x * x + z * z) < DEEP_DANGER_R * DEEP_DANGER_R) continue;   // still inshore → safe
     if (!map.isDeepWater(x, z)) continue;
+    if (inNoSubZone(x, z)) continue;                                 // assaulting a flag base → the sub leaves you be
     const d = x * x + z * z;
     if (d < bd) { bd = d; tgt = v; }
   }
@@ -7970,6 +8028,8 @@ window.RR = {
   get vehicles() { return vehicles; },
   get elevators() { return elevators; },
   get submarines() { return activeSub ? [activeSub] : []; },        // debug: the on-demand sub (0 or 1)
+  get flags() { return flags; },   // debug: capturable flags
+  bloodAt: (x, z, r = 1.6) => addBloodMark(x, z, r),   // debug: drop a blood mark (screenshots)
   deepDangerR: () => DEEP_DANGER_R,                             // debug: radius past which subs patrol
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
