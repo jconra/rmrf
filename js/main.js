@@ -18,7 +18,7 @@ import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?
 import { RoadNetwork } from './Roads.js?v=85';
 import { Foliage } from './Foliage.js?v=5';
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
-import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=68';
+import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=69';
 import { Elevator } from './Elevator.js?v=3';
 import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
@@ -188,7 +188,11 @@ function updateCamera() {
       fireHeld = true;
     } else if (QS.has('tap')) damageTapAt(e.clientX, e.clientY);   // legacy debug damage tap
   });
-  window.addEventListener('mousemove', e => { move(e.clientX, e.clientY); _cursor = { x: e.clientX, y: e.clientY }; });
+  // pointermove with a pointerType gate, NOT mousemove: on phones the browser synthesizes
+  // compatibility mouse events from taps (the field canvas listeners are passive), which set
+  // _cursor to the tap point — then releasing the aim stick fell into the desktop-cursor aim
+  // path and swung the turret to that stale spot instead of holding its bearing.
+  window.addEventListener('pointermove', e => { if (e.pointerType !== 'mouse') return; move(e.clientX, e.clientY); _cursor = { x: e.clientX, y: e.clientY }; });
   window.addEventListener('mouseup', e => { if (e.button === 0) fireHeld = false; else dragging = false; });
   el.addEventListener('contextmenu', e => e.preventDefault());   // right-drag look, no menu popup
   el.addEventListener('wheel', e => {
@@ -3205,6 +3209,7 @@ function updateCrushables() {
 // corners at map build; a vehicle driving over one collects it for its team. Spend
 // scrap in the garage to build more vehicles (BUILD_COST). Neutral: either team grabs.
 const SCRAP_PICKUP_R = 8;   // how close a vehicle must get to snag a pile (a little margin so a unit halting at the kill site still collects)
+const SCRAP_FLOAT_MS = 10000;   // debris in water floats COLLECTABLE this long before it slides under (shallow-water kills stay grabbable)
 
 // kind 'parts' = organized delivery pallet (world scatter); 'wreck' = blown-up vehicle
 // debris (death drop) — its armor plates wear the dead vehicle's team camo.
@@ -4258,6 +4263,11 @@ function repairEligible(team) {
   return out;
 }
 
+function clearRepairIcons() {
+  for (const [, rec] of repairIcons) rec.el.remove();
+  repairIcons.clear();
+}
+
 function updateRepairIcons() {
   const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
   const list = (human && onField && !matchOver && repairsOn) ? repairEligible(PLAYER_TEAM) : [];
@@ -4325,14 +4335,20 @@ function updateScrap(dt) {
   const now = performance.now();
   for (let i = scrapPiles.length - 1; i >= 0; i--) {
     const p = scrapPiles[i];
-    // Debris that landed over water sinks below the surface and despawns instead of floating —
-    // it's unreachable for ground units anyway. Wait out the hot (airborne) window first so a
-    // mid-air wreck finishes its arc, then slide it under and remove it.
+    // Debris that landed in water floats COLLECTABLE for a grace window (a wader in the
+    // shallows or a passing flyer can still snag it), then slides under and despawns.
+    // Wait out the hot (airborne) window first so a mid-air wreck finishes its arc.
     if (p.overWater && (!p.hotUntil || now >= p.hotUntil)) {
-      p.sink = (p.sink || 0) + dt;
-      p.group.position.y = p.pos.y + 0.04 - p.sink * 3;   // ~3 u/s under
-      if (p.sink > 1.6) { scene.remove(p.group); p._gone = true; scrapPiles.splice(i, 1); }
-      continue;   // not collectable while sinking
+      if (p.sinkAt == null) p.sinkAt = now + SCRAP_FLOAT_MS;   // grace clock starts once it has settled
+      if (now >= p.sinkAt) {
+        // Sink from where the debris actually SITS — using the death position's y made a
+        // wreck from a downed flyer jump back up to its death altitude on the first frame.
+        if (p.sinkBase == null) p.sinkBase = p.group.position.y;
+        p.sink = (p.sink || 0) + dt;
+        p.group.position.y = p.sinkBase - p.sink * 3;   // ~3 u/s under
+        if (p.sink > 1.6) { scene.remove(p.group); p._gone = true; scrapPiles.splice(i, 1); }
+        continue;   // not collectable while sinking
+      }
     }
     if (!p.noBob) {   // parts pallets bob gently as a pickup; scattered gib-wrecks sit still
       p.bob += dt * 2;
@@ -7645,6 +7661,7 @@ function beginReturn() {
 function returnToGarage() {
   returning = false;
   exitFortPlace(); exitTowerPick();   // belt-and-suspenders: kill any lingering garage aerial overlay before the hangar shows
+  clearRepairIcons();                 // the field loop stops ticking updateRepairIcons, so live 🔧 icons would orphan over the hangar
   // Did the player ride an enemy flag all the way down into the garage? That's the capture.
   const captured = flags.find(f => f.carried && f.carrier === player);
   if (player) { removeCombatant(player); scene.remove(player.group); player = null; }

@@ -126,8 +126,19 @@ export class Vehicle {
       const want = Math.atan2(-mx, -mz);                 // heading whose forward (-Z) points at (mx,mz)
       const turn = ((want - this.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;   // wrap to [-π,π]
       const slew = 6 * dt;                               // cosmetic catch-up; tight enough to read as "facing where it goes"
-      this.heading += Math.max(-slew, Math.min(slew, turn));
+      const dh = Math.max(-slew, Math.min(slew, turn));
+      this.heading += dh;
       this.holder.rotation.y = this.heading;
+      // GYRO-STABILIZED turret: the turret is a child of the hull, so the cosmetic
+      // facing above would drag the gun off its bearing (faster than the mount's own
+      // slew could recover — the gun visibly swung away and crawled back on every
+      // direction change). Counter-rotate the mount by the hull's turn in the same
+      // frame so the gun holds its WORLD bearing while the body walks any which way.
+      if (dh && this.model.turretGroup && this.model.autoScan === false) {
+        const wrap = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
+        this.model.aimYaw = wrap((this.model.aimYaw || 0) - dh);
+        this.model.turretGroup.rotation.y = wrap(this.model.turretGroup.rotation.y - dh);
+      }
     }
     const d = this.speed * (this.speedMul || 1) * dt;
     const dx = mx * d, dz = mz * d;

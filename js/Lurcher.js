@@ -247,11 +247,16 @@ export class Lurcher {
     const turnMag = Math.abs(turnInput);
     const moving  = fwdMag + turnMag * 0.7;
 
-    // Phase advances faster when moving; ticks slowly at idle for a subtle fidget
-    this.gaitPhase = (this.gaitPhase + delta * (moving * 1.9 + 0.06)) % 1;
+    // Cadence: CONSTANT while moving (short ramp from idle), so foot ground-speed tracks
+    // hull speed linearly — stride already scales with input, so rate × stride ∝ throttle
+    // exactly matches the hull at every throttle. The old rate ∝ moving made foot speed
+    // QUADRATIC in throttle: the hull outran the feet at any partial throttle (worst on a
+    // low-fuel limp) and the walker skated. 4.35 Hz × 0.44 stride ≈ hull speed 14 at the
+    // game's world scale (3.6 × 0.72) during the stance backslide.
+    this.gaitPhase = (this.gaitPhase + delta * (Math.min(moving, 0.15) / 0.15 * 4.35 + 0.06)) % 1;
 
     const SWING      = 0.28;   // fraction of cycle spent swinging forward
-    const MAX_STRIDE = 0.36;
+    const MAX_STRIDE = 0.44;
     const MAX_STEP   = 0.20;   // foot lift height
     const IDLE_STR   = 0.03;   // tiny residual stride when stationary
 
@@ -267,12 +272,16 @@ export class Lurcher {
       const rx = Math.cos(a) * this.REST_R;
       const rz = -Math.sin(a) * this.REST_R;
 
-      // Stride direction components:
-      //   forward/back  → along -Z (vehicle forward) scaled by forwardInput
-      //   turn          → tangential: (-sin a, 0, -cos a) × turnInput
-      const fwdDZ  = -forwardInput;
-      const trnDX  = -Math.sin(a) * turnInput;
-      const trnDZ  = -Math.cos(a) * turnInput;
+      // Stride direction components — UNIT direction only; `stride` already carries the
+      // input magnitude. (These used to scale with the raw inputs too, so the foot sweep
+      // went with throttle² — at partial throttle the feet barely moved while the hull
+      // drove on and the walker skated, worst on a low-fuel limp.)
+      //   forward/back  → along -Z (vehicle forward)
+      //   turn          → tangential: (-sin a, 0, -cos a)
+      const norm   = moving > 0.05 ? 1 / Math.max(fwdMag, turnMag * 0.7) : 1;
+      const fwdDZ  = -forwardInput * norm;
+      const trnDX  = -Math.sin(a) * turnInput * norm;
+      const trnDZ  = -Math.cos(a) * turnInput * norm;
 
       // strideDir: -1 = back of stroke (foot behind), +1 = front (foot ahead)
       let strideDir, footY;
