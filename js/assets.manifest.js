@@ -24,7 +24,7 @@ import {
   makeQuonset, makeTent, makeElevator, makeLookout,
 } from './Buildings.js?v=9';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator } from './Resupply.js';   // no ?v: match main.js so the module dedupes
-import { makeWall, makeTower, makeGate } from './Walls.js?v=66';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
+import { makeWall, makeTower, makeGate } from './Walls.js?v=68';   // perimeter kit (visual makers; Wall/Camp classes do the combat)
 import { makeSubmarine } from './Submarine.js?v=5';   // deep-water hazard sub (designer-built via submarine.config.js; ?v matches main.js so the module dedupes)
 import CORNER_TOWER_CFG from './corner_tower.config.js?v=1';   // the designed corner tower, as shared data (designer + game read this one file)
 import LOOKOUT_CFG from './lookout.config.js?v=1';   // the designed lookout tower, same shared-data pattern

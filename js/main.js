@@ -8,7 +8,7 @@ import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp, Wall } from './Walls.js?v=66';
+import { Camp, Wall } from './Walls.js?v=68';
 import { SoldierCorps } from './Soldiers.js?v=4';
 import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=8';
 import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=4';
@@ -1008,6 +1008,8 @@ function placeCampsFromConfig(assets) {
   for (const c of camps) scene.remove(c.group);
   for (const e of elevators) { if (e._snd) { e._snd.stop(); e._snd = null; } scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
   for (const g of placedProps) scene.remove(g);
+  for (const m of bloodMarks) scene.remove(m); bloodMarks = [];
+  crushables = []; _crushBuilt = false;
   camps = []; elevators = []; placedWalls = []; placedProps = []; destructibles = new DestructibleManager();
 
   const items = [];   // { cell, site, size, role, team }  (parallel to camps[])
@@ -1088,8 +1090,10 @@ function placeCampsFromConfig(assets) {
     g.rotation.y = (a.rot || 0) * Math.PI / 2;
     scene.add(g);
     applyStaging(g, a.id);
-    destructibles.add(new Destructible(g, { type: entry.destructible ? entry.destructible.type : 'building',
-      hp: entry.destructible ? entry.destructible.hp : 100, blocks: true, staged: true }));
+    const pdest = new Destructible(g, { type: entry.destructible ? entry.destructible.type : 'building',
+      hp: entry.destructible ? entry.destructible.hp : 100, blocks: true, staged: true });
+    destructibles.add(pdest);
+    if (a.id === 'tent') { g.userData.crushable = true; g.userData.crushDest = pdest; }   // squishable (see updateCrushables)
     placedProps.push(g);
   }
   scene.updateMatrixWorld(true);
@@ -3081,6 +3085,78 @@ function updateResupplies(dt) {
 }
 
 // --- SCRAP / SALVAGE ----------------------------------------------------
+// ── Blood marks — a small dark splat left on the ground where a soldier is squished under a
+// tread (and where a crushed tent's occupants were). Persistent + capped, cleared on rebuild.
+// Reuses BlobShadow's flat-plane-on-ground decal trick (one canvas texture, shared material).
+let _bloodTex = null;
+function bloodTexture() {
+  if (_bloodTex) return _bloodTex;
+  const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const ctx = cv.getContext('2d');
+  const blob = (cx, cz, r, a) => {
+    const g = ctx.createRadialGradient(cx, cz, 0, cx, cz, r);
+    g.addColorStop(0, `rgba(150,14,14,${a})`); g.addColorStop(0.55, `rgba(105,8,8,${a * 0.75})`); g.addColorStop(1, 'rgba(90,6,6,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cz, r, 0, 7); ctx.fill();
+  };
+  blob(S / 2, S / 2, S * 0.34, 0.92);                       // main splat
+  for (let i = 0; i < 8; i++) {                             // scattered droplets
+    const a = Math.random() * 7, d = S * (0.26 + Math.random() * 0.2);
+    blob(S / 2 + Math.cos(a) * d, S / 2 + Math.sin(a) * d, S * (0.025 + Math.random() * 0.06), 0.85);
+  }
+  _bloodTex = new THREE.CanvasTexture(cv);
+  return _bloodTex;
+}
+const _bloodGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+let _bloodMat = null;
+const bloodMat = () => _bloodMat || (_bloodMat = new THREE.MeshBasicMaterial({ map: bloodTexture(), transparent: true, opacity: 0.9, depthWrite: false }));
+let bloodMarks = [];
+const MAX_BLOOD = 40;
+function addBloodMark(x, z, radius = 1.5) {
+  const m = new THREE.Mesh(_bloodGeo, bloodMat());
+  const r = radius * (0.8 + Math.random() * 0.5);
+  m.scale.set(r * 2, 1, r * 2);
+  const gy = roadDeckY(x, z); m.position.set(x, (gy != null ? gy : map.heightAt(x, z)) + 0.05, z);   // sit on the road slab if there's one under it
+  m.rotation.y = Math.random() * Math.PI * 2;
+  m.renderOrder = 1;                                        // draw over terrain, blend onto it
+  scene.add(m); bloodMarks.push(m);
+  while (bloodMarks.length > MAX_BLOOD) scene.remove(bloodMarks.shift());   // cap (shared geo/mat, nothing to dispose)
+}
+
+// Squishable tents: a ground vehicle that rolls over a tent flattens it (they're drive-through
+// decoration, not nav obstacles) and leaves a blood mark — the occupants didn't make it out.
+// Tents are tagged (userData.crushable) at build in Walls.js + the designed-map loader; the list
+// is gathered lazily on the first field tick (positions are only final once the camp is placed).
+let crushables = [], _crushBuilt = false;
+const _crushWP = new THREE.Vector3();
+function updateCrushables() {
+  if (!_crushBuilt) {
+    _crushBuilt = true; crushables = [];
+    const consider = (obj) => {
+      if (obj.userData && obj.userData.crushable && obj.userData.crushDest) {
+        obj.getWorldPosition(_crushWP);
+        crushables.push({ dest: obj.userData.crushDest, x: _crushWP.x, z: _crushWP.z, r: 3.6, crushed: false });
+      }
+    };
+    for (const c of camps) if (c.buildings) for (const o of c.buildings) consider(o);
+    for (const g of placedProps) consider(g);
+  }
+  if (!crushables.length) return;
+  for (const t of crushables) {
+    if (t.crushed || t.dest.dead) continue;
+    for (const v of combatants) {
+      if (v.dead || isFlyer(v) || vehicleHidden(v)) continue;   // flyers pass over; a unit down its lift shaft can't crush
+      const dx = v.holder.position.x - t.x, dz = v.holder.position.z - t.z;
+      if (dx * dx + dz * dz < t.r * t.r) {
+        t.crushed = true;
+        t.dest.damage(t.dest.hp + 1);           // flatten the tent (its own staged collapse plays)
+        addBloodMark(t.x, t.z, 2.2);
+        if (sound) sound.squishAt(t.x, 0, t.z);
+        break;
+      }
+    }
+  }
+}
+
 // One pile = 1 scrap. Piles drop where vehicles die and are scattered in remote
 // corners at map build; a vehicle driving over one collects it for its team. Spend
 // scrap in the garage to build more vehicles (BUILD_COST). Neutral: either team grabs.
@@ -3245,7 +3321,9 @@ function updateScrapHud() {
 }
 
 // ── Base infantry (Soldiers.js): decorative minifigs — garrison patrols, and a squad
-// scattering out of every building that collapses. One InstancedMesh, no gameplay stats.
+// scattering out of an OCCUPIED building that collapses. One InstancedMesh, no gameplay stats.
+// Troops spill only from structures people work/live in — not equipment or storage.
+const SOLDIER_SPILL_IDS = new Set(['admin', 'lookout', 'barracks', 'flagHQ', 'quonset']);
 let soldiers = null;
 // Firebrat deployables (mines + sensor pods). Bound to the live scene/map; reset per match.
 let minefield = new Minefield(scene, map);
@@ -3254,11 +3332,16 @@ let sensorNet = new SensorNet(scene, map);
 let gadgetStats = { minesLaid: 0, podsLaid: 0, detonations: 0, kills: 0, enemyKills: 0, friendlyKills: 0, damage: 0 };
 function resetGadgetStats() { gadgetStats = { minesLaid: 0, podsLaid: 0, detonations: 0, kills: 0, enemyKills: 0, friendlyKills: 0, damage: 0 }; }
 function wireSoldiers() {
-  if (!soldiers) { soldiers = new SoldierCorps(scene, map); soldiers.onSquish = (x, y, z) => { if (sound) sound.squishAt(x, y, z); }; }
+  if (!soldiers) { soldiers = new SoldierCorps(scene, map); soldiers.onSquish = (x, y, z) => { if (sound) sound.squishAt(x, y, z); addBloodMark(x, z); }; }
   for (const c of camps) {
     if (c._soldiersWired) continue;
     c._soldiersWired = true;
-    c.onBuildingDown = (obj) => soldiers.scatterFrom(obj.position.x, obj.position.z, c.team, c.accent, 3 + (Math.random() * 3 | 0));
+    // Only OCCUPIED structures garrison troops — a shelled barracks/HQ/hut spills soldiers, but
+    // diesel barrels, sandbags and generators shouldn't (looked odd — Jacob). Whitelist by id.
+    c.onBuildingDown = (obj) => {
+      if (!SOLDIER_SPILL_IDS.has(obj.userData && obj.userData.buildId)) return;
+      soldiers.scatterFrom(obj.position.x, obj.position.z, c.team, c.accent, 3 + (Math.random() * 3 | 0));
+    };
     if (c.role === 'main') {
       // a small garrison marching a rectangle inside the walls (clear of the road ring)
       const r = 12, cx = c.center.x, cz = c.center.z;
@@ -7611,6 +7694,7 @@ function mountHangarHud(garage) {
     #build-panel .shop-tile.off { opacity:0.38; cursor:default; border-color:#333; }
     #build-panel .shop-tile img { width:100%; height:56px; object-fit:contain; display:block; }
     #build-panel .shop-tile .tl { display:block; font-size:9px; letter-spacing:0.08em; color:#8ff0b0; margin-top:2px; }
+    #build-panel .shop-tile .upg-arrow { position:absolute; top:46%; left:50%; transform:translate(-50%,-50%); font-size:30px; line-height:1; color:#5fd66a; pointer-events:none; text-shadow:0 0 5px rgba(0,0,0,0.85), 0 2px 4px rgba(0,0,0,0.95); }
     #build-panel .shop-tile .pr { position:absolute; top:3px; right:5px; color:#ffcf4a; font-weight:bold; font-size:11px; }
     #build-panel .shop-tile .ct { position:absolute; top:3px; left:5px; color:#6fa9c9; font-size:10px; }
     #build-panel .bp-hint { margin-top:6px; min-height:13px; color:#7089; letter-spacing:0.08em; }`;
@@ -7652,7 +7736,7 @@ function mountHangarHud(garage) {
     + `<div class="shop-sec">FORTIFICATIONS</div>`
     + `<div class="shop-grid">${fortTile('wall', 'wall', 'WALL')}${fortTile('bastion', 'bastion', 'BASTION')}${fortTile('armed', 'tower', 'GUN TOWER')}</div>`
     + `<div class="shop-sec">TOWER UPGRADES</div>`
-    + `<div class="shop-grid"><div class="shop-tile" data-upg="1" style="grid-column:1/3;padding:8px 4px"><span class="tl" style="font-size:11px;color:#ffcf4a;margin-top:0">&#9881; UPGRADE A TOWER &#9656;</span></div></div>`
+    + `<div class="shop-grid"><div class="shop-tile" data-upg="1"><span class="upg-arrow">&#9650;</span><img src="thumbnails/tower.png" alt=""><span class="tl">UPGRADE</span></div></div>`
     + `<div class="bp-hint" id="bp-hint"></div>`
     + `</div>`;
   document.body.appendChild(panel);
@@ -7852,6 +7936,7 @@ window.RR = {
   },
   upgradeJeep: (team = PLAYER_TEAM) => { const h = findWoundedTowerAny(team); return h ? deployUpgrade(team, h.camp, h.wall) : false; },   // debug: roll an upgrade jeep to the first tower
   enterTowerPick: () => enterTowerPick(), exitTowerPick: () => exitTowerPick(),   // debug: drive the tower-upgrade picker
+  fxCounts: () => ({ blood: bloodMarks.length, tents: crushables.length, crushed: crushables.filter(c => c.crushed).length, bloodPos: bloodMarks.slice(0, 5).map(m => ({ x: +m.position.x.toFixed(0), y: +m.position.y.toFixed(2), z: +m.position.z.toFixed(0), vis: m.visible, scl: +m.scale.x.toFixed(1) })) }),   // debug: blood marks + squishable-tent state
   killTowerGun: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.turretDest.damage(1e9); return !!h; },   // debug: shoot a tower's gun off (test gun purchase)
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
@@ -7962,7 +8047,7 @@ window.RR = {
       for (const v of vehicles) v.idle(dt);
       projectiles.update(dt); updateProjectileHits();
       destructibles.update(dt);
-      updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateTowerUpgrades(); updateLock(dt);
+      updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateTowerUpgrades(); updateCrushables(); updateLock(dt);
       if (soldiers) soldiers.update(dt, combatants);
       updateGadgets(dt);
       updateRepairs(dt);
@@ -8581,7 +8666,7 @@ function animate() {
     // FORT PLACEMENT (Scrap Shop): swap to the locked aerial over the player's base and
     // show the hologram instead of the hangar. The field sim stays frozen, same as the
     // garage always is — placing is calm; the construction run after deploy is the risk.
-    if (fortPlace) {
+    if (fortPlace || towerPick) {
       waterT += dt; map.tickWater(waterT);   // keep the water alive so the aerial doesn't read as a freeze-frame
       renderer.render(scene, camera);
       return;   // rAF is already queued at the top of animate()
@@ -8633,6 +8718,7 @@ function animate() {
       updateRepairIcons();                   // player: clickable 🔧 over each damaged friendly tower
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateTowerUpgrades();                         // treasure-box drop + partial rebuild on tower death/revive
+      updateCrushables();                            // flatten a tent + blood mark when a tread rolls over it
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
     }

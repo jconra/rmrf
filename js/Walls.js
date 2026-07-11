@@ -517,6 +517,8 @@ export class Camp {
         onDestroyed: () => { if (this.onBuildingDown) this.onBuildingDown(obj); } });   // pieces crumble (was: vanish→rubblePile)
       manager.add(d);
       this.buildings.push(obj);
+      obj.userData.buildId = id;   // so main.js can decide which structures garrison troops (vs barrels/sandbags)
+      if (id === 'tent') { obj.userData.crushable = true; obj.userData.crushDest = d; }   // a tread rolls right over a tent (main.js: crush + blood mark)
       return d;
     };
     const addCell = (obj, ix, iz, hp, id, yaw = 0) => {
