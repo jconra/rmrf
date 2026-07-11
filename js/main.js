@@ -23,7 +23,7 @@ import { Elevator } from './Elevator.js?v=3';
 import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
-import { SoundManager } from './SoundManager.js?v=9';
+import { SoundManager } from './SoundManager.js?v=10';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
@@ -1916,8 +1916,8 @@ const TURRET_FALLOFF = { near: 16, far: 54, farMult: 0.45 };
 // turret's own fire range so heavies (Jotun) can pick towers off from safely outside.
 const TURRET_SENSE = 96;
 const _tHead = new THREE.Vector3(), _tDir = new THREE.Vector3(), _threatV = new THREE.Vector3();
-function turretFalloff(dist) {
-  const { near, far, farMult } = TURRET_FALLOFF;
+function turretFalloff(dist, far = TURRET_FALLOFF.far) {
+  const { near, farMult } = TURRET_FALLOFF;
   if (dist <= near) return 1;
   if (dist >= far) return farMult;
   return 1 - (1 - farMult) * (dist - near) / (far - near);
@@ -1927,11 +1927,12 @@ function turretFalloff(dist) {
 function tickWallTurret(w, team, dt) {
   const t = w.turret;
   if (!t || t.dead || t.falling) return;
+  const st = towerStats(t.upg || 0);   // per-turret combat stats (scaled by its upgrade stars)
   t._cd = (t._cd || 0) - dt;
   t.group.updateWorldMatrix(true, false);
   t.head.getWorldPosition(_tHead);
   // nearest enemy vehicle in range (turrets sit above the parapet → no wall-LOS check)
-  let target = null, bestD = TURRET_RANGE * TURRET_RANGE;
+  let target = null, bestD = st.range * st.range;
   for (const v of combatants) {
     if (v.dead || (team && v.team === team) || vehicleHidden(v)) continue;   // can't shoot a unit still down its lift shaft
     const dx = v.holder.position.x - _tHead.x, dz = v.holder.position.z - _tHead.z;
@@ -1942,10 +1943,10 @@ function tickWallTurret(w, team, dt) {
   const tp = target.holder.position;
   t.aimYaw = Math.atan2(tp.x - _tHead.x, tp.z - _tHead.z);   // barrels point +Z local; swing the head onto it
   if (t._cd <= 0) {
-    t._cd = TURRET_CD;
+    t._cd = st.cd;
     // Damage the locked target directly (with range falloff) + a cosmetic tracer.
     // Direct, so the slug can't clip the turret's OWN walls on the way out.
-    damageVehicle(target, TURRET_DMG * turretFalloff(Math.sqrt(bestD)), 'turret', null, _tHead);   // srcPos → hit-ring faces the turret
+    damageVehicle(target, st.dmg * turretFalloff(Math.sqrt(bestD), st.range), 'turret', null, _tHead);   // srcPos → hit-ring faces the turret
     _tDir.copy(tp).sub(_tHead).normalize();
     const hex = TEAM_ACCENT[team] ? new THREE.Color(TEAM_ACCENT[team]).getHex() : 0xffd0a0;
     projectiles.spawn(0, _tHead.clone(), _tDir.clone(), hex);   // cosmetic tracer toward the target
@@ -2166,6 +2167,79 @@ function updateRankStars(v) {
   }
   v._rankSpr.userData.tex.needsUpdate = true;
   v._rankSpr.visible = true;
+}
+
+// --- TOWER UPGRADES (Jacob's design) -----------------------------------------
+// A single linear STAR path per corner tower, bought from the garage scrap shop (a jeep crew
+// rolls out to install it). Four colour bands, three stars each = 12 total, and each band
+// improves ONE stat — you grind toward the payoff (damage last):
+//   bronze 1-3 → +HP        silver 4-6 → +range
+//   gold   7-9 → +fire rate  black 10-12 → +damage
+// Reuses the promotion star billboard; stats are read per-turret in tickWallTurret via towerStats.
+const TOWER_UPG_MAX = 12;
+const UPG_HP_PER = 0.20, UPG_RANGE_PER = 0.12, UPG_SPEED_PER = 0.11, UPG_DMG_PER = 0.18;   // per star, within a band
+const upgBand = (u, b) => Math.max(0, Math.min(3, (u || 0) - b * 3));   // stars lit in band b (0 bronze .. 3 black)
+function towerStats(u) {
+  return {
+    range: TURRET_RANGE * (1 + UPG_RANGE_PER * upgBand(u, 1)),
+    cd:    TURRET_CD    * (1 - UPG_SPEED_PER * upgBand(u, 2)),
+    dmg:   TURRET_DMG   * (1 + UPG_DMG_PER   * upgBand(u, 3)),
+    hpMul: 1 + UPG_HP_PER * upgBand(u, 0),
+  };
+}
+// Apply the HP band to the tower body (heal the gain, like a promotion pin-on).
+function applyTowerHp(w) {
+  const u = (w.turret && w.turret.upg) || 0;
+  const base = w._baseMaxHp ?? (w._baseMaxHp = w.maxHp);
+  const newMax = Math.round(base * (1 + UPG_HP_PER * upgBand(u, 0)));
+  const gain = newMax - w.maxHp;
+  w.maxHp = newMax;
+  if (w.body) { w.body.maxHp = newMax; if (gain > 0) w.body.heal(gain); }
+}
+// Install one (or n) upgrade star on a tower. Returns the new level, or -1 if maxed / no turret.
+function upgradeTower(w, n = 1) {
+  const t = w && w.turret; if (!t || t.dead) return -1;
+  const before = t.upg || 0;
+  if (before >= TOWER_UPG_MAX) return -1;
+  t.upg = Math.min(TOWER_UPG_MAX, before + n);
+  applyTowerHp(w);
+  updateTowerStars(w);
+  return t.upg;
+}
+// Star billboard above a tower — the CURRENT band's stars, coloured by band (bronze→black).
+const UPG_BAND_COL = ['#8a5a30', '#d7dee5', '#ffd24a', '#1a1a1e'];
+function updateTowerStars(w) {
+  const t = w && w.turret; if (!t) return;
+  const u = Math.min(t.upg || 0, TOWER_UPG_MAX);
+  if (!u) { if (t._upgSpr) t._upgSpr.visible = false; return; }
+  if (!t._upgSpr) {
+    const cv = document.createElement('canvas'); cv.width = 96; cv.height = 26;
+    const tex = new THREE.CanvasTexture(cv);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    sp.scale.set(5.5, 1.5, 1); sp.position.set(0, 2.4, 0);
+    sp.userData.cv = cv; sp.userData.tex = tex;
+    t.group.add(sp); t._upgSpr = sp;
+  }
+  const band = Math.min(3, Math.floor((u - 1) / 3));
+  const n = u - band * 3;                       // 1..3 stars lit in the current band
+  const col = UPG_BAND_COL[band];
+  const cv = t._upgSpr.userData.cv, ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 96, 26);
+  for (let i = 0; i < n; i++) {
+    const cx = 48 + (i - (n - 1) / 2) * 24, cy = 13, r = 11;
+    ctx.beginPath();
+    for (let j = 0; j < 10; j++) {
+      const ang = -Math.PI / 2 + j * Math.PI / 5, rr = j % 2 === 0 ? r : r * 0.45;
+      const x = cx + Math.cos(ang) * rr, y = cy + Math.sin(ang) * rr;
+      j ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = col;
+    ctx.strokeStyle = band === 3 ? 'rgba(235,205,95,0.95)' : 'rgba(10,14,20,0.85)';   // black stars get a gold rim to read
+    ctx.lineWidth = 2; ctx.fill(); ctx.stroke();
+  }
+  t._upgSpr.userData.tex.needsUpdate = true;
+  t._upgSpr.visible = true;
 }
 
 function creditKill(killer, victim) {
@@ -3633,12 +3707,12 @@ function enterFortPlace(kind) {
 }
 
 function exitFortPlace() {
+  const ui = document.getElementById('fortplace-ui');
+  if (ui) ui.style.display = 'none';   // ALWAYS hide the overlay — even if state is already gone, so it can't dangle into the garage/field
   if (!fortPlace) return;
   scene.remove(fortPlace.ghost); scene.remove(fortPlace.ring);
   for (const [obj, vis] of fortPlace.hidden) obj.visible = vis;   // reveal the enemy again, exactly as they were
   fortPlace = null;
-  const ui = document.getElementById('fortplace-ui');
-  if (ui) ui.style.display = 'none';
   setGarageOverlays(true);   // also refreshes the shop panel (scrap changed)
 }
 
@@ -7155,6 +7229,7 @@ if (QS.has('win')) {
 function enterField() {
   onField = true;
   fieldFadeT = 0;
+  exitFortPlace();   // never carry the fort-placement overlay onto the field (it would dangle back into the garage on return)
 
   if (!fieldBuilt) {
     map.generate(GEN_OPTS);
@@ -7197,6 +7272,7 @@ function beginReturn() {
 
 function returnToGarage() {
   returning = false;
+  exitFortPlace();   // belt-and-suspenders: kill any lingering fort-placement overlay before the hangar shows
   // Did the player ride an enemy flag all the way down into the garage? That's the capture.
   const captured = flags.find(f => f.carried && f.carrier === player);
   if (player) { removeCombatant(player); scene.remove(player.group); player = null; }
@@ -7289,7 +7365,12 @@ function mountHangarHud(garage) {
     #build-panel { position:fixed; top:132px; right:20px; z-index:59;
       background:rgba(5,12,20,0.78); border:1px solid #0e2030; padding:10px 12px; width:216px;
       font:11px ui-monospace, monospace; }
-    #build-panel .scrap { color:#ffcf4a; letter-spacing:0.12em; margin-bottom:8px; }
+    #build-panel.collapsed { width:auto; padding:7px 12px; }
+    #build-panel.collapsed .bp-body { display:none; }
+    #build-panel .scrap { color:#ffcf4a; letter-spacing:0.12em; margin-bottom:8px; cursor:pointer; user-select:none; -webkit-user-select:none; white-space:nowrap; }
+    #build-panel.collapsed .scrap { margin-bottom:0; }
+    #build-panel .bp-caret { display:inline-block; margin-left:8px; color:#7fa8bf; transition:transform 0.15s; }
+    #build-panel:not(.collapsed) .bp-caret { transform:rotate(90deg); }
     #build-panel .scrap b { font-size:15px; }
     #build-panel .shop-sec { color:#5a7a8a; letter-spacing:0.18em; font-size:9px; margin:7px 0 4px; }
     #build-panel .shop-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
@@ -7330,13 +7411,19 @@ function mountHangarHud(garage) {
     `<span class="pr">${BUILD_COST[t]}⚙</span><img src="thumbnails/${t}.png" alt=""><span class="tl">${VEHICLE_TYPES[t].label.toUpperCase()}</span></div>`;
   const fortTile = (kind, thumb, label) => `<div class="shop-tile" data-fort="${kind}">` +
     `<span class="pr">${fortCostOf(kind)}⚙</span><img src="thumbnails/${thumb}.png" alt=""><span class="tl">${label}</span></div>`;
-  panel.innerHTML = `<div class="scrap">⚙ SCRAP SHOP <b id="bp-scrap">0</b></div>`
+  // Collapsible: starts as just the header BUTTON (mobile — the open panel covers the vehicles).
+  // Tap the header to expand/collapse; the scrap count stays visible either way.
+  panel.classList.add('collapsed');
+  panel.innerHTML = `<div class="scrap" id="bp-toggle">⚙ SCRAP SHOP <b id="bp-scrap">0</b><span class="bp-caret">▸</span></div>`
+    + `<div class="bp-body">`
     + `<div class="shop-sec">VEHICLES</div>`
     + `<div class="shop-grid">${['firebrat', 'lurcher', 'valkyrie', 'jotun'].map(vehTile).join('')}</div>`
     + `<div class="shop-sec">FORTIFICATIONS</div>`
     + `<div class="shop-grid">${fortTile('wall', 'wall', 'WALL')}${fortTile('bastion', 'bastion', 'BASTION')}${fortTile('armed', 'tower', 'GUN TOWER')}</div>`
-    + `<div class="bp-hint" id="bp-hint"></div>`;
+    + `<div class="bp-hint" id="bp-hint"></div>`
+    + `</div>`;
   document.body.appendChild(panel);
+  panel.querySelector('#bp-toggle').addEventListener('click', () => panel.classList.toggle('collapsed'));
 
   const bar = (v, max = 5) => '▪'.repeat(v) + '▫'.repeat(max - v);
   const update = () => {
@@ -7506,6 +7593,21 @@ window.RR = {
   orderRepair: (team = PLAYER_TEAM) => orderRepair(team),      // force a repair for a team (debug/testing)
   repairStatus: () => { const pool = (t) => ({ parked: motorPool[t].filter(s => s.state === 'parked').length, deployed: motorPool[t].filter(s => s.state === 'deployed').length, lost: motorPool[t].filter(s => s.state === 'lost').length }); return { on: repairsOn, jobs: repairJobs.map(j => ({ team: j.team, state: j.state, gun: j.gun, progress: +j.progress.toFixed(1), pathLen: j.path ? j.path.length : 0, jeepDead: j.jeepDest.dead, jx: +j.jx.toFixed(1), jz: +j.jz.toFixed(1), jy: +j.jeep.position.y.toFixed(2) })), jeeps: { red: pool('red'), blue: pool('blue') }, scrap: { ...teamScrap }, cd: { red: +(_repairCd.red || 0).toFixed(1), blue: +(_repairCd.blue || 0).toFixed(1) } }; },
   woundTower: (team, frac = 0.4) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(h.wall.maxHp * (1 - frac)); return !!h; },  // debug: bang up a tower to test repair
+  // Tower upgrades (star path): install n stars on a team's towers. all=true hits every standing
+  // tower; otherwise just the first found. Returns the levels applied + resulting stats.
+  upgradeTower: (team = PLAYER_TEAM, n = 1, all = false) => {
+    const tm = team === 'a' ? 'red' : team === 'b' ? 'blue' : team;
+    const out = [];
+    for (const c of camps) {
+      if (c.team !== tm) continue;
+      for (const w of c.walls) {
+        if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+        const lvl = upgradeTower(w, n);
+        if (lvl >= 0) { out.push({ lvl, maxHp: w.maxHp, ...towerStats(lvl) }); if (!all) return out; }
+      }
+    }
+    return out;
+  },
   killTowerGun: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.turretDest.damage(1e9); return !!h; },   // debug: shoot a tower's gun off (test gun purchase)
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
