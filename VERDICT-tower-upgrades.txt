@@ -1,0 +1,45 @@
+TOWER UPGRADES — verdict (2026-07-11)
+=====================================
+
+FEATURE (Jacob's design): a single linear STAR path per corner tower, bought from the
+garage scrap shop. Four colour bands x 3 stars = 12:
+  bronze 1-3 -> +HP   silver 4-6 -> +range   gold 7-9 -> +fire rate   black 10-12 -> +damage
+Per star: +20% HP / +12% range / -11% cd / +18% dmg (within its band). A maxed tower goes
+340->544 HP, range 54->73, cd 1.6->1.07, dmg 18->28. Reuses the promotion star billboard
+(no new tower models). Player flow: scrap shop -> outside aerial picker -> pick a tower, read
+its stats/stars -> a jeep rolls out and installs the star (~5s; killable the whole time).
+Treasure box: a destroyed upgraded tower spills scrap (~half the stars, as loose piles).
+Partial rebuild: a rebuilt tower keeps a random 40-75% of its old stars.
+
+AI: orderRepair gained a 3rd priority (after repair-wounded-gun, after buy-replacement-gun):
+aiWantsUpgrade (bank >= AI_UPG_SCRAP 6, fleet >= 4) -> findUpgradeTower (least-upgraded HEALTHY
+standing tower, spreads stars across the ring) -> deployUpgrade. Knob RR.setAiUpgrades.
+
+ECONOMY NOTE: teams bank little scrap (vehicle rebuilds are the first claim). At the first
+threshold (14) the AI never upgraded; dropped to 6, where upgrades fire in ~5/8 seeds
+(14 stars / 8 sample matches; one rich seed fortified to 9 stars).
+
+A/B TOURNAMENT (30 seeds, rng-paired, RR.setAiUpgrades off vs on)
+                      OFF (baseline)   ON
+  resolved            26/30            26/30
+  avg resolve         556s             555s
+  stalemates          4                4     (2 seeds shared, 2 shifted — no systemic block)
+  transit-stuck       1214             1248  (noise)
+  idle-at-goal        1057             847   (-20%)
+  HP healed/match     748              770
+  guns bought/mounted 15/10            9/5
+
+READ: AI tower upgrades are RESOLUTION-NEUTRAL — same win rate, same time, same stalemate
+count (different seeds). Tougher AI towers do NOT choke out attackers into stalemates, which
+was the main risk. Side effect: the AI buys FEWER replacement guns (15->9) because small
+upgrade spends leak scrap below the 10-scrap gun threshold — it fortifies live towers with
+stars instead of re-gunning dead ones. That's a wash for outcomes; if it ever reads as the
+AI neglecting dead guns, raise AI_UPG_SCRAP toward/above AI_GUN_SCRAP (10) so guns fund first.
+
+VERDICT: keep it (per smarter-over-winrate — the AI now uses the feature, at no cost to
+resolution). Threshold 6 + the gun/upgrade split are tuning knobs for Jacob's playtest.
+
+VERIFIED (headless): stat scaling + star billboard (check-tower-upg.js, probe-tower-star.js);
+picker + jeep install upg 0->1 (check-tower-picker.js); treasure-box + rebuild lvl9->6
+(check-treasure.js); AI firing rate (multiseed-ai-upg.js); this A/B (tourney-aiupg-{off,on}).
+All UNCOMMITTED pending Jacob's playtest + go-ahead.

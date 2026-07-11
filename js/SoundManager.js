@@ -23,7 +23,7 @@
 // stands alone. The Sound Lab is still where these patches are authored — after tuning a preset
 // there, re-sync with:  cp ../sound-lab/patch.js js/patch.js  (run from the Sound Lab's parent).
 
-import { playPatch, PATCH_PRESETS } from './patch.js?v=8';
+import { playPatch, PATCH_PRESETS } from './patch.js?v=9';
 
 // Each vehicle's engine + gun plays a Sound Lab modular patch (authored in the Sound Lab) by index:
 // 0 Lurcher, 1 Firebrat, 2 Valkyrie, 3 Jotun. RPM_RANGE = [idle, max] the driving throttle maps to.
@@ -448,7 +448,6 @@ export class SoundManager {
     this.master.connect(limiter);
     limiter.connect(this.masterVol);
     this.masterVol.connect(this.ctx.destination);
-    this._loadSquish();   // decode the soldier-squish sample so it's ready before the first crush
 
     // Separate SFX bus for gun shots — independent of the engine master, so guns
     // sound whether or not the engine toggle is on.
@@ -746,15 +745,8 @@ export class SoundManager {
     setTimeout(() => { try { trim.disconnect(); } catch (e) {} }, 700);
   }
 
-  // Soldier SQUISH — now a SYNTH patch ('WORLD — SQUISH (synth)', Jacob's 2026-07-10 design),
-  // played positioned. The old rmrf/sounds/squish.mp3 SAMPLE path (_loadSquish + _squishBuf) is
-  // retained just below as the quick revert: point squishAt back at the buffer to use it again.
-  _loadSquish() {   // fallback only — unused while squishAt plays the synth patch
-    if (this._squishBuf || this._squishLoading || !this.ctx) return;
-    this._squishLoading = true;
-    fetch('sounds/squish.mp3').then(r => r.arrayBuffer()).then(ab => this.ctx.decodeAudioData(ab))
-      .then(buf => { this._squishBuf = buf; }).catch(() => { this._squishLoading = false; });
-  }
+  // Soldier SQUISH — a SYNTH patch ('WORLD — SQUISH (synth)', Jacob's design), played positioned.
+  // (The old rmrf/sounds/squish.mp3 sample was retired 2026-07-11 once the synth won on his ear.)
   squishAt(x, y, z) {
     this._ensureSpatial();
     if (this.ctx.state === 'suspended') this.ctx.resume();

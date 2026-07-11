@@ -17,6 +17,7 @@ const HEAL_RATE   = 0.01;   // fraction of maxHp healed per SECOND (so a scratch
                             // half-wrecked tower takes ~a minute — and the crew stays until it's
                             // full, so damage taken mid-repair just extends the job).
 const GUN_INSTALL_T = 20;   // seconds of crew work to mount a purchased gun (after the body's full)
+const UPGRADE_T   = 5;      // seconds of crew work to pin one upgrade star on a healthy tower (fast, by design)
 const CREW_N      = 3;      // soldiers dismounted per job
 const STANDOFF    = 5;      // jeep parks this far short of the tower
 const JEEP_HP     = 40;     // matches jeep.config.js — fragile, "not built to take a shell"
@@ -57,7 +58,9 @@ export class RepairJob {
     this.nav = opts.nav || null;         // { plan(fromX,fromZ,toX,toZ) -> [{x,z}]|null } — A* on roads
     this.groundY = opts.groundY || null; // road-aware ground sampler (the game's roadDeckY-or-terrain)
     this.gun = !!opts.gun;               // paid job: the jeep carries a replacement gun to mount
-    this.state = 'driving';              // driving → building → (installing) → returning → done | cancelled
+    this.upgrade = !!opts.upgrade;       // paid job: pin an upgrade star on a HEALTHY tower (no heal)
+    this.onUpgrade = opts.onUpgrade || null;   // called once the ~5s install completes
+    this.state = 'driving';              // driving → building/upgrading → (installing) → returning → done | cancelled
     this.crew = [];
     this.home = { x: opts.start.x, z: opts.start.z };
     this.startHp = null;                 // tower HP when the crew starts work (for the progress bar)
@@ -170,9 +173,17 @@ export class RepairJob {
 
     if (this.state === 'driving') {
       if (this._navTo(this.park.x, this.park.z, dt, 1.2)) {
-        this._spawnCrew(); this.state = 'building'; this.bar.visible = true;
+        this._spawnCrew(); this.bar.visible = true;
+        this.state = this.upgrade ? 'upgrading' : 'building';   // healthy-tower upgrade skips the heal
         this.path = null; this._pIdx = 0;   // fresh route for the return leg
       }
+    } else if (this.state === 'upgrading') {
+      // Fixed ~5s of crew work on a healthy tower, then pin the star (no HP heal involved).
+      if (this._crewWipedOut()) return this._end('cancelled');
+      this.installT += dt;
+      this.progress = Math.min(1, this.installT / UPGRADE_T);
+      this._setBar(this.progress);
+      if (this.installT >= UPGRADE_T) { if (this.onUpgrade) this.onUpgrade(); this._packUp(); }
     } else if (this.state === 'building') {
       if (this._crewWipedOut()) return this._end('cancelled');
       const body = this.wall.body;

@@ -10,7 +10,7 @@ import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
 import { Camp, Wall } from './Walls.js?v=66';
 import { SoldierCorps } from './Soldiers.js?v=4';
-import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=7';
+import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=8';
 import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=4';
 import { makeFlagHQ } from './Buildings.js?v=9';   // decoy HQ buildings on designed maps
 import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
@@ -23,7 +23,7 @@ import { Elevator } from './Elevator.js?v=3';
 import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
-import { SoundManager } from './SoundManager.js?v=10';
+import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
 
@@ -1394,7 +1394,7 @@ function aimPlayerTurret(veh, dt) {
     const arc = SHOT_ARC[veh.type] ?? Math.PI;
     desired = Math.max(-arc, Math.min(arc, wrapPi(ang - veh.heading)));
   } else {
-    desired = 0;   // no cursor (e.g. touch) → ease back to forward
+    desired = veh.model.aimYaw || 0;   // no active aim (touch thumb lifted / cursor off-field) → HOLD the last-pointed direction, don't drift back to forward
   }
   const cur = veh.model.aimYaw || 0;
   let d = wrapPi(desired - cur);
@@ -2177,6 +2177,7 @@ function updateRankStars(v) {
 //   gold   7-9 → +fire rate  black 10-12 → +damage
 // Reuses the promotion star billboard; stats are read per-turret in tickWallTurret via towerStats.
 const TOWER_UPG_MAX = 12;
+const TOWER_UPG_COST = 1;   // scrap per star (12 to fully max one tower); tune with balance
 const UPG_HP_PER = 0.20, UPG_RANGE_PER = 0.12, UPG_SPEED_PER = 0.11, UPG_DMG_PER = 0.18;   // per star, within a band
 const upgBand = (u, b) => Math.max(0, Math.min(3, (u || 0) - b * 3));   // stars lit in band b (0 bronze .. 3 black)
 function towerStats(u) {
@@ -2240,6 +2241,41 @@ function updateTowerStars(w) {
   }
   t._upgSpr.userData.tex.needsUpdate = true;
   t._upgSpr.visible = true;
+}
+
+// Scatter salvage around a destroyed upgraded tower — the "treasure box": the more you invested,
+// the more scrap spills when it falls (roughly half the stars come back as loose piles, worth 1
+// each). Whoever's standing there (usually the attacker) collects it.
+function dropTowerScrap(w, upg) {
+  const n = Math.min(6, Math.ceil(upg / 2));
+  const p = w.group.position;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + Math.random() * 0.6;
+    const r = grid.cell * (0.9 + Math.random() * 0.8);
+    const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
+    if (map.isLand(x, z)) addScrapPile(x, z, 'parts');
+  }
+}
+// Watch every gun tower for the death→rebuild cycle: on DESTRUCTION, spill the treasure box and
+// drop its stars; on REBUILD (the repair crew's revive), restore a RANDOM slice of what it had
+// (Jacob's design — a 3-gold tower might come back ~2 silver, so the loss isn't total).
+function updateTowerUpgrades() {
+  const visit = (w) => {
+    const t = w.turret; if (!t) return;
+    const dead = !!(w.body && w.body.dead);
+    if (dead && !t._wasDead) {
+      if ((t.upg || 0) > 0) { t._upgWas = t.upg; dropTowerScrap(w, t.upg); t.upg = 0; updateTowerStars(w); }
+      t._wasDead = true;
+    } else if (!dead && t._wasDead) {
+      if (t._upgWas) {
+        t.upg = Math.max(0, Math.floor(t._upgWas * (0.4 + Math.random() * 0.35)));   // keep ~40–75%
+        t._upgWas = 0; applyTowerHp(w); updateTowerStars(w);
+      }
+      t._wasDead = false;
+    }
+  };
+  for (const c of camps) for (const w of c.walls) visit(w);
+  for (const w of placedWalls) visit(w);
 }
 
 function creditKill(killer, victim) {
@@ -3412,6 +3448,10 @@ const randRepairCd = () => REPAIR_CD_MIN + Math.random() * (REPAIR_CD_MAX - REPA
 const GUN_COST = 3;         // scrap for a replacement tower gun
 const AI_GUN_SCRAP = 10;    // AI buys a gun only with at least this much banked
 const AI_GUN_FLEET = 5;     // ...and at least this many vehicles left in its fleet
+const AI_UPG_SCRAP = 6;     // AI upgrades a tower on a MODEST surplus — scrap is scarce (teams rarely bank
+                            // much), and repairs/guns still come first in orderRepair, so this stays a luxury
+const AI_UPG_FLEET = 4;     // ...and fleet-healthy
+let aiUpgradesOn = true;    // A/B: AI spends surplus scrap on tower star-upgrades (RR.setAiUpgrades)
 
 // Cumulative repair telemetry (per match — reset with the pools). Answers "what did the
 // crews actually DO all game": sorties, HP healed, rubble rebuilds, guns bought vs actually
@@ -3529,6 +3569,35 @@ function deployRepair(team, camp, wall, wantGun = false) {
   const st = repairStats[team];
   st.jobs++;
   if (wantGun) { st.gunsBought++; st.scrapSpent += GUN_COST; }
+  return true;
+}
+
+// Dispatch a jeep crew to pin ONE upgrade star on a healthy tower (the garage scrap-shop flow).
+// Mirrors deployRepair, but the job runs the fast ~5s 'upgrading' path and calls upgradeTower on
+// completion. Returns false (with no charge) if it can't roll.
+function deployUpgrade(team, camp, wall) {
+  if (!repairsOn || !soldiers) return false;
+  if (repairJobs.some(j => j.team === team)) return false;      // one crew out per team (slice)
+  if (!wall || !wall.turret || wall.turret.dead) return false;  // need a live gun to upgrade
+  if (((wall.turret.upg) || 0) >= TOWER_UPG_MAX) return false;  // already maxed
+  if ((teamScrap[team] || 0) < TOWER_UPG_COST) return false;
+  const slot = motorPool[team].find(s => s.state === 'parked');
+  if (!slot) return false;                                      // no jeeps in the lot
+  teamScrap[team] -= TOWER_UPG_COST; updateScrapHud();
+  slot.state = 'deployed';
+  destructibles.remove(slot.dest);
+  if (slot.mesh && slot.mesh.parent) slot.mesh.parent.remove(slot.mesh);
+  const job = new RepairJob(scene, map, {
+    start: { x: slot.x, z: slot.z },
+    tower: { x: wall.group.position.x, y: wall.group.position.y, z: wall.group.position.z },
+    wall, team, accent: (camp && camp.accent) || wall.accent, soldiers, nav: makeJeepNav(team),
+    groundY: jeepGroundY, upgrade: true, onUpgrade: () => upgradeTower(wall),
+  });
+  job.slot = slot;
+  destructibles.add(job.jeepDest);
+  job.jeepDest.onDamage = () => { repairStats[team].jeepHits++; };
+  repairJobs.push(job);
+  repairStats[team].jobs++;
   return true;
 }
 
@@ -3716,6 +3785,143 @@ function exitFortPlace() {
   setGarageOverlays(true);   // also refreshes the shop panel (scrap changed)
 }
 
+// ── TOWER UPGRADE PICKER (garage scrap-shop flow) ────────────────────────────────
+// The same aerial "from the outside" view as fort placement, but you SELECT one of your standing
+// gun towers (tap it, or ◀ ▶) to read its stats/stars, then UPGRADE pins the next star: a jeep
+// crew rolls out and installs it (~5s of work). The field stays paused while you browse.
+let towerPick = null;   // { camp, walls:[wall], idx, ring, hidden:[] }
+function playerTowers() {
+  const out = [];
+  for (const { wall } of fortWallsOf(PLAYER_TEAM))
+    if (wall.turret && !wall.turret.dead && wall.body && !wall.body.dead) out.push(wall);
+  return out;
+}
+function enterTowerPick() {
+  const camp = fortHomeCamp(); if (!camp) return false;
+  const walls = playerTowers(); if (!walls.length) return false;
+  const ring = new THREE.Mesh(new THREE.RingGeometry(grid.cell * 0.55, grid.cell * 0.82, 32),
+    new THREE.MeshBasicMaterial({ color: '#ffcf4a', transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
+  ring.rotation.x = -Math.PI / 2;
+  scene.add(ring);
+  towerPick = { camp, walls, idx: 0, ring, hidden: [] };
+  // fog of war: hide enemy units + their jeeps while the aerial is up (same as fort placement)
+  for (const v of combatants) if (v.team !== PLAYER_TEAM) { towerPick.hidden.push([v.holder, v.holder.visible]); v.holder.visible = false; }
+  for (const j of repairJobs) if (j.team !== PLAYER_TEAM) { towerPick.hidden.push([j.jeep, j.jeep.visible]); j.jeep.visible = false; }
+  orbit.target.set(camp.center.x, 0, camp.center.z);
+  orbit.dist = 120; orbit.pitch = 1.25; orbit.yaw = 0;
+  updateCamera();
+  setGarageOverlays(false);
+  ensureTowerPickUI();
+  document.getElementById('towerpick-ui').style.display = '';
+  refreshTowerPick();
+  return true;
+}
+function exitTowerPick() {
+  const ui = document.getElementById('towerpick-ui');
+  if (ui) ui.style.display = 'none';   // ALWAYS hide, so it can't dangle into the garage/field
+  if (!towerPick) return;
+  scene.remove(towerPick.ring);
+  for (const [obj, vis] of towerPick.hidden) obj.visible = vis;
+  towerPick = null;
+  setGarageOverlays(true);
+}
+const _TP_BAND = ['BRONZE', 'SILVER', 'GOLD', 'BLACK'], _TP_NEXT = ['+HULL', '+RANGE', '+FIRE RATE', '+DAMAGE'];
+function refreshTowerPick() {
+  const tp = towerPick; if (!tp) return;
+  if (tp.idx >= tp.walls.length) tp.idx = 0;
+  const wall = tp.walls[tp.idx];
+  const p = wall.group.position;
+  tp.ring.position.set(p.x, map.heightAt(p.x, p.z) + 0.3, p.z);
+  const u = (wall.turret.upg) || 0, st = towerStats(u);
+  const band = u === 0 ? -1 : Math.min(3, Math.floor((u - 1) / 3));
+  const inBand = u === 0 ? 0 : u - band * 3;
+  const starTxt = u === 0 ? '— none —' : `${_TP_BAND[band]} ${'★'.repeat(inBand)}`;
+  const maxed = u >= TOWER_UPG_MAX;
+  const canAfford = (teamScrap[PLAYER_TEAM] || 0) >= TOWER_UPG_COST;
+  document.getElementById('tp-count').textContent = `TOWER ${tp.idx + 1}/${tp.walls.length}`;
+  document.getElementById('tp-stars').textContent = starTxt;
+  document.getElementById('tp-stats').innerHTML =
+    `HULL <b>${Math.round(wall.maxHp)}</b> · RANGE <b>${st.range.toFixed(0)}</b> · RATE <b>${(1 / st.cd).toFixed(2)}</b>/s · DMG <b>${st.dmg.toFixed(0)}</b>`;
+  document.getElementById('tp-next').textContent = maxed ? 'FULLY UPGRADED' : `NEXT: ${_TP_NEXT[Math.floor(u / 3)]}  (${TOWER_UPG_COST}⚙)`;
+  const btn = document.getElementById('tp-upg');
+  btn.disabled = maxed || !canAfford;
+  btn.textContent = maxed ? 'MAXED' : `✓ UPGRADE ${TOWER_UPG_COST}⚙`;
+  document.getElementById('tp-hint').textContent = '';
+}
+function towerPickPointer(ev) {
+  const tp = towerPick; if (!tp) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  _fpNdc.x = ((ev.clientX - r.left) / r.width) * 2 - 1;
+  _fpNdc.y = -((ev.clientY - r.top) / r.height) * 2 + 1;
+  _fpRay.setFromCamera(_fpNdc, camera);
+  let bestI = -1, bestD = Infinity;                    // pick the CLOSEST tower the ray hits
+  for (let i = 0; i < tp.walls.length; i++) {
+    const h = _fpRay.intersectObject(tp.walls[i].group, true)[0];
+    if (h && h.distance < bestD) { bestD = h.distance; bestI = i; }
+  }
+  if (bestI >= 0) { tp.idx = bestI; refreshTowerPick(); }
+}
+function ensureTowerPickUI() {
+  if (document.getElementById('towerpick-ui')) return;
+  const ui = document.createElement('div');
+  ui.id = 'towerpick-ui';
+  ui.innerHTML = `
+    <div id="tp-title">UPGRADE TOWER — tap a tower or use &#9664; &#9654; &nbsp;·&nbsp; PAUSED</div>
+    <div id="tp-info"><span id="tp-count">TOWER 1/1</span><span id="tp-stars">— none —</span></div>
+    <div id="tp-stats"></div>
+    <div id="tp-next"></div>
+    <div id="tp-row">
+      <button id="tp-prev">&#9664;</button>
+      <button id="tp-upg">&#10003; UPGRADE</button>
+      <button id="tp-next-btn">&#9654;</button>
+      <button id="tp-cancel">&#10005; DONE</button>
+    </div>
+    <div id="tp-hint"></div>`;
+  ui.style.cssText = 'position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:140;text-align:center;' +
+    'font:12px ui-monospace,monospace;color:#dfe8ef;background:rgba(5,12,20,0.82);border:1px solid #0e2030;padding:12px 16px;border-radius:8px;min-width:300px;';
+  const st = document.createElement('style');
+  st.textContent = `
+    #towerpick-ui #tp-title { letter-spacing:0.12em; color:#8fa3b3; margin-bottom:8px; font-size:11px; }
+    #towerpick-ui #tp-info { display:flex; justify-content:space-between; color:#ffcf4a; letter-spacing:0.08em; margin-bottom:5px; }
+    #towerpick-ui #tp-stats { color:#9fd; letter-spacing:0.04em; font-size:11px; margin-bottom:4px; }
+    #towerpick-ui #tp-stats b { color:#cfffff; }
+    #towerpick-ui #tp-next { color:#8ff0b0; letter-spacing:0.1em; font-size:11px; margin-bottom:9px; }
+    #towerpick-ui #tp-row { display:flex; gap:7px; justify-content:center; }
+    #towerpick-ui #tp-row button { font:bold 12px ui-monospace,monospace; letter-spacing:0.08em; padding:7px 12px; cursor:pointer;
+      background:rgba(0,238,255,0.08); border:1px solid #1f6b8f; color:#cfffff; border-radius:5px; }
+    #towerpick-ui #tp-row button:disabled { opacity:0.4; cursor:default; }
+    #towerpick-ui #tp-upg { border-color:#1f6b3f; color:#8ff0b0; background:rgba(0,255,120,0.08); }
+    #towerpick-ui #tp-cancel { border-color:#6b1f1f; color:#f0a08f; background:rgba(255,80,80,0.06); }
+    #towerpick-ui #tp-hint { margin-top:7px; min-height:14px; color:#ffcf6a; letter-spacing:0.08em; }`;
+  document.head.appendChild(st);
+  document.body.appendChild(ui);
+  const cyc = (d) => { const tp = towerPick; if (!tp) return; tp.idx = (tp.idx + d + tp.walls.length) % tp.walls.length; refreshTowerPick(); };
+  document.getElementById('tp-prev').addEventListener('click', () => cyc(-1));
+  document.getElementById('tp-next-btn').addEventListener('click', () => cyc(1));
+  document.getElementById('tp-cancel').addEventListener('click', () => exitTowerPick());
+  document.getElementById('tp-upg').addEventListener('click', () => {
+    const tp = towerPick; if (!tp) return;
+    const wall = tp.walls[tp.idx];
+    if (deployUpgrade(PLAYER_TEAM, tp.camp, wall)) { exitTowerPick(); }
+    else {
+      const have = teamScrap[PLAYER_TEAM] || 0;
+      document.getElementById('tp-hint').textContent =
+        ((wall.turret.upg) || 0) >= TOWER_UPG_MAX ? 'already maxed'
+          : have < TOWER_UPG_COST ? `need ${TOWER_UPG_COST} scrap`
+            : repairJobs.some(j => j.team === PLAYER_TEAM) ? 'a crew is already out'
+              : !motorPool[PLAYER_TEAM].some(s => s.state === 'parked') ? 'no jeeps left in the pool'
+                : 'cannot upgrade right now';
+    }
+  });
+  renderer.domElement.addEventListener('pointerdown', e => { if (towerPick && e.button === 0) towerPickPointer(e); });
+  window.addEventListener('keydown', e => {
+    if (!towerPick) return;
+    if (e.key === 'Escape') exitTowerPick();
+    else if (e.key === 'ArrowLeft') cyc(-1);
+    else if (e.key === 'ArrowRight') cyc(1);
+  });
+}
+
 // Recompute ghost pose + validity (and the UI hint) for the current cell.
 function refreshFortPlace() {
   const fp = fortPlace; if (!fp) return;
@@ -3802,6 +4008,27 @@ function aiWantsGun(team) {
   return !!cmd && cmd.fleetLeft() >= AI_GUN_FLEET;
 }
 
+// AI tower-upgrade appetite — the same "from strength" gate as guns, just a higher bank (upgrades
+// are a luxury, never at the expense of vehicles/gun repairs which come first in orderRepair).
+function aiWantsUpgrade(team) {
+  if (!aiUpgradesOn) return false;
+  if ((teamScrap[team] || 0) < AI_UPG_SCRAP) return false;
+  const cmd = commanders.find(c => c.team === team);
+  return !!cmd && cmd.fleetLeft() >= AI_UPG_FLEET;
+}
+// The least-upgraded HEALTHY standing tower not yet maxed — spread the stars across the ring so
+// the whole base climbs together (and no single tower becomes a giant treasure box).
+function findUpgradeTower(team) {
+  let best = null, bestU = TOWER_UPG_MAX;
+  for (const { camp, wall: w } of fortWallsOf(team)) {
+    if (!w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+    if (w.body.hp < w.maxHp * 0.9) continue;          // don't upgrade a tower that's under fire
+    const u = w.turret.upg || 0;
+    if (u < bestU && u < TOWER_UPG_MAX) { bestU = u; best = { camp, wall: w }; }
+  }
+  return best;
+}
+
 // AI auto-order (human teams repair by CLICK). Priorities: patch a wounded LIVE gun first
 // (free, keeps the defense shooting), then — if fleet-healthy and scrap-rich — buy a
 // replacement gun for a downed tower (rebuilding its body on the way, all in one job).
@@ -3811,6 +4038,10 @@ function orderRepair(team) {
   if (aiWantsGun(team)) {
     const g = findGunDeadTower(team);
     if (g) return deployRepair(team, g.camp, g.wall, true);
+  }
+  if (aiWantsUpgrade(team)) {
+    const up = findUpgradeTower(team);
+    if (up) return deployUpgrade(team, up.camp, up.wall);
   }
   return false;
 }
@@ -7229,7 +7460,7 @@ if (QS.has('win')) {
 function enterField() {
   onField = true;
   fieldFadeT = 0;
-  exitFortPlace();   // never carry the fort-placement overlay onto the field (it would dangle back into the garage on return)
+  exitFortPlace(); exitTowerPick();   // never carry a garage aerial overlay onto the field (it would dangle back into the garage on return)
 
   if (!fieldBuilt) {
     map.generate(GEN_OPTS);
@@ -7272,7 +7503,7 @@ function beginReturn() {
 
 function returnToGarage() {
   returning = false;
-  exitFortPlace();   // belt-and-suspenders: kill any lingering fort-placement overlay before the hangar shows
+  exitFortPlace(); exitTowerPick();   // belt-and-suspenders: kill any lingering garage aerial overlay before the hangar shows
   // Did the player ride an enemy flag all the way down into the garage? That's the capture.
   const captured = flags.find(f => f.carried && f.carrier === player);
   if (player) { removeCombatant(player); scene.remove(player.group); player = null; }
@@ -7420,6 +7651,8 @@ function mountHangarHud(garage) {
     + `<div class="shop-grid">${['firebrat', 'lurcher', 'valkyrie', 'jotun'].map(vehTile).join('')}</div>`
     + `<div class="shop-sec">FORTIFICATIONS</div>`
     + `<div class="shop-grid">${fortTile('wall', 'wall', 'WALL')}${fortTile('bastion', 'bastion', 'BASTION')}${fortTile('armed', 'tower', 'GUN TOWER')}</div>`
+    + `<div class="shop-sec">TOWER UPGRADES</div>`
+    + `<div class="shop-grid"><div class="shop-tile" data-upg="1" style="grid-column:1/3;padding:8px 4px"><span class="tl" style="font-size:11px;color:#ffcf4a;margin-top:0">&#9881; UPGRADE A TOWER &#9656;</span></div></div>`
     + `<div class="bp-hint" id="bp-hint"></div>`
     + `</div>`;
   document.body.appendChild(panel);
@@ -7451,6 +7684,8 @@ function mountHangarHud(garage) {
     for (const tile of panel.querySelectorAll('[data-fort]')) {
       tile.classList.toggle('off', have < fortCostOf(tile.dataset.fort) || !crewFree);
     }
+    const upgTile = panel.querySelector('[data-upg]');
+    if (upgTile) upgTile.classList.toggle('off', !fortHomeCamp() || playerTowers().length === 0);
   };
   panel.addEventListener('click', e => {
     const tile = e.target.closest('.shop-tile');
@@ -7461,6 +7696,11 @@ function mountHangarHud(garage) {
       if ((playerLosses[t] || 0) <= 0) { hint('no lost ' + VEHICLE_TYPES[t].label.toUpperCase() + ' to replace'); return; }
       if (have < (BUILD_COST[t] || 0)) { hint(`need ${(BUILD_COST[t] || 0) - have} more scrap`); return; }
       if (buildVehicle(t)) { hint(VEHICLE_TYPES[t].label.toUpperCase() + ' rebuilt from salvage'); update(); }
+      return;
+    }
+    if (tile.dataset.upg) {   // open the outside picker to choose a tower to upgrade
+      if (!fortHomeCamp()) { hint('deploy once first — the island is not built yet'); return; }
+      if (!enterTowerPick()) hint('no standing towers to upgrade');
       return;
     }
     const kind = tile.dataset.fort;
@@ -7590,6 +7830,8 @@ window.RR = {
   get camps() { return camps; },
   // Tower repair crews (prototype)
   setRepairs: (v) => { repairsOn = !!v; return repairsOn; },   // A/B: enable/disable jeep repair crews
+  setAiUpgrades: (v) => { aiUpgradesOn = !!v; return aiUpgradesOn; },   // A/B: AI spends surplus scrap on tower upgrades
+  aiUpgradeStatus: () => { const per = {}; for (const c of camps) { let n = 0, m = 0; for (const w of c.walls) if (w.turret) { n += w.turret.upg || 0; m++; } (per[c.team] ??= []).push(n); } return { on: aiUpgradesOn, byCamp: per }; },   // total stars per camp
   orderRepair: (team = PLAYER_TEAM) => orderRepair(team),      // force a repair for a team (debug/testing)
   repairStatus: () => { const pool = (t) => ({ parked: motorPool[t].filter(s => s.state === 'parked').length, deployed: motorPool[t].filter(s => s.state === 'deployed').length, lost: motorPool[t].filter(s => s.state === 'lost').length }); return { on: repairsOn, jobs: repairJobs.map(j => ({ team: j.team, state: j.state, gun: j.gun, progress: +j.progress.toFixed(1), pathLen: j.path ? j.path.length : 0, jeepDead: j.jeepDest.dead, jx: +j.jx.toFixed(1), jz: +j.jz.toFixed(1), jy: +j.jeep.position.y.toFixed(2) })), jeeps: { red: pool('red'), blue: pool('blue') }, scrap: { ...teamScrap }, cd: { red: +(_repairCd.red || 0).toFixed(1), blue: +(_repairCd.blue || 0).toFixed(1) } }; },
   woundTower: (team, frac = 0.4) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(h.wall.maxHp * (1 - frac)); return !!h; },  // debug: bang up a tower to test repair
@@ -7608,6 +7850,8 @@ window.RR = {
     }
     return out;
   },
+  upgradeJeep: (team = PLAYER_TEAM) => { const h = findWoundedTowerAny(team); return h ? deployUpgrade(team, h.camp, h.wall) : false; },   // debug: roll an upgrade jeep to the first tower
+  enterTowerPick: () => enterTowerPick(), exitTowerPick: () => exitTowerPick(),   // debug: drive the tower-upgrade picker
   killTowerGun: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.turretDest.damage(1e9); return !!h; },   // debug: shoot a tower's gun off (test gun purchase)
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
@@ -7718,7 +7962,7 @@ window.RR = {
       for (const v of vehicles) v.idle(dt);
       projectiles.update(dt); updateProjectileHits();
       destructibles.update(dt);
-      updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateLock(dt);
+      updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateTowerUpgrades(); updateLock(dt);
       if (soldiers) soldiers.update(dt, combatants);
       updateGadgets(dt);
       updateRepairs(dt);
@@ -8388,6 +8632,7 @@ function animate() {
       updateRepairs(dt, camera);             // tower repair crews: jeep drives out, crew builds, tower heals
       updateRepairIcons();                   // player: clickable 🔧 over each damaged friendly tower
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
+      updateTowerUpgrades();                         // treasure-box drop + partial rebuild on tower death/revive
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
     }
