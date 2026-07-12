@@ -9,8 +9,9 @@
 export const CAMPAIGN = [
   { id: 'basic-training', name: 'Basic Training', file: 'campaign/basic-training.json',
     blurb: 'Crack a lightly-held base and run the flag home. Learn the ropes.' },
+  { id: 'crossroads',   name: 'Crossroads',   file: 'campaign/crossroads.json',
+    blurb: 'Twin bases across a crossroads. A random opponent, still finding their feet.' },
   // ── Upcoming (no map yet → shown locked) ────────────────────────────────────
-  { id: 'crossroads',   name: 'Crossroads',   blurb: 'Coming soon.' },
   { id: 'the-gauntlet', name: 'The Gauntlet', blurb: 'Coming soon.' },
 ];
 

@@ -1091,6 +1091,10 @@ function placeCampsFromConfig(assets) {
     const entry = ASSETS_BY_ID[a.id];
     if (!entry || entry.category !== 'structure') continue;                      // specials/supplies handled above
     if (a.id === 'wall' || a.id === 'tower' || a.id === 'gate') continue;        // real combat Wall pieces, placed above
+    if (a.id === 'jeep') {                                                        // team jeeps designate the functional motor pool (see buildMotorPool)
+      const jt = gameTeamOf(a.team);
+      if (jt) { const js = siteOfCell(a.cx, a.cz); placedJeeps[jt].push({ x: js.x, z: js.z, yaw: (a.rot || 0) * Math.PI / 2 }); continue; }
+    }                                                                            // neutral jeeps fall through to a decorative prop
     const dtm = a.team || 'neutral';
     const g = entry.make(grid.cell, new THREE.Color(accentForCode(dtm)));
     g.userData.team = gameTeamOf(dtm);   // so the colour-lock can recolour its accent/camo mats
@@ -1126,6 +1130,7 @@ function placeCampsFromConfig(assets) {
 }
 // Use the designed bases when a map carries placed assets; else procedural placement.
 function placeCampsAuto() {
+  placedJeeps = { red: [], blue: [] };   // cleared each build; refilled from the map's placed jeeps (if any)
   if (minefield) minefield.reset();   // clear any mines/pods from a prior match
   if (sensorNet) sensorNet.reset();
   resetGadgetStats();
@@ -3657,6 +3662,7 @@ let repairJobs = [];                              // active RepairJob instances
 const MOTOR_JEEPS = 3;                            // jeeps parked in each main base's motor pool
 const JEEP_HP = 40;                               // a jeep is fragile — a couple of shells
 let motorPool = { red: [], blue: [] };            // parked jeeps: [{ mesh, dest, state, x, z, y, yaw, accent }]
+let placedJeeps = { red: [], blue: [] };           // designer-placed motor-pool spots per team (empty = auto-place)
 let _repairCd = { red: 0, blue: 0 };              // per-team auto-order cooldown
 const REPAIR_WOUND = 0.7;                         // order a repair once a tower dips below this HP frac
 // The AI waits a RANDOM spell between repair sorties, so its cadence is unpredictable — you can't
@@ -3705,12 +3711,23 @@ function clearMotorPool() {
   }
 }
 
-// Park MOTOR_JEEPS jeeps in a row toward the BACK of each main base (away from the gate) — a
-// visible, raidable motor pool the repair crews draw from.
+// Build each main base's motor pool. If the MAP placed team-tagged 'jeep' assets in the base,
+// those exact spots become the functional pool (the designer controls count + layout); otherwise
+// auto-park MOTOR_JEEPS in a row toward the BACK of the base (away from the gate). Either way it's
+// the visible, raidable pool the repair crews draw from.
 function buildMotorPool() {
   clearMotorPool();
   for (const c of camps) {
     if (c.role !== 'main') continue;
+    const placed = placedJeeps[c.team];
+    if (placed && placed.length) {                // designer-placed pool: honour their spots
+      for (const p of placed) {
+        const s = { x: p.x, z: p.z, y: map ? jeepGroundY(p.x, p.z) : 0, yaw: p.yaw, accent: c.accent, team: c.team, mesh: null, dest: null, state: '' };
+        parkSlot(s);
+        motorPool[c.team].push(s);
+      }
+      continue;
+    }
     const out = (c.gates && c.gates[0] && c.gates[0].outward) || new THREE.Vector3(0, 0, 1);
     const bx = -out.x, bz = -out.z;               // back direction (unit)
     const px = -bz, pz = bx;                      // perpendicular = the row axis
