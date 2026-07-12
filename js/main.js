@@ -32,7 +32,7 @@ import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, g
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate } from './AIStrategies.js?v=88';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass } from './AIStrategies.js?v=90';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -408,8 +408,12 @@ function ensureSpectateControls() {
 // Keep the two side buttons coloured + labelled by the live team colours, and light up
 // whichever team is currently being watched.
 let spectateTeamBtns = [];
+let _specBtnT = 0;
 function updateSpectateTeamButtons() {
   if (!spectateTeamBtns.length) return;
+  const nowMs = performance.now();   // 4Hz — per-frame style/text writes showed up hot in the phone trace
+  if (nowMs - _specBtnT < 250) return;
+  _specBtnT = nowMs;
   const teams = [...new Set(commanders.map(c => c.team))];
   for (let i = 0; i < spectateTeamBtns.length; i++) {
     const btn = spectateTeamBtns[i], team = teams[i];
@@ -757,6 +761,7 @@ const BUILD_COST = { jotun: 5, valkyrie: 5, lurcher: 3, firebrat: 2 };   // scra
 let onField = false;  // true while the island is on screen (false = hangar view)
 let fieldBuilt = false; // the island is generated once, then reused across deploys
 let matchOver = false;  // a flag was captured — freeze the action, show the result
+let lastWinner = null;     // team key of the last decided match (endMatch)
 let matchWon = false;   // last match's result for the PLAYER team (VICTORY vs DEFEAT on the end menu)
 let flagsCaptured = 0;  // enemy flags the player has extracted into the garage (score)
 let deploy = null;    // { type, colorIndex } captured when a deploy is confirmed
@@ -1179,6 +1184,35 @@ function roadSpeedMul(v) {
 function vehicleHidden(v) {
   for (const e of elevators) if (e.rider === v && e.phase !== 'top') return true;
   return false;
+}
+
+// ── SHADER-STUTTER FIX: hold the scene's point-light COUNT constant ────────────────
+// Three.js bakes numPointLights into every lit material's shader — when the count
+// changes, every lit material in view needs a brand-new program, compiled synchronously
+// at first use (getProgramInfoLog). Vehicle glow lights come and go with every spawn/
+// death/lift-ride, so early match walks through many counts = a compile storm (a phone
+// trace showed 33% of a window blocked in getProgramInfoLog, with one 3.7s frame).
+// PAD LIGHTS fill the gap to a fixed budget: intensity-0 lights parked under the map,
+// toggled so (live vehicle lights + visible pads) === LIGHT_BUDGET, so the shader
+// variant is compiled once and reused forever.
+const LIGHT_BUDGET = 16;
+let padLights = null;
+function updatePadLights() {
+  if (!padLights) {
+    padLights = [];
+    for (let i = 0; i < LIGHT_BUDGET; i++) {
+      const l = new THREE.PointLight(0xffffff, 0, 0.001);
+      l.position.set(0, -500, 0);
+      scene.add(l); padLights.push(l);
+    }
+  }
+  let live = 0;
+  for (const v of combatants) {
+    if (v.dead || !v.group.visible || vehicleHidden(v)) continue;   // hidden subtree lights don't render
+    v.group.traverse(o => { if (o.isPointLight && o.visible) live++; });
+  }
+  const pads = Math.max(0, LIGHT_BUDGET - live);
+  for (let i = 0; i < padLights.length; i++) padLights[i].visible = i < pads;
 }
 
 // Ground height a vehicle should rest at (terrain + a small clearance; or the deck).
@@ -1879,6 +1913,10 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null, srcPos = nu
   // Stamp when an ENEMY VEHICLE last hit us (shield hits count — we're still under fire). The
   // AI uses this to answer an attacker it can't outrun instead of sieging on / fleeing (underFire).
   if (cause === 'vehicle' && shooter && shooter !== veh && shooter.team !== veh.team) veh._hitByVehT = performance.now();
+  // A TURRET landed a hit — remember which gun (by head position) so the AI can SHOOT
+  // BACK at the tower actually hurting it, instead of grinding whatever target its
+  // mission math picked (nearest turret / a healing sponge / a wall).
+  if (cause === 'turret' && srcPos) veh._hitByTurret = { x: srcPos.x, y: srcPos.y, z: srcPos.z, t: performance.now() };
   if (veh.bar) updateHealthBar(veh);
   if (veh.isPlayer) updatePlayerHud();
   // COMBAT LOG (deep view): vehicle-vs-vehicle hits only, and only when the hull actually
@@ -2286,11 +2324,46 @@ function updateTowerUpgrades() {
   for (const w of placedWalls) visit(w);
 }
 
+// Shared commander-side bookkeeping for a confirmed kill: team tally + the DEFENSIVE
+// tallies the mission scorecard reads (kills on OUR half = interception/guard work;
+// carrier kills = downing the flag thief). Victim position vs the two main camps
+// decides the half — same test Defend uses.
+// An enemy repair crew actively HEALING near a point we're about to shell: the tower
+// out-heals the chew while covering towers do the killing (a live-watched damage-sponge
+// standoff). The designed counterplay is the killable JEEP — kill it and the job
+// cancels — so shooters swap their aim to the jeep. Returns the jeep aim point or null.
+function enemyRepairJeepNear(myTeam, x, z, r = 20) {
+  for (const j of repairJobs) {
+    if (j.team === myTeam || j.jeepDest.dead) continue;
+    if (j.state !== 'building' && j.state !== 'installing') continue;   // crew on site, actively working
+    if ((j.jx - x) ** 2 + (j.jz - z) ** 2 < r * r) return { x: j.jx, y: j.jeep.position.y + 1.0, z: j.jz };
+  }
+  return null;
+}
+
+function creditKillToTeam(team, victim) {
+  const cmd = commanders.find(c => c.team === team);
+  if (!cmd) return null;
+  cmd.kills = (cmd.kills || 0) + 1;
+  const vp = victim.holder ? victim.holder.position : null;
+  if (vp) {
+    let dMine = Infinity, dTheirs = Infinity;
+    for (const c of camps) {
+      if (c.role !== 'main') continue;
+      const d = (vp.x - c.center.x) ** 2 + (vp.z - c.center.z) ** 2;
+      if (c.team === team) dMine = Math.min(dMine, d); else dTheirs = Math.min(dTheirs, d);
+    }
+    if (dMine < dTheirs) cmd.homeKills = (cmd.homeKills || 0) + 1;
+  }
+  if (flags.some(f => f.carried && f.carrier === victim)) cmd.carrierKills = (cmd.carrierKills || 0) + 1;
+  return cmd;
+}
 function creditKill(killer, victim) {
   if (!killer || killer.team == null || killer.team === victim.team) return;
-  const cmd = commanders.find(c => c.team === killer.team);
+  const cmd = creditKillToTeam(killer.team, victim);
   if (!cmd) { promoteUnit(killer); return; }   // player/no-commander team: stars still pin on
-  cmd.kills = (cmd.kills || 0) + 1;
+  const sl = cmd._slotFor && cmd._slotFor(killer);   // per-slot tally too (turtle's siege gate counts its OWN kills)
+  if (sl) sl._kills = (sl._kills || 0) + 1;
   aiLog(killer.team, `${cmd.cname}: Splash! ${killer.type} just dropped their ${victim.type} — that's ${cmd.kills} confirmed!`);
   promoteUnit(killer);
 }
@@ -2663,6 +2736,8 @@ const VIS   = { valkyrie: 1.5, jotun: 1.3, lurcher: 1.0, firebrat: 0.65 };
 // a moving Jotun's drone clears it at range; an idling unit barely makes a whisper.
 const AI_HEARD_MIN = 0.18;
 const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to top up at a known shield generator
+const GUARD_GEN_DWELL = 25000;  // ms a patrolling guard holds ON the shield generator each lap (turtle v2)
+let turtleGuardOn = true;       // A/B: turtle v2 (slot-kill gate + gen guarding + maintenance) — RR.setTurtleGuard
 const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT — grab the armour before fighting
 const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the armour top-up
 let SHIELD_SIGHT_MULT = 1.4;    // shield beacon spotted at this × base vision. Tall & glowing so it carries
@@ -2855,6 +2930,8 @@ function updateFlags(dt) {
           if (displaced) { f.group.position.set(f.home.x, f.home.y, f.home.z); showBanner(`${flagColorName(f)} FLAG RECOVERED`, { color: '#9bd6ff' }); }
         } else {
           f.carried = true; f.carrier = v; showBanner(`${flagColorName(f)} FLAG TAKEN`, { color: '#' + f.cloth.material.color.getHexString() });
+          const oc = commanders.find(c => c.team === f.team);   // scorecard: the owners lost their flag on somebody's watch
+          if (oc) oc.flagsLost = (oc.flagsLost || 0) + 1;
         }
         break;
       }
@@ -4326,7 +4403,15 @@ function updateGadgets(dt) {
       if (dealt > 0) gadgetStats.damage += dealt;
       if (s.v.dead && s.hp > 0) {   // this blast finished it
         gadgetStats.kills++;
-        if (s.team === b.mine.team) gadgetStats.friendlyKills++; else gadgetStats.enemyKills++;
+        if (s.team === b.mine.team) gadgetStats.friendlyKills++;
+        else {
+          gadgetStats.enemyKills++;
+          // A mine kill IS a kill — credit the laying team (kills/homeKills/carrierKills),
+          // so mine plays stop grading as failures. (No unit to promote — the placer may
+          // be long gone; explodeAt fired with a null shooter, which skipped creditKill.)
+          const mc = creditKillToTeam(b.mine.team, s.v);
+          if (mc) mc.mineKills = (mc.mineKills || 0) + 1;
+        }
       }
     }
   }
@@ -4687,10 +4772,35 @@ const ROLE_DECK = {
   hunter:  ['warrior', 'turtle'],  // the hunt + siege pressure + a home guard
   rogue:   ['hunter', 'turtle'],   // the sneak + an interceptor + a home guard
 };
+
+// ── NN MISSION ASSIGNER — slice 1: the data pipeline ──────────────────────────────────
+// The static ROLE_DECK above is the placeholder a LEARNED mission assigner replaces:
+// instead of a fixed per-persona table, a policy looks at the battlefield each time a
+// support slot redeploys and picks the role that tour should field. This slice only
+// COLLECTS training tours — (feature snapshot at deploy, role fielded, the mission
+// report card's outcome) — so a small net can be trained OFFLINE from headless matches;
+// in-game inference lands once trained weights exist. Slot 0 always fields the
+// commander's own archetype (the persona is the team's identity — the net assigns the
+// SUPPORT missions around it).
+//   'deck'    — today's behavior, static persona deck (default: zero gameplay change)
+//   'explore' — deck, but each support tour has missionEps odds of a random role
+//               (counterfactual coverage so training isn't blind off-policy)
+//   'nn'      — argmax of the loaded policy net (once weights are trained/loaded)
+// Every tour is LOGGED under every policy, so plain tournaments feed the dataset too.
+const MISSION_ROLES = ['warrior', 'turtle', 'hunter', 'rogue'];
+const MISSION_FEATS = ['clock', 'fielded', 'fleet', 'rosFirebrat', 'rosLurcher', 'rosValkyrie', 'rosJotun',
+  'scrap', 'myTowers', 'theirTowers', 'myFort', 'theirFort', 'ownFlagHome', 'enemyFlagHome',
+  'seenEnemies', 'losing', 'tilt', 'roleWarrior', 'roleTurtle', 'roleHunter', 'roleRogue'];   // feature order — keep in sync with _missionFeatures
+let missionPolicy = 'deck';
+let missionPolicyTeam = {};        // per-team override (head-to-head A/B: net vs deck in one match)
+let missionEps = 0.35;             // explore: odds a support tour fields a random role
+let missionNN = null;              // trained policy weights (loaded via RR.loadMissionNN)
+const aiTrainLog = [];             // one record per graded tour
 function freshSlot() {
   return {
     unit: null, respawnT: 0,
     strategy: null,                                    // this slot's OWN doctrine card (set at slot creation)
+    _role: null,                                       // the role name that card fields (deck default; a mission policy may re-pick per tour)
     _failStep: null, _failN: 0, _failT: 0, _failSnap: null,   // per-mission total-failure bans (per slot — each card banks its own lessons)
     _rising: false, _elev: null,                       // FOB-lift deploy state
     _exit: null, _exitT: 0, _exitCoolT: 0,             // post-deploy gate-exit waypoint
@@ -4709,10 +4819,53 @@ function freshSlot() {
     _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
     _lastFlip: null,                                   // log anti-bounce
     _patrolI: 0,                                       // position on the (shared) patrol route
+    _patrolHoldT: 0,                                   // guard-the-shield dwell timer (gen patrol node)
+    _harassTgt: null, _harassT0: 0, _harassHp0: 0,     // harass rotation: current stop + engagement budget
+    _healHuntOn: false,                                // latch: announced the "kill the repair jeep" swap once
+    _kills: 0,                                         // kills by THIS slot's units (cmd.kills is the team total)
   };
 }
 const SLOT_FIELDS = Object.keys(freshSlot());
 let aiUnitCap = null;   // debug override (RR.setUnitCap): force the per-team unit cap regardless of elevators
+
+// Forward pass for the trained mission net (1 hidden ReLU layer, tiny — weights are a
+// plain JSON of arrays loaded via RR.loadMissionNN). Returns the argmax role.
+function nnPickRole(feat, temp = 0) {
+  const { W1, b1, W2, b2 } = missionNN;
+  const h = W1.map((row, j) => Math.max(0, row.reduce((a, w, i) => a + w * feat[i], b1[j])));
+  const q = W2.map((row, j) => row.reduce((a, w, i) => a + w * h[i], b2[j]));
+  // temp = 0 → pure argmax. Otherwise SAMPLE from a softmax: mostly the best card,
+  // sometimes the second, rarely the wild one. Surprise can't be LEARNED from AI-vs-AI
+  // data (our commanders don't pattern-read, so unpredictability earns nothing in the
+  // dataset) — a human opponent DOES pattern-read, so the mix is designed in, and it
+  // also keeps army variety alive (no role gets argmax-benched over a hair of a gap).
+  let best = 0;
+  for (let i = 1; i < q.length; i++) if (q[i] > q[best]) best = i;
+  if (!temp) return MISSION_ROLES[best];
+  const w = q.map(v => Math.exp((v - q[best]) / temp));
+  let r = Math.random() * w.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) return MISSION_ROLES[i]; }
+  return MISSION_ROLES[best];
+}
+// How erratic this commander's dealing is — a PERSONALITY trait (wanderlust: the same
+// appetite that wanders the map wanders the deck; rogues add a twist), overridable for
+// A/B via RR.setMissionTemp.
+let missionTemp = null;   // null = personality-driven
+function missionTempOf(cmd) {
+  if (missionTemp != null) return missionTemp;
+  const p = cmd.personality || {};
+  return 0.04 + (p.wanderlust || 0.5) * 0.10 + (cmd.archetype === 'rogue' ? 0.06 : 0);
+}
+
+// Close out every OPEN tour (units alive when the match ends) into the training log —
+// the harness calls this before reading RR.trainLog(), so surviving tours count too.
+function flushTourLog() {
+  for (const c of commanders) for (let i = 0; i < c._slots.length; i++) {
+    const sl = c._slots[i];
+    if (sl._mrec && sl._mrec.feat) { aiTrainLog.push(c._tourRecord(sl._mrec, (!sl.unit || sl.unit.dead) ? 1 : 0, i)); sl._mrec = null; }
+  }
+  return aiTrainLog.length;
+}
 
 class AICommander {
   constructor(team, archetype = null) {
@@ -4730,6 +4883,10 @@ class AICommander {
     this._gambit = false;      // latched: gave up on the mid-field grind → send a Valkyrie around to crack the HQ
     this.deaths = 0;
     this.kills = 0;                                   // enemy vehicles this commander's units have downed
+    this.homeKills = 0;                               // ...of which, killed on OUR half (guard/intercept work)
+    this.carrierKills = 0;                            // ...of which, flag carriers (downing the thief)
+    this.mineKills = 0;                               // enemy kills by our mines (credited into kills too)
+    this.flagsLost = 0;                               // times OUR flag was lifted (scorecard: lost on watch)
     this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`));   // the archetype's mission doctrine
     this.fortHp0 = null;                              // enemy fort HP when this card started
     this.seenTypes = {};                              // rival vehicle types this team has spotted
@@ -4749,17 +4906,19 @@ class AICommander {
     // so pre-start external reads (debug hooks) see sane defaults.
     this._slots = [freshSlot()];
     this._slots[0].strategy = this.strategy;          // slot 0 fields the archetype's own doctrine
+    this._slots[0]._role = this.archetype;
     Object.assign(this, this._slots[0]);
     this._slotI = 0; this._lead = true;
   }
 
   // The doctrine a given slot fields: slot 0 = the archetype itself, extras from its
   // ROLE_DECK (see above). Legacy no-archetype commanders draw random cards as ever.
-  _slotDoctrine(i) {
+  _slotRole(i) {
     const deck = ROLE_DECK[this.archetype] || [];
-    const role = i === 0 || !deck.length ? this.archetype : deck[(i - 1) % deck.length];
-    return makeDoctrine(role, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`));
+    return i === 0 || !deck.length ? this.archetype : deck[(i - 1) % deck.length];
   }
+  _makeCard(role) { return makeDoctrine(role, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`)); }
+  _slotDoctrine(i) { return this._makeCard(this._slotRole(i)); }
 
   // ── slot plumbing (multi-unit) ─────────────────────────────────────────
   // The team's unit cap: one fielded vehicle per elevator it owns (min 1), or the
@@ -4780,6 +4939,7 @@ class AICommander {
       const s = freshSlot();
       s.respawnT = 2 + this._slots.length * 2.5;
       s.strategy = this._slotDoctrine(this._slots.length);   // its own role card (see ROLE_DECK)
+      s._role = this._slotRole(this._slots.length);
       this._slots.push(s);
     }
     if (this._slots.length > cap)
@@ -4914,11 +5074,72 @@ class AICommander {
   // DEFEND under tower cover and let the winning side overextend into our guns, preserving
   // what's left for a counter-punch. (A human enemy has no roster, so we never read them
   // as "ahead" and never turtle against a human on this basis.)
+  // The enemy fleet is decisively beaten down vs ours — the turtle's licence to leave the
+  // wall and press (same read losingBadly makes from the other side).
+  enemyWeaker() {
+    const ec = commanders.find(c => c.team === this.targetTeam());
+    return !ec || ec.fleetLeft() <= this.fleetLeft() - 2;
+  }
   losingBadly() {
     const ec = commanders.find(c => c.team === this.targetTeam());
     if (!ec) return false;
     const mine = this.fleetLeft(), theirs = ec.fleetLeft();
     return mine <= 5 && mine <= theirs - 3;
+  }
+  // Battlefield snapshot for the mission assigner, from THIS commander's view (own state
+  // + the same reads the doctrines already make — nothing new is revealed). Normalized
+  // ~[0,1], order fixed by MISSION_FEATS. Keep it LEGIBLE — a bug here poisons training
+  // data silently.
+  _missionFeatures() {
+    if (!this._fortBase) this._fortBase = { mine: fortHpOf(this.team) || 1, theirs: fortHpOf(this.targetTeam()) || 1 };
+    const cap = this.unitCap();
+    const roles = { warrior: 0, turtle: 0, hunter: 0, rogue: 0 };
+    let fielded = 0;
+    for (const sl of this._slots) if (sl.unit && !sl.unit.dead) { fielded++; roles[sl._role || this.archetype]++; }
+    const tt = this.targetTeam();
+    let seen = 0;
+    for (const v of combatants) if (!v.dead && v.team === tt && !vehicleHidden(v)) seen++;
+    const own = flags.find(f => f.team === this.team), theirs = flags.find(f => f.team === tt);
+    return [
+      Math.min(1, (this._matchT || 0) / 900),                            // clock (0..15min)
+      fielded / Math.max(1, cap),                                        // fielded
+      Math.min(1, this.fleetLeft() / 13),                                // fleet
+      (this.roster.firebrat || 0) / (GARAGE_COUNTS.firebrat || 1),       // rosFirebrat
+      (this.roster.lurcher || 0) / (GARAGE_COUNTS.lurcher || 1),         // rosLurcher
+      (this.roster.valkyrie || 0) / (GARAGE_COUNTS.valkyrie || 1),       // rosValkyrie
+      (this.roster.jotun || 0) / (GARAGE_COUNTS.jotun || 1),             // rosJotun
+      Math.min(1, (teamScrap[this.team] || 0) / 15),                     // scrap
+      turretCountOf(this.team, 'main') / 4,                              // myTowers
+      turretCountOf(tt, 'main') / 4,                                     // theirTowers
+      Math.min(1, (fortHpOf(this.team) || 0) / this._fortBase.mine),     // myFort
+      Math.min(1, (fortHpOf(tt) || 0) / this._fortBase.theirs),          // theirFort
+      own && !own.carried ? 1 : 0,                                       // ownFlagHome
+      theirs && !theirs.carried ? 1 : 0,                                 // enemyFlagHome
+      Math.min(1, seen / 4),                                             // seenEnemies
+      this.losingBadly() ? 1 : 0,                                        // losing
+      Math.max(0, Math.min(1, 0.5 + (this.kills - this.deaths) / 12)),   // tilt
+      roles.warrior / Math.max(1, cap),                                  // roleWarrior
+      roles.turtle / Math.max(1, cap),                                   // roleTurtle
+      roles.hunter / Math.max(1, cap),                                   // roleHunter
+      roles.rogue / Math.max(1, cap),                                    // roleRogue
+    ];
+  }
+  // One graded tour → one training record. NOTE kills/fortDmg are the COMMANDER'S deltas
+  // over the tour window (kills are credited at team level), so with multiple slots the
+  // credit is noisy — the trainer sees it in expectation. Refine attribution later if the
+  // signal proves too dilute.
+  _tourRecord(rec, died, slotI) {
+    return { team: this.team, arch: this.archetype, slot: slotI, veh: rec.veh, role: rec.role, feat: rec.feat,
+      kills: this.kills - rec.kills0, fortDmg: Math.max(0, Math.round(rec.fort0 - fortHpOf(this.targetTeam()))),
+      flag: rec.flagTouched ? 1 : 0, died, dur: Math.round((performance.now() - rec.t0) / 1000),
+      // v2: what defense/recon produced on this watch (deltas of team-level tallies —
+      // same noisy-credit model as kills; the trainer sees it in expectation)
+      homeKills: this.homeKills - (rec.homeKills0 || 0),
+      carrierKills: this.carrierKills - (rec.carrierKills0 || 0),
+      mineKills: this.mineKills - (rec.mineKills0 || 0),
+      fortLost: Math.max(0, Math.round((rec.ownFort0 || 0) - fortHpOf(this.team))),
+      flagLost: (this.flagsLost - (rec.flagsLost0 || 0)) > 0 ? 1 : 0,
+      intelGain: +Math.max(0, (this.explore ? this.explore.fraction() : 0) - (rec.intel0 || 0)).toFixed(3) };
   }
   // STALEMATE GAMBIT: the match has dragged on and we've made ZERO progress on the enemy base
   // (their towers still nearly all up) — we're just trading + healing in mid-field. Give up on
@@ -5021,7 +5242,23 @@ class AICommander {
   // shot or a hit on our towers pre-empts the whole patrol (see Defend.objective).
   patrolSpot() {
     const flag = this.homeBasePos(), fob = this.homePos(), enemy = this.enemyBasePos();
-    if (!this._patrol) {
+    // GUARD THE SHIELD (turtle v2): the nearest KNOWN shield generator on OUR half joins
+    // the patrol — armour decides lurcher duels, so the guard re-tops its own shield and
+    // DENIES the enemy's re-armour by standing on the spawner. The route rebuilds if the
+    // qualifying gen changes (they get scouted mid-match). Guarding never outranks a real
+    // threat: Defend.objective checks homeAttack + our-half contacts BEFORE the patrol.
+    let genPt = null;
+    if (turtleGuardOn) {
+      const fr = { x: (flag.x + fob.x) / 2, z: (flag.z + fob.z) / 2 };
+      const gen = this.nearestKnownShield(fr.x, fr.z);
+      if (gen) {
+        const dh = (gen.pos.x - fr.x) ** 2 + (gen.pos.z - fr.z) ** 2;
+        const de = (gen.pos.x - enemy.x) ** 2 + (gen.pos.z - enemy.z) ** 2;
+        if (dh < de) genPt = { x: gen.pos.x, z: gen.pos.z, gen: true };   // ours-half only — never lured deep
+      }
+    }
+    const genKey = genPt ? ((genPt.x | 0) + ',' + (genPt.z | 0)) : '';
+    if (!this._patrol || this._patrolGenKey !== genKey) {
       const front = { x: (flag.x + fob.x) / 2, z: (flag.z + fob.z) / 2 };
       let tx = enemy.x - front.x, tz = enemy.z - front.z;
       const td = Math.hypot(tx, tz) || 1; tx /= td; tz /= td;       // unit vector toward the threat
@@ -5031,18 +5268,87 @@ class AICommander {
       const SIDE = 30;
       this._patrol = [
         home,
+        ...(genPt ? [genPt] : []),                                  // hold the shield spawner (dwell below)
         { x: mid.x + px * SIDE, z: mid.z + pz * SIDE },             // mid-field, one flank
         home,
         { x: mid.x - px * SIDE, z: mid.z - pz * SIDE },             // mid-field, other flank
       ];
+      this._patrolGenKey = genKey;
       this._patrolI = 0;
     }
-    const wp = this._patrol[this._patrolI];
+    const wp = this._patrol[this._patrolI % this._patrol.length];
     if (this.unit) {
       const u = this.unit.holder.position;
-      if (Math.hypot(u.x - wp.x, u.z - wp.z) < 12) this._patrolI = (this._patrolI + 1) % this._patrol.length;
+      if (Math.hypot(u.x - wp.x, u.z - wp.z) < 12) {
+        // DWELL on the generator node — long enough to top up and deny a pass, short
+        // enough that the lane still gets walked (a guard camping the gen forever is
+        // exploitable: siege the far side of the base and the response comes late).
+        if (wp.gen) {
+          if (!this._patrolHoldT) { this._patrolHoldT = performance.now(); aiLog(this.team, `${this.cname} ${this.unit.type}: “Holding the shield generator — nobody re-arms on our watch.”`); }
+          if (performance.now() - this._patrolHoldT < GUARD_GEN_DWELL) return wp;
+        }
+        this._patrolHoldT = 0;
+        this._patrolI = (this._patrolI + 1) % this._patrol.length;
+      }
     }
-    return this._patrol[this._patrolI];
+    return this._patrol[this._patrolI % this._patrol.length];
+  }
+  // HARASS rotation (hunter): pick a stop from the enemy-half menu, spend a short
+  // engagement budget on it, then rotate to the FARTHEST other stop (spread the alarms).
+  harassSpot() {
+    const now = performance.now();
+    const u = this.unit ? this.unit.holder.position : null;
+    const t = this._harassTgt;
+    if (t && u) {
+      const d = Math.hypot(u.x - t.x, u.z - t.z);
+      if (d < 32 && !this._harassT0) { this._harassT0 = now; this._harassHp0 = this.unit.hp; }   // on station — start the clock
+      const overstay = this._harassT0 && now - this._harassT0 > 9000;
+      const mauled = this._harassT0 && this.unit.hp < this._harassHp0 - this.unit.maxHp * 0.2;   // they answered — fade
+      const done = (t.gen && t.gen.dead) || (t.wall && (!t.wall.turret || t.wall.turret.dead));
+      if (overstay || mauled || done) this._harassTgt = null;
+    }
+    if (!this._harassTgt) {
+      const menu = this._harassMenu();
+      if (!menu.length) return this.enemyFobPos();     // nothing scouted yet — lean on their fob
+      const from = u || this.homePos();
+      let best = menu[0], bd = -1;
+      for (const m of menu) { const d = (m.x - from.x) ** 2 + (m.z - from.z) ** 2; if (d > bd) { bd = d; best = m; } }
+      this._harassTgt = best; this._harassT0 = 0; this._harassHp0 = 0;
+      const say = best.gen ? 'Taking out their shield generator — no more armour for them!'
+        : best.wall ? 'Sniping that tower — make ’em flinch, then gone.'
+        : 'Lifting their salvage — bleed the economy.';
+      if (this.unit) aiLog(this.team, `${this.cname} ${this.unit.type}: “${say}”`);
+    }
+    return this._harassTgt;
+  }
+  // The menu: enemy-half shield generator (destroy it — their lurchers fight unshielded
+  // after), a live corner tower to snipe, their salvage to steal. Known intel only.
+  _harassMenu() {
+    const menu = [];
+    const home = this.homeBasePos(), tt = this.targetTeam();
+    const theirHalf = (x, z) => {
+      const en = this.enemyBasePos();
+      return (x - en.x) ** 2 + (z - en.z) ** 2 < (x - home.x) ** 2 + (z - home.z) ** 2;
+    };
+    for (const rp of this.knownSupplies) {
+      if (rp.dead || rp.kind !== 'shield') continue;
+      if (theirHalf(rp.pos.x, rp.pos.z)) menu.push({ x: rp.pos.x, z: rp.pos.z, kind: 'their shield generator', gen: rp });
+    }
+    let towers = 0;
+    for (const c of camps) {
+      if (c.team !== tt || c.role !== 'main') continue;
+      for (const w of (c.walls || [])) {
+        if (towers >= 2 || !w.turret || w.turret.dead || !w.body || w.body.dead) continue;
+        menu.push({ x: w.group.position.x, z: w.group.position.z, kind: 'sniping a tower', wall: w });
+        towers++;
+      }
+    }
+    let piles = 0;
+    for (const p of this.knownScrap) {
+      if (piles >= 2 || p._gone || p.overWater) continue;
+      if (theirHalf(p.pos.x, p.pos.z)) { menu.push({ x: p.pos.x, z: p.pos.z, kind: 'stealing their salvage' }); piles++; }
+    }
+    return menu;
   }
   flag() { return enemyFlagOf(this.team); }
   // Our OWN flag (the one a rival steals). ourFlagStolen → a live enemy is carrying it.
@@ -5276,6 +5582,25 @@ class AICommander {
   redraw() { this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, this.strategy.constructor, m => aiLog(this.team, `${this.cname}: ${m}`)); this.fortHp0 = fortHpOf(this.targetTeam()) || this.fortHp0; this.failStreak = 0; aiLog(this.team, `${this.cname}: That's not working — new plan, listen up!`); }
 
   deploy() {
+    // NN mission assigner: under 'explore'/'nn' a SUPPORT slot re-picks its role card
+    // each tour from the battlefield state (slot 0 keeps the archetype — the persona).
+    // The pick runs BEFORE the vehicle choice below, since the card drives wantVehicle.
+    // Features are snapshotted for EVERY tour (any policy) — they ride _mrec into the
+    // report-card grading, where the tour becomes one training record.
+    this._tourFeat = this._missionFeatures();
+    const pol = missionPolicyTeam[this.team] || missionPolicy;
+    if (pol !== 'deck' && !this._lead) {
+      let role = this._slotRole(this._slotI);
+      if (pol === 'explore') {
+        if (Math.random() < missionEps) role = MISSION_ROLES[(Math.random() * MISSION_ROLES.length) | 0];
+      } else if (pol === 'nn' && missionNN) {
+        role = nnPickRole(this._tourFeat, missionTempOf(this));
+      }
+      if (role !== this._role) {
+        this._role = role;
+        this.strategy = this._makeCard(role);
+      }
+    }
     const want = this.strategy.wantVehicle(this);
     // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
     // plus running LOW on the wanted type builds a fresh one before picking — not just at
@@ -5338,7 +5663,13 @@ class AICommander {
     // achieved NOTHING (no kills, no damage to their base, never touched the flag), that's a
     // TOTAL failure — two in a row on the same mission bans it (missionBanned) so the doctrine
     // tries something else instead of feeding identical units into the same guns.
-    this._mrec = { veh: type, kills0: this.kills, fort0: fortHpOf(this.targetTeam()), flagTouched: false };
+    this._mrec = { veh: type, kills0: this.kills, fort0: fortHpOf(this.targetTeam()), flagTouched: false,
+      feat: this._tourFeat, role: this._role || this.archetype, t0: performance.now(),
+      // v2 scorecard baselines: defensive + intel products of the tour
+      ownFort0: fortHpOf(this.team), homeKills0: this.homeKills, carrierKills0: this.carrierKills,
+      mineKills0: this.mineKills, flagsLost0: this.flagsLost,
+      intel0: this.explore ? this.explore.fraction() : 0 };
+    this._tourFeat = null;
     // Ride up the FOB elevator like the player does — it can't leave (or shoot)
     // until the lift tops out, so neither side gets a head start (see update()).
     // Each slot prefers its OWN lift (slot i → the team's i-th elevator); if that
@@ -5758,6 +6089,7 @@ class AICommander {
         // (missionBanned → the doctrine's FAIL_ALT unblocker) so the commander stops making
         // the same bad decision over and over.
         const rec = this._mrec; this._mrec = null;
+        if (rec && rec.feat) aiTrainLog.push(this._tourRecord(rec, 1, this._slotI));
         if (rec) {
           const step = this.strategy.step;
           const progress = this.kills > rec.kills0 || rec.flagTouched
@@ -6186,6 +6518,36 @@ class AICommander {
         if (promote) { threat = hqPt; threatCamp = ec; hqThreat = true; }
       }
     }
+    // SHOOT BACK: a turret that LANDED A HIT on us in the last 4s IS the threat — not the
+    // nearest gun, not the keep, and not the healing sponge next door. (Watched live: a
+    // lurcher ground away at a gunless tower under repair while the far corner's live
+    // gun killed it.) Match the remembered head position back to a live turret.
+    let hitBack = false;
+    const hb = this.unit && this.unit._hitByTurret;
+    if (hb && performance.now() - hb.t < 4000) {
+      for (const c of camps) {
+        if (c.team === this.team) continue;
+        for (const w of c.walls) {
+          const t = w.turret;
+          if (!t || t.dead || t.falling) continue;
+          t.group.updateWorldMatrix(true, false);   // matrices can be stale outside a render (headless sims)
+          t.head.getWorldPosition(_threatV);
+          if ((_threatV.x - hb.x) ** 2 + (_threatV.z - hb.z) ** 2 < 5 * 5) {
+            threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; threatCamp = c; hqThreat = false; hitBack = true;
+            break;
+          }
+        }
+        if (hitBack) break;
+      }
+    }
+    // Tower under ACTIVE repair → shoot the crew's JEEP instead (cancels the heal); the
+    // tower itself is a sponge that soaks fire while its neighbours shoot back. (Unless
+    // we're being SHOT — then the gun firing at us stays the target.)
+    if (threat && !hqThreat && !hitBack) {
+      const jp = enemyRepairJeepNear(this.team, threat.x, threat.z);
+      if (jp) { threat = jp; if (!this._healHuntOn) { this._healHuntOn = true; aiLog(this.team, `${this.cname} ${this.unit.type}: “That tower's got a repair crew — kill the jeep, kill the fix!”`); } }
+      else this._healHuntOn = false;
+    }
     // Is there a CLEAR shot at the nearest tower, and which way to peel around it?
     // `threatLOS` lets the brain hold + fire when it can see the tower, or swing wide
     // to the flank (rather than hammer the wall in front of it) when it can't. The
@@ -6269,6 +6631,13 @@ class AICommander {
       // while the flag stayed sealed). With nothing else left to shoot through, the keep
       // is a demolish target like any wall: square onto the hull and shell it open.
       if (!demolishTarget && hqThreat) demolishTarget = { x: threat.x, y: map.heightAt(threat.x, threat.z) + 2.5, z: threat.z };
+    }
+    // Same sponge rule as the turret threat above: chewing a wall a crew is actively
+    // re-raising is a losing race — put the rounds into the JEEP and cancel the heal.
+    if (demolishTarget) {
+      const jp = enemyRepairJeepNear(this.team, demolishTarget.x, demolishTarget.z);
+      if (jp) { demolishTarget = jp; if (!this._healHuntOn) { this._healHuntOn = true; aiLog(this.team, `${this.cname} ${this.unit.type}: “Crew's patching that wall — take out their jeep!”`); } }
+      else if (!threat) this._healHuntOn = false;
     }
     const fx = -Math.sin(h), fz = -Math.cos(h), lx = -Math.sin(h + 0.6), lz = -Math.cos(h + 0.6),
           rx = -Math.sin(h - 0.6), rz = -Math.cos(h - 0.6), P = 9;
@@ -6665,9 +7034,16 @@ function briefEvent(cmd, msg) {
   m = m.replace(/\s*\[[^\]]*\]\s*$/, '');                            // trailing [card]
   return m.trim();
 }
+let _aiLogPaintT = 0;
 function updateAiLog() {
   const el = document.getElementById('ai-log');
   if (aiLogMode === 'hidden') { if (el) el.style.display = 'none'; return; }
+  // 5Hz repaint — this rebuilds the whole panel's HTML, which at 60fps was one of the
+  // biggest CPU lines in the phone trace (~4% of all samples). Nothing here changes
+  // faster than a few times a second.
+  const nowMs = performance.now();
+  if (nowMs - _aiLogPaintT < 200) return;
+  _aiLogPaintT = nowMs;
   const box = ensureAiLogEl(); box.style.display = '';
   box.className = aiLogMode;
   document.getElementById('ai-log-title').textContent = aiLogMode === 'full' ? `AI LOG · ${AI_LOG_TAG} · PAUSED` : `AI LOG · ${AI_LOG_TAG}`;
@@ -6833,6 +7209,7 @@ function showExportOverlay(txt, copied) {
 function endMatch(winner) {
   if (matchOver) return;
   matchOver = true;
+  lastWinner = winner;   // team key, for harnesses (RR.matchWinner) — the celeb title only carries the colour name
   const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
   const won = winner === PLAYER_TEAM;
   matchWon = won;
@@ -7990,6 +8367,18 @@ window.RR = {
   // Tower repair crews (prototype)
   setRepairs: (v) => { repairsOn = !!v; return repairsOn; },   // A/B: enable/disable jeep repair crews
   setAiUpgrades: (v) => { aiUpgradesOn = !!v; return aiUpgradesOn; },   // A/B: AI spends surplus scrap on tower upgrades
+  // ── NN mission assigner (training pipeline) ──
+  setTurtleGuard: (v) => { turtleGuardOn = !!v; setTurtleGuard(!!v); return turtleGuardOn; },   // A/B: turtle v2 defender pack
+  setMissionTemp: (t) => { missionTemp = t == null ? null : Math.max(0, t); return missionTemp; },   // nn pick temperature (null = personality)
+  setHunterHarass: (v) => { setHunterHarass(!!v); return !!v; },   // A/B: hunter disruption tours
+  setMissionPolicy: (mode = 'deck', eps) => { missionPolicy = mode; if (eps != null) missionEps = eps; return { missionPolicy, missionEps }; },
+  setMissionPolicyTeam: (team, mode) => { if (mode == null) delete missionPolicyTeam[team]; else missionPolicyTeam[team] = mode; return { ...missionPolicyTeam }; },
+  loadMissionNN: (w) => { missionNN = w || null; return !!missionNN; },
+  trainLog: () => aiTrainLog,                     // graded tours: {team, arch, slot, veh, role, feat[], kills, fortDmg, flag, died, dur}
+  flushTours: () => flushTourLog(),               // grade tours still open (match end) before reading
+  clearTrainLog: () => { const n = aiTrainLog.length; aiTrainLog.length = 0; return n; },
+  missionFeatNames: () => MISSION_FEATS,
+  get matchWinner() { return lastWinner; },
   aiUpgradeStatus: () => { const per = {}; for (const c of camps) { let n = 0, m = 0; for (const w of c.walls) if (w.turret) { n += w.turret.upg || 0; m++; } (per[c.team] ??= []).push(n); } return { on: aiUpgradesOn, byCamp: per }; },   // total stars per camp
   orderRepair: (team = PLAYER_TEAM) => orderRepair(team),      // force a repair for a team (debug/testing)
   repairStatus: () => { const pool = (t) => ({ parked: motorPool[t].filter(s => s.state === 'parked').length, deployed: motorPool[t].filter(s => s.state === 'deployed').length, lost: motorPool[t].filter(s => s.state === 'lost').length }); return { on: repairsOn, jobs: repairJobs.map(j => ({ team: j.team, state: j.state, gun: j.gun, progress: +j.progress.toFixed(1), pathLen: j.path ? j.path.length : 0, jeepDead: j.jeepDest.dead, jx: +j.jx.toFixed(1), jz: +j.jz.toFixed(1), jy: +j.jeep.position.y.toFixed(2) })), jeeps: { red: pool('red'), blue: pool('blue') }, scrap: { ...teamScrap }, cd: { red: +(_repairCd.red || 0).toFixed(1), blue: +(_repairCd.blue || 0).toFixed(1) } }; },
@@ -8241,6 +8630,7 @@ window.RR = {
   get flagsCaptured() { return flagsCaptured; },
   tickTurrets: (dt = 0.1) => updateWallTurrets(dt),
   get islandBound() { return islandBound; },
+  get renderer() { return renderer; },   // debug: program cache / draw stats (renderer.info)
 };
 function damageTapAt(px, py) {
   const ndc = new THREE.Vector2(
@@ -8793,6 +9183,7 @@ function animate() {
       updateGadgets(dt);                     // mines (proximity detonate) + sensor pods (blink)
       updateRepairs(dt, camera);             // tower repair crews: jeep drives out, crew builds, tower heals
       updateRepairIcons();                   // player: clickable 🔧 over each damaged friendly tower
+      updatePadLights();                     // hold point-light count constant (shader-compile stutter fix)
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateTowerUpgrades();                         // treasure-box drop + partial rebuild on tower death/revive
       updateCrushables();                            // flatten a tent + blood mark when a tread rolls over it

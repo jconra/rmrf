@@ -287,6 +287,10 @@ class Defend extends Mission {
       const dh = (p.x - home.x) ** 2 + (p.z - home.z) ** 2, de = (p.x - en.x) ** 2 + (p.z - en.z) ** 2;
       if (dh < de) return p;                      // on OUR half → run it down; their half = bait, hold the lane
     }
+    // QUIET WATCH = MAINTENANCE TIME: nothing shooting us, nothing on our half → top the
+    // hull at home before resuming the lane (guards fight at whatever they carry in; a
+    // fresh guard wins the duels a worn one loses). Any contact above pre-empts this.
+    if (TURTLE_GUARD && cmd.unit && cmd._home && cmd.unit.hp < cmd.unit.maxHp * 0.85) return cmd._home;
     return cmd.patrolSpot();
   }
   shoot(cmd) { return false; }
@@ -298,12 +302,35 @@ class Defend extends Mission {
       const home = cmd.homeBasePos(), en = cmd.enemyBasePos();
       if ((p.x - home.x) ** 2 + (p.z - home.z) ** 2 < (p.x - en.x) ** 2 + (p.z - en.z) ** 2) return 'running down a contact on our ground';
     }
+    if (TURTLE_GUARD && cmd.unit && cmd._home && cmd.unit.hp < cmd.unit.maxHp * 0.85) return 'patching up at home between contacts';
     return 'patrolling the lane (base↔mid-field)';
   }
   cry(cmd) { return pickCry(cmd, [
     'Pull back and hold the line — protect the flag!',
     'They’re pushing hard — dig in under the towers and hold!',
     'Everybody home — turtle up and guard our flag!',
+  ]); }
+}
+
+// HARASS — the hunter's disruption tour, run when there's no live contact to hunt:
+// rotate cheap-to-hit, expensive-to-ignore stops on THEIR half — the enemy-half shield
+// generator above all (kill it and their lurchers fight the rest of the match without
+// armour), a corner tower to snipe, their salvage to steal. Fire briefly, then FADE to
+// the farthest next stop before the response lands: every poke writes a false alarm
+// into their radio and drags guards to where we WERE, opening the field for the rest
+// of the army. Never commits — this is disruption, not a siege (harassSpot rotates on
+// an engagement budget: ~9s on station or real return damage).
+class Harass extends Mission {
+  get key() { return 'harass'; }
+  wantVehicle(cmd) { return this.doc.role('attack'); }
+  objective(cmd) { return cmd.harassSpot(); }
+  shoot(cmd) { return true; }                   // the structure at the stop IS the point
+  arriveDist(cmd) { return 22; }                // stand off and snipe, don't park on it
+  label(cmd) { return cmd._harassTgt ? `harassing: ${cmd._harassTgt.kind}` : 'harassing their backfield'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Poke and fade — keep ’em jumping at shadows!',
+    'Hit their gear and get out — don’t let them pin you!',
+    'Make some noise out there, then vanish!',
   ]); }
 }
 
@@ -347,7 +374,7 @@ class Scavenge extends Mission {
   ]); }
 }
 
-const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge };
+const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 
 // ---- DOCTRINE — a persona running one mission at a time ------------------------------
@@ -397,6 +424,14 @@ export function setHqFinisher(v) { HQ_FINISHER = !!v; return HQ_FINISHER; }
 // staying out of the defender's reach (walls block a chasing ground unit; the flyer lifts over).
 // Runtime-toggleable so a single build can A/B it on deterministic (rngseed) paired matches.
 let ROGUE_REAR_SIEGE = true;
+// TURTLE GUARD v2 (A/B knob): per-slot kill gate + shield-generator guarding + quiet-time
+// maintenance. Off = the legacy turtle (team-kill siege flip, plain lane patrol).
+let TURTLE_GUARD = true;
+export function setTurtleGuard(v) { TURTLE_GUARD = !!v; }
+// HUNTER HARASS (A/B knob): with no live contact to hunt, the hunter runs disruption
+// tours on the enemy half instead of a generic attack push. Off = legacy hunter.
+let HUNTER_HARASS = true;
+export function setHunterHarass(v) { HUNTER_HARASS = !!v; }
 export function setRogueRearSiege(v) { ROGUE_REAR_SIEGE = !!v; }
 
 // A back-door runner only sneaks around the rear when the REAR towers are dead; if the back is
@@ -587,6 +622,17 @@ class Hunter extends Doctrine {
     // Recon UNTIL we've found them OR the field is mostly mapped — the fraction backstop stops a
     // Hunter idling in 'scout' with its Valkyrie parked once there's nothing left to reveal.
     if (!cmd.knowsEnemy() && cmd.explore.fraction() < 0.8) return 'scout';
+    // HUNT what roams; HARASS what hides. A fresh contact out in the FIELD is prey —
+    // chase it. No contact at all, or a contact hugging their own base (dug in behind
+    // the guns — chasing it is a siege we didn't sign up for), means the open field is
+    // ours: go make their half loud instead. Every poke drags defenders to where we
+    // WERE, and flushes the reveals the hunt feeds on.
+    if (HUNTER_HARASS) {
+      const p = cmd.lastEnemyPos();
+      if (!p) return 'harass';
+      const en = cmd.enemyBasePos();
+      if ((p.x - en.x) ** 2 + (p.z - en.z) ** 2 < 70 * 70) return 'harass';
+    }
     return 'attack';
   }
 }
@@ -598,7 +644,17 @@ class Turtle extends Doctrine {
   get roles() { return { scout: 'lurcher', attack: 'lurcher', siege: 'valkyrie', defend: 'lurcher', capture: 'firebrat' }; }
   choose(cmd) {
     if (cmd.flagGrabbable()) return 'capture';
-    if (cmd.kills >= 2 || cmd.enemyEliminated()) return 'siege';
+    // The "proved ourselves -> push" gate counts THIS GUARD's kills (cmd._kills, per slot),
+    // not the team total — under multi-unit the team's 2nd kill lands inside the first
+    // minute, which flipped every turtle to siege almost immediately (the dataset's
+    // "turtles" were mostly siegers in a defense-spec hull). And guards WIN their duels
+    // (tower cover), so personal kills alone still flipped them fast — the push also
+    // requires the enemy fleet to actually be beaten down (press from strength; a guard
+    // holding an even fight keeps holding).
+    const proved = TURTLE_GUARD
+      ? (cmd._kills || 0) >= 2 && cmd.enemyWeaker && cmd.enemyWeaker()
+      : cmd.kills >= 2;
+    if (proved || cmd.enemyEliminated()) return 'siege';
     return 'defend';
   }
 }

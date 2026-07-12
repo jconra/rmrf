@@ -1,0 +1,44 @@
+DOCTRINE V2 (defenders + hunter) — verdict (2026-07-11)
+========================================================
+
+Two doctrine packs from Jacob's playbook, each behind an A/B knob, each gated on a
+30-paired-seed both-deck tournament (units=3, full map, 1500s cap).
+
+TURTLE V2 (RR.setTurtleGuard)
+  - Siege flip counts THIS GUARD's kills (per-slot), not the team total (which flipped
+    every turtle to siege inside the first minute of 3v3), AND requires the enemy fleet
+    beaten down by 2+ (press from strength; an even fight keeps holding).
+  - The nearest KNOWN shield generator on OUR half joins the patrol; the guard DWELLS on
+    the spawner 25s per lap (tops its own armour, denies theirs). Bounded on purpose —
+    a gen-camper is exploitable by far-side siege (Jacob's own counterplay), and any
+    homeAttack / our-half contact pre-empts the dwell instantly.
+  - Quiet watch = maintenance: no contact + hull under 85% -> patch up at home, resume.
+  GATE: v2 28/29 resolved @478s vs legacy 26/29 @393s -> +2 net resolutions, +85s
+  (longer wars = defense working). Verdict: KEEP (on by default).
+
+HUNTER HARASS (RR.setHunterHarass)
+  - New 'harass' mission: rotate cheap-to-hit, expensive-to-ignore stops on THEIR half —
+    the enemy-half shield generator (DESTROY it: their lurchers fight unshielded after),
+    corner towers to snipe, their salvage to steal. ~9s engagement budget or real return
+    damage -> FADE to the farthest next stop (spread the alarms; every poke drags guards
+    to where we WERE).
+  - Trigger: hunt what roams; harass when blind or when the only contact hugs their base.
+  - Jeep-hunting DEFERRED: in current 3v3 maps repair jeeps never leave the compound
+    (hunting them = suiciding into the flag HQ). Needs the field-tower scatter first.
+  GATE: on 30/30 resolved @512s vs off 28/30 @515s -> +2 net resolutions, same pace.
+  Verdict: KEEP (on by default).
+
+COMBAT TARGETING FIXES (same session, Jacob-reported, no knob — bug-class):
+  - SHOOT BACK: a turret that lands a hit is THE threat for 4s (damageVehicle stamps
+    the gun's head pos; view threat overrides nearest/keep/sponge). Fixes a lurcher
+    grinding a gunless healing tower while the far corner's gun killed it.
+  - KILL THE HEALER: shelling a structure an enemy crew is actively repairing swaps the
+    aim to the JEEP (job cancels on jeep death — the designed counterplay). Suppressed
+    while under fire (the gun shooting you stays the target).
+  Verified by staged scenario (threat tracked the shooter 16/16 samples, gun died).
+  CAVEAT: these landed mid-harass-gate; last seed-pairs ran newer combat rules (pairs
+  are adjacent, so the off/on comparison inside each pair stays sound).
+
+NEXT: overnight v2 recollection (150 matches, explore policy, both doctrines on) with
+the v2 scorecard fields (homeKills/carrierKills/mineKills/fortLost/flagLost/intelGain),
+retrain, re-gate the mission net vs the deck.

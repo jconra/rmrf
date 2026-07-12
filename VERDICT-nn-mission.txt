@@ -1,0 +1,75 @@
+NN MISSION ASSIGNER v1 — verdict (2026-07-11)
+==============================================
+
+FEATURE: a learned mission assigner replacing the static ROLE_DECK table. A 21->16->4
+MLP (404 weights, pure-JS forward pass) reads a battlefield snapshot each time a SUPPORT
+slot redeploys and picks the role card that tour fields (warrior/turtle/hunter/rogue).
+Slot 0 always keeps the commander's archetype. Knob: RR.setMissionPolicy /
+RR.setMissionPolicyTeam ('deck' default = zero change, 'explore', 'nn').
+
+TRAINING: 150 explore-policy matches (eps 0.35), 7,189 report-card-graded tours.
+Reward = 0.35*kills(cap4) + 0.9*fortDmg/600(cap) + 1.2*flagTouch + 0.4*matchWin
++ 0.25*survived. Val MSE 0.497 vs 0.531 state-blind per-role baseline (6.5% better).
+
+WHAT IT LEARNED (feature sweeps, all discovered — none hand-written):
+  - enemy fort healthy -> warrior; enemy fort under ~half -> ROGUE (sneak the finish)
+  - full firebrat roster -> rogue (runners to spare)
+  - teammates all warriors -> diversify
+  - it nearly abandons turtle (6%) and hunter (4%) support picks
+
+A/B TOURNAMENT (seeds 201-230, 4 arms, 120 matches, 0 errors)
+  HEAD-TO-HEAD (nn vs deck, both orientations, 60):
+    nn 32 wins - deck 26 - 2 unresolved  (55% of decided; side-balanced 15+17)
+    seed pairs: nn swept 8, deck swept 6, split 16
+  RESOLUTION (30 each): both-nn 29/30 @ 434s  vs  both-deck 29/30 @ 402s -> NEUTRAL
+
+READ: a first-generation net, trained on one evening of self-play, plays EVEN-TO-AHEAD
+of the hand-tuned table while ignoring defenders — and does not get flag-punished for
+it. 32-26 is a lean, not significance. The defender finding is partly a REWARD BIAS:
+kills/fortDmg/flag are all offensive stats; a guard that deters an attack grades as a
+total failure. Defense's value is counterfactual and per-tour grading can't see it.
+
+VERDICT: pipeline PROVEN, net stays OPT-IN ('deck' remains default). Do not ship 'nn'
+as default off a 55% lean from a scorekeeper that can't see defense.
+
+V2 PLAN:
+  1. Defensive reward credit: own-fort HP preserved during a guard tour, flag-still-home
+     retention, enemy tours that died inside our perimeter on its watch.
+  2. Recollect (explore) under the new reward, retrain, re-gate. If the net starts
+     dealing guards when guards pay, the scorekeeper was the disease; if it still
+     ignores them AND keeps winning, the meta genuinely rewards tempo (game-design
+     signal, not an AI bug).
+  3. Optional: one-hot the commander archetype into the features (known confounder),
+     and a second generation of data collected under the v1 net's policy.
+
+ARTIFACTS: dataset ~/pw/nn-tours.jsonl (7,189 tours), trainer ~/pw/nn-train.cjs,
+weights ~/pw/nn-mission-weights.json, A/B ~/pw/nn-ab{-run.sh,.cjs} ->
+nn-ab-results.jsonl. Lab blog post 12 explains the system; part 2 = these results.
+
+
+RE-GATE, V2 WEIGHTS (2026-07-12, temp sampling active): HEAD-TO-HEAD nn 24 - deck 34 -
+2 unresolved; pairs deck swept 10 / nn 4 / split 16. Resolution fine (both-nn 28/30 @463s).
+The defense-generous scorecard over-rotated: 62% turtle LOSES to the hand table.
+
+V3 (same data, fortKeep retired — event-based defense credit only): STILL 59% turtle.
+The remaining pull isn't a bug: guards genuinely bank the best per-tour numbers (tower-
+covered kills — the designer's own kill-farm, now visible), but flag capture is the only
+win and a PER-TOUR scorecard structurally can't price "somebody has to attack". The net
+did learn diversification (teammates mostly turtle -> deal hunter/warrior), so it
+self-balances in play — but not enough to beat the deck. v3 NOT gated (policy too close
+to v2 to expect a different verdict; box hours saved).
+
+SCOREBOARD ACROSS THE ARC:
+  v1 (offense-only reward):    nn 32 - 26 deck   policy: 48w/43r/6t/4h
+  v2 (defense-generous):       nn 24 - 34 deck   policy: 62t/15h/15r/8w
+  the truth: in between, and the hand table is still champion.
+
+WHAT THE ARC ALREADY PAID FOR: the net-as-diagnostic loop produced turtle v2 + hunter
+harass (+2 resolutions each, SHIPPED) and exposed the mine-kill credit hole. The deck
+the net keeps losing to is a BETTER deck than when this started.
+
+NEXT REAL STEP (the end boss, sized for its own session): train against MATCH OUTCOME
+instead of per-tour greed — population self-play / evolutionary weight search on win
+rate over the sim harness (generations). Per-tour Q-regression has hit its structural
+ceiling. Alternative cheap option: ship 'nn' v1 as an opt-in VARIETY mode (it plays
+even with the deck and fields different armies).
