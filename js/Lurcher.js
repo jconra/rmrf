@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { applyCamoUVs, getTeamColor, makeCamoMaterial } from './CamoTexture.js';
 import { makeMuzzleFlash, flashMuzzle, updateMuzzle, decayRecoil } from './GunFX.js';
+import { mergeStatic } from './MergeParts.js?v=1';
 
 export class Lurcher {
   constructor() {
@@ -31,6 +32,16 @@ export class Lurcher {
 
   _build() {
     this._buildModel();
+    // DRAW-CALL MERGE: ~70 little meshes → ~30. Everything rigid relative to its frame
+    // bakes into one mesh per material: each foot pad's 5 claws → 1, the turret's 10
+    // parts → per-material meshes UNDER turretGroup (they ride its yaw/recoil), and the
+    // hull statics (body, neck, hex rings, hip spheres) → per-material meshes on the
+    // group. The IK legs (thigh/shin/knee, re-posed every frame) and the muzzle flashes
+    // (opacity-animated) stay untouched.
+    const dyn = [this.turretGroup];
+    for (const l of this.legs) { mergeStatic(l.footPad); dyn.push(l.thigh, l.shin, l.kneeSphere, l.footPad); }
+    mergeStatic(this.turretGroup, this._muzzles);
+    mergeStatic(this.group, dyn);
   }
 
   // ── IK helpers ────────────────────────────────────────────────────────────────

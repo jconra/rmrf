@@ -8,7 +8,7 @@ import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
-import { Camp, Wall } from './Walls.js?v=68';
+import { Camp, Wall, resetWallInstances, wallInstancesGroup } from './Walls.js?v=68';
 import { SoldierCorps } from './Soldiers.js?v=4';
 import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=8';
 import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=4';
@@ -465,6 +465,61 @@ const PERF = QS.has('perf');
 const _pfAcc = {};                                     // section → ms accumulated over the window
 let _pfFrames = 0, _pfWork = 0, _planCount = 0, _pfShownAt = 0;
 function _pfT(k, fn) { if (!PERF) return fn(); const t = performance.now(); fn(); _pfAcc[k] = (_pfAcc[k] || 0) + (performance.now() - t); }
+// ── DRAW-CALL BREAKDOWN (?perf) ───────────────────────────────────────────────
+// `renderer.info.render.calls` is the TRUE per-frame total (it includes the shadow
+// pass). The per-category lines are an ESTIMATE of the main pass: visible, frustum-
+// passing mesh×material units under each category's scene roots — one Mesh with 3
+// materials = 3 draws; an InstancedMesh = 1 whatever its count (that's its point).
+// NOTE the game has NO shadow-map pass: shadows are BlobShadow decals (instanced), and
+// although renderer.shadowMap.enabled is on, no LIGHT casts — so no shadow render runs
+// and the meshes' castShadow flags are inert. `shadow off` in the readout confirms it;
+// if a casting light is ever added, the line flips to `shadow~ N` (casters in view, a
+// ballpark of the extra pass). Recomputed at 1Hz; the walk is a fraction of a ms.
+const _dcFrus = new THREE.Frustum(), _dcMat4 = new THREE.Matrix4();
+let _dcAt = 0, _dcLines = '';
+function _dcUnits(root, seen, tally) {
+  const walk = (o) => {
+    if (!o.visible) return;
+    if (o.isMesh && !seen.has(o)) {
+      seen.add(o);
+      if (!o.frustumCulled || _dcFrus.intersectsObject(o)) {
+        tally.n += Array.isArray(o.material) ? o.material.length : 1;
+        if (o.castShadow) tally.sh++;
+      }
+    }
+    for (const c of o.children) walk(c);
+  };
+  if (root) walk(root);
+}
+function _dcBreakdown() {
+  _dcMat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _dcFrus.setFromProjectionMatrix(_dcMat4);
+  const seen = new Set();
+  const cats = [
+    ['terrain', [map.group]],
+    ['foliage', [foliage && foliage.group]],
+    ['bases', [...camps.map(c => c.group), ...placedWalls.map(w => w.group), ...placedProps, ...elevators.map(e => e.group), wallInstancesGroup()]],
+    ['vehicles', [...combatants, ...vehicles].map(v => v.holder)],   // combatants = live field units; vehicles = ambient
+  ];
+  let shadow = 0;
+  const rows = [];
+  for (const [name, roots] of cats) {
+    const t = { n: 0, sh: 0 };
+    for (const r of roots) _dcUnits(r, seen, t);
+    shadow += t.sh; rows.push([name, t.n]);
+  }
+  // everything not under a tracked root (projectiles, soldiers, gadgets, flags, fx —
+  // they add straight to the scene) lands in 'other'.
+  const t = { n: 0, sh: 0 }; _dcUnits(scene, seen, t);
+  shadow += t.sh; rows.push(['other', t.n]);
+  // A shadow pass only exists if a LIGHT casts (mesh flags alone do nothing).
+  let shadowsLive = false;
+  if (renderer.shadowMap.enabled) scene.traverse(o => { if (o.isLight && o.castShadow) shadowsLive = true; });
+  const gpu = renderer.info.render.calls;
+  _dcLines = `draws ${gpu} (frame)\n`
+    + rows.filter(([, n]) => n).map(([k, n]) => ` ${k.padEnd(9)}${n}`).join('\n')
+    + (shadowsLive ? `\n shadow~  ${shadow}` : '\n shadow   off (blob decals)');
+}
 function _pfRender() {
   const now = performance.now(); const win = now - _pfShownAt;
   if (win < 300 || !_pfFrames) return;
@@ -473,7 +528,9 @@ function _pfRender() {
   let el = document.getElementById('perfhud');
   if (!el) { el = document.createElement('div'); el.id = 'perfhud'; el.style.cssText = 'position:fixed;top:46px;right:8px;z-index:99;font:11px/1.35 monospace;color:#7fffb8;background:rgba(0,0,0,0.72);padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none'; document.body.appendChild(el); }
   const secs = Object.entries(_pfAcc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k.padEnd(11)}${(v / _pfFrames).toFixed(1)}ms`);
-  el.textContent = `fps ${fps.toFixed(0)}  work ${work.toFixed(1)}ms\nreplans/s ${rep.toFixed(0)}  units ${combatants.length}  fx ${fx.length}\nscene ${scene.children.length}\n` + secs.join('\n');
+  if (now - _dcAt > 1000) { _dcAt = now; try { _dcBreakdown(); } catch (e) { _dcLines = ''; } }
+  el.textContent = `fps ${fps.toFixed(0)}  work ${work.toFixed(1)}ms\nreplans/s ${rep.toFixed(0)}  units ${combatants.length}  fx ${fx.length}\nscene ${scene.children.length}\n` + secs.join('\n')
+    + (_dcLines ? '\n' + _dcLines : '');
   for (const k in _pfAcc) _pfAcc[k] = 0;
   _pfFrames = 0; _pfWork = 0; _planCount = 0;
 }
@@ -869,6 +926,7 @@ function placeCamps() {
   configBases = false;   // procedural map → full procgen forts + roads
   for (const w of placedWalls) scene.remove(w.group);
   placedWalls = [];
+  resetWallInstances();   // hand every instanced-segment slot back for the new layout
   for (const c of camps) scene.remove(c.group);
   for (const e of elevators) { if (e._snd) { e._snd.stop(); e._snd = null; } scene.remove(e.group); if (e.rider) scene.remove(e.rider.group); e.dispose(); }
   camps = [];
@@ -1024,6 +1082,7 @@ function placeCampsFromConfig(assets) {
   for (const m of bloodMarks) scene.remove(m); bloodMarks = [];
   crushables = []; _crushBuilt = false;
   camps = []; elevators = []; placedWalls = []; placedProps = []; destructibles = new DestructibleManager();
+  resetWallInstances();   // hand every instanced-segment slot back for the new layout
 
   const items = [];   // { cell, site, size, role, team }  (parallel to camps[])
   const pads = [];
@@ -2867,7 +2926,11 @@ function recolorGroup(group, hex, accent) {
 function recolorPlaced(team, hex) {
   const accent = new THREE.Color(hex);
   for (const g of placedProps) if (g.userData.team === team) recolorGroup(g, hex, accent);
-  for (const w of placedWalls) if (w._team === team && w.group) recolorGroup(w.group, hex, accent);
+  for (const w of placedWalls) if (w._team === team && w.group) {
+    recolorGroup(w.group, hex, accent);
+    if (w.accent) w.accent.set(hex);
+    w._syncAccentInstance && w._syncAccentInstance();   // instanced segments tint via instanceColor
+  }
 }
 // Nearest rival flag to `team`'s base (its steal target).
 function enemyFlagOf(team) {
@@ -4919,6 +4982,29 @@ function nnPickRole(feat, temp = 0) {
   for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) return MISSION_ROLES[i]; }
   return MISSION_ROLES[best];
 }
+// ── L2 MISSION NET — the doctrine-level head (1v1's learned layer) ────────────────
+// Where the L1 net assigns support-slot ROLES (useless in 1v1 — no support slots), L2
+// picks the MISSION itself in place of the persona playbook's choose(): consulted by
+// Doctrine.tick AFTER the urgent/universal rungs (flag emergencies, preservation, timers
+// all stay hand-authored) and still subject to dwell + the report-card mission bans.
+// Same 26 features, same tiny-MLP shape — only the output head differs (6 missions).
+const L2_MISSIONS = ['attack', 'siege', 'capture', 'defend', 'scout', 'harass'];
+let missionL2 = null;   // {W1,b1,W2,b2} 26→H→6, loaded via RR.loadMissionL2
+function nnPickMission(cmd) {
+  const feat = cmd._missionFeatures();
+  const { W1, b1, W2, b2 } = missionL2;
+  const h = W1.map((row, j) => Math.max(0, row.reduce((a, w, i) => a + w * feat[i], b1[j])));
+  const q = W2.map((row, j) => row.reduce((a, w, i) => a + w * h[i], b2[j]));
+  // Legality mask: CAPTURE without a grabbable flag is a wasted runner — the decks gate
+  // it, so the net inherits the same rule rather than having to relearn it.
+  let best = -1;
+  for (let i = 0; i < q.length; i++) {
+    if (L2_MISSIONS[i] === 'capture' && !cmd.flagGrabbable()) continue;
+    if (best < 0 || q[i] > q[best]) best = i;
+  }
+  return best >= 0 ? L2_MISSIONS[best] : null;
+}
+
 // How erratic this commander's dealing is — a PERSONALITY trait (wanderlust: the same
 // appetite that wanders the map wanders the deck; rogues add a twist), overridable for
 // A/B via RR.setMissionTemp.
@@ -5539,6 +5625,13 @@ class AICommander {
     const f = this.flag();
     if (f && !f.carried && Math.hypot(f.group.position.x - f.home.x, f.group.position.z - f.home.z) > 60) return true;
     return aiKeepBreach ? this.turretsLive() <= FLAG_GRAB_TURRETS : this.fortDown();
+  }
+  // L2 mission pick: when this team's policy is 'l2' and weights are loaded, the net
+  // stands in for the persona playbook's choose() (see Doctrine.tick). Null = deck plays.
+  l2Pick() {
+    if (!missionL2) return null;
+    if ((missionPolicyTeam[this.team] || missionPolicy) !== 'l2') return null;
+    return nnPickMission(this);
   }
   // The enemy flag is sealed inside its HQ until that building is rubble. The
   // runner can't grab it before then, so the heavy must finish the HQ first —
@@ -8669,6 +8762,7 @@ window.RR = {
   setMissionPolicy: (mode = 'deck', eps) => { missionPolicy = mode; if (eps != null) missionEps = eps; return { missionPolicy, missionEps }; },
   setMissionPolicyTeam: (team, mode) => { if (mode == null) delete missionPolicyTeam[team]; else missionPolicyTeam[team] = mode; return { ...missionPolicyTeam }; },
   loadMissionNN: (w) => { missionNN = w || null; return !!missionNN; },
+  loadMissionL2: (w) => { missionL2 = w || null; return !!missionL2; },   // L2 doctrine head; enable via setMissionPolicy('l2') / setMissionPolicyTeam(team,'l2')
   trainLog: () => aiTrainLog,                     // graded tours: {team, arch, slot, veh, role, feat[], kills, fortDmg, flag, died, dur}
   flushTours: () => flushTourLog(),               // grade tours still open (match end) before reading
   clearTrainLog: () => { const n = aiTrainLog.length; aiTrainLog.length = 0; return n; },

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { applyCamoUVs, applyFacetedCamoUVs, getTeamColor, makeCamoMaterial } from './CamoTexture.js';
 import { makeMuzzleFlash, flashMuzzle, updateMuzzle, decayRecoil } from './GunFX.js';
+import { mergeStatic } from './MergeParts.js?v=1';
 
 export class Valkyrie {
   constructor() {
@@ -17,6 +18,16 @@ export class Valkyrie {
   _build() {
     // The Valkyrie is the recon Samson — the signed-off keeper.
     this._buildSamson({ detailPkg: 'recon' });
+    // DRAW-CALL MERGE (~158 meshes → a couple dozen): each rigid frame bakes to one mesh
+    // per material — blades within each ROTOR (they only spin as a unit), nacelle bodies
+    // within each NACELLE (they tilt as a unit, skipping the child rotor), and the whole
+    // hull + arms + fins on the group (skipping the tilting nacelles). Muzzle flashes
+    // stay separate (opacity-animated).
+    mergeStatic(this.leftRotorGroup);
+    mergeStatic(this.rightRotorGroup);
+    mergeStatic(this.leftNacelleGroup, [this.leftRotorGroup, ...this._muzzles]);
+    mergeStatic(this.rightNacelleGroup, [this.rightRotorGroup, ...this._muzzles]);
+    mergeStatic(this.group, [this.leftNacelleGroup, this.rightNacelleGroup, ...this._muzzles]);
   }
 
   // ── Shared materials ──────────────────────────────────────────────────────────

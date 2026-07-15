@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { applyCamoUVs, getTeamColor, makeCamoMaterial } from './CamoTexture.js';
 import { makeMuzzleFlash, flashMuzzle, updateMuzzle, decayRecoil } from './GunFX.js';
+import { mergeStatic } from './MergeParts.js?v=1';
 
 export class Firebrat {
   constructor() {
@@ -17,6 +18,10 @@ export class Firebrat {
 
   _build() {
     this._buildModel();
+    // DRAW-CALL MERGE: bake the rigid hull down to one mesh per material. The vectoring
+    // thruster pods stay whole (they pivot, and their flames/glow animate inside), as do
+    // the muzzle flashes (opacity-animated).
+    mergeStatic(this.group, [...this.thrusters, ...this._muzzles]);
   }
 
   // ── Shared helpers ────────────────────────────────────────────────────────────

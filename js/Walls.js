@@ -42,6 +42,95 @@ function box(w, h, d, mat) {
   return m;
 }
 
+// ── WALL CLONES (instancing) ───────────────────────────────────────────────────
+// Every straight NS/EW wall segment in the world is geometrically IDENTICAL — the same
+// 4 tapered courses + parapet lip, with NS just the EW box yawed 90°. So ALL of them
+// render as FIVE InstancedMeshes total (one per course) instead of five meshes per
+// segment: the trees' trick applied to fortifications. Per-instance state: transform +
+// the team colour on the accent course (instanceColor). The crumble keeps full fidelity
+// via PULL-OUT: a course that sheds materializes as a real tumbling mesh while its
+// instance zeroes; a repair crew re-seating it (or a fort growing out of the ground)
+// does the reverse. Hit detection / raycasts / A* never notice — each Wall keeps an
+// INVISIBLE proxy box (bounds and raycasts read geometry, not visibility). Gates and
+// corner towers keep the classic build (doors slide, towers carry guns).
+const WALL_CLONES = true;   // kill-switch back to the classic per-segment meshes
+const WALL_CAP = 512;       // segments per match (rings + player forts + designed maps); over-cap falls back to classic
+const _zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+const _iV = new THREE.Vector3(), _iQ = new THREE.Quaternion(), _iM = new THREE.Matrix4();
+const _iOne = new THREE.Vector3(1, 1, 1), _iUp = new THREE.Vector3(0, 1, 0), _iW = new THREE.Vector3();
+
+// The course stack, EW orientation — mirrors _buildClassic's math exactly. Geometry is
+// CENTERED (y rides in the instance matrix) so shed debris can reuse the same geometry
+// and tumble about its own centre, like the classic meshes always did.
+function wallCourseDims(cell) {
+  const nLayers = 4, height = cell * 0.78, layerH = height / nLayers;
+  const baseThick = cell * 0.30, taper = 0.30;
+  const out = [];
+  for (let i = 0; i < nLayers; i++) {
+    const t = i / (nLayers - 1), shrink = 1 - t * taper;
+    out.push({ w: cell, h: layerH, d: baseThick * shrink, y: 0.1 + i * layerH + layerH / 2, accent: i === nLayers - 1 });
+  }
+  const lipH = layerH * 0.35;   // parapet lip, flush with the coloured top course
+  out.push({ w: cell, h: lipH, d: baseThick * (1 - taper), y: 0.1 + height + lipH / 2, accent: false });
+  return out;
+}
+
+class WallInstances {
+  constructor(cell) {
+    this.dims = wallCourseDims(cell);
+    this.group = new THREE.Group();
+    this.free = [];
+    for (let i = WALL_CAP - 1; i >= 0; i--) this.free.push(i);
+    const white = new THREE.Color('#ffffff');
+    this.meshes = this.dims.map(d => {
+      const geo = new THREE.BoxGeometry(d.w, d.h, d.d);
+      const mat = d.accent
+        ? new THREE.MeshStandardMaterial({ color: '#ffffff', map: ACCENT_TEX, roughness: 0.6, metalness: 0.2, flatShading: true })
+        : STONE;
+      const im = new THREE.InstancedMesh(geo, mat, WALL_CAP);
+      im.frustumCulled = false;   // segments span the whole island — culling per-instance isn't worth the bounds churn
+      for (let i = 0; i < WALL_CAP; i++) im.setMatrixAt(i, _zeroM);
+      if (d.accent) { for (let i = 0; i < WALL_CAP; i++) im.setColorAt(i, white); im.instanceColor.needsUpdate = true; }
+      im.instanceMatrix.needsUpdate = true;
+      this.group.add(im);
+      return im;
+    });
+  }
+  alloc() { return this.free.length ? this.free.pop() : -1; }
+  // Show/hide one course of one segment: compose its matrix (position + yaw, course
+  // height baked in) or zero it out.
+  setCourse(slot, ix, on, x, y, z, yaw) {
+    const im = this.meshes[ix];
+    if (!on) im.setMatrixAt(slot, _zeroM);
+    else {
+      _iQ.setFromAxisAngle(_iUp, yaw);
+      _iM.compose(_iV.set(x, y + this.dims[ix].y, z), _iQ, _iOne);
+      im.setMatrixAt(slot, _iM);
+    }
+    im.instanceMatrix.needsUpdate = true;
+  }
+  setAccent(slot, color) {
+    for (let ix = 0; ix < this.dims.length; ix++) if (this.dims[ix].accent) {
+      this.meshes[ix].setColorAt(slot, color);
+      this.meshes[ix].instanceColor.needsUpdate = true;
+    }
+  }
+}
+let _wi = null;   // lazy singleton; attached to the scene beside the first placed wall
+
+// Match teardown: zero every slot and hand the capacity back (walls don't free
+// individually — a destroyed wall keeps its slot so a repair crew can rebuild it).
+export function resetWallInstances() {
+  if (!_wi) return;
+  for (const im of _wi.meshes) {
+    for (let i = 0; i < WALL_CAP; i++) im.setMatrixAt(i, _zeroM);
+    im.instanceMatrix.needsUpdate = true;
+  }
+  _wi.free.length = 0;
+  for (let i = WALL_CAP - 1; i >= 0; i--) _wi.free.push(i);
+}
+export function wallInstancesGroup() { return _wi ? _wi.group : null; }   // ?perf draw breakdown ('bases')
+
 export class Wall {
   // type: 'NS' | 'EW' | 'CORNER'. world: ground point. cell: build-cell size.
   constructor({ type, world, cell, team, accent, manager, span = 1 }) {
@@ -88,7 +177,70 @@ export class Wall {
     this.group.add(this.bodyGroup);
     if (this.type === 'GATE_EW' || this.type === 'GATE_NS') return this._buildGate();
     if (this.type === 'CORNER') return this._buildCornerTower();
+    if (WALL_CLONES && this._buildInstanced()) return;   // falls through to classic when over capacity
+    this._buildClassic();
+  }
 
+  // ── Instanced straight segment: 5 shared InstancedMesh courses + an invisible proxy ──
+  _buildInstanced() {
+    if (!_wi) _wi = new WallInstances(this.cell);
+    const slot = _wi.alloc();
+    if (slot < 0) return false;
+    this._slot = slot;
+    this._yaw = this.type === 'NS' ? Math.PI / 2 : 0;
+    // Invisible proxy: gives the Destructible its bounds and the raycaster something to
+    // hit (both read geometry — the visible flag only gates rendering). Own throwaway
+    // material so Destructible's wear pass can clone it without touching shared mats.
+    const dims = _wi.dims;
+    const topH = 0.1 + this.cell * 0.78 + dims[dims.length - 1].h;
+    const pw = this.type === 'EW' ? this.cell : this.cell * 0.30;
+    const pd = this.type === 'EW' ? this.cell * 0.30 : this.cell;
+    const proxy = new THREE.Mesh(new THREE.BoxGeometry(pw, topH, pd), new THREE.MeshBasicMaterial());
+    proxy.visible = false;
+    proxy.position.y = topH / 2;
+    this.bodyGroup.add(proxy);
+    // Virtual course entries: mesh stays null until the course SHEDS (then it
+    // materializes as real tumbling debris and the instance course goes dark).
+    for (let i = 0; i < dims.length; i++) this.layers.push({ ...this._layerEntry(null), ix: i, hidden: false });
+    // Instance placement needs the WORLD transform, which doesn't exist until the caller
+    // adds our group to the scene — one tick later is soon enough (update() also retries).
+    queueMicrotask(() => this._placeInstances());
+    return true;
+  }
+  _placeInstances() {
+    if (this._slot == null || this._placed || !this.group.parent) return;
+    if (!_wi.group.parent) { let r = this.group; while (r.parent) r = r.parent; r.add(_wi.group); }
+    this.bodyGroup.updateWorldMatrix(true, false);
+    this.bodyGroup.getWorldPosition(_iW);
+    this._wx = _iW.x; this._wy = _iW.y; this._wz = _iW.z;
+    this._placed = true;
+    for (const L of this.layers) this._setCourseVisible(L, !(L.falling || L.hidden));
+    this._syncAccentInstance();
+  }
+  _setCourseVisible(L, on) {
+    L.hidden = !on;
+    if (this._placed) _wi.setCourse(this._slot, L.ix, on, this._wx, this._wy, this._wz, this._yaw);
+  }
+  _syncAccentInstance() {
+    if (this._slot != null && this._placed) _wi.setAccent(this._slot, this.accent);
+  }
+  // A course leaves the instanced stack as REAL debris (same geometry, tumbles from the
+  // exact spot it stood) — and rejoins it when a repair crew re-seats the stack.
+  _materialize(L) {
+    const d = _wi.dims[L.ix];
+    const m = new THREE.Mesh(_wi.meshes[L.ix].geometry, d.accent ? this._accentMat() : STONE);
+    m.position.y = d.y;
+    m.rotation.y = this._yaw;
+    this.bodyGroup.add(m);
+    L.mesh = m;
+    this._setCourseVisible(L, false);
+  }
+  _dematerialize(L) {
+    if (L.mesh) { this.bodyGroup.remove(L.mesh); L.mesh = null; }   // geometry is SHARED with the instances — never dispose
+    this._setCourseVisible(L, true);
+  }
+
+  _buildClassic() {
     const cell = this.cell;
     const isCorner = this.type === 'CORNER';
     const nLayers = isCorner ? 5 : 4;
@@ -184,6 +336,11 @@ export class Wall {
   beginConstruction() {
     this.body.hp = 1;
     for (const p of this.layers) {
+      if (p.ix != null && this._slot != null) {   // instanced course: just go dark (no debris — nothing built yet)
+        p.falling = true; p.settled = true;
+        this._setCourseVisible(p, false);
+        continue;
+      }
       const m = p.mesh || p.group;
       if (!p.home) p.home = { pos: m.position.clone(), rot: m.rotation.clone() };
       p.falling = true; p.settled = true;
@@ -326,6 +483,7 @@ export class Wall {
   // Kick a layer/turret loose: outward + up, with tumble. Snapshots the piece's intact
   // transform first, so a repair crew can seat it back exactly where it stood (_restore).
   _fall(obj) {
+    if (obj.ix != null && this._slot != null && !obj.mesh) this._materialize(obj);   // instanced course → real debris
     const m = obj.mesh || obj.group;
     if (!obj.home) obj.home = { pos: m.position.clone(), rot: m.rotation.clone() };
     obj.falling = true;
@@ -337,6 +495,12 @@ export class Wall {
   // Seat a crumbled piece back on the stack (the rebuild mirror of _fall). Also reveals
   // pieces hidden by beginConstruction — a new build GROWS by restoring invisible courses.
   _restore(obj) {
+    if (obj.ix != null && this._slot != null) {   // instanced course: drop the debris, relight the instance
+      obj.falling = false; obj.settled = false;
+      obj.vel.set(0, 0, 0); obj.ang.set(0, 0, 0);
+      this._dematerialize(obj);
+      return;
+    }
     if (!obj.home) return;
     const m = obj.mesh || obj.group;
     m.position.copy(obj.home.pos); m.rotation.copy(obj.home.rot);
@@ -381,6 +545,7 @@ export class Wall {
   }
 
   update(dt) {
+    if (this._slot != null && !this._placed) this._placeInstances();   // belt-and-suspenders (microtask usually beat us here)
     for (const L of this.layers) this._animate(L, dt);
     if (this._doors) {   // ease the door leaves toward the open/closed target (skip fallen ones)
       const goal = this._gateTarget;
@@ -591,6 +756,7 @@ export class Camp {
         if (m.userData && m.userData.camo) recolorCamo(m, this.accent);   // rebuild baked camo for the new team colour
       }
     });
+    for (const w of this.walls) w._syncAccentInstance();   // instanced segments tint via instanceColor, not materials
   }
 
   update(dt) { for (const w of this.walls) w.update(dt); }

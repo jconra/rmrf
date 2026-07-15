@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { getTeamColor, makeCamoMaterial, applyFacetedCamoUVs } from './CamoTexture.js';
 import { makeMuzzleFlash, flashMuzzle, updateMuzzle, decayRecoil } from './GunFX.js';
+import { mergeStatic } from './MergeParts.js?v=1';
 
 // World units of surface per camo tile. Bigger = the camo pattern is stretched over more
 // of the tank, so it repeats far fewer times (and the cells read coarser). Was 0.5 (the
@@ -33,6 +34,12 @@ export class Jotun {
       front: { r: 0.28, lift: 0.62 }, rear: { r: 0.22 }, rRoad: 0.20, roadZ: [-1.05, 1.15],
       linkW: 0.34, linkH: 0.07, linkL: 0.12, metalColor: 0x1a0e06, wheelColor: 0x0e0805 };
     this._treads(CFG);
+    // DRAW-CALL MERGE: hull plates + wheels (they don't rotate — the scrolling belt links
+    // sell the motion) bake to one mesh per material; the railgun head merges within its
+    // own turretGroup (it yaws + recoil-slams as a unit). The belt is an InstancedMesh
+    // (already 1 draw) and the muzzle flash animates — both stay.
+    mergeStatic(this.turretGroup, this._muzzles);
+    mergeStatic(this.group, [this.turretGroup, this.treadMesh, ...this._muzzles]);
   }
 
   _wheelLayout(cfg) {

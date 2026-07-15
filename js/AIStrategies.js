@@ -567,7 +567,14 @@ class Doctrine {
     if (!next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; fk = 'sapper'; }
     // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
     if (!next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; fk = 'trap'; }
-    if (!next) { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; fk = 'choose'; }
+    if (!next) {
+      // L2 mission net (opt-in policy): stands in for the persona playbook's choose() —
+      // the urgent/universal rungs above and the dwell + report-card bans below still apply.
+      const l2 = cmd.l2Pick ? cmd.l2Pick() : null;
+      if (l2) { next = l2; why = 'the L2 mission net'; }
+      else { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
+      fk = 'choose';
+    }
     // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
     // don't repeat the bad decision; run its unblocker (unless that's banned too).
     if (next && cmd.missionBanned && cmd.missionBanned(next)) {
