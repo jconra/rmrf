@@ -85,31 +85,60 @@ class Sap extends Mission {
 }
 
 // TRAP (Hunter, Mode B) — after the sapper mines the lane, field a Lurcher as BAIT and lure the
-// enemy across the kill-zone. Three sub-phases (main.js sets the geometry via cmd._trap):
-//   anchor  — hold just behind the mines, quiet.
-//   provoke — no enemy seen for 10s → push toward their base, suppress a tower to draw attention
-//             (and take a few tower hits → the mid-health that spikes the enemy's chase instinct).
-//   shield  — enemy in sight → fall back so the MINES sit between us and them; keep firing so a
-//             tunnel-visioned pursuer (target-fixation: slimmer mine-spot roll) barrels onto them.
+// enemy across the kill-zone. Sub-phases (main.js sets the geometry via cmd._trap):
+//   anchor — hold just behind the mines, quiet, ~10s.
+//   signal — still nobody → stay put and fire a few SIGNAL shots toward their base (gunfire
+//            carries — the sound-awareness system baits listeners in). If nobody shows in the
+//            signal window either, the trap tender moves on (_trapDone → the persona playbook:
+//            attack/siege), leaving the mines armed behind it.
+//   lure   — enemy in sight near the trap → fall back so the MINES sit between us and them and
+//            KITE: circle the cluster (trapShield skirts it, never crosses), firing whenever the
+//            gun bears, so a tunnel-visioned pursuer (target-fixation: slimmer mine-spot roll)
+//            chases us straight across the kill-zone.
+const TRAP_QUIET = 10;    // s parked silent in ambush before signalling
+const TRAP_SIGNAL = 14;   // s of signal shots before giving up on a no-show
+const TRAP_LURE_R = 55;   // u from the trap centroid within which the bait kites (beyond it: normal engage)
 class Trap extends Mission {
   get key() { return 'trap'; }
   wantVehicle(cmd) { return 'lurcher'; }
-  enter(cmd, doc) { super.enter(cmd, doc); this._phase = 'anchor'; this._idleT = 0; }
+  enter(cmd, doc) { super.enter(cmd, doc); this._phase = 'anchor'; }
   tick(cmd, dt) {
     super.tick(cmd, dt);
     const sees = cmd.lastEnemyPos && cmd.lastEnemyPos();
-    if (sees) { this._idleT = 0; this._phase = 'shield'; }
-    else { this._idleT += dt; this._phase = this._idleT > 10 ? 'provoke' : 'anchor'; }
+    // The no-show clock lives on the COMMANDER (cmd._trapIdleT), not this mission instance —
+    // an emergency (defend) can preempt the trap and re-enter it, and a per-instance timer
+    // would restart the whole wait each time (the tender then never times out).
+    if (sees) { cmd._trapIdleT = 0; this._phase = 'lure'; }
+    else {
+      cmd._trapIdleT = (cmd._trapIdleT || 0) + dt;
+      this._phase = cmd._trapIdleT > TRAP_QUIET ? 'signal' : 'anchor';
+      // Signalled long enough with no takers → stop tending; the doctrine falls through to
+      // the persona playbook (a hunter goes attack/siege). The mines stay armed either way.
+      if (cmd._trapIdleT > TRAP_QUIET + TRAP_SIGNAL) cmd._trapDone = true;
+    }
   }
-  objective(cmd) {
-    if (this._phase === 'shield') return cmd.trapShield();
-    if (this._phase === 'provoke') return cmd.enemyBasePos();   // draw them out (engages towers en route)
-    return cmd.trapAnchor();
+  objective(cmd) { return this._phase === 'lure' ? cmd.trapShield() : cmd.trapAnchor(); }
+  shoot(cmd) { return false; }   // never blind-shell the objective; signal shots are their own hook
+  // SIGNAL SHOTS: a few spaced rounds toward the enemy base — pure noise-bait, consumed by
+  // the firing block in main.js (fires only when idle: no visible enemy, gun off cooldown).
+  signalShot(cmd) {
+    if (this._phase !== 'signal' || !cmd.unit) return null;
+    const e = cmd.enemyBasePos(), u = cmd.unit.holder.position;
+    const dx = e.x - u.x, dz = e.z - u.z, d = Math.hypot(dx, dz) || 1;
+    return { x: u.x + dx / d * 30, z: u.z + dz / d * 30 };   // lob one ~30u down the lane
   }
-  shoot(cmd) { return this._phase !== 'anchor'; }
+  // KITE ANCHOR: while luring with the enemy close to the kill-zone, the brain's engage
+  // footwork steers for THIS point (mines between us and them) instead of duelling footwork —
+  // that duel strafing is blind to mines and is how the bait blew up its own trap.
+  lurePoint(cmd) {
+    if (this._phase !== 'lure' || !cmd.unit || !cmd._trap) return null;
+    const u = cmd.unit.holder.position, t = cmd._trap;
+    if ((u.x - t.x) ** 2 + (u.z - t.z) ** 2 > TRAP_LURE_R * TRAP_LURE_R) return null;   // too far out — fight normally
+    return cmd.trapShield();
+  }
   arriveDist(cmd) { return this._phase === 'anchor' ? 6 : 10; }
-  label(cmd) { return this._phase === 'shield' ? 'luring them onto the mines'
-    : this._phase === 'provoke' ? 'baiting them out' : 'set in ambush behind the trap'; }
+  label(cmd) { return this._phase === 'lure' ? 'luring them onto the mines'
+    : this._phase === 'signal' ? 'firing signal shots to bait them in' : 'set in ambush behind the trap'; }
   cry(cmd) { return pickCry(cmd, [
     'Set the trap — get behind the mines and draw them onto it.',
     'Bait them across the minefield.',
@@ -229,10 +258,17 @@ class Capture extends Mission {
         && (!REAR_SNEAK_GATE || cmd.rearTowersLive() === 0);
     return cmd.unit._sneakBack;
   }
+  // The flag's been knocked loose from its base (a downed carrier dropped it mid-field):
+  // it's out from under the base guns, so the whole sneak-in-the-back choreography is
+  // pointless — a fresh runner should beeline the flag itself, not stage behind an empty base.
+  _displaced(f) {
+    return !!(f && !f.carried && Math.hypot(f.group.position.x - f.home.x, f.group.position.z - f.home.z) > 8);
+  }
   objective(cmd) {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return cmd.homePos();            // carrying → run it home
     const flagPt = f ? { x: f.group.position.x, z: f.group.position.z } : cmd.enemyBasePos();
+    if (this._displaced(f)) return flagPt;                            // loose in the field → straight at it
     // Stealth run: sneak the runner in the back — but only when the rear is undefended (_sneak).
     // If the back towers are still up (only the front fell), go straight in the front instead.
     if (this._sneak(cmd) && cmd.unit) {   // loop to the rear, THEN grab
@@ -255,6 +291,7 @@ class Capture extends Mission {
   label(cmd) {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return 'home with the flag';
+    if (this._displaced(f)) return 'racing for the loose flag';
     if (this._sneak(cmd) && !(cmd.unit && cmd.unit._rearReached)) return 'sneaking round the back';
     return 'snatching the flag';
   }
@@ -345,12 +382,20 @@ class Intercept extends Mission {
   // empty spot where the runner was / at their elevator.
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 4; }
-  label(cmd) { return 'intercepting the flag runner!'; }
-  cry(cmd) { return pickCry(cmd, [
-    'They’ve got our flag! Scramble the Valkyrie — chase ’em down!',
-    'Flag runner! Cut them off before they reach their elevator!',
-    'Stop that thief! Run the carrier down NOW!',
-  ]); }
+  // Phase 2: the thief's dead and the flag's lying loose — same mission, new objective
+  // (interceptSpot returns the flag once no live carrier); touching it snaps it home.
+  label(cmd) { return cmd.ourFlagStolen() ? 'intercepting the flag runner!' : 'recovering our dropped flag'; }
+  cry(cmd) { return cmd.ourFlagStolen()
+    ? pickCry(cmd, [
+        'They’ve got our flag! Scramble the Valkyrie — chase ’em down!',
+        'Flag runner! Cut them off before they reach their elevator!',
+        'Stop that thief! Run the carrier down NOW!',
+      ])
+    : pickCry(cmd, [
+        'The thief is down! Get to our flag and bring it home!',
+        'Our flag’s lying out there — grab it back before they do!',
+        'Flag’s on the ground — somebody touch it home, NOW!',
+      ]); }
 }
 
 // SCAVENGE — "find parts": we need a flag RUNNER to win but have none and can't afford to
@@ -465,12 +510,18 @@ class Doctrine {
     if (cmd._softenT > 0 && cmd.fortDown && cmd.fortDown()) cmd._softenT = 0;   // towers are down — job done, go grab
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
-    let next = this._urgent(cmd), why = next ? 'our flag is on the move — run the thief down' : null;
+    let next = this._urgent(cmd);
+    // Two flavours of the same emergency: a live thief carrying it (chase) vs the thief died
+    // and the flag's lying loose in the field (drive over and touch it home before their next
+    // runner re-grabs it mid-field — far closer than our base).
+    const loose = next && !cmd.ourFlagStolen();
+    let why = next ? (loose ? 'our flag is lying in the field — recover it before they re-grab' : 'our flag is on the move — run the thief down') : null;
+    let fk = next ? (loose ? 'flag_loose' : 'flag_stolen') : null;   // which doctrine rung justified the decision (ai-lab decision-path)
     // PRESERVATION (any persona): losing the attrition war → hold under tower cover instead
     // of trading the last of the army out in the open — UNLESS we can win right now by
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
-    if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; }
+    if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; fk = 'losing_attrition'; }
     // HOME UNDER ATTACK (persona-weighted): enemy rounds are hitting our structures. The
     // tower's radio call used to be consumed only by a commander ALREADY in defend, so any
     // offense-minded persona simply never heard it: a Hunter idled at a stale mid-field goal
@@ -490,45 +541,49 @@ class Doctrine {
         cmd._homeRollGo = this.rng() < (HOME_RESPONSE[cmd.archetype] ?? 0.6);
         if (!cmd._homeRollGo && this.log) this.log(`They're shelling our base — let them! We finish THEIRS first.`);
       }
-      if (cmd._homeRollGo) { next = 'defend'; why = 'our base is under fire — get back there and stop them'; }
+      if (cmd._homeRollGo) { next = 'defend'; why = 'our base is under fire — get back there and stop them'; fk = 'home_under_fire'; }
     }
     // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
     // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
     // without a firebrat to actually grab the exposed flag).
-    if (!next && cmd.needsPartsRun && cmd.needsPartsRun()) { next = 'scavenge'; why = 'no runner left and no parts to build one'; }
+    if (!next && cmd.needsPartsRun && cmd.needsPartsRun()) { next = 'scavenge'; why = 'no runner left and no parts to build one'; fk = 'need_parts'; }
     // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
     // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
     // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
     // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
-    if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) { next = 'siege'; why = 'their towers are down — crack the HQ while it is open'; }
+    if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) { next = 'siege'; why = 'their towers are down — crack the HQ while it is open'; fk = 'towers_down'; }
     // STALEMATE GAMBIT: the match dragged on with the enemy base untouched — stop grinding the
     // mid-field duel and commit to the "Valkyrie around the back" siege (the Siege mission reads
     // cmd._gambit to force the flyer + rear flank, and rushBase suppresses engaging en route).
-    if (!next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) { next = 'siege'; why = 'stalemate — committing to the rear-door gambit'; }   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
+    if (!next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) { next = 'siege'; why = 'stalemate — committing to the rear-door gambit'; fk = 'gambit'; }   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
-    if (!next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; }
+    if (!next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; fk = 'clear_path'; }
     // Tower-soften window (see onRunnerLost): the towers keep shredding runners → hold SIEGE
     // until they're silenced, instead of rebuilding a firebrat into the same guns each lap.
-    if (!next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; }
+    if (!next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; fk = 'soften'; }
     // OPENING SAPPER (persona-rolled): a Firebrat out to a home flank — lay mines on the way back,
     // drop a pod, scout that side — then fall through to the persona's real playbook.
-    if (!next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; }
+    if (!next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; fk = 'sapper'; }
     // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
-    if (!next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; }
-    if (!next) { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
+    if (!next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; fk = 'trap'; }
+    if (!next) { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; fk = 'choose'; }
     // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
     // don't repeat the bad decision; run its unblocker (unless that's banned too).
     if (next && cmd.missionBanned && cmd.missionBanned(next)) {
       const alt = FAIL_ALT[next];
-      if (alt && !cmd.missionBanned(alt)) { why = `${next} is benched — two units lost on it for nothing`; next = alt; }
+      if (alt && !cmd.missionBanned(alt)) { why = `${next} is benched — two units lost on it for nothing`; next = alt; fk = 'benched'; }
     }
+    this._firedRung = fk;   // ai-lab decision-path: which rung justified the current decision this tick
     if (next && next !== this.step && (this.t > DWELL || URGENT.has(next))) this._switch(next, cmd, why);
   }
-  // Emergencies that preempt any persona's plan: our flag's been lifted → run it down
-  // (unless WE'RE the one carrying the enemy flag home — don't blow a winning run).
+  // Emergencies that preempt any persona's plan: our flag's been lifted → run it down;
+  // the thief died and dropped it in the field → go RECOVER it (any teammate's touch snaps
+  // it home). Both waived when WE'RE carrying the enemy flag home — don't blow a winning run.
   _urgent(cmd) {
-    if (cmd.ourFlagStolen() && !(cmd.flag() && cmd.flag().carrier === cmd.unit)) return 'intercept';
+    if (cmd.flag() && cmd.flag().carrier === cmd.unit) return null;
+    if (cmd.ourFlagStolen()) return 'intercept';
+    if (cmd.ourFlagLoose && cmd.ourFlagLoose()) return 'intercept';
     return null;
   }
   _switch(key, cmd, why = null) {
@@ -537,6 +592,7 @@ class Doctrine {
     this.mission = makeMission(key);
     this.mission.enter(cmd, this);
     this.step = key; this.t = 0;
+    if (why) this._lastWhy = why;   // keep the last meaningful reason (for the ai-lab live overlay)
     // Radio-chatter order + a machine-readable decision trail: the cry() supplies the
     // characterful line, the bracket names the transition and WHY it happened, so every
     // mission change in the log is auditable (from → to — reason).
@@ -577,6 +633,8 @@ class Doctrine {
   objective(cmd) { return this.mission.objective(cmd); }
   shoot(cmd) { return this.mission.shoot(cmd); }
   arriveDist(cmd) { return this.mission.arriveDist(cmd); }
+  lurePoint(cmd) { return this.mission.lurePoint ? this.mission.lurePoint(cmd) : null; }     // trap kite anchor (view.lure)
+  signalShot(cmd) { return this.mission.signalShot ? this.mission.signalShot(cmd) : null; }  // trap noise-bait aim point
   objectiveLabel(cmd) {
     const f = cmd.flag();
     if (f && f.carrier === cmd.unit) return 'home with the flag';

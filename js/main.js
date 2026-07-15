@@ -43,6 +43,10 @@ import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=8';
 
 // --- Renderer ----------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+// Skip the post-link getProgramInfoLog/getShaderInfoLog check — that call synchronously stalls
+// until each shader finishes compiling (a big chunk of the shader-compile jank). Shaders are
+// stable in this build; re-enable with ?shaderdebug if you're debugging a broken material.
+renderer.debug.checkShaderErrors = new URLSearchParams(location.search).has('shaderdebug');
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -2909,9 +2913,9 @@ function updateFlags(dt) {
         const c = f.carrier.holder.position, hd = f.carrier.heading || 0;
         // Trail the flag up and a touch BEHIND the carrier, yaw it so the fly streams to the
         // REAR, and lean the pole back — a captured banner flapping off the tail.
-        f.group.position.set(c.x - Math.sin(hd) * 1.8, c.y + 3.4, c.z - Math.cos(hd) * 1.8);
+        f.group.position.set(c.x - Math.sin(hd) * 1.8, c.y + 2.6, c.z - Math.cos(hd) * 1.8);
         f.group.rotation.y = hd + Math.PI / 2;   // local +x (the fly) points to the carrier's rear
-        f.tilt.rotation.z = -0.9;                // pole leans back
+        f.tilt.rotation.z = 0.9;                 // pole leans BACKWARD off the tail (lower + attached-looking)
         // AI carriers score by reaching their own base. The PLAYER must EXTRACT it —
         // ride the flag down the FOB lift into the secure garage (see returnToGarage).
         if (f.carrier !== player) {
@@ -2923,20 +2927,24 @@ function updateFlags(dt) {
         continue;
       }
     }
-    if (!f.carried) {                                  // a dropped/displaced flag — only a FIREBRAT can lift it
+    if (!f.carried) {                                  // a dropped/displaced flag on the ground
       const fx = f.group.position.x, fz = f.group.position.z;
       const displaced = Math.hypot(fx - f.home.x, fz - f.home.z) > GRAB;
       for (const v of combatants) {
-        if (v.dead || v.type !== 'firebrat') continue;
+        if (v.dead) continue;
         if (Math.hypot(v.holder.position.x - fx, v.holder.position.z - fz) >= GRAB) continue;
         if (v.team === f.team) {
-          // Own team reaching its DISPLACED flag recovers it — snaps straight home
-          // (you can't carry your own flag; this denies the thief a re-grab).
-          if (displaced) { f.group.position.set(f.home.x, f.home.y, f.home.z); showBanner(`${flagColorName(f)} FLAG RECOVERED`, { color: '#9bd6ff' }); }
+          // Classic CTF return: ANY teammate reaching its DISPLACED flag recovers it —
+          // snaps straight home (you can't carry your own flag; denies the thief a re-grab).
+          // An AT-HOME flag is untouched — a teammate parked on it doesn't shield the steal.
+          if (!displaced) continue;
+          f.group.position.set(f.home.x, f.home.y, f.home.z); showBanner(`${flagColorName(f)} FLAG RECOVERED`, { color: '#9bd6ff' });
         } else {
+          // Stealing (carrying it off) stays FIREBRAT-only — it's the runner class.
+          if (v.type !== 'firebrat') continue;
           f.carried = true; f.carrier = v; showBanner(`${flagColorName(f)} FLAG TAKEN`, { color: '#' + f.cloth.material.color.getHexString() });
           const oc = commanders.find(c => c.team === f.team);   // scorecard: the owners lost their flag on somebody's watch
-          if (oc) oc.flagsLost = (oc.flagsLost || 0) + 1;
+          if (oc) { oc.flagsLost = (oc.flagsLost || 0) + 1; oc._lastFlagLostT = oc._matchT; }
         }
         break;
       }
@@ -3851,7 +3859,8 @@ const jeepGroundY = (x, z) => { const r = roadDeckY(x, z); return r != null ? r 
 // Covers both a crew's jeep out on a job and the jeeps parked in the enemy motor pool.
 // Flyers are skipped: a homing missile on a 40hp truck is a waste of the Valkyrie's magazine.
 function jeepShotTarget(v) {
-  if (!repairsOn || isFlyer(v)) return null;
+  if (!repairsOn) return null;
+  const flyer = isFlyer(v);   // a Valkyrie pot-shots jeeps too — it lobs OVER walls, so no ground-LOS gate
   const range = ENGAGE_RANGE[v.type] || 36, arc = SHOT_ARC[v.type] ?? Math.PI / 5;
   const px = v.holder.position.x, pz = v.holder.position.z;
   let best = null, bestD = range * range;
@@ -3859,7 +3868,7 @@ function jeepShotTarget(v) {
     const d = (x - px) ** 2 + (z - pz) ** 2;
     if (d >= bestD) return;
     if (Math.abs(wrapPi(Math.atan2(-(x - px), -(z - pz)) - v.heading)) > arc + 0.02) return;   // outside the gun's swing
-    if (!hasLOS(px, pz, x, z)) return;                    // a wall would just soak the shell
+    if (!flyer && !hasLOS(px, pz, x, z)) return;          // a wall would just soak a GROUND shell
     best = { x, y, z }; bestD = d;
   };
   for (const team of ['red', 'blue']) {
@@ -3989,6 +3998,27 @@ function makeFortGhost(kind) {
   return g;
 }
 
+// Save/restore the camera pose around the build aerial: the aerial can be PANNED across the map,
+// so on exit we put the fixed field camera back exactly where it was (else the panned view leaks
+// into the fog-of-war-locked game).
+function saveCam() { return { tx: orbit.target.x, tz: orbit.target.z, dist: orbit.dist, pitch: orbit.pitch, yaw: orbit.yaw }; }
+function restoreCam(s) { if (!s) return; orbit.target.set(s.tx, 0, s.tz); orbit.dist = s.dist; orbit.pitch = s.pitch; orbit.yaw = s.yaw; updateCamera(); }
+
+// In the build/upgrade aerial, WASD/arrows PAN the view across the map (like driving), keeping the
+// fixed overhead angle + height — so you can aim a tower anywhere, not just near your base.
+const AERIAL_PAN_SPEED = 65;   // world-u per second
+function updateAerialPan(dt) {
+  if (!fortPlace && !towerPick) return;
+  const fwd = (keys['w'] || keys['arrowup'] ? 1 : 0) - (keys['s'] || keys['arrowdown'] ? 1 : 0);
+  const rt  = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);   // arrow L/R stay reserved (towerPick cycles with them)
+  if (!fwd && !rt) return;
+  const sp = AERIAL_PAN_SPEED * dt, sy = Math.sin(orbit.yaw), cy = Math.cos(orbit.yaw);
+  const lim = map.worldW / 2 + 40;
+  orbit.target.x = Math.max(-lim, Math.min(lim, orbit.target.x + (rt * cy - fwd * sy) * sp));
+  orbit.target.z = Math.max(-lim, Math.min(lim, orbit.target.z + (-rt * sy - fwd * cy) * sp));
+  updateCamera();
+}
+
 function enterFortPlace(kind) {
   const camp = fortHomeCamp();
   if (!camp) return false;
@@ -3998,7 +4028,7 @@ function enterFortPlace(kind) {
     new THREE.MeshBasicMaterial({ color: '#58d17a', transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }));
   ring.rotation.x = -Math.PI / 2;
   scene.add(ghost); scene.add(ring);
-  fortPlace = { kind, rot: 0, cx: Math.round(camp.center.x / grid.cell) + 3, cz: Math.round(camp.center.z / grid.cell), ghost, ring, ok: false, why: '', hidden: [] };
+  fortPlace = { kind, rot: 0, cx: Math.round(camp.center.x / grid.cell) + 3, cz: Math.round(camp.center.z / grid.cell), ghost, ring, ok: false, why: '', hidden: [], locked: false, _cam: saveCam() };
   // FOG OF WAR: the aerial is a frozen frame — hide every enemy unit (vehicles' health bars
   // ride their holder; enemy repair jeeps too) so pausing to place can't be used to spy.
   // Prior visibility is saved per-object (a unit hidden down a lift shaft must STAY hidden).
@@ -4021,6 +4051,7 @@ function exitFortPlace() {
   if (!fortPlace) return;
   scene.remove(fortPlace.ghost); scene.remove(fortPlace.ring);
   for (const [obj, vis] of fortPlace.hidden) obj.visible = vis;   // reveal the enemy again, exactly as they were
+  restoreCam(fortPlace._cam);
   fortPlace = null;
   setGarageOverlays(true);   // also refreshes the shop panel (scrap changed)
 }
@@ -4043,7 +4074,7 @@ function enterTowerPick() {
     new THREE.MeshBasicMaterial({ color: '#ffcf4a', transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
   ring.rotation.x = -Math.PI / 2;
   scene.add(ring);
-  towerPick = { camp, walls, idx: 0, ring, hidden: [] };
+  towerPick = { camp, walls, idx: 0, ring, hidden: [], _cam: saveCam() };
   // fog of war: hide enemy units + their jeeps while the aerial is up (same as fort placement)
   for (const v of combatants) if (v.team !== PLAYER_TEAM) { towerPick.hidden.push([v.holder, v.holder.visible]); v.holder.visible = false; }
   for (const j of repairJobs) if (j.team !== PLAYER_TEAM) { towerPick.hidden.push([j.jeep, j.jeep.visible]); j.jeep.visible = false; }
@@ -4062,6 +4093,7 @@ function exitTowerPick() {
   if (!towerPick) return;
   scene.remove(towerPick.ring);
   for (const [obj, vis] of towerPick.hidden) obj.visible = vis;
+  restoreCam(towerPick._cam);
   towerPick = null;
   setGarageOverlays(true);
 }
@@ -4165,10 +4197,9 @@ function ensureTowerPickUI() {
 // Recompute ghost pose + validity (and the UI hint) for the current cell.
 function refreshFortPlace() {
   const fp = fortPlace; if (!fp) return;
-  const camp = fortHomeCamp();
   const x = fp.cx * grid.cell, z = fp.cz * grid.cell;
-  const inRange = camp && Math.hypot(x - camp.center.x, z - camp.center.z) <= FORT_BUILD_RADIUS;
-  const site = inRange ? fortSiteOk(fp.cx, fp.cz) : { ok: false, why: 'too far from base' };
+  // No build radius — place anywhere buildable; the jeep crew just has farther (and riskier) to drive.
+  const site = fortSiteOk(fp.cx, fp.cz);
   const cost = fortCostOf(fp.kind);
   const afford = (teamScrap[PLAYER_TEAM] || 0) >= cost;
   const jeep = motorPool[PLAYER_TEAM] && motorPool[PLAYER_TEAM].some(s => s.state === 'parked');
@@ -4202,7 +4233,7 @@ function ensureFortPlaceUI() {
   const ui = document.createElement('div');
   ui.id = 'fortplace-ui';
   ui.innerHTML = `
-    <div id="fp-title">PLACE FORTIFICATION — drag / tap the ground &nbsp;·&nbsp; PAUSED</div>
+    <div id="fp-title">PLACE FORTIFICATION — click the ground to lock the spot, then BUILD &nbsp;·&nbsp; PAUSED</div>
     <div id="fp-row">
       <button id="fp-rot">&#8635; ROTATE</button>
       <button id="fp-build">&#10003; BUILD</button>
@@ -4231,8 +4262,11 @@ function ensureFortPlaceUI() {
     else { const hint = document.getElementById('fp-hint'); if (hint) hint.textContent = res.why; }
   });
   // pointer: move the hologram to the cell under the cursor / finger
-  renderer.domElement.addEventListener('pointermove', e => { if (fortPlace) fortPlacePointer(e); });
-  renderer.domElement.addEventListener('pointerdown', e => { if (fortPlace && e.button === 0) fortPlacePointer(e); });
+  // Hover only re-aims the ghost UNTIL the first left-click locks it in place — otherwise a
+  // mouse user could never travel to the BUILD button without dragging the ghost off-target
+  // (touch was fine because the finger lifts). A further click re-aims + re-locks.
+  renderer.domElement.addEventListener('pointermove', e => { if (fortPlace && !fortPlace.locked) fortPlacePointer(e); });
+  renderer.domElement.addEventListener('pointerdown', e => { if (fortPlace && e.button === 0) { fortPlacePointer(e); fortPlace.locked = true; } });
   window.addEventListener('keydown', e => {
     if (!fortPlace) return;
     if (e.key === 'r' || e.key === 'R') { fortPlace.rot = (fortPlace.rot + 1) % 4; refreshFortPlace(); }
@@ -4628,6 +4662,17 @@ function detourMines(v, pts) {
   }
   return out;
 }
+// A* tuning knobs (tunable live via RR.setNavHScale / RR.setNavBudget).
+// NAV_HSCALE = heuristic weight: 1.0 is admissible/thorough; ~1.5 is the measured sweet spot
+// (~2x fewer node expansions on detour routes, paths still optimal); above ~1.6 the search
+// over-commits at obstacles and thrashes, so keep it clamped. NAV_FRAME_BUDGET_MS caps the A*
+// time spent per AI pass — once blown, a unit that still has a usable route defers its refresh
+// replan to a later frame (spreads the replan spikes that caused the sawtooth); units with no
+// route are never deferred, so movement is never starved.
+let NAV_HSCALE = 1.5;
+let NAV_FRAME_BUDGET_MS = 3;
+let _astarFrameMs = 0;            // ms spent in planPath this AI pass; reset in updateCommanders
+
 function planPath(v, dest) {
   if (PERF) _planCount++;
   const c = grid.cell;
@@ -4643,7 +4688,7 @@ function planPath(v, dest) {
   // returns a valid route to the closest reachable cell, so the unit still makes real progress.
   const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
   const maxNodes = Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4)));
-  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true });
+  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
   if (!path || path.length < 2) {
     // BOXED-IN START: parked hard against a wall/shoreline, every neighbouring cell can be
     // blocked, so the search dies on the spot and the unit used to drop to a DIRECT beeline
@@ -4651,7 +4696,7 @@ function planPath(v, dest) {
     // one short direct hop to that first waypoint, then follows a real A* route.
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
-      const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true });
+      const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
       if (p2 && p2.length >= 1) return detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c })));
     }
     return null;
@@ -4727,9 +4772,18 @@ function navWaypoint(nav, v, dest, dt) {
   // CPU in cellBlocked (the perf sawtooth). failT gates retries after a failure so we search
   // at most a few times a second instead of 60×; a valid path (or a forced null) replans as before.
   if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || moved2 > (c * 2) ** 2) && !(nav.failT > 0)) {
-    nav.path = planPath(v, dest); nav.idx = 0; nav.t = 1.1; nav.dx = dest.x; nav.dz = dest.z;
-    nav.failT = nav.path ? 0 : 0.6;   // no route → don't re-run the search for 0.6s
-    if (!nav.path) return null;
+    const hasUsablePath = nav.path && nav.idx < nav.path.length;
+    if (hasUsablePath && _astarFrameMs >= NAV_FRAME_BUDGET_MS) {
+      // Per-frame A* budget spent: keep following the current route and retry the refresh next
+      // frame, so a crowd of simultaneous replans spreads across frames instead of spiking.
+      nav.t = 0.03;
+    } else {
+      const _s = performance.now();
+      nav.path = planPath(v, dest); nav.idx = 0; nav.t = 1.1; nav.dx = dest.x; nav.dz = dest.z;
+      _astarFrameMs += performance.now() - _s;
+      nav.failT = nav.path ? 0 : 0.6;   // no route → don't re-run the search for 0.6s
+      if (!nav.path) return null;
+    }
   }
   if (!nav.path) return null;
   // Follow the path LOCALLY: consume the current waypoint only once the unit reaches it
@@ -4807,7 +4861,8 @@ const ROLE_DECK = {
 const MISSION_ROLES = ['warrior', 'turtle', 'hunter', 'rogue'];
 const MISSION_FEATS = ['clock', 'fielded', 'fleet', 'rosFirebrat', 'rosLurcher', 'rosValkyrie', 'rosJotun',
   'scrap', 'myTowers', 'theirTowers', 'myFort', 'theirFort', 'ownFlagHome', 'enemyFlagHome',
-  'seenEnemies', 'losing', 'tilt', 'roleWarrior', 'roleTurtle', 'roleHunter', 'roleRogue'];   // feature order — keep in sync with _missionFeatures
+  'seenEnemies', 'losing', 'tilt', 'roleWarrior', 'roleTurtle', 'roleHunter', 'roleRogue',
+  'fortTrend', 'tiltTrend', 'recentAttrition', 'lastProgress', 'sinceFlagLost'];   // feature order — keep in sync with _missionFeatures  (tail 5 = HISTORY: motion/memory, not instantaneous)
 let missionPolicy = 'deck';
 let missionPolicyTeam = {};        // per-team override (head-to-head A/B: net vs deck in one match)
 let missionEps = 0.35;             // explore: odds a support tour fields a random role
@@ -4879,7 +4934,7 @@ function missionTempOf(cmd) {
 function flushTourLog() {
   for (const c of commanders) for (let i = 0; i < c._slots.length; i++) {
     const sl = c._slots[i];
-    if (sl._mrec && sl._mrec.feat) { aiTrainLog.push(c._tourRecord(sl._mrec, (!sl.unit || sl.unit.dead) ? 1 : 0, i)); sl._mrec = null; }
+    if (sl._mrec && sl._mrec.feat) { const r = c._tourRecord(sl._mrec, (!sl.unit || sl.unit.dead) ? 1 : 0, i); aiTrainLog.push(r); c._noteTour(r); sl._mrec = null; }
   }
   return aiTrainLog.length;
 }
@@ -4904,6 +4959,11 @@ class AICommander {
     this.carrierKills = 0;                            // ...of which, flag carriers (downing the thief)
     this.mineKills = 0;                               // enemy kills by our mines (credited into kills too)
     this.flagsLost = 0;                               // times OUR flag was lifted (scorecard: lost on watch)
+    // HISTORY state (gives the memoryless net motion + memory). Fresh each match.
+    this._histBuf = [];                               // rolling {t,fortFrac,tilt} samples for the derivatives
+    this._histT = 0;                                  // next sample time (_matchT)
+    this._recentTours = [];                           // last few support-tour outcomes {died,progress}
+    this._lastFlagLostT = -1e9;                       // _matchT when our flag was last lifted
     this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, null, m => aiLog(this.team, `${this.cname}: ${m}`));   // the archetype's mission doctrine
     this.fortHp0 = null;                              // enemy fort HP when this card started
     this.seenTypes = {};                              // rival vehicle types this team has spotted
@@ -5105,6 +5165,39 @@ class AICommander {
   }
   // Battlefield snapshot for the mission assigner, from THIS commander's view (own state
   // + the same reads the doctrines already make — nothing new is revealed). Normalized
+  // HISTORY sampling — one light sample every ~4s so the mission features can carry
+  // MOTION (trends), not just the frozen instant. Called from update().
+  _sampleHistory() {
+    if (this._matchT < (this._histT || 0)) return;
+    this._histT = this._matchT + 4;
+    if (!this._fortBase) this._fortBase = { mine: fortHpOf(this.team) || 1, theirs: fortHpOf(this.targetTeam()) || 1 };
+    const fortFrac = Math.min(1, (fortHpOf(this.team) || 0) / this._fortBase.mine);
+    const tilt = Math.max(0, Math.min(1, 0.5 + (this.kills - this.deaths) / 12));
+    this._histBuf.push({ t: this._matchT, fortFrac, tilt });
+    while (this._histBuf.length && this._histBuf[0].t < this._matchT - 40) this._histBuf.shift();
+  }
+  // Record a finished SUPPORT tour's outcome so the next deploy can react to how the last went.
+  _noteTour(r) {
+    if (!r || r.slot === 0) return;                                    // slot 0 = persona, not a learned pick
+    const progress = r.flag ? 1 : (r.fortDmg > 60 ? 1 : (r.kills > 0 ? 0.6 : 0));
+    this._recentTours.push({ died: r.died ? 1 : 0, progress });
+    if (this._recentTours.length > 4) this._recentTours.shift();       // remember the last 4
+  }
+  // The 5 HISTORY features — order MUST match the MISSION_FEATS tail.
+  _historyFeats() {
+    const buf = this._histBuf;
+    let fortTrend = 0.5, tiltTrend = 0.5;
+    if (buf && buf.length >= 2) {
+      const now = buf[buf.length - 1], then = buf[0];
+      fortTrend = Math.max(0, Math.min(1, 0.5 + (now.fortFrac - then.fortFrac) * 2));
+      tiltTrend = Math.max(0, Math.min(1, 0.5 + (now.tilt - then.tilt) * 2));
+    }
+    const rt = this._recentTours || [];
+    const recentAttrition = rt.length ? rt.reduce((a, s) => a + s.died, 0) / rt.length : 0;
+    const lastProgress = rt.length ? rt[rt.length - 1].progress : 0.5;
+    const sinceFlagLost = Math.max(0, Math.min(1, (this._matchT - (this._lastFlagLostT || -1e9)) / 120));
+    return [fortTrend, tiltTrend, recentAttrition, lastProgress, sinceFlagLost];
+  }
   // ~[0,1], order fixed by MISSION_FEATS. Keep it LEGIBLE — a bug here poisons training
   // data silently.
   _missionFeatures() {
@@ -5139,6 +5232,7 @@ class AICommander {
       roles.turtle / Math.max(1, cap),                                   // roleTurtle
       roles.hunter / Math.max(1, cap),                                   // roleHunter
       roles.rogue / Math.max(1, cap),                                    // roleRogue
+      ...this._historyFeats(),                                          // 5 HISTORY dims (fortTrend,tiltTrend,recentAttrition,lastProgress,sinceFlagLost)
     ];
   }
   // One graded tour → one training record. NOTE kills/fortDmg are the COMMANDER'S deltas
@@ -5236,11 +5330,29 @@ class AICommander {
     return { x: t.x + dx * 15, z: t.z + dz * 15 };
   }
   // Fall-back spot that puts the trap BETWEEN us and the enemy — a chaser must cross the mines.
+  // If the STRAIGHT line from our bait to that spot would cut through the mine cluster itself
+  // (enemy came in on our side, so "opposite them" is across the kill-zone), detour via a flank
+  // waypoint on our own side — the bait circles AROUND its mines, never over them.
   trapShield() {
     const t = this._trap; if (!t) return this.homePos();
     const e = this.lastEnemyPos() || this.enemyBasePos();
     let dx = t.x - e.x, dz = t.z - e.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
-    return { x: t.x + dx * 16, z: t.z + dz * 16 };
+    const spot = { x: t.x + dx * 16, z: t.z + dz * 16 };
+    const u = this.unit && this.unit.holder.position;
+    if (u) {
+      // Distance from the trap centroid to the segment unit→spot; under ~11u means the drive
+      // would roll the cluster (mines land within a few units of the centroid, +3.2u trigger).
+      const sx = spot.x - u.x, sz = spot.z - u.z, L2 = sx * sx + sz * sz || 1;
+      const k = Math.max(0, Math.min(1, ((t.x - u.x) * sx + (t.z - u.z) * sz) / L2));
+      const cx = u.x + sx * k - t.x, cz = u.z + sz * k - t.z;
+      if (cx * cx + cz * cz < 11 * 11) {
+        // Flank waypoint: perpendicular to the enemy axis, on OUR side of the cluster.
+        const px = -dz, pz = dx;
+        const side = ((u.x - t.x) * px + (u.z - t.z) * pz) >= 0 ? 1 : -1;
+        return { x: t.x + px * side * 16, z: t.z + pz * side * 16 };
+      }
+    }
+    return spot;
   }
   // Trap spent = no live team mine remains near the kill-zone (blew or got cleared) → resume play.
   trapSpent() {
@@ -5371,14 +5483,25 @@ class AICommander {
   // Our OWN flag (the one a rival steals). ourFlagStolen → a live enemy is carrying it.
   ourFlag() { return flags.find(f => f.team === this.team) || null; }
   ourFlagStolen() { const f = this.ourFlag(); return !!(f && f.carried && f.carrier && !f.carrier.dead && f.carrier.team !== this.team); }
+  // Our flag is LOOSE: the thief dropped it (killed mid-run) and it's lying in the field —
+  // any teammate touching it snaps it home (updateFlags), and until then the enemy's next
+  // runner can re-grab it far from our guns. 8u > the 6u GRAB radius, so a recovered/at-home
+  // flag never reads as loose.
+  ourFlagLoose() {
+    const f = this.ourFlag();
+    return !!(f && f.revealed && !f.carried
+      && Math.hypot(f.group.position.x - f.home.x, f.group.position.z - f.home.z) > 8);
+  }
   // Our flag base has lost all its turrets → a defender can't lean on tower cover and
   // should switch to a Valkyrie's mobility (ai_behavior Defend).
   ownTowersDown() { return turretCountOf(this.team) === 0; }
-  // DEFEND intercept point (ai_behavior): chase the carrier directly; if it's somehow
+  // DEFEND intercept point (ai_behavior): chase the carrier directly; thief down and the
+  // flag lying loose → drive to the FLAG (touching it snaps it home); if it's somehow
   // out of play fall back to the enemy's elevator — where they must take it to score.
   interceptSpot() {
     const f = this.ourFlag();
     if (f && f.carried && f.carrier && !f.carrier.dead) { const c = f.carrier.holder.position; return { x: c.x, z: c.z }; }
+    if (this.ourFlagLoose()) { const p = f.group.position; return { x: p.x, z: p.z }; }
     return this.enemyFobPos();
   }
   // Nearest KNOWN, live shield generator to (x,z) — only POIs this team has discovered
@@ -5407,7 +5530,16 @@ class AICommander {
   // near defenses are cleared (<= FLAG_GRAB_TURRETS still standing) rather than waiting for a
   // full sweep that often never finishes (the stalemate). A fully-down fort is still preferred
   // by the doctrine (it'll keep sieging while it can), this just stops hoarding the win.
-  flagGrabbable() { return this.flagExposed() && (aiKeepBreach ? this.turretsLive() <= FLAG_GRAB_TURRETS : this.fortDown()); }
+  flagGrabbable() {
+    if (!this.flagExposed()) return false;
+    // A LOOSE flag lying far from its home (a downed carrier dropped it mid-field) is out
+    // from under the base towers entirely — the turret gate below guards the grab AT the
+    // base, so it shouldn't hold the runner back from a free pickup in the open. 60u >
+    // TURRET_RANGE (54) even with an upgrade band or two of reach.
+    const f = this.flag();
+    if (f && !f.carried && Math.hypot(f.group.position.x - f.home.x, f.group.position.z - f.home.z) > 60) return true;
+    return aiKeepBreach ? this.turretsLive() <= FLAG_GRAB_TURRETS : this.fortDown();
+  }
   // The enemy flag is sealed inside its HQ until that building is rubble. The
   // runner can't grab it before then, so the heavy must finish the HQ first —
   // strategy cards gate the open→grab handoff on this.
@@ -5512,6 +5644,7 @@ class AICommander {
     const sl = this._slotFor(v), strat = (sl && sl.strategy) || this.strategy;   // the KILLER's own card
     if (strat.step === 'capture' || strat.key === 'capture') return false;
     if (this.ourFlagStolen()) return false;
+    if (this.ourFlagLoose()) return false;   // the thief we just killed DROPPED it — recover, don't loot
     for (const f of flags) if (f.carried) return false;
     return true;
   }
@@ -5825,6 +5958,7 @@ class AICommander {
       foeT: view.enemy ? view.enemy.type : null,
       foeD: view.enemy ? Math.round(Math.hypot(view.enemy.x - pX, view.enemy.z - pZ)) : null,
       turD: view.threat ? Math.round(Math.hypot(view.threat.x - pX, view.threat.z - pZ)) : null,
+      hq: !!view.hqThreat,   // the suppress target is the enemy KEEP, not a tower (labels)
       heard: !!view.heard,
     };
     if (cmd.state !== prev) {
@@ -6081,6 +6215,7 @@ class AICommander {
 
   update(dt) {
     this._matchT += dt;
+    this._sampleHistory();
     // Notify once the moment the enemy fleet is wiped — instead of a unit silently
     // wandering off to "chase the last seen enemy" that no longer exists.
     if (!this._enemyGoneAnnounced && this.enemyEliminated()) {
@@ -6106,7 +6241,7 @@ class AICommander {
         // (missionBanned → the doctrine's FAIL_ALT unblocker) so the commander stops making
         // the same bad decision over and over.
         const rec = this._mrec; this._mrec = null;
-        if (rec && rec.feat) aiTrainLog.push(this._tourRecord(rec, 1, this._slotI));
+        if (rec && rec.feat) { const r = this._tourRecord(rec, 1, this._slotI); aiTrainLog.push(r); this._noteTour(r); }
         if (rec) {
           const step = this.strategy.step;
           const progress = this.kills > rec.kills0 || rec.flagTouched
@@ -6183,6 +6318,10 @@ class AICommander {
     const v = this.unit;
     if (!v) return;
     const view = this._view(v, dt);
+    // TRAP LURE: while baiting a chaser near our own mine cluster, the engage footwork kites
+    // for this point (mines between us and them) instead of duel-strafing — strafe is blind
+    // to mines, which is how a bait Lurcher once side-stepped onto its own trap.
+    if (this.strategy.lurePoint) { const lp = this.strategy.lurePoint(this); if (lp) view.lure = lp; }
     const cmd = v.ai.think(view);
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
@@ -6226,9 +6365,23 @@ class AICommander {
     if (cmd.fire && v.cooldown <= 0) {
       let tp = null, atEnemy = false;
       if (cmd.state === 'suppress' && view.threat) {
-        tp = (!view.threatLOS && view.demolishTarget)
+        // REPAIR RACE: the tower we're shelling has a live repair crew ON it, healing it right
+        // back up — a Valkyrie once emptied its whole magazine into that race and lost. Shoot
+        // THE JEEP first: it's soft, it carries the spare-gun cargo, and with the medic dead
+        // the tower stays down. Flyers lob over walls, so only ground shooters gate on LOS.
+        let jeepTp = null;
+        if (repairsOn) {
+          for (const j of repairJobs) {
+            if (j.team === v.team || j.jeepDest.dead) continue;
+            if (Math.hypot(j.jx - view.threat.x, j.jz - view.threat.z) > 14) continue;   // crew not at THIS tower
+            if (!isFlyer(v) && !hasLOS(v.holder.position.x, v.holder.position.z, j.jx, j.jz)) continue;
+            jeepTp = _aimDir.set(j.jx, j.jeep.position.y + 1.0, j.jz).clone();
+            break;
+          }
+        }
+        tp = jeepTp || ((!view.threatLOS && view.demolishTarget)
           ? _aimDir.set(view.demolishTarget.x, view.demolishTarget.y, view.demolishTarget.z).clone()
-          : _aimDir.set(view.threat.x, view.threat.y, view.threat.z).clone();
+          : _aimDir.set(view.threat.x, view.threat.y, view.threat.z).clone());
       }
       else if (view.enemy) { tp = leadAim(v.holder.position, view.enemy, v.def.soundIndex, v.ai.p.jitter).clone(); atEnemy = true; }   // lead a moving target (Lurcher/Valkyrie/Jotun; charge-compensated for the railgun)
       else if (cmd.breakAim) tp = _aimDir.set(cmd.breakAim.x, cmd.breakAim.y, cmd.breakAim.z).clone();   // blasting a blocker out of the way
@@ -6239,6 +6392,16 @@ class AICommander {
       // it, so it can't be lured off its actual job). Keeps the last round for real trouble.
       const jt = jeepShotTarget(v);
       if (jt) fireVehicle(v, false, _aimDir.set(jt.x, jt.y, jt.z).clone(), null, false);
+      // TRAP SIGNAL SHOTS: the tender fires a spaced round down the lane — pure noise-bait
+      // (gunfire carries; the sound-awareness layer draws listeners toward it). Throttled well
+      // below the gun's rate so a whole magazine never goes into signalling.
+      else if (this.strategy.signalShot && (this._signalCd = (this._signalCd || 0) - dt) <= 0) {
+        const sp = this.strategy.signalShot(this);
+        if (sp) {
+          fireVehicle(v, false, _aimDir.set(sp.x, map.heightAt(sp.x, sp.z) + 1.2, sp.z).clone(), null, false);
+          this._signalCd = 4.5;   // one bang every few seconds — a couple over the whole signal window
+        }
+      }
     }
   }
 
@@ -6711,6 +6874,10 @@ class AICommander {
       supplyHeals,   // the chosen resupply point is an own base → hold until ammo+fuel+hp are all maxed
       home: healHome || goal,
       atHome: nearOwnSupply(v, px, pz),   // already in the base's heal/rearm zone → stop and top up (don't orbit the exact centre)
+      // The most hp base repair will actually give THIS unit (fraction). A trap-tending bait
+      // deliberately holds 55% (repairCap) — without this the hurt/resup latches demand 80/99%
+      // hp that can never come, parking the unit at its FOB "topping up" forever (deadlock).
+      healCap: v.maxHp ? repairCap(v) / v.maxHp : 1,
       // While DETOURING (grabbing a shield / intercepting), the goal is a place to GO, not a
       // thing to shell — so suppress shootGoal or the unit would "assault" (and gun down) the
       // shield generator / intercept spot it's heading for. It still engages real enemies via
@@ -6802,7 +6969,110 @@ function pickFreeColor(used) {
   const pool = free.length ? free : [...TEAM_COLORS.keys()];
   return pool[(Math.random() * pool.length) | 0];
 }
-function updateCommanders(dt) { for (const cmd of commanders) cmd.update(dt); updateFlags(dt); }
+// "Advance"… advance to WHAT? Compose the brain state's OBJECT from a slot's _dbg readout
+// (resolved destination, foe type/dist, tower dist) so the logs read as decisions, not verbs.
+// Shared by the in-game brief log and the ai-lab publish (Jacob: "Suppress what? Where?").
+function stateDetail(d, st) {
+  if (!d) return '';
+  const go = d.gd != null ? `(${d.gx},${d.gz}) ${d.gd}u out` : '';
+  switch (st) {
+    case 'engage':   return d.foeT ? `duelling the ${d.foeT} ${d.foeD}u out` : 'duelling';
+    case 'suppress': return d.hq ? `shelling their HQ${d.turD != null ? ` ${d.turD}u out` : ''}`
+                                 : `shelling a turret${d.turD != null ? ` ${d.turD}u out` : ''} · ${d.towers} left`;
+    case 'advance':  return `to the objective ${go}`;
+    case 'assault':  return `storming the objective ${go}`;
+    case 'pursue':   return `to their last-known spot ${go}`;
+    case 'retreat':  return `to base to heal ${go}`;
+    case 'resupply': return `to top up ${go}`;
+    case 'flee':     return d.foeT ? `from the ${d.foeT} ${d.foeD}u back` : `breaking contact ${go}`;
+    case 'exit':     return 'through the gate';
+    case 'unstick':  return d.stuckWhy || 'jolting free';
+    default:         return '';
+  }
+}
+function updateCommanders(dt) { _astarFrameMs = 0; for (const cmd of commanders) cmd.update(dt); updateFlags(dt); publishAILive(dt); }
+
+// AI LAB LIVE OVERLAY: publish each commander's current mission to localStorage on a light
+// throttle (~2.5 Hz). The standalone ai-lab/commanders.html (same origin) reads this key and
+// highlights the live decision — no game import, no per-frame cost, just one tiny JSON write a
+// few times a second. Absent that page, this is inert.
+let _aiLiveT = 0;
+const _AI_LIVE_TEAM = { red: 'Team A', blue: 'Team B' };
+function publishAILive(dt) {
+  _aiLiveT += dt;
+  if (_aiLiveT < 0.4) return;
+  _aiLiveT = 0;
+  try {
+    const teams = {};
+    for (const cmd of commanders) {
+      const s = cmd.strategy;
+      if (!s) continue;
+      const label = _AI_LIVE_TEAM[cmd.team] || cmd.team;
+      // lower tactical layer: each live unit's current unit-brain mode (engage/pursue/flee/…),
+      // plus `when` = the EXACT brain transition that won (mem._when), so the lab lights the one
+      // rung that fired, not every rung that shares the mode.
+      const units = [];
+      for (const u of cmd.liveUnits()) {
+        // ctrl = who's actually driving this tick. During a recall/lift-rise the game drives the
+        // unit directly and skips the brain, so its state/when are STALE — flag that so the lab
+        // doesn't show a frozen decision. (A routine recall aborts back to the brain if a foe
+        // closes within ~46u; a forced swap commits home regardless — either way _recalling tracks it.)
+        const sl = cmd._slots.find(s => s.unit === u);
+        const ctrl = sl && sl._recalling ? 'recall' : (sl && sl._rising ? 'rising' : 'brain');
+        units.push({
+          type: u.type, state: u._aiState || '—',
+          detail: stateDetail(sl && sl._dbg, u._aiState),   // the state's OBJECT — "advance to WHAT" (Jacob's ask)
+          when: (u.ai && u.ai._when) || '', ctrl,
+          hp: u.maxHp ? Math.round(100 * u.hp / u.maxHp) : null,
+          ammo: u.maxAmmo ? Math.round(100 * u.ammo / u.maxAmmo) : null,
+          fuel: u.maxFuel ? Math.round(100 * u.fuel / u.maxFuel) : null,
+          shield: u.maxShield ? Math.round(100 * u.shield / u.maxShield) : null,
+          heading: typeof u.heading === 'number' ? +u.heading.toFixed(2) : null });
+      }
+      let sub = ''; try { sub = s.objectiveLabel ? s.objectiveLabel(cmd) : ''; } catch (e) { sub = ''; }   // current sub-behavior within the mission (Defend → "patrolling the lane")
+      // METRICS — the live number behind each decision (rendered on the spine cards); DBG — the
+      // full brief-log readout for the top panel. Everything here is already computed each tick.
+      const ec = commanders.find(c => c !== cmd);
+      const num = f => { try { const v = f(); return v == null ? null : v; } catch (e) { return null; } };
+      const mine = num(() => cmd.fleetLeft()), theirs = ec ? num(() => ec.fleetLeft()) : null;
+      const primSlot = cmd._slots.find(sl => sl.unit && !sl.unit.dead);
+      const d = primSlot ? primSlot._dbg : null, pu = units[0];
+      const M = {};
+      if (mine != null && theirs != null) M.losing_attrition = `our fleet ${mine} vs ${theirs}`;
+      const twr = num(() => cmd.turretsLive()); if (twr != null) M.towers_down = `enemy towers ${twr}`;
+      if (cmd._clearPathT > 0) M.clear_path = `${cmd._clearPathT.toFixed(0)}s left`;
+      if (cmd._softenT > 0) M.soften = `${cmd._softenT.toFixed(0)}s left`;
+      const scrap = num(() => cmd.scrap()); if (scrap != null) M.need_parts = `${scrap} scrap`;
+      M['choose:capture'] = num(() => cmd.flagGrabbable()) ? 'flag is OPEN' : 'flag not grabbable';
+      if (cmd.kills != null) M['choose:siege'] = `${cmd.kills} kills · ${cmd.deaths || 0} lost`;
+      if (num(() => cmd.gambitOn())) M.gambit = 'gambit armed';
+      if (num(() => cmd.ourFlagStolen())) M.flag_stolen = 'our flag STOLEN';
+      if (num(() => cmd.ourFlagLoose())) {   // dropped in the field — how far the recovery drive is
+        const fl = cmd.ourFlag(), uu = units[0] && primSlot ? primSlot.unit.holder.position : null;
+        M.flag_loose = fl && uu ? `flag ${Math.hypot(uu.x - fl.group.position.x, uu.z - fl.group.position.z).toFixed(0)}u away` : 'flag on the ground';
+      }
+      if (d) {
+        if (d.fof != null) { const f = `fightScore ${d.fof > 0 ? '+' : ''}${d.fof}`; M.engaging = f; M.underAttack = f; }
+        if (pu && pu.hp != null) M.hurtLatched = `hp ${pu.hp}%`;
+        if (pu && pu.fuel != null) M.resupLatched = `fuel ${pu.fuel}% · ammo ${pu.ammo}%`;
+        if (d.turD != null) M.threatened = `tower ${d.turD}u out`;
+        if (d.foeD != null) M.pursuing = `contact ${d.foeD}u out`;
+      }
+      const dbg = d ? { gd: d.gd, gx: d.gx, gz: d.gz, px: d.px, pz: d.pz, blk: d.blk, fwd: d.fwd, turn: d.turn,
+        distFob: d.distFob, towers: d.towers, foeT: d.foeT, foeD: d.foeD, turD: d.turD, heard: !!d.heard,
+        atHome: !!d.atHome, navPath: d.navPath, stuck: d.stuck, stuckWhy: d.stuckWhy, card: d.card, fof: d.fof } : null;
+      teams[label] = { archetype: cmd.archetype, mission: s.step, rung: s._firedRung || '', sub, why: s._lastWhy || '',
+        fleet: mine, known: cmd._knownSummary ? cmd._knownSummary() : '', metrics: M, dbg, units };
+    }
+    // recent decision log tail, mapped to team labels (the on-screen feed, relocated to the console)
+    const log = [];
+    for (let i = Math.max(0, aiEvents.length - 60); i < aiEvents.length; i++) {
+      const e = aiEvents[i];
+      log.push({ t: e.t, team: _AI_LIVE_TEAM[e.team] || e.team, msg: e.msg });
+    }
+    localStorage.setItem('rmrf-ai-live', JSON.stringify({ t: Date.now(), over: matchOver, teams, log }));
+  } catch (e) { /* no storage (private mode) — overlay just stays idle */ }
+}
 
 // Brief on-screen toast (flag captures, etc.).
 function showBanner(text, opts = {}) {
@@ -7004,6 +7274,10 @@ function ensureLogStyle() {
       border:1px solid rgba(255,255,255,0.3); border-radius:5px; background:rgba(255,255,255,0.07);
       font-weight:bold; font-size:16px; user-select:none; -webkit-user-select:none; touch-action:manipulation; }
     #ai-log .lg-btn:active { background:rgba(255,255,255,0.22); }
+    #ai-log .lg-link { display:inline-flex; align-items:center; height:26px; padding:0 9px;
+      font-size:10px; letter-spacing:1px; color:#7dd3fc; text-decoration:none; border-radius:4px;
+      background:rgba(125,211,252,0.12); }
+    #ai-log .lg-link:active { background:rgba(125,211,252,0.26); }
     #ai-log-body { padding:7px 8px; font-size:11px; line-height:1.4; letter-spacing:0.2px; white-space:pre-wrap; }
     #ai-log.brief #ai-log-body { overflow:hidden; }
     #ai-log.full  #ai-log-body { overflow-y:auto; flex:1; -webkit-overflow-scrolling:touch; }
@@ -7025,7 +7299,8 @@ function ensureAiLogEl() {
   el = document.createElement('div'); el.id = 'ai-log';
   el.innerHTML =
     `<div id="ai-log-head"><span id="ai-log-title">AI LOG · ${AI_LOG_TAG}</span>` +
-    '<span id="ai-log-btns"><span class="lg-btn" data-act="export" title="Copy a snapshot to share">⧉</span>' +
+    '<span id="ai-log-btns"><a class="lg-link" href="/ai-lab/console.html" target="_blank" rel="noopener" title="Open the AI Lab live console (split A|B + full log)">LAB ↗</a>' +
+    '<span class="lg-btn" data-act="export" title="Copy a snapshot to share">⧉</span>' +
     '<span class="lg-btn" data-act="minus">–</span>' +
     '<span class="lg-btn" data-act="plus">+</span></span></div>' +
     '<div id="ai-log-body"></div>';
@@ -7087,7 +7362,9 @@ function updateAiLog() {
       html += `<div class="tb-h" style="color:${col}">${i === 0 ? cmd.cname + ' · ' : ''}${multi ? (i + 1) + '· ' : ''}${type} · ${mission}${card ? ` · ${card.toUpperCase()}` : ''}</div>`;
       if (d) {
         const fof = d.fof != null ? ` · <span style="color:${d.fof > 0 ? '#7fffb8' : '#ff9d7f'}">fof ${d.fof > 0 ? '+' : ''}${d.fof}</span>` : '';
-        html += `<div class="tb-l">${d.state} · hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}/${d.maxFuel}${fof} · fob ${d.distFob}</div>`;
+        const det = stateDetail(d, d.state);   // the state's object — "suppress" alone says nothing
+        html += `<div class="tb-l">${d.state}${det ? ` <span style="opacity:0.75">${det}</span>` : ''}</div>`;
+        html += `<div class="tb-l">hp ${d.hp}% · ammo ${d.ammo} · fuel ${d.fuel}/${d.maxFuel}${fof} · fob ${d.distFob}</div>`;
         // WHERE it's headed (stable line) then, on its OWN line, the per-tick DRIVE readout —
         // blk first, then fwd/turn. Both are kept off the position line and fixed-width so the
         // rapidly-changing numbers can't wrap/resize the box and scramble everything above.
@@ -7226,6 +7503,7 @@ function showExportOverlay(txt, copied) {
 function endMatch(winner) {
   if (matchOver) return;
   matchOver = true;
+  publishAILive(1);   // one final ai-lab snapshot, flagged over — updateCommanders (the usual publisher) stops now
   lastWinner = winner;   // team key, for harnesses (RR.matchWinner) — the celeb title only carries the colour name
   const human = TEAM_CTRL[PLAYER_TEAM] === 'human';
   const won = winner === PLAYER_TEAM;
@@ -8076,7 +8354,7 @@ function returnToGarage() {
     // path only handles AI captures). Mark the match decided here so the block below
     // runs the victory cinematic + play-again menu instead of dropping back into a
     // live garage and letting the match continue.
-    matchOver = true; matchWon = true;
+    matchOver = true; matchWon = true; publishAILive(1);   // final ai-lab snapshot, flagged over
   }
   clearCeleb();        // tidy any field confetti/title before the hangar shows
   // Match decided (not a mid-match death/redeploy) → celebrate, then open the
@@ -8456,6 +8734,8 @@ window.RR = {
   deepDangerR: () => DEEP_DANGER_R,                             // debug: radius past which subs patrol
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
+  setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
+  setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   spawnPlayer: (type = 'firebrat', colorIndex = 4, rise = false) => deployToFOB(type, colorIndex, rise),
   get garage() { return garage; },
   winDemo: (type = 'firebrat', hex = '#46d6ff') => { ensureGarage(); garage.playWin(type, hex); },   // headless: stage the victory cinematic
@@ -9144,6 +9424,7 @@ let _splashHidden = false;
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
+  updateAerialPan(dt);   // WASD pans the build/upgrade aerial across the map (fixed angle/height)
   const _pfStart = PERF ? performance.now() : 0;
   const fade = document.getElementById('deployfade');
   if (garage && !onField) {

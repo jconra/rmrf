@@ -131,8 +131,8 @@ export class Destructible {
       const stage = Math.min(CRACK_STAGES, Math.ceil(sev * CRACK_STAGES));
       if (stage < this._stage && this._unique.some(u => u.ctx)) {
         this._stage = stage;
-        for (const u of this._unique) if (u.ctx && u.clean) {
-          u.ctx.putImageData(u.clean, 0, 0);                        // repaint the pristine surface
+        for (const u of this._unique) if (u.ctx && u.srcImg) {
+          u.ctx.drawImage(u.srcImg, 0, 0, u.w, u.h);               // repaint the pristine surface from the source texture
           if (stage > 0) drawCracks(u.ctx, u.w, u.h, stage / CRACK_STAGES);   // then only the remaining cracks
           u.tex.needsUpdate = true;
         }
@@ -218,9 +218,9 @@ export class Destructible {
           const tex = new THREE.CanvasTexture(cv);
           tex.colorSpace = c.map.colorSpace; tex.wrapS = c.map.wrapS; tex.wrapT = c.map.wrapT;
           tex.repeat.copy(c.map.repeat); tex.anisotropy = c.map.anisotropy;
-          // snapshot the pristine surface so heal() can wind cracks back off (redraw fewer)
-          let clean = null; try { clean = ctx.getImageData(0, 0, w, h); } catch (e) { /* tainted canvas */ }
-          c.map = tex; u.ctx = ctx; u.tex = tex; u.w = w; u.h = h; u.clean = clean;
+          // keep the SOURCE image; heal() redraws it to restore the pristine surface. (Was a
+          // getImageData snapshot — that synchronous canvas readback was the getImageData stutter.)
+          c.map = tex; u.ctx = ctx; u.tex = tex; u.w = w; u.h = h; u.srcImg = img;
         }
         this._unique.push(u);
         return c;

@@ -1,0 +1,5 @@
+fatals: NONE
+FIX ON : resolved 12/16  avgEnd 348s  scrap/match 13.4  builds/match 4.2
+FIX OFF: resolved 13/16  avgEnd 394s  scrap/match 11.1  builds/match 4.9
+paired resolution: both 11  ON-only(gain) 1  OFF-only(regression) 2  neither 2
+VERDICT: resolution REGRESSION (12 vs 13); scrap 11.1->13.4; builds 4.9->4.2

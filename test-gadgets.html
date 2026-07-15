@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- test-gadgets.html — render the Firebrat deployables (land mine + sensor pod) on a bare
+     stage (debug tool). Screenshot headlessly to eyeball the meshes without the field camera. -->
+<html lang="en">
+<head><meta charset="UTF-8"><style>html,body{margin:0;height:100%;background:#20303a}</style></head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+  import * as THREE from 'three';
+  import { Minefield, SensorNet } from './js/Gadgets.js?v=1';
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color('#20303a');
+  scene.add(new THREE.HemisphereLight('#dfeaf2', '#4a4038', 1.15));
+  const sun = new THREE.DirectionalLight('#fff2dd', 1.7); sun.position.set(20, 35, 15); scene.add(sun);
+  const ground = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 0.3, 40),
+    new THREE.MeshStandardMaterial({ color: '#7a8a6a', roughness: 1 })); ground.position.y = -0.15; scene.add(ground);
+  const flat = { heightAt: () => 0 };
+  const mines = new Minefield(scene, flat), pods = new SensorNet(scene, flat);
+  mines.place(-4, 1.5, 'a', '#2cc0d4');   // team A (cyan) mine
+  mines.place(-1, -2, 'b', '#e0554a');    // team B (red) mine
+  pods.place(4, 0, 'a', '#2cc0d4');       // sensor pod
+  const cam = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight); document.body.appendChild(renderer.domElement);
+  const clock = new THREE.Clock(); let t = 0;
+  (function anim() { requestAnimationFrame(anim);
+    t += 0.006; pods.update(Math.min(0.05, clock.getDelta()));
+    cam.position.set(Math.cos(t) * 12, 6, Math.sin(t) * 12); cam.lookAt(0, 1, 0);
+    renderer.render(scene, cam); window.__ready = true; })();
+</script>
+</body>
+</html>

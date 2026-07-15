@@ -276,12 +276,16 @@ const CONDITIONS = {
   // the resource it fills is topped AND the OTHER one is merely "OK to carry on" (not full
   // — the depot can't fill it, so requiring full would camp it forever). This is the match
   // to the routing: a unit only diverts to the ammo depot when fuel is already ≥ fuelOK.
+  // hp targets respect view.healCap — base repair may CAP below full (a trap bait holds a
+  // killable 55%), and demanding more hp than the base will ever give deadlocks the unit
+  // at its own FOB "topping up" forever.
   resupDone:   (v, m, p, cfg) => v.supplyHeals
-    ? (ammoFrac(v) >= cfg.topFull && v.self.fuelFrac >= cfg.topFull && v.self.hpFrac >= cfg.topFull)
+    ? (ammoFrac(v) >= cfg.topFull && v.self.fuelFrac >= cfg.topFull
+       && v.self.hpFrac >= Math.min(cfg.topFull, (v.healCap ?? 1) - 0.01))
     : ((ammoFrac(v) >= cfg.ammoFull && v.self.fuelFrac >= cfg.fuelOK) ||
        (v.self.fuelFrac >= cfg.fuelFull && ammoFrac(v) >= cfg.ammoOK)),
   hurtNeeded:  (v, m, p, cfg) => v.self.hpFrac < bailOf(p, cfg, v.self.type),
-  hurtDone:    (v, m, p, cfg) => v.self.hpFrac > cfg.hurtClear,
+  hurtDone:    (v, m, p, cfg) => v.self.hpFrac > Math.min(cfg.hurtClear, (v.healCap ?? 1) - 0.02),
 };
 
 // Resolve a transition's `target` key to a world point the behavior aims at.
@@ -431,6 +435,20 @@ const BEHAVIORS = {
     if (mode === 'engage' && view.enemy && los) {
       const tac = duelTactic(self.type, view.enemy.type);
       const arc = Math.min(view.shotArc || 0.26, Math.PI);   // how far off-hull the turret can still bear
+      // TRAP LURE (hunter's bait): kite the chaser ACROSS OUR OWN MINEFIELD — steer the hull
+      // for the lure point (the commander keeps it on the far side of the mines, skirting the
+      // cluster), fire whenever the gun bears. Replaces normal duel footwork entirely: press
+      // closes the gap we're trying to stretch, and strafe side-steps blind — mines don't show
+      // up in the whisker/nudge checks a strafe makes, which is how a bait blew its own trap.
+      if (view.lure) {
+        const lx = view.lure.x - self.x, lz = view.lure.z - self.z;
+        const ld = Math.hypot(lx, lz);
+        turn = clamp(wrapPi(Math.atan2(-lx, -lz) - self.heading) * 2.0, -1, 1);
+        fwd = ld > 4 ? 1 : 0;   // settle at the shield spot — the mines sit between us and them
+        fire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap)) ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
+        mem._wantMove = fwd > 0;
+        return { fwd, turn, fire, strafe: 0, state: mode };
+      }
       const pressured = self.hpFrac < 0.55 || dist < range * 0.6;
       // KITE — out-matched or pressed: fall back toward our own TOWER COVER while the turret
       // keeps bearing on the enemy. Steer the HULL at support; fire whenever the gun bears.
@@ -908,6 +926,7 @@ export function runBrain(graph, view, mem) {
   for (const t of graph.transitions) { if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; } }
   const mode = rule.mode;
   mem.state = mode;
+  mem._when = rule.when;   // the exact transition that won (for the ai-lab decision-path view)
   const target = resolveTarget(rule.target, view, mem);
 
   // Common steering bag: heading error toward the target (with personality jitter).

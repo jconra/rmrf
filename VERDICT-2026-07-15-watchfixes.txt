@@ -1,0 +1,51 @@
+VERDICT — 2026-07-15 spectator-session AI fixes (before/after tournament)
+==========================================================================
+
+Batch under test (all shipped together in this reconcile):
+  1. Flag rules: any own vehicle RETURNS its dropped flag (steal stays Firebrat-only);
+     new flag_loose doctrine rung (INTERCEPT recovery phase drives to the loose flag);
+     Capture beelines a displaced flag (skips rear-sneak staging); flagGrabbable bypasses
+     the turret gate when the flag lies >60u from its home; wantsLoot defers to recovery.
+  2. Hunter TRAP rework: anchor (quiet 10s) -> signal (hold position, ~2 spaced noise
+     shots) -> no-show timeout (~24s, commander-level clock) -> back to the playbook.
+     Enemy within 55u of the trap -> lure/kite footwork (view.lure): hull steers for the
+     far side of the minefield, fires as the gun bears, never duel-strafes over its own
+     mines; trapShield skirts the cluster via a flank waypoint.
+  3. Heal-cap latch fix: view.healCap clamps hurtDone/resupDone hp targets, so a unit
+     whose base repair is capped (trap bait holds 55%) releases its latches at the cap
+     instead of parking at the FOB "topping up" forever.
+  4. Repair-race: a sieger suppressing a tower with a live repair crew ON it redirects
+     fire at the jeep first; jeepShotTarget flyer exclusion lifted (Valkyries included).
+  5. State-detail logging (no behavior change): brain states name their object in the
+     brief log + ai-lab publish.
+  Plus non-AI riders: Destructible heal repaint (getImageData stutter fix), Garage
+  roll-out gait, elevator designer asset collar, campaign road-tile clears.
+
+Protocol: ~/pw/tourney.cjs, 30 seeds (11+7k), full 480 map, 20000 ticks (1000s sim),
+par 2. Same seed set both runs. Seed 158 load-timed-out in BOTH runs (box contention,
+not a regression).
+
+                         BEFORE          AFTER           DELTA
+resolved                 20/29 (69%)     23/29 (79%)     +3 resolutions
+stalemates               9               6               -3
+avg resolve time         533s            543s            +10s (noise)
+transit-stuck samples    1303            1237            -5%
+transit-stuck unit-sec   ~2606           ~2474           -5%
+
+Repair-crew economy (the repair-race fix at work):
+jeeps lost on the road   27              44              +63% (siegers now shoot the medic)
+sorties completed        150             139             -11
+HP healed                20929           18544           -11%
+guns actually mounted    8               6
+
+Reading:
+- Direction is positive across the board: more matches resolve, fewer stalemates,
+  slightly less transit-stuck time. +3/29 resolutions is within single-run noise for
+  a sample this size, but it moves the intended way and the repair-crew numbers show
+  the mechanism working (medics die more, towers stay down, sieges finish).
+- No metric regressed: resolve time flat, stuck down, zero page errors, same single
+  load-fail seed as baseline.
+
+VERDICT: KEEP. Reconciled to /rmrf/ (main.js v404).
+Unit-level verifications (headless rigs, all passing): ~/pw/flag-recover.cjs,
+trap-check.cjs, signal-check.cjs, repair-race.cjs, detail-check.cjs, smoke-live.cjs.

@@ -3,7 +3,7 @@
 // Each maker returns a THREE.Group with its base at y=0. Team accent passed in.
 
 import * as THREE from 'three';
-import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture } from './Textures.js?v=2';
+import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture } from './Textures.js?v=2';
 import { buildAssetGroup } from './AssetBuilder.js?v=1';
 import FLAGHQ_CFG from './flaghq.config.js?v=2';
 import ADMIN_CFG from './admin.config.js?v=1';
@@ -86,20 +86,64 @@ export function makeLookout(cell, accent) {
   return buildAssetGroup(LOOKOUT_CFG, accent, { cell });
 }
 
-// Surface elevator: a framed platform that vehicles rise onto (the underground
-// garage rise animation hooks in later). Recessed dark lift pad + corner posts.
-// Flat elevator pad (posts intentionally dropped): a stone apron with a recessed dark
-// lift pad and accent edge stripes. The rise animation hooks in with the garage.
-export function makeElevator(cell, accent) {
-  const g = new THREE.Group();
-  const am = accentMat(accent);
-  const apron = box(cell * 1.35, cell * 0.18, cell * 1.35, STONE);
-  apron.position.y = cell * 0.09; g.add(apron);
-  const pad = box(cell * 0.95, cell * 0.12, cell * 0.95, LIFT);
-  pad.position.y = cell * 0.2; g.add(pad);
-  for (const sx of [-1, 1]) {
-    const stripe = box(cell * 0.1, cell * 0.13, cell * 0.95, am);
-    stripe.position.set(sx * cell * 0.48, cell * 0.2, 0); g.add(stripe);
+// Surface elevator: the deck vehicles rise onto, ringed by a yellow/black hazard
+// collar. This is the DESIGNER asset — in game the placed elevator is consumed to
+// build the functional Elevator.js rig (carved shaft + rising lift). The two share a
+// footprint (padHalf 6 deck, collar inner 5.75 / outer 7.6, world units) so what you
+// place in the designer matches what appears on the island — the collar included, so
+// its stripes visibly meet the gate roads here just as they do in play.
+const ELEV_PAD_HALF = 6.0;          // deck half-width (matches Elevator.js)
+const ELEV_COLLAR_IN = ELEV_PAD_HALF - 0.25;   // collar hole (tucks over the deck edge)
+const ELEV_COLLAR_OUT = 7.6;        // collar outer edge (meets the gate roads)
+const ELEV_HAZARD_PERIOD = 2.2;     // world-UV stripe period (matches Elevator._collar)
+
+// The striped collar frame: a flat ring, world-UV'd so the diagonal stripes stay even
+// regardless of size. Mirrors Elevator.prototype._collar.
+function elevatorCollar() {
+  const inner = ELEV_COLLAR_IN, outer = ELEV_COLLAR_OUT;
+  const shape = new THREE.Shape();
+  shape.moveTo(-outer, -outer); shape.lineTo(outer, -outer);
+  shape.lineTo(outer, outer); shape.lineTo(-outer, outer); shape.closePath();
+  const hole = new THREE.Path();
+  hole.moveTo(-inner, -inner); hole.lineTo(-inner, inner);
+  hole.lineTo(inner, inner); hole.lineTo(inner, -inner); hole.closePath();
+  shape.holes.push(hole);
+  const geo = new THREE.ShapeGeometry(shape);
+  const pos = geo.attributes.position;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i * 2] = pos.getX(i) / ELEV_HAZARD_PERIOD;
+    uv[i * 2 + 1] = pos.getY(i) / ELEV_HAZARD_PERIOD;
   }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  const mat = new THREE.MeshStandardMaterial({ map: hazardTexture().clone(), roughness: 0.7 });
+  mat.map.needsUpdate = true;
+  const frame = new THREE.Mesh(geo, mat);
+  frame.rotation.x = -Math.PI / 2;
+  frame.receiveShadow = true;
+  return frame;
+}
+
+export function makeElevator(cell, accent) {
+  void cell;   // sized in absolute world units to match the functional rig, not cells
+  const g = new THREE.Group();
+  const half = ELEV_PAD_HALF;
+  // Concrete deck.
+  const pad = box(half * 2, 0.5, half * 2, STONE);
+  pad.position.y = 0.25; g.add(pad);
+  // Team-colour border framing the deck on all four edges (mirrors Elevator.js).
+  const am = accentMat(accent);
+  const bw = 0.7;
+  const inset = half - bw / 2 - 0.15;
+  const len = half * 2 - 0.3;
+  for (const s of [-1, 1]) {
+    const front = box(len, 0.12, bw, am);
+    front.position.set(0, 0.56, s * inset); g.add(front);
+    const side = box(bw, 0.12, len, am);
+    side.position.set(s * inset, 0.56, 0); g.add(side);
+  }
+  // Yellow/black hazard collar ringing the deck, just above the surface.
+  const collar = elevatorCollar();
+  collar.position.y = 0.55; g.add(collar);
   return g;
 }

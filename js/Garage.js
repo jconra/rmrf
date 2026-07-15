@@ -500,7 +500,14 @@ export class Garage {
       const x = lerp(d.fromX, 0, k), z = lerp(d.fromZ, 0, k);
       const h = lerpAngle(d.fromH, d.targetH, k);
       d.veh.setPose(x, this.liftY, z, h);
-      d.veh.model.update(dt, 1, 0);        // driving gait while it rolls
+      // Gait tracks the ACTUAL roll velocity, not full throttle — else the legs/tracks
+      // animate at top speed while the hull eases slowly onto the lift (the walker skates).
+      const spd = dt > 0 ? Math.hypot(x - (d._px ?? x), z - (d._pz ?? z)) / dt : 0;
+      d._px = x; d._pz = z;
+      // throttle = roll speed ÷ (top speed × garage display scale): the garage renders vehicles
+      // at vehScale (2.6×), so the walk cycle covers vehScale× more ground per step than in-game —
+      // divide it back out or the legs skate over the floor.
+      d.veh.model.update(dt, Math.min(1, spd / ((d.veh.speed || 14) * (this.vehScale || 1))), 0);
       this._placeSelLight({ x, z });
       if (d.t >= ROLL_TIME) { this.phase = 'rising'; d.t = 0; }
     } else if (this.phase === 'rising') {
