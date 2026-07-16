@@ -247,6 +247,8 @@ export class Destructible {
   // rebuild is always revive-then-heal). The owner is responsible for restoring its own staging
   // (e.g. a Wall snaps crumbled layers back as its HP climbs — see Wall._restage's rebuild branch).
   revive(hp = 1) {
+    // A rebuilt structure BLOCKS again — cached paths routed through the gap must replan.
+    if (this.blocks && Destructible.onBlocksChanged) Destructible.onBlocksChanged();
     if (!this.dead) return;
     this.dead = false;
     this.hp = Math.min(this.maxHp, Math.max(1, hp));
@@ -260,6 +262,9 @@ export class Destructible {
 
   _destroy() {
     this.dead = true;
+    // The pathing world just changed (a blocking structure fell → routes THROUGH it opened):
+    // wake the nav caches (event-driven invalidation — see bumpNavEpoch in main.js).
+    if (this.blocks && Destructible.onBlocksChanged) Destructible.onBlocksChanged();
     this._parent = this.mesh.parent;   // remembered so revive() can re-attach the mesh
     if (this.staged) {           // pieces ARE the rubble — drop whatever's still standing, keep them in place
       this._restageFall();

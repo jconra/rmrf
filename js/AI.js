@@ -559,13 +559,22 @@ const BEHAVIORS = {
     // the exact centre. A wide-turning unit (Lurcher) can't land on a 5u pinpoint and just orbits
     // it, which parks it circling on top of its own FOB elevator. atHome (the real supply radius)
     // lets it settle anywhere in the zone and top up.
-    const fwd = ((homeward && view.atHome) || dist < arrive) ? 0 : 1;
+    const arrived = (homeward && view.atHome) || dist < arrive;
+    // FORWARD EASING (kills the orbit): pivot to FACE the target before driving, instead of
+    // gunning full-speed while hard-turning. A wide-turning unit driving+turning at once arcs
+    // around a target it can't out-turn — the "spinning in circles at the staging point" bug,
+    // worst when the goal is unreachable (walled fob) so the nav layer hands back raw seek.
+    // >34° off → pivot in place; 14–34° → half throttle while lining up; <14° → full. (Matches
+    // steerToward, which the nav overlay already uses when it HAS a route.)
+    const a = Math.abs(err);
+    const fwd = arrived ? 0 : (a > 0.6 ? 0 : a > 0.25 ? 0.5 : 1);
     // FIGHT FROM THE PAD: a unit parked at base topping up used to sit BLIND, facing the
     // base — a chaser (a Lurcher on a healing Valkyrie) out-damages the heal and the unit
     // died waiting. Healing doesn't disarm the gun: pivot to face the pursuer (any rival
     // in sight, else the last threat we fled from) and return fire while the base tops us
-    // up. Stays parked — leaving the heal radius to duel is what gets it killed.
-    if (homeward && fwd === 0) {
+    // up. Stays parked — leaving the heal radius to duel is what gets it killed. Gated on
+    // ARRIVED (not fwd===0) so a homeward unit merely pivoting en route doesn't stop to fight.
+    if (homeward && arrived) {
       const foe = view.enemy;                      // visible + LOS → can actually shoot it
       const face = foe || mem._fleeFrom;           // else at least FACE where the trouble was
       if (face) {

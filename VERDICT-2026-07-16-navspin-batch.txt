@@ -1,0 +1,47 @@
+VERDICT — 2026-07-16 nav/steering/scrap batch (before/after tournament)
+=========================================================================
+
+Batch under test (all uncommitted in /rmrf/):
+  1. Event-driven A* invalidation (nav epoch): a cached path replans only when the
+     pathing world actually changes (structure died/rebuilt, fort placed, mine
+     laid/spotted/detonated, obstacles rebuilt) + a 7s safety net, instead of a blanket
+     1.1s TTL. Measured -64% A* replans/s in isolation; a pure CPU win that should be
+     INVISIBLE to outcome quality (the point of this test = confirm no behavioral cost).
+  2. Siege-scrap gate: a sieger bends for a salvage pile within 14u (was fully excluded);
+     capture/scavenge/Jotun still excluded.
+  3. Spinning-lurcher fix: ATTACK targets enemyStagingHold() (a reachable standoff outside
+     the enemy wall ring) instead of the unreachable walled fob centre, + seek() now eases
+     its throttle by heading error (pivot-to-face) instead of driving full-speed-while-
+     turning. Kills the orbit a wide-turning unit did around an unreachable goal.
+  (Rendering-only riders also present but outcome-neutral: building merge, wall instancing,
+   ?perf spelling alias.)
+
+Protocol: ~/pw/tourney.cjs, 30 seeds (11+7k), full 480 map, 20000 ticks (1000s sim), par 2.
+BEFORE = rmrf-frozen (has the committed watch-fixes + L2 hook, but NONE of this batch).
+AFTER  = rmrf (current). Box was idle (evolution run finished), so 0 load-fails both sides
+— a clean paired comparison.
+
+                         BEFORE (frozen)   AFTER (current)   DELTA
+resolved                 24/30 (80%)       25/30 (83%)       +1 resolution
+stalemates               6                 5                 -1
+avg resolve time         536s              549s              +13s (noise)
+transit-stuck samples    1249              1278              +29 (+2%, noise)
+idle-at-goal samples     1896              1408              -26% (fewer units
+                                                              loitering — cleaner arrivals)
+longest stuck episode    72s               40s               -32s (worst-case tail HALVED)
+load-failed seeds        0                 0                 clean
+
+Reading:
+- NO REGRESSION. Resolution held/improved (80% -> 83%), stalemates down, zero new failure
+  modes, zero load fails. Outcomes flat-to-slightly-positive, all within single-run noise.
+- WORST-CASE TAIL IMPROVED. The longest transit-stuck episode dropped 72s -> 40s, and
+  idle-at-goal loitering fell 26% — consistent with the anti-orbit steering + reachable
+  ATTACK target + faster nav recovery clearing the pathological cases.
+- The nav-epoch CPU win (-64% replans) correctly shows up as NOTHING in the outcome metrics
+  — exactly what a perf optimization should do: cheaper, same behavior.
+
+VERDICT: KEEP. No behavioral cost, a real perf win, and the watched bugs (spinning lurcher,
+sieger walking past its own scrap) are addressed without denting aggregate play.
+Unit-level verifications: ~/pw/staging-reach.cjs (ATTACK goal now reachable 0u vs 21u short),
+nav-epoch-check.cjs (instant invalidation on wall-fall), nav-replan-check.cjs (-64% replans),
+sap-land-check.cjs, scrap-siege behaviour.

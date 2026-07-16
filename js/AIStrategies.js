@@ -150,7 +150,7 @@ class Trap extends Mission {
 // sighting, fall back to where they emerge (the elevator).
 class Attack extends Mission {
   get key() { return 'attack'; }
-  objective(cmd) { return cmd.lastEnemyPos() || cmd.enemyFobPos(); }
+  objective(cmd) { return cmd.lastEnemyPos() || cmd.enemyStagingHold(); }   // a REACHABLE standoff, not the walled fob centre (see enemyStagingHold)
   // The objective is a place to HOLD/HUNT (a last-seen spot or the enemy's deploy pad), NOT a
   // fortification to shell — so don't blind-fire the goal (base Mission defaults shoot=true, which
   // had a Warrior dumping rounds over a flattened, empty staging point). Real targets are still
@@ -498,6 +498,7 @@ class Doctrine {
     this.mission.tick(cmd, dt);
     if (cmd._sapOn === undefined) {   // one-time roll: does this commander open with a sapper sortie?
       cmd._sapOn = this.rng() < (SAP_CHANCE[cmd.archetype] ?? 0.35);
+      cmd._sapSide = this.rng() < 0.5 ? 1 : -1;   // which flank to sap — rolled per match (was hardcoded per team)
       // A HUNTER that saps may turn it into a baited TRAP: mines on the lane + a Lurcher that lures.
       cmd._trapMode = cmd.archetype === 'hunter' && cmd._sapOn && this.rng() < 0.7;
       if (!cmd._sapOn) cmd._sapDone = true;

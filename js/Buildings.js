@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture } from './Textures.js?v=2';
 import { buildAssetGroup } from './AssetBuilder.js?v=1';
+import { mergeByFallBand } from './MergeParts.js?v=1';
 import FLAGHQ_CFG from './flaghq.config.js?v=2';
 import ADMIN_CFG from './admin.config.js?v=1';
 import TENT_CFG from './tent.config.js?v=2';
@@ -40,13 +41,13 @@ function accentMat(accent) {
 // the generic AssetBuilder; team-flagged parts take the accent and stay setAccent-able.
 // (The capturable flag itself is a separate system — Camp/buildFlags — not this mesh.)
 export function makeFlagHQ(cell, accent) {
-  return buildAssetGroup(FLAGHQ_CFG, accent, { cell });
+  return mergeByFallBand(buildAssetGroup(FLAGHQ_CFG, accent, { cell }));
 }
 
 // Barracks (js/barracks.config.js): twin green fabric quonset huts with dark end
 // walls, redesigned in the asset-designer (replaces the old hand-coded box hut).
 export function makeBarracks(cell, accent) {
-  return buildAssetGroup(BARRACKS_CFG, accent, { cell });
+  return mergeByFallBand(buildAssetGroup(BARRACKS_CFG, accent, { cell }));
 }
 
 // Supply depot: a cluster of crates.
@@ -65,25 +66,25 @@ export function makeDepot(cell) {
 // Admin block (js/admin.config.js): the former flag-HQ tower, now a plain interior
 // structure — concrete stack with team-colour trim banners and a rooftop pennant.
 export function makeAdmin(cell, accent) {
-  return buildAssetGroup(ADMIN_CFG, accent, { cell });
+  return mergeByFallBand(buildAssetGroup(ADMIN_CFG, accent, { cell }));
 }
 
 // Clamshell / quonset hut: a FULL cylinder lying on its side, sunk halfway so
 // Quonset hut (js/quonset.config.js): a half-buried ribbed-steel barrel vault with a
 // dark end wall, redesigned in the asset-designer (replaces the hand-coded arch).
 export function makeQuonset(cell, accent) {
-  return buildAssetGroup(QUONSET_CFG, accent, { cell });
+  return mergeByFallBand(buildAssetGroup(QUONSET_CFG, accent, { cell }));
 }
 
 // Canvas ridge tent (Return Fire style): a green triangular-prism A-frame.
 export function makeTent(cell, accent) {
-  return buildAssetGroup(TENT_CFG, accent, { cell });
+  return mergeByFallBand(buildAssetGroup(TENT_CFG, accent, { cell }));
 }
 
 // Lookout tower (js/lookout.config.js): a raised observation deck on cross-braced
 // legs, camo skirt panels in the team colour, spotlight rig on the roof.
 export function makeLookout(cell, accent) {
-  return buildAssetGroup(LOOKOUT_CFG, accent, { cell });
+  return mergeByFallBand(buildAssetGroup(LOOKOUT_CFG, accent, { cell }));
 }
 
 // Surface elevator: the deck vehicles rise onto, ringed by a yellow/black hazard

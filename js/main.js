@@ -460,8 +460,9 @@ if (QS.has('rngseed')) { const _seedRng = mulberry32((+QS.get('rngseed') >>> 0) 
 const doctrineRng = QS.has('dseed') ? mulberry32((+QS.get('dseed') >>> 0) || 1) : Math.random;
 
 // ?perf — on-device profiler: per-frame CPU time BROKEN DOWN by system, so a stutter's cause
-// is visible without DevTools (esp. on the phone, where there's no console). Off unless ?perf.
-const PERF = QS.has('perf');
+// is visible without DevTools (esp. on the phone, where there's no console). Off unless enabled.
+// Accepts common spellings/typos (perf / pref / performance / preformance) so it just works.
+const PERF = ['perf', 'pref', 'performance', 'preformance'].some(k => QS.has(k));
 const _pfAcc = {};                                     // section → ms accumulated over the window
 let _pfFrames = 0, _pfWork = 0, _planCount = 0, _pfShownAt = 0;
 function _pfT(k, fn) { if (!PERF) return fn(); const t = performance.now(); fn(); _pfAcc[k] = (_pfAcc[k] || 0) + (performance.now() - t); }
@@ -812,6 +813,7 @@ let aiScrapTightArrive = true;   // salvage-detouring units close to within the 
 let aiPostKillMoveOn = true;   // on a kill, drop the killer's engage-afterglow ghost so it doesn't linger "searching" the corpse (A/B via RR.setPostKillMoveOn)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
+const SCRAP_SIEGE_RANGE = 14;  // a SIEGER only bends for a pile basically on its path (no real detours off the firing line)
 const LOOT_RANGE = 28;         // after a KILL, how far the killer will swing over to grab the wreck it just made
 const LOOT_MS = 6000;          // give up the loot order after this long (don't let it stall the advance)
 let aiKillLoot = true;         // killers collect the wreck of what they just destroyed (A/B knob via RR.setKillLoot)
@@ -1383,6 +1385,12 @@ const VEH_MOVE = {
   valkyrie: { cruise: 7.5, ignoreWalls: true,  water: 'cross', tree: 'fly'   },
   jotun:    { cruise: 0,   ignoreWalls: false, water: 'sink',  tree: 'crush' },
 };
+// A "sinker" proxy for snapping an AI route point onto reachable LAND (water + walls both
+// count as blocked). Used where a route must stay on the ground even for a unit that can
+// itself cross water — e.g. a Firebrat's sap flank, which has to be MINABLE ground, not
+// open ocean (else the sortie drives out over the water and idles there). `.team` is set
+// per-use so the gate check reads right.
+const LAND_SNAP = { _move: { water: 'sink', ignoreWalls: false, tree: 'bump' }, team: null, holder: { position: { x: 0, z: 0 } } };
 // Durability + thirst. burn = fuel/sec at full throttle (idle sips 25%).
 // ammo = shots carried (fast guns carry more, heavy hitters few); shield = the
 // MAX armour pool a shield-generator pickup can give this vehicle (starts at 0).
@@ -2773,6 +2781,7 @@ function deployMine() {
   if (!playerIsFirebrat() || (player._mineCharges || 0) <= 0) { flashGadget('mine-btn', false); return; }
   const p = player.holder.position;
   const m = minefield.place(p.x, p.z, PLAYER_TEAM, teamColor(PLAYER_TEAM), player);
+  if (m) bumpNavEpoch();   // AI teammates route around the player's fresh mine too
   if (m) { player._mineCharges--; gadgetStats.minesLaid++; flashGadget('mine-btn', true); } else flashGadget('mine-btn', false);
   updateGadgetButtons();
 }
@@ -2974,11 +2983,13 @@ function updateFlags(dt) {
         f.carried = false; f.carrier = null;
       } else {
         const c = f.carrier.holder.position, hd = f.carrier.heading || 0;
-        // Trail the flag up and a touch BEHIND the carrier, yaw it so the fly streams to the
-        // REAR, and lean the pole back — a captured banner flapping off the tail.
-        f.group.position.set(c.x - Math.sin(hd) * 1.8, c.y + 2.6, c.z - Math.cos(hd) * 1.8);
-        f.group.rotation.y = hd + Math.PI / 2;   // local +x (the fly) points to the carrier's rear
-        f.tilt.rotation.z = 0.9;                 // pole leans BACKWARD off the tail (lower + attached-looking)
+        // Trail the flag BEHIND the carrier, yaw it so the fly streams to the REAR, and lean
+        // the pole back — a captured banner planted on the tail. (Forward is (-sin,-cos)hd,
+        // so BEHIND is +sin/+cos — the old minus signs hung the flag off the NOSE, floating
+        // ahead of the Firebrat; and the fabric streamed forward. Both flipped.)
+        f.group.position.set(c.x + Math.sin(hd) * 2.0, c.y + 1.5, c.z + Math.cos(hd) * 2.0);
+        f.group.rotation.y = hd - Math.PI / 2;   // fabric spun 180° about the pole: fly points AFT
+        f.tilt.rotation.z = -0.9;                // pole still leans BACKWARD (lean flips with the yaw flip)
         // AI carriers score by reaching their own base. The PLAYER must EXTRACT it —
         // ride the flag down the FOB lift into the secure garage (see returnToGarage).
         if (f.carrier !== player) {
@@ -3594,7 +3605,7 @@ function aiHandleGadgets(dt) {
         // TARGET FIXATION: a unit locked on a chase (pursue) is tunnel-visioned — slimmer chance to
         // notice the mine it's barrelling toward, so a hunter's bait can lure it right onto the trap.
         const chance = v._aiState === 'pursue' ? 0.3 : MINE.spotChance;
-        if (Math.random() < chance) m.spottedBy.add(v.team);
+        if (Math.random() < chance) { m.spottedBy.add(v.team); bumpNavEpoch(); }   // a newly-known mine reroutes this team's paths
       }
     }
     // (b) MISSION: an AI Firebrat seeds the contested ground with mines + one sensor pod per trip.
@@ -3618,6 +3629,7 @@ function aiLayGadgets(cmd, v, dt) {
     if (v._mineCharges > 0 && v._layCd <= 0 && map.isLand(p.x, p.z)) {
       if (minefield.place(p.x, p.z, cmd.team, teamColor(cmd.team), v)) {
         v._mineCharges--; v._layCd = AI_MINE_COOLDOWN; gadgetStats.minesLaid++;
+        bumpNavEpoch();   // the laying team knows this mine instantly — its paths route around it
       }
     }
     if (v._mineCharges <= 0) v._sapPhase = 'pod';
@@ -4020,6 +4032,7 @@ function constructFort(team, kind, cx, cz, rot = 0) {
   scene.add(w.group); placedWalls.push(w);
   // Direct obstacle registration — the one live list nav/collision/LOS all consult.
   obstacles.push({ x, z, team, body: w.body, r: grid.cell * (type === 'CORNER' ? 0.7 : 0.5) });
+  bumpNavEpoch();   // a new wall just closed routes — cached paths through it must replan
   if (!deployRepair(team, null, w, kind === 'armed')) {
     // No crew could roll (shouldn't happen past the guards) — tear the site back down, no charge.
     destructibles.remove(w.body); if (w.turretDest) destructibles.remove(w.turretDest);
@@ -4505,6 +4518,7 @@ function updateGadgets(dt) {
   if (!minefield) return;
   aiHandleGadgets(dt);
   const booms = minefield.update(dt, combatants, isFlyer);
+  if (booms.length) bumpNavEpoch();   // detonated mines vanish from the cost field — detours can relax
   for (const b of booms) {
     const p = new THREE.Vector3(b.x, b.y + 0.4, b.z);
     // Snapshot the living so we can attribute this mine's damage/kills (friendly vs enemy).
@@ -4825,6 +4839,20 @@ function avoidCell(x, z) {
 // Maintain a unit's cached path toward `dest` and return the next waypoint to steer
 // at (skips waypoints already reached). Replans on a timer, when the goal moves, or
 // when the path runs out. Returns a world {x,z}, or null to fall back to direct seek.
+// ── EVENT-DRIVEN PATH INVALIDATION ─────────────────────────────────────────────
+// A planned path stays valid until the WORLD it was planned in changes — and the world
+// only changes at a handful of known events: a blocking structure dies or gets rebuilt
+// (Destructible hooks below), a player fort goes up, the obstacle set rebuilds, a mine
+// is laid / spotted / detonated. Each bumps this epoch; navWaypoint replans a cached
+// path only when its epoch is stale (or its goal moved, or it ran out). Before this,
+// every path silently expired after 1.1s — a unit crossing the island to a STATIC goal
+// re-ran a full A* search ~once a second for the whole trip, "just in case". A long
+// TTL remains as a safety net for anything unmodeled.
+const NAV_TTL = 7;   // s — safety-net expiry (was the 1.1s "just in case" cadence)
+let _navEpoch = 0;
+function bumpNavEpoch() { _navEpoch++; }
+Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → routes opened/closed
+
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
@@ -4834,7 +4862,7 @@ function navWaypoint(nav, v, dest, dt) {
   // trigger below re-ran a full-grid A* search EVERY FRAME while a unit was stuck — ~80% of
   // CPU in cellBlocked (the perf sawtooth). failT gates retries after a failure so we search
   // at most a few times a second instead of 60×; a valid path (or a forced null) replans as before.
-  if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || moved2 > (c * 2) ** 2) && !(nav.failT > 0)) {
+  if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || nav.epoch !== _navEpoch || moved2 > (c * 2) ** 2) && !(nav.failT > 0)) {
     const hasUsablePath = nav.path && nav.idx < nav.path.length;
     if (hasUsablePath && _astarFrameMs >= NAV_FRAME_BUDGET_MS) {
       // Per-frame A* budget spent: keep following the current route and retry the refresh next
@@ -4842,7 +4870,8 @@ function navWaypoint(nav, v, dest, dt) {
       nav.t = 0.03;
     } else {
       const _s = performance.now();
-      nav.path = planPath(v, dest); nav.idx = 0; nav.t = 1.1; nav.dx = dest.x; nav.dz = dest.z;
+      nav.path = planPath(v, dest); nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
+      nav.epoch = _navEpoch;
       _astarFrameMs += performance.now() - _s;
       nav.failT = nav.path ? 0 : 0.6;   // no route → don't re-run the search for 0.6s
       if (!nav.path) return null;
@@ -4939,7 +4968,7 @@ function freshSlot() {
     _failStep: null, _failN: 0, _failT: 0, _failSnap: null,   // per-mission total-failure bans (per slot — each card banks its own lessons)
     _rising: false, _elev: null,                       // FOB-lift deploy state
     _exit: null, _exitT: 0, _exitCoolT: 0,             // post-deploy gate-exit waypoint
-    _nav: { path: null, idx: 0, t: 0, dx: null, dz: null },   // A* path cache
+    _nav: { path: null, idx: 0, t: 0, dx: null, dz: null, epoch: 0 },   // A* path cache (epoch: world state it was planned under)
     _supply: null, _supplyHeals: false, _home: null,   // resolved resupply/heal points (set per tick in _view)
     _stepAtDeploy: null,                               // strategy step when this unit deployed
     _recalling: false, _recallForce: false, _recallBestD: Infinity, _recallStallT: 0,
@@ -5143,6 +5172,22 @@ class AICommander {
   }
   enemyBasePos() { return teamCenter(this.targetTeam(), 'main'); }
   enemyFobPos() { return teamCenter(this.targetTeam(), 'fob'); }   // where the enemy's units rise — the Warrior hunts here
+  // A REACHABLE hold point outside the enemy's forward base — the fob CENTRE sits inside the
+  // enemy wall ring (and its gate is shut to us), so a ground unit's A* finds NO route there;
+  // aiming ATTACK at the centre made a wide-turning Lurcher orbit the wall ring forever (the
+  // "spinning at the staging point" bug). Pull the target back onto our approach side, just
+  // outside the ring, then snap it to reachable ground. Flyers hunt the centre directly.
+  enemyStagingHold() {
+    const fob = this.enemyFobPos();
+    if (!this.unit || this.unit._move.ignoreWalls) return fob;
+    const from = this.homePos();
+    let dx = fob.x - from.x, dz = fob.z - from.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+    const standoff = FOB_SIZE * grid.cell * 0.6;   // ~15u — clears the wall ring on the near side
+    const hx = fob.x - dx * standoff, hz = fob.z - dz * standoff;
+    const c = grid.cell;
+    const oc = nearestOpenCell(this.unit, Math.round(hx / c), Math.round(hz / c), 5);
+    return oc ? { x: oc.i * c, z: oc.j * c } : { x: hx, z: hz };
+  }
   homeBasePos() { return teamCenter(this.team, 'main'); }           // our own flag base
   // Comma-list of the points this team has SCOUTED (for the known-POI log readout):
   // discovered supply depots by kind + the enemy elevator/flag once seen.
@@ -5376,10 +5421,25 @@ class AICommander {
     if (this._sapGeoC) return this._sapGeoC;
     const base = this.homeBasePos(), enemy = this.enemyBasePos();
     let dx = enemy.x - base.x, dz = enemy.z - base.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
-    const px = -dz, pz = dx, side = this.team === 'red' ? 1 : -1;
+    // Flank side is rolled per-match (Doctrine.tick sets _sapSide off the seeded rng), so a
+    // team saps its LEFT or RIGHT flank at random across games instead of always the same one.
+    const px = -dz, pz = dx, side = this._sapSide != null ? this._sapSide : (this.team === 'red' ? 1 : -1);
+    // Snap onto LAND (LAND_SNAP is a sinker), not merely "open for a Firebrat" — a Firebrat
+    // crosses water, so the old nearestOpenCell(this.unit,…) happily left a flank point out in
+    // the ocean and the sortie idled there. Wider ring (8) so a point that lands offshore pulls
+    // back to the nearest reachable shore.
+    LAND_SNAP.team = this.team;
     const snap = (x, z) => { const c = grid.cell;
-      const oc = this.unit ? nearestOpenCell(this.unit, Math.round(x / c), Math.round(z / c), 5) : null;
-      return oc ? { x: oc.i * c, z: oc.j * c } : { x, z }; };
+      const oc = this.unit ? nearestOpenCell(LAND_SNAP, Math.round(x / c), Math.round(z / c), 8) : null;
+      if (oc) return { x: oc.i * c, z: oc.j * c };
+      // No land within reach (the flank point is well out in the ocean on a small island) —
+      // slide it back toward `base`, which is always ground, until it hits land. Guarantees a
+      // land point on the flank line so the sortie never drives out over open water.
+      for (let t = 0.2; t <= 1.0001; t += 0.2) {
+        const ix = x + (base.x - x) * t, iz = z + (base.z - z) * t;
+        if (map.isLand(ix, iz)) return { x: ix, z: iz };
+      }
+      return { x: base.x, z: base.z }; };
     let g;
     if (this._trapMode) {
       // TRAP (Hunter): a tight cluster ON the lane at ~35% out — a kill-zone the enemy crosses.
@@ -6052,6 +6112,7 @@ class AICommander {
       foeD: view.enemy ? Math.round(Math.hypot(view.enemy.x - pX, view.enemy.z - pZ)) : null,
       turD: view.threat ? Math.round(Math.hypot(view.threat.x - pX, view.threat.z - pZ)) : null,
       hq: !!view.hqThreat,   // the suppress target is the enemy KEEP, not a tower (labels)
+      sap: v._sapPhase || null,   // sap sortie leg (out/back/pod/done) — names the advance target in the logs
       heard: !!view.heard,
     };
     if (cmd.state !== prev) {
@@ -6638,12 +6699,16 @@ class AICommander {
     }
     // 2) OPPORTUNISTIC SALVAGE: swing over to a spotted scrap pile that's nearly on our path (free
     //    parts for the build bank). Short-range so it never drags a unit far off its real objective;
-    //    skipped for the slow Jotun, active siegers/capturers, flag carriers, and while already detouring.
+    //    skipped for the slow Jotun, capturers (a runner never stops), scavengers (their mission IS
+    //    scrap), flag carriers, and while already detouring. A SIEGER used to be fully excluded —
+    //    a Lurcher walked right past its dead teammate's pile mid-siege — but a pile a stone's
+    //    throw from the path is free: it bends (tight SCRAP_SIEGE_RANGE), it doesn't detour.
     if (!this._scrapDetour && !this._shielding && !this._intercepting && v.type !== 'jotun'
-        && this.strategy.step !== 'siege' && this.strategy.step !== 'capture' && this.strategy.step !== 'scavenge'
+        && this.strategy.step !== 'capture' && this.strategy.step !== 'scavenge'
         && !(this.flag() && this.flag().carrier === v)) {
+      const reach = this.strategy.step === 'siege' ? SCRAP_SIEGE_RANGE : SCRAP_GRAB_RANGE;
       const sp = this.nearestKnownScrap(px, pz);
-      if (sp && Math.hypot(sp.pos.x - px, sp.pos.z - pz) < SCRAP_GRAB_RANGE) { goal = { x: sp.pos.x, z: sp.pos.z }; this._scrapDetour = true; this._scrapTargetPile = sp; }
+      if (sp && Math.hypot(sp.pos.x - px, sp.pos.z - pz) < reach) { goal = { x: sp.pos.x, z: sp.pos.z }; this._scrapDetour = true; this._scrapTargetPile = sp; }
     }
     if (this._scrapDetour && !this._scrapDetourOn) {   // announce the commit ONCE (false→true), like the shield grab
       aiLog(this.team, `${this.cname} ${v.type}: “Salvage on our line — grabbing it.”`);
@@ -7072,7 +7137,12 @@ function stateDetail(d, st) {
     case 'engage':   return d.foeT ? `duelling the ${d.foeT} ${d.foeD}u out` : 'duelling';
     case 'suppress': return d.hq ? `shelling their HQ${d.turD != null ? ` ${d.turD}u out` : ''}`
                                  : `shelling a turret${d.turD != null ? ` ${d.turD}u out` : ''} · ${d.towers} left`;
-    case 'advance':  return `to the objective ${go}`;
+    case 'advance':  {
+      // Sap sortie legs get named — "to the objective" told Jacob nothing while a Firebrat
+      // ran its flank route (out → mine the way back → drop the pod → home).
+      const SAP_LEG = { out: 'to the flank point', back: 'mining the run home', pod: 'to the sensor-pod drop', done: 'flank run done — heading home' };
+      return `${d.sap && SAP_LEG[d.sap] ? SAP_LEG[d.sap] : 'to the objective'} ${go}`;
+    }
     case 'assault':  return `storming the objective ${go}`;
     case 'pursue':   return `to their last-known spot ${go}`;
     case 'retreat':  return `to base to heal ${go}`;
@@ -7154,8 +7224,13 @@ function publishAILive(dt) {
       const dbg = d ? { gd: d.gd, gx: d.gx, gz: d.gz, px: d.px, pz: d.pz, blk: d.blk, fwd: d.fwd, turn: d.turn,
         distFob: d.distFob, towers: d.towers, foeT: d.foeT, foeD: d.foeD, turD: d.turD, heard: !!d.heard,
         atHome: !!d.atHome, navPath: d.navPath, stuck: d.stuck, stuckWhy: d.stuckWhy, card: d.card, fof: d.fof } : null;
+      // Fleet COMPOSITION (garage reserves by type), tourney-style: F2 L1 V2 J1.
+      const comp = [['firebrat', 'F'], ['lurcher', 'L'], ['valkyrie', 'V'], ['jotun', 'J']]
+        .map(([k, c]) => (cmd.roster && cmd.roster[k] > 0) ? c + cmd.roster[k] : '')
+        .filter(Boolean).join(' ');
       teams[label] = { archetype: cmd.archetype, mission: s.step, rung: s._firedRung || '', sub, why: s._lastWhy || '',
-        fleet: mine, known: cmd._knownSummary ? cmd._knownSummary() : '', metrics: M, dbg, units };
+        fleet: mine, comp, color: teamColor(cmd.team),   // the ACTUAL in-game colour (the commander's pick), not a team-slot guess
+        known: cmd._knownSummary ? cmd._knownSummary() : '', metrics: M, dbg, units };
     }
     // recent decision log tail, mapped to team labels (the on-screen feed, relocated to the console)
     const log = [];
@@ -7646,6 +7721,7 @@ function gateBlocks(w, team) {
   return !w.gateOpen;
 }
 function buildObstacles() {
+  bumpNavEpoch();   // the whole obstacle set is being rebuilt — every cached path is suspect
   obstacles = [];
   gates = [];
   gateCells.clear();
@@ -8912,6 +8988,7 @@ window.RR = {
     }
   },
   blockedAt: (x, z) => blockedAt(x, z),
+  planPathTo: (v, x, z) => planPath(v, { x, z }),   // debug: A* path a unit would take to (x,z), or null
   get obstacles() { return obstacles; },
   get grid() { return grid; },
   fire: () => firePlayer(),
