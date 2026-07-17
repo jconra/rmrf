@@ -453,6 +453,30 @@ const BEHAVIORS = {
         mem._wantMove = fwd > 0;
         return { fwd, turn, fire, strafe: 0, state: mode };
       }
+      // SIEGE BREAK-OFF: dueling a vehicle while a tower is ACTIVELY HITTING us — that
+      // crossfire is a losing trade, so slip the tower's guns while the nose tracks the
+      // rival: locomote's goto/face split does both at once, and for a Jotun whose
+      // attacker is astern, "away is behind me" makes fwd go negative on its own (the
+      // reverse-arc). Trigger = TAKING TOWER FIRE (view.towerFire, last ~2.5s), per the
+      // doctrine "the maneuver depends on being fired on" — the first version triggered
+      // on mere tower PROXIMITY, which interrupted every siege of a defended base into
+      // an endless field duel (exact-gate: 8 seeds flipped stalemate, towers untouched
+      // for 1000s while kills tripled). Time-boxed so the unit fights once clear.
+      if (view.towerFire) {
+        if (mem._breakoffT == null) mem._breakoffT = 3.5;
+        if (mem._breakoffT > 0) {
+          mem._breakoffT -= view.dt;
+          const tdx = self.x - view.towerFire.x, tdz = self.z - view.towerFire.z;
+          const td = Math.hypot(tdx, tdz) || 1;
+          const away = { x: self.x + (tdx / td) * 24, z: self.z + (tdz / td) * 24 };
+          const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+            { goto: away, face: { x: view.enemy.x, z: view.enemy.z }, arrive: 2 });
+          const bfire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap))
+            ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
+          mem._wantMove = true;
+          return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: bfire, state: mode };
+        }
+      } else mem._breakoffT = null;   // guns quiet — re-arm for the next crossfire
       const pressured = self.hpFrac < 0.55 || dist < range * 0.6;
       // KITE — out-matched or pressed: fall back toward our own TOWER COVER while the turret
       // keeps bearing on the enemy. Steer the HULL at support; fire whenever the gun bears.

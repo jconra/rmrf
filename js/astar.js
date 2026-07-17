@@ -51,13 +51,13 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   // search can still hand back a valid route that makes real progress toward the goal instead of null
   // (the caller then walks toward it along passable cells rather than beelining straight into terrain).
   let best = null, bestH = Infinity;
-  let popped = 0;
+  let popped = 0, budgetHit = false;
   while (heap.length) {
     const cur = pop();
     // SEARCH BOUND: an UNREACHABLE goal would otherwise expand the entire reachable grid
     // (tens of thousands of cellBlocked calls) — and unit nav re-runs that constantly, which
     // was the perf sawtooth. Give up past the bound and return the best partial (below) / back off.
-    if (++popped > maxNodes) break;
+    if (++popped > maxNodes) { budgetHit = true; break; }
     const curK = key(cur.i, cur.j, cur.d);
     if (cur.g > (g.get(curK) ?? Infinity)) continue;
     const ch = h(cur.i, cur.j);
@@ -93,6 +93,10 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   }
   // Goal unreachable (or past the node bound): hand back the closest partial route, but only if it
   // actually gets NEARER the goal than the start — otherwise there's no progress to be had (null).
-  if (partial && best && bestH < h(start.i, start.j) - 0.5) return buildPath(best);
+  // The path carries WHY it's partial: budgetHit=true means the search ran out of NODES (the goal
+  // may be perfectly reachable, just far — a long trek on a big map); budgetHit=false means the
+  // open set EMPTIED — every reachable cell was settled and the goal wasn't among them: genuinely
+  // unreachable. Callers judging a "contract violation" must only trust the second kind.
+  if (partial && best && bestH < h(start.i, start.j) - 0.5) { const p = buildPath(best); p.budgetHit = budgetHit; return p; }
   return null;
 }

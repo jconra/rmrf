@@ -540,6 +540,9 @@ function _pfRender() {
 const SHOT_SIZE = parseInt(QS.get('size')) || 96;
 const SHOT_FOL = QS.has('fol');
 const SHOT_SEED = QS.has('seed') ? parseInt(QS.get('seed')) : null;
+// (Deterministic matches: use `?rngseed=N` + `?dseed=N` — both below — plus a test rig
+// that freezes performance.now and disables rAF before load. `?seed` alone pins ONLY the
+// map: normal play stays fresh, and the RNG stream is left native unless a rig asks.)
 // Seed policy: normal play gets a FRESH RANDOM map every load (each game is different).
 // `?seed=N` pins it for reproducibility, and `?shot` keeps the fixed default seed so the
 // headless render/test rigs stay deterministic. `?seed` always wins.
@@ -4778,11 +4781,13 @@ function planPath(v, dest) {
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
       const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
-      if (p2 && p2.length >= 1) return detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c })));
+      if (p2 && p2.length >= 1) { const o2 = detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c }))); o2.budgetHit = !!p2.budgetHit; return o2; }
     }
     return null;
   }
-  return detourMines(v, path.map(n => ({ x: n.i * c, z: n.j * c })));
+  const out = detourMines(v, path.map(n => ({ x: n.i * c, z: n.j * c })));
+  out.budgetHit = !!path.budgetHit;   // carried through the transforms: "partial because FAR" ≠ "partial because UNREACHABLE"
+  return out;
 }
 
 // --- A* search visualizer (debug overlay) ------------------------------------
@@ -4918,6 +4923,11 @@ function steerToward(v, wx, wz) {
 // hull turned WHILE strafing and the recall orbited its own goal for minutes (tournament
 // seeds 95/109/116, 182s worst). One helper, one contract, both call sites.
 function driveChassis(v, out, dt, omniTravel) {
+  // REVERSE CAP (doctrine): every chassis backs up at HALF throttle — reverse is a
+  // maneuver tool (kite, reverse-arc, backing out of a notch), never a fast way to
+  // travel; a unit that wants to go the other way turns around. The omni Lurcher is
+  // exempt: its six legs give it full speed in ANY direction by design.
+  if (aiReverseCap && out.fwd < -0.5 && !v._move.omni) out.fwd = -0.5;
   if (omniTravel) {
     const h = v.heading, st = out.strafe || 0;
     const mx = out.fwd * -Math.sin(h) + st * Math.cos(h);
@@ -4933,6 +4943,13 @@ function driveChassis(v, out, dt, omniTravel) {
     v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
   }
 }
+
+// Rotating siege-stand search: candidate bearings AROUND the ideal radial (the one-gun-at-
+// a-time spot), nearest first, alternating sides, capped at ±1.3 rad so the search can never
+// carry a sieger into the far corners' crossfire arcs.
+const STAND_ROT_STEPS = [0.5, -0.5, 0.9, -0.9, 1.3, -1.3];
+let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverseCap toggles for A/B bisection)
+let aiStandRotOn = true;    // rotating stand search on/off (RR.setStandRot)
 
 // ── THE DRIVER (js/Driver.js) ────────────────────────────────────────────────
 // Each slot seats a Driver: behaviors issue ORDERS (GOTO/DIRECT for now), the driver
@@ -5023,6 +5040,7 @@ function freshSlot() {
     _lootPile: null, _lootUntil: 0,                    // fresh-kill wreck grab
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
     _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
+    _standRot: 0, _standRotN: 0,                       // siege-stand rotation: driver said the standoff is unreachable → try the next bearing
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
     _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
@@ -6220,6 +6238,7 @@ class AICommander {
   // the gate exit, and the unstick reflex keep their own tuned steering. Flyers go
   // straight. Falls back to the brain's seek when there's no route.
   _navOverride(v, view, cmd, dt) {
+    this._destIsStand = false;   // set by the suppress branch below; reset every tick so it can't leak across states
     if (v._move.ignoreWalls) return;
     if (cmd.breakAim) return;     // brain is squaring up to shoot a blocker — don't steer it around
     const st = cmd.state;
@@ -6248,6 +6267,7 @@ class AICommander {
       const d2s = (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2;
       const obj = d2s > 70 * 70 ? this.strategy.objective(this) : null;
       dest = obj || view.threatStand; slack = 14;
+      if (!obj) this._destIsStand = true;   // final approach to the radial standoff (rotation applies)
     }
     else {
       if (st === 'unstick') {
@@ -6296,8 +6316,33 @@ class AICommander {
     // The DRIVER takes it from here: the state's resolved destination becomes a standing
     // GOTO order; the driver route-follows it (same A* cache) and reports the contract
     // violation if the goal turns out unreachable. Returns true = the driver owns motion.
-    this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, by: st });
+    const isStand = this._destIsStand; this._destIsStand = false;
+    const ord = this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, by: st });
     const s = this._driver.tick(dt);
+    // HANDLE "NO" — the driver reported this goal unreachable; the ISSUER reacts instead of
+    // letting the unit walk a partial route into a soft-lock (the top violation issuers from
+    // the tournament breakdown, handled at their source):
+    if (ord.violated && !ord._handled) {
+      ord._handled = true;
+      if (st === 'pursue' && v.ai && v.ai.lastSeen) {
+        // The ghost is across water/walls — no route will ever get there. Write the contact
+        // off; the state collapses back to the mission next think instead of chasing forever.
+        v.ai.lastSeen = null;
+        aiLog(this.team, `${this.cname}: Can't reach that last contact — writing it off, back to the plan.`);
+        return;
+      }
+      if (isStand && aiStandRotOn && this._standRotN < STAND_ROT_STEPS.length) {
+        // Siege standoff refused (water / unbroken ring): try the next bearing — but stay NEAR
+        // the ideal radial, alternating sides in small steps. The radial is the one-gun-at-a-
+        // time spot; the first version of this search marched 0.7 rad one direction and walked
+        // siegers straight into the OTHER corners' crossfire (fresh-seed tournament: dead
+        // siegers, towers standing, resolution -2). Bounded cone; past it, the walk-partial +
+        // plant/demolish fallback owns the approach like before.
+        this._standRot = STAND_ROT_STEPS[this._standRotN]; this._standRotN++;
+        this._nav.path = null;
+        aiLog(this.team, `${this.cname}: Can't REACH that firing position — trying ${this._standRot > 0 ? 'right' : 'left'} of the line (${this._standRotN}/${STAND_ROT_STEPS.length}).`);
+      }
+    }
     if (!s) return;                                 // no route — keep the brain's command
     cmd.fwd = s.fwd; cmd.turn = s.turn; cmd.strafe = s.strafe || 0;   // nav owns the motion (omni chassis translate immediately)
     v.ai._wantMove = s.fwd > 0.3 || Math.abs(s.strafe || 0) > 0.3;    // keep the anti-wedge motion check honest
@@ -7027,7 +7072,16 @@ class AICommander {
         const om = Math.hypot(bx, bz) || 1;
         threatStand = { x: threat.x + (bx / om) * hold, z: threat.z + (bz / om) * hold };
       }
-    }
+      // HANDLE "NO" (driver contract): the geometric standoff can land in water / behind an
+      // unbroken ring for a ground unit — the driver refuses it (unreachable) and _navOverride
+      // answers by advancing this rotation, so the stand walks around the tower until a
+      // bearing the chassis can actually REACH comes up. Capped at one full circle.
+      if (threatStand && this._standRot) {
+        const cs = Math.cos(this._standRot), sn = Math.sin(this._standRot);
+        const rx = threatStand.x - threat.x, rz = threatStand.z - threat.z;
+        threatStand = { x: threat.x + rx * cs - rz * sn, z: threat.z + rx * sn + rz * cs };
+      }
+    } else { this._standRot = 0; this._standRotN = 0; }   // threat gone — fresh geometry next siege
     // SIEGE FLATTEN: with no clean line on the tower, shell the latched breach wall (a real,
     // solidly-hittable target at its true position) to blow a path through — aimed shots at the
     // hidden turret just arc over. Falls back to the nearest wall if no breach wall is latched.
@@ -7106,6 +7160,11 @@ class AICommander {
       enemyGone: this.enemyEliminated(),   // target fleet wiped → don't waste time ghost-chasing a dead sighting
       support: turretCountOf(this.team) > 0 ? this.homeBasePos() : null,   // rally toward own tower cover (ai_behavior duels)
       threat, threatLOS, flankSide, threatStand, demolishTarget, breakTarget, engageRange: ENGAGE_RANGE[v.type] || 36,
+      // ACTIVE tower fire on this hull (last ~2.5s): the siege break-off's trigger. The doctrine
+      // is "the maneuver depends on being FIRED ON" — proximity alone interrupted every siege of
+      // a defended base into an endless field duel (exact-gate: 8 seeds flipped to stalemate).
+      towerFire: v._hitByTurret && performance.now() - v._hitByTurret.t < 2500
+        ? { x: v._hitByTurret.x, z: v._hitByTurret.z } : null,
       shotReach: SHOT_REACH[v.type] || 999,   // hard cap on firing distance — a round physically dies past this (see SHOT_REACH)
       fofW: fofFor(this.team),   // this team's fight-or-flight weight set (tunable / A/B)
       hqThreat,   // the suppress target is the enemy KEEP (not a tower) — for logs/recorder
@@ -9008,8 +9067,10 @@ window.RR = {
   bridgeDeckY: (x, z) => roadDeckY(x, z),                     // alias (kept for older verification scripts)
   navPlan: (v, x, z) => planPath(v, { x, z }),                 // debug: A* path for a unit
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
-  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal }),   // match-wide driver counters
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy } }),   // match-wide driver counters
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
+  setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
+  setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)
   navCellBlocked: (v, i, j) => cellBlocked(v, i, j),          // debug: nav passability of a cell
   astar: () => toggleAstarViz(),                              // open/close the A* search visualizer overlay
   get paused() { return paused; },                            // debug: is the sim frozen (full log or A* viz open)

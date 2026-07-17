@@ -38,6 +38,12 @@ const GOTO_STALL = 16;        // s — a GOTO making NO headway toward its goal 
                               // ground (the pin detector never trips) while its distance-to-goal
                               // goes nowhere. Progress = getting CLOSER, not just moving.
 const GOTO_STALL_MIN = 1;     // u — closing this much on the goal counts as headway
+const GRIND_FRAC = 0.15;      // actual ground under this fraction of COMMANDED×nominal speed =
+                              // a GRIND: pedals hard down, hull barely moving (wall friction,
+                              // slope shove, crowd press). The seed-109 recall crept at ~1u/s —
+                              // a tenth of a Lurcher's 14u/s — past both the pin floor AND the
+                              // stall clock (it genuinely closed on home, glacially).
+const GRIND_CMD_MIN = 0.5;    // only judge grind when the window's avg pedal is a real demand
 const DESTRUCT_GRACE = 15;    // s pinned AFTER the alarm before the unit scuttles itself
 const UNREACH_SLACK = 9;      // u — route ends farther than this from the goal = partial path
 
@@ -58,6 +64,7 @@ export class Driver {
     this.violations = 0;       // unreachable-GOTO contracts caught (current vehicle)
     this._recT = 0;
     this._winT = 0; this._winX = 0; this._winZ = 0; this._wantT = 0;
+    this._cmdT = 0; this._why = 'pin';         // grind bookkeeping + last no-progress reason
     this._noProgWins = 0;      // consecutive windows with no net progress
     this._alarmT = -1;         // >=0: seconds since the alarm fired (grace countdown)
     this._lastPed = null;      // pedals actually driven this tick (set by note())
@@ -70,7 +77,7 @@ export class Driver {
       this.v = v; this.o = null; this.rec.length = 0; this.alarms = 0; this.violations = 0;
       this._recT = 0; this._winT = 0; this._wantT = 0; this._noProgWins = 0; this._alarmT = -1;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
-      this._winD = null; this._lastGoto = null;
+      this._winD = null; this._lastGoto = null; this._cmdT = 0; this._why = 'pin';
     }
     this.nav = nav; this.team = team; this.cname = cname;
   }
@@ -132,10 +139,17 @@ export class Driver {
   _checkReach(dest) {
     const o = this.o, path = this.nav && this.nav.path;
     if (!path || !path.length || o.violated) return;
+    // A budget-truncated search proves NOTHING about reachability — the goal may just be far
+    // (a long trek on a big map exhausts maxNodes long before it exhausts the island). Only a
+    // search that EMPTIED its open set — settled every reachable cell and the goal wasn't
+    // there — convicts the order. Acting on budget partials was the false-conviction bug:
+    // reachable pursuit contacts written off, good siege stands rotated away, resolution -4.
+    if (path.budgetHit) return;
     const end = path[path.length - 1];
     const short = Math.hypot(end.x - dest.x, end.z - dest.z);
     if (short > Math.max(UNREACH_SLACK, o.arrive || 0)) {
       o.violated = true; this.violations++; Driver.violationsTotal++;
+      Driver.violationsBy[o.by || '?'] = (Driver.violationsBy[o.by || '?'] || 0) + 1;   // WHO orders the impossible (Slice-2 targeting data)
       this.hooks.log(this.team, `[NAV CONTRACT] ${this.cname}: ${this.v.type} ordered to unreachable `
         + `(${Math.round(dest.x)},${Math.round(dest.z)}) by ${o.by || '?'} — route ends ${Math.round(short)}u short. `
         + `Walking the partial route; the ORDER is the bug.`);
@@ -167,6 +181,7 @@ export class Driver {
     // blind shore slides included). "Trying to move" = any pedal pressed hard enough.
     const wants = Math.abs(ped.fwd || 0) > WATCH_WANT || Math.abs(ped.strafe || 0) > WATCH_WANT;
     if (wants) this._wantT += dt;
+    this._cmdT += Math.min(1, Math.abs(ped.fwd || 0) + Math.abs(ped.strafe || 0)) * dt;   // window's commanded-throttle integral (grind check)
     // GOTO goal-progress stall — the orbit catcher. Any real closing on the goal resets
     // the clock (and stands an armed alarm down); driving hard without ever getting
     // closer runs it up. DIRECT orders skip this (combat holds ground on purpose).
@@ -183,13 +198,21 @@ export class Driver {
         // is judged once per window below, at a rate no wall-grind can fake.
       } else {
         o.stallT = (o.stallT || 0) + dt;
-        if (o.stallT > GOTO_STALL && this._alarmT < 0) this._fireAlarm();
+        if (o.stallT > GOTO_STALL && this._alarmT < 0) this._fireAlarm(o.violated && !wants ? 'partial-freeze' : 'stall');
       }
     }
     this._winT += dt;
     if (this._winT >= WATCH_WIN) {
       const moved = Math.hypot(v.holder.position.x - this._winX, v.holder.position.z - this._winZ);
-      const noProg = this._wantT > WATCH_WIN * 0.6 && moved < WATCH_MIN_MOVE;
+      const pinned = this._wantT > WATCH_WIN * 0.6 && moved < WATCH_MIN_MOVE;
+      // GRIND: expected ground = avg commanded throttle × the chassis' nominal speed; actual
+      // ground under GRIND_FRAC of that means the hull is being held back by something the
+      // pedals can't beat — whatever the absolute numbers.
+      const avgCmd = this._cmdT / WATCH_WIN; this._cmdT = 0;
+      const nom = (v.def && v.def.speed) || 10;
+      const ground = avgCmd > GRIND_CMD_MIN && moved < avgCmd * nom * WATCH_WIN * GRIND_FRAC;
+      const noProg = pinned || ground;
+      this._why = pinned ? 'pin' : ground ? 'grind' : this._why;
       this._noProgWins = noProg ? this._noProgWins + 1 : 0;
       // RECOVERY (alarm stand-down), judged once per window: real ground covered AND — when
       // still on a GOTO — real closing on the goal (≥4u/window ≈ 0.5u/s). An orbit moves
@@ -203,7 +226,7 @@ export class Driver {
         ? Math.hypot(o.x - v.holder.position.x, o.z - v.holder.position.z) : null;
       this._winT = 0; this._wantT = 0;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
-      if (noProg && this._noProgWins >= ALARM_WINDOWS && this._alarmT < 0) this._fireAlarm();
+      if (noProg && this._noProgWins >= ALARM_WINDOWS && this._alarmT < 0) this._fireAlarm(this._why);
     }
     // scuttle countdown: pinned right through the post-alarm grace → the driver ends it
     if (this._alarmT >= 0) {
@@ -216,19 +239,19 @@ export class Driver {
     }
   }
 
-  _fireAlarm() {
+  _fireAlarm(why = 'pin') {
     const v = this.v, o = this.o;
     this.alarms++; Driver.alarmsTotal++;
     this._alarmT = 0;
     const dump = {
-      when: Date.now(), team: this.team, cname: this.cname, type: v.type,
+      when: Date.now(), why, team: this.team, cname: this.cname, type: v.type,
       x: +v.holder.position.x.toFixed(1), z: +v.holder.position.z.toFixed(1),
       order: o ? { ...o } : null, label: this.label(),
       navPath: this.nav && this.nav.path ? this.nav.path.length : 0,
       navIdx: this.nav ? this.nav.idx : 0,
       rec: this.rec.slice(),                    // the last ~12s, tick by tick
     };
-    this.hooks.log(this.team, `[NAV ALARM] ${this.cname}: ${v.type} is making NO ground `
+    this.hooks.log(this.team, `[NAV ALARM · ${why}] ${this.cname}: ${v.type} is making NO ground `
       + `@(${Math.round(v.holder.position.x)},${Math.round(v.holder.position.z)}) on ${this.label()} — `
       + `flight recording dumped (${this.rec.length} samples). ${DESTRUCT_GRACE}s to break free.`);
     this.hooks.alarm(dump);
@@ -259,3 +282,4 @@ export class Driver {
 }
 Driver.alarmsTotal = 0;       // match-wide counters (the nightly "alarms per match" metric)
 Driver.violationsTotal = 0;
+Driver.violationsBy = {};     // unreachable orders per issuing state — names the Layer-2 bugs
