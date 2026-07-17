@@ -20,6 +20,7 @@
 // different graph to a brain's `.graph` to change its behavior.
 
 import { COUNTER } from './AIStrategies.js?v=64';   // rock-paper-scissors web for fight-or-flight matchups
+import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
 
@@ -408,10 +409,13 @@ const BEHAVIORS = {
       }
       // Skirt: drive the hull toward the standoff (arcing around the base) while the
       // turret keeps firing on the tower whenever it bears. The point is to REACH the
-      // flank, not dance out front.
-      const eMove = wrapPi(Math.atan2(-dsx, -dsz) - self.heading);
+      // flank, not dance out front. Movement via locomote — the old raw "fwd 1 + full
+      // turn" was the binary-throttle orbit bug living on in suppress (tournament: 34s
+      // orbits at siege standoffs); the eased square-up cures it here like everywhere.
+      const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+        { goto: view.threatStand, arrive: 2 });
       mem._wantMove = true;
-      return { fwd: 1, turn: clamp(eMove * 2.0, -1, 1), fire, state: mode };
+      return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire, state: mode };
     }
     const los = mode !== 'suppress' || view.threatLOS;   // duel target is always visible
     let steer = err;
@@ -478,6 +482,13 @@ const BEHAVIORS = {
           mem._unblockT = mem.t;
         }
         mem._wantMove = true;
+        // Clear the lane with the tools THIS chassis has: sliders sidestep; a tank (Jotun —
+        // treads, no strafe pedal) REVERSE-ARCS onto a new firing line instead. Its old
+        // "escape" was an illegal tread-slide; once the chassis gate zeroed that, blocked
+        // Jotuns just stood there grinding (engage-stuck +118% in the tournament).
+        if (!view.canStrafe) {
+          return { fwd: mem._unblockLong ? -0.6 : -0.5, turn: mem._unblockDir, fire, strafe: 0, state: mode };
+        }
         return { fwd: mem._unblockLong ? 0.4 : 0.35, turn, fire, strafe: mem._unblockDir * 0.95, state: mode };
       }
       // Lane cleared (a shot landed, or the fight moved) for a few seconds → forget the futility.
@@ -531,43 +542,41 @@ const BEHAVIORS = {
   },
 
   // Pound a fortification from the type's reach — heavies shell it from outside the
-  // turrets' best range instead of nosing up to the wall.
+  // turrets' best range instead of nosing up to the wall. Movement = locomote order
+  // (goto the target, FACE it — it's also the aim); the fire gate stays here.
   assault(ctx) {
-    const { view, mem, p, err, dist, mode } = ctx;
+    const { view, mem, p, err, dist, mode, self, target } = ctx;
     const aimGate = 0.18 + p.aggression * 0.12;
     const want = view.engageRange || 36;
     const standoff = want * 0.7;
-    const turn = clamp(err * 2.0, -1, 1);
-    const fwd = dist < standoff ? 0.1 : 1;
+    const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+      { goto: target ? { x: target.x, z: target.z } : null, face: target, arrive: standoff });
     let fire = false;
     if (Math.abs(err) < aimGate + 0.06 && dist < standoff * 1.4) fire = mem.rng() < 0.75 * AI_HANDICAP.fireProb;
-    mem._wantMove = Math.abs(fwd) > 0.3;
-    return { fwd, turn, fire, state: mode };
+    mem._wantMove = Math.abs(lo.fwd) > 0.3 || Math.abs(lo.strafe || 0) > 0.3;
+    return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire, state: mode };
   },
 
-  // advance / pursue / resupply / retreat — just get to the target.
+  // advance / pursue / resupply / retreat — just get to the target. Movement comes from the
+  // ONE locomotion primitive (Locomotion.js): eased square-up for tank chassis, immediate
+  // any-direction translation for an omni chassis. This behavior only decides WHERE and
+  // whether we've ARRIVED.
   seek(ctx) {
-    const { view, mem, self, err, dist, mode } = ctx;
+    const { view, mem, self, target, dist, mode } = ctx;
     // Heading HOME to heal/rearm must actually REACH the base (its heal radius is
     // ~12u), so use a tight arrival here — NOT the card's objective standoff, which
     // can be large (e.g. ScoutSnatch parks 30u out to scout) and would otherwise
     // leave a wounded unit frozen just outside its own supply, never healing.
     const homeward = mode === 'retreat' || mode === 'resupply';
     const arrive = homeward ? 5 : (view.arriveDist || 8);
-    const turn = clamp(err * 2.0, -1, 1);
     // Heading home: the instant we're actually IN the base's heal/rearm zone, STOP — don't chase
     // the exact centre. A wide-turning unit (Lurcher) can't land on a 5u pinpoint and just orbits
     // it, which parks it circling on top of its own FOB elevator. atHome (the real supply radius)
     // lets it settle anywhere in the zone and top up.
-    const arrived = (homeward && view.atHome) || dist < arrive;
-    // FORWARD EASING (kills the orbit): pivot to FACE the target before driving, instead of
-    // gunning full-speed while hard-turning. A wide-turning unit driving+turning at once arcs
-    // around a target it can't out-turn — the "spinning in circles at the staging point" bug,
-    // worst when the goal is unreachable (walled fob) so the nav layer hands back raw seek.
-    // >34° off → pivot in place; 14–34° → half throttle while lining up; <14° → full. (Matches
-    // steerToward, which the nav overlay already uses when it HAS a route.)
-    const a = Math.abs(err);
-    const fwd = arrived ? 0 : (a > 0.6 ? 0 : a > 0.25 ? 0.5 : 1);
+    const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+      { goto: target ? { x: target.x, z: target.z } : null, arrive });
+    const arrived = (homeward && view.atHome) || lo.arrived;
+    const turn = lo.turn, fwd = arrived ? 0 : lo.fwd, strafe = arrived ? 0 : (lo.strafe || 0);
     // FIGHT FROM THE PAD: a unit parked at base topping up used to sit BLIND, facing the
     // base — a chaser (a Lurcher on a healing Valkyrie) out-damages the heal and the unit
     // died waiting. Healing doesn't disarm the gun: pivot to face the pursuer (any rival
@@ -589,8 +598,8 @@ const BEHAVIORS = {
         return { fwd: 0, turn: clamp(derr * 2.2, -1, 1), fire, state: ctx.mode };
       }
     }
-    mem._wantMove = Math.abs(fwd) > 0.3;
-    return { fwd, turn, fire: false, state: ctx.mode };
+    mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
+    return { fwd, turn, strafe, fire: false, state: ctx.mode };
   },
 
   // RUNNER EVASION (ai_behavior Capture): a Firebrat doesn't trade shots — it flees to the

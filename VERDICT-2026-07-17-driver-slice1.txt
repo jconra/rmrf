@@ -1,0 +1,54 @@
+VERDICT — 2026-07-17 Driver architecture, Slice 1 (before/after tournament, two seed sets)
+===========================================================================================
+
+Batch under test (uncommitted in /rmrf/):
+  1. js/Locomotion.js — the ONE steering primitive (eased throttle kills the turning-circle
+     orbit; omni chassis translate immediately). Kept from the parked locomotion port.
+  2. js/Driver.js — THE DRIVER (Layer 0/1 of devblog/2026-07-16-driver-architecture.md):
+     travel states issue GOTO orders, driver route-follows via the shared A* cache through
+     locomote; combat stays DIRECT (observed, not steered — Slice 3 ports it to orders).
+     GOTO honesty rule: partial route to an unreachable goal = logged contract violation.
+     Flight recorder (~12s ring) + watchdog: PIN (net move <6u/8s while pedals pressed),
+     ORBIT/STALL (no closing on the GOTO goal 16s; survives order churn; accrues even
+     pedals-off when standing "arrived" at a partial-path end), recovery judged per-window
+     at a rate no wall-grind can fake. ALARM → autopsy dump (RR.navAlarms) → 15s grace →
+     SELF-DESTRUCT (RR.setNavScuttle toggles). Chain-of-command published to _dbg/ai-live
+     (mnv/drv rows, rendered in the ai-lab console).
+  3. driveChassis() — one chassis-correct drive boundary; _driveHome no longer feeds omni
+     pedals through classic drive (the recall-orbit machine).
+  4. Chassis gate + capability flags (Jotun cannot strafe anywhere), Jotun reverse-arc
+     unblock, omni-Lurcher travel via driveOmni (combat keeps drive(): fire-gate contract).
+
+Protocol: ~/pw/tourney.cjs, 30 seeds x2 sets (11+7k and 311+7k), 480 map, 1000s sim.
+BEFORE = rmrf-frozen. Three AFTER iterations mid-slice (autopsies between): DRV1 wiring,
+DRV2 +orbit-catcher +driveChassis, DRV3 +creeper/churn/partial-freeze fixes = this verdict.
+
+POOLED (60 matches/side)         BEFORE      AFTER(DRV3)   DELTA
+  resolved                       49/60       50/60         +1
+  avg resolve time               ~588s       ~537s         -51s (faster wins)
+  transit-stuck samples          2794        2496          -11%
+  idle-at-goal samples           2715        2479          -9%
+  suppress-stuck                 980         793           -19%
+  advance-stuck                  587         553           -6%
+  engage-stuck                   331         358           +8% (inside the est. noise band;
+                                                            engage swung 109-247 across runs)
+  worst episodes                 40s/38s     116s/48s      one residual (see below)
+  nav ALARMS                     n/a         31 (0.52/match)
+  distinct unreachable orders    invisible   ~26/match     the Slice-2 to-do list
+  load-failed seeds              0           0             clean
+
+Autopsied + fixed during the slice (each has a probe or tournament trace):
+  - recall-orbit (omni pedals through classic drive): seeds 95/116 at 182s/172s -> GONE
+  - order-churn stall laundering (state flicker resets the clock) -> inherited bookkeeping
+  - partial-path freeze (pedals-off "arrival" 31u short of an unreachable goal) -> alarms
+  - creeper under the pin floor (0.3u/s wall grind) -> floor raised to 0.75u/s
+
+KNOWN RESIDUAL: seed 109 recall lurcher, 116s — a GRIND: creeps ~1u/s (a tenth of
+commanded speed), beats the pin floor AND resets the stall clock by genuinely closing.
+Needs the devblog's expected-vs-actual-speed detector. 1 episode / 60 matches; queued.
+
+VERDICT: KEEP. Resolution held/improved on both seed sets (25->26 paired, 24->24 fresh),
+wins come ~50s sooner, every major stuck aggregate is down, the two worst legacy stuck
+classes are dead, and the game now EXPLAINS its failures: every alarm ships a flight
+recording, every impossible order is named. The alarms-per-match metric (0.52) is live in
+tourney output — drive it to zero through Slice 2 (commanders that handle "no").

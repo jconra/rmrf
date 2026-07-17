@@ -119,7 +119,7 @@ export class Vehicle {
   // world vector (mx, mz) ∈ unit disc, no input-driven turning — the hull has no "front"
   // to manage, it just goes where you push. The body eases to FACE its travel direction
   // (purely cosmetic; the turret aims independently via its full 360° arc). Same blocked-
-  // slide as drive(). Used only for the player Lurcher; the AI still uses drive().
+  // slide as drive(). Both the player Lurcher AND the AI's omni chassis route through here.
   driveOmni(dt, mx, mz, groundFn, blockedFn) {
     const mag = Math.hypot(mx, mz);
     if (mag > 0.001) {

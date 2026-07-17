@@ -26,6 +26,8 @@ import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
 import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
+import { locomote } from './Locomotion.js?v=1';
+import { Driver } from './Driver.js?v=1';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
@@ -1380,10 +1382,12 @@ const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beel
 // ignoreWalls = flies over base walls; water = 'cross' (hover/fly) or 'sink'
 // (land vehicle floods + drowns); tree = 'crush' | 'bump' (collide+chip) | 'fly'.
 const VEH_MOVE = {
-  lurcher:  { cruise: 0,   ignoreWalls: false, water: 'sink',  tree: 'crush' },
-  firebrat: { cruise: 2.4, ignoreWalls: false, water: 'cross', tree: 'bump'  },
-  valkyrie: { cruise: 7.5, ignoreWalls: true,  water: 'cross', tree: 'fly'   },
-  jotun:    { cruise: 0,   ignoreWalls: false, water: 'sink',  tree: 'crush' },
+  // strafe: chassis can slide sideways at all; omni: full any-direction translation (nav
+  // uses it too — locomote decomposes motion instead of nose-first steering).
+  lurcher:  { cruise: 0,   ignoreWalls: false, water: 'sink',  tree: 'crush', strafe: true,  omni: true  },   // six legs step ANY direction
+  firebrat: { cruise: 2.4, ignoreWalls: false, water: 'cross', tree: 'bump',  strafe: true,  omni: false },   // hover — can slide
+  valkyrie: { cruise: 7.5, ignoreWalls: true,  water: 'cross', tree: 'fly',   strafe: true,  omni: false },   // flies
+  jotun:    { cruise: 0,   ignoreWalls: false, water: 'sink',  tree: 'crush', strafe: false, omni: false },   // TREADS — nose-first only (it was sidestepping in combat: the unblock reflex never checked the chassis)
 };
 // A "sinker" proxy for snapping an AI route point onto reachable LAND (water + walls both
 // count as blocked). Used where a route must stay on the ground even for a unit that can
@@ -4895,21 +4899,61 @@ function navWaypoint(nav, v, dest, dt) {
   }
   return nav.path[nav.idx];
 }
-// Steer a vehicle toward a world point. SQUARE UP before committing forward: pivot in
-// place when badly mis-aimed, ease in at part-throttle while lining up, and only run at
-// full speed once roughly on heading. The old 69° gate let a slow tank charge forward
-// at up to 69° off and arc straight into a gate jamb / wall corner instead of turning to
-// face the gap first. drive() still slides on the fine bit.
+// Steer a vehicle toward a world point — now a thin wrapper over the ONE locomotion
+// primitive (js/Locomotion.js), so every nav follower shares the same square-up easing,
+// deadzone, and chassis capabilities. An omni chassis (the Lurcher's six legs) additionally
+// gets an immediate strafe component: it starts translating toward the point while the
+// nose is still swinging, so there is no turning circle to orbit.
 function steerToward(v, wx, wz) {
-  const dx = wx - v.holder.position.x, dz = wz - v.holder.position.z;
-  const err = wrapPi(Math.atan2(-dx, -dz) - v.heading);
-  const a = Math.abs(err);
-  const fwd = a > 0.6 ? 0 : a > 0.25 ? 0.45 : 1;   // >34° pivot in place; 14–34° crawl + turn; <14° full
-  // Small deadzone near zero so a unit that's basically on-heading drives STRAIGHT
-  // instead of micro-correcting left/right every frame (the "shaking its head" wobble).
-  const turn = a < 0.06 ? 0 : Math.max(-1, Math.min(1, err * 2.2));
-  return { fwd, turn };
+  return locomote({ x: v.holder.position.x, z: v.holder.position.z, heading: v.heading, omni: !!v._move.omni },
+    { goto: { x: wx, z: wz }, arrive: 0.001 });
 }
+
+// Drive the hull with the pedals THE CHASSIS-CORRECT WAY — the one drive boundary every
+// AI motion funnels through. omniTravel: an omni chassis (the Lurcher) folds fwd+strafe
+// into a world vector and takes driveOmni (independent nose, no turning circle). Everything
+// else — tank chassis always, and the omni hull during COMBAT footwork (whose fire gates
+// key off hull bearing, so drive() must own the heading) — takes classic drive().
+// _driveHome once fed omni pedals (fwd+strafe from locomote) through classic drive(): the
+// hull turned WHILE strafing and the recall orbited its own goal for minutes (tournament
+// seeds 95/109/116, 182s worst). One helper, one contract, both call sites.
+function driveChassis(v, out, dt, omniTravel) {
+  if (omniTravel) {
+    const h = v.heading, st = out.strafe || 0;
+    const mx = out.fwd * -Math.sin(h) + st * Math.cos(h);
+    const mz = out.fwd * -Math.cos(h) + st * -Math.sin(h);
+    const mag = Math.hypot(mx, mz);
+    v._throttle = Math.min(1, mag + Math.abs(out.turn) * 0.3);
+    v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);
+    if (mag > 0.02) v.driveOmni(dt, mx / Math.max(1, mag), mz / Math.max(1, mag), null, v._blocked);
+    else v.drive(dt, 0, out.turn, null, v._blocked);
+  } else {
+    v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
+    v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);   // road boost × promotion (bronze stars)
+    v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
+  }
+}
+
+// ── THE DRIVER (js/Driver.js) ────────────────────────────────────────────────
+// Each slot seats a Driver: behaviors issue ORDERS (GOTO/DIRECT for now), the driver
+// route-follows and drives, and everything is observed — order log, flight recorder,
+// a net-progress watchdog whose ALARM dumps an autopsy (and, pinned long enough past
+// the grace, scuttles the unit — a stuck vehicle is a bug, not a situation).
+const navAlarms = [];                       // alarm autopsies this match (flight recordings)
+let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
+const driverHooks = {
+  navWaypoint,
+  log: aiLog,
+  alarm: d => {
+    navAlarms.push(d); if (navAlarms.length > 40) navAlarms.shift();
+    // trimmed copy for the live ai-lab console (full recordings stay in-memory via RR.navAlarms)
+    try {
+      localStorage.setItem('rmrf-nav-alarms',
+        JSON.stringify(navAlarms.slice(-6).map(a => ({ ...a, rec: a.rec.slice(-50) }))));
+    } catch (e) { /* storage full/blocked — the in-memory copy still has everything */ }
+  },
+  selfDestruct: (v, why) => { if (aiNavScuttle && !v.dead) damageVehicle(v, 1e6, 'other', null); },
+};
 
 // ── MULTI-UNIT SLOTS ─────────────────────────────────────────────────────────
 // A commander fields one vehicle per SLOT; the slot count ("unit cap") is the number of
@@ -4978,6 +5022,7 @@ function freshSlot() {
     _scrapDetour: false, _scrapDetourOn: false, _scrapTargetPile: null,
     _lootPile: null, _lootUntil: 0,                    // fresh-kill wreck grab
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
+    _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
     _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
@@ -6101,6 +6146,11 @@ class AICommander {
       blk: (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'),
       hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), maxFuel: Math.round(v.maxFuel), shield: Math.round(v.shield),
       fof: v.ai && v.ai._fof != null ? +v.ai._fof.toFixed(1) : null,   // live fight-or-flight score vs the rival in sight
+      // CHAIN OF COMMAND (driver architecture): the standing maneuver order + the pedals
+      // actually driven — the two bottom rows of the console's layer display.
+      mnv: this._driver ? this._driver.label() : null,
+      drv: this._driver ? this._driver.pedals() : null,
+      alarms: this._driver ? this._driver.alarms : 0,
       distFob: Math.round(Math.hypot(v.holder.position.x - fob.x, v.holder.position.z - fob.z)),
       px: Math.round(v.holder.position.x), pz: Math.round(v.holder.position.z),
       gx: dest ? Math.round(dest.x) : null, gz: dest ? Math.round(dest.z) : null, gd: destDist,   // where it's ACTUALLY headed + distance
@@ -6243,11 +6293,15 @@ class AICommander {
       if (v.ai) v.ai._wantMove = true;
       return;
     }
-    const wp = navWaypoint(this._nav, v, dest, dt);
-    if (!wp) return;                                // no route — keep the brain's command
-    const s = steerToward(v, wp.x, wp.z);
-    cmd.fwd = s.fwd; cmd.turn = s.turn;
-    v.ai._wantMove = s.fwd > 0.3;                   // keep the anti-wedge motion check honest
+    // The DRIVER takes it from here: the state's resolved destination becomes a standing
+    // GOTO order; the driver route-follows it (same A* cache) and reports the contract
+    // violation if the goal turns out unreachable. Returns true = the driver owns motion.
+    this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, by: st });
+    const s = this._driver.tick(dt);
+    if (!s) return;                                 // no route — keep the brain's command
+    cmd.fwd = s.fwd; cmd.turn = s.turn; cmd.strafe = s.strafe || 0;   // nav owns the motion (omni chassis translate immediately)
+    v.ai._wantMove = s.fwd > 0.3 || Math.abs(s.strafe || 0) > 0.3;    // keep the anti-wedge motion check honest
+    return true;
   }
 
   // Decide whether to change the deployed vehicle. We only do this on a DELIBERATE
@@ -6351,18 +6405,23 @@ class AICommander {
       removeCombatant(v); scene.remove(v.group); this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 1.0;
       return;
     }
-    const wp = navWaypoint(this._nav, v, home, dt) || home;
-    const s = steerToward(v, wp.x, wp.z);
-    const out = burnFuel(v, { fwd: s.fwd, turn: s.turn }, dt);
-    v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6);
-    v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);   // road boost × promotion (bronze stars)
-    v.drive(dt, out.fwd, out.turn, null, v._blocked);
-    v.ai._wantMove = s.fwd > 0.3;
+    if (!this._driver) this._driver = new Driver(driverHooks);
+    this._driver.bind(v, this._nav, this.team, this.cname);
+    this._driver.order({ type: 'GOTO', x: home.x, z: home.z, arrive: reach, by: 'recall' });
+    const s = this._driver.tick(dt) || steerToward(v, home.x, home.z);   // no route → direct beeline home (old fallback)
+    const out = burnFuel(v, { fwd: s.fwd, turn: s.turn, strafe: s.strafe || 0 }, dt);
+    if (out.strafe && !v._move.strafe) out.strafe = 0;   // same chassis gate as the main drive boundary
+    this._driver.note(dt, out, '···');
+    driveChassis(v, out, dt, v._move.omni);   // recall is a travel move — the omni hull slides home, no orbit
+    v.ai._wantMove = s.fwd > 0.3 || Math.abs(s.strafe || 0) > 0.3;
     this._dbg = {
       name: this.cname, type: v.type, state: 'return-to-base',
       card: (this.strategy.constructor.name || 'Card').replace('Strategy', ''),
       fwd: +s.fwd.toFixed(2), turn: +s.turn.toFixed(2), blk: '···',
       hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), distFob: Math.round(d),
+      gx: Math.round(home.x), gz: Math.round(home.z), gd: Math.round(d),   // where it's headed (the log's honesty fields)
+      navPath: this._nav && this._nav.path ? this._nav.path.length : 0,
+      mnv: this._driver.label(), drv: this._driver.pedals(), alarms: this._driver.alarms,
       towers: this.turretsLive(),
     };
   }
@@ -6478,7 +6537,12 @@ class AICommander {
     if (this.strategy.lurePoint) { const lp = this.strategy.lurePoint(this); if (lp) view.lure = lp; }
     const cmd = v.ai.think(view);
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
-    this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
+    if (!this._driver) this._driver = new Driver(driverHooks);
+    this._driver.bind(v, this._nav, this.team, this.cname);
+    const routed = this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
+    // No GOTO issued (combat footwork / close-in / jolt): the brain's own motor output
+    // stands — the driver just observes it (recorder + watchdog stay hot under DIRECT).
+    if (!routed) this._driver.order({ type: 'DIRECT', by: cmd.state });
     // UNREACHABLE SALVAGE bail: we committed to a scrap pile but A* found NO route to it (walled
     // off on a spit next to the base). Without this the brain just steers straight at it — nosing
     // into the wall forever (the nav line points through the wall). Blocklist the pile for a bit
@@ -6505,9 +6569,26 @@ class AICommander {
     }
     const mineTurn = mineAvoidNudge(v);   // soft-steer around a spotted mine dead ahead (no A* block)
     if (mineTurn) out.turn = Math.max(-1, Math.min(1, out.turn + mineTurn));
-    v._throttle = Math.min(1, Math.abs(out.fwd) + Math.abs(out.turn) * 0.6 + Math.abs(out.strafe || 0) * 0.6);   // for spatial engine RPM
-    v.speedMul = roadSpeedMul(v) * rankSpeedMul(v);   // road boost × promotion (bronze stars)
-    v.drive(dt, out.fwd, out.turn, null, v._blocked, out.strafe || 0);
+    // CHASSIS GATE: treads don't sidestep. The Jotun was strafing in combat (the blocked-shot
+    // sidestep never checked the chassis) — clamp here at the drive boundary so NO behavior,
+    // present or future, can slide a vehicle its chassis can't slide.
+    if (out.strafe && !v._move.strafe) out.strafe = 0;
+    // Flight recorder + net-progress watchdog: the driver observes the pedals that are
+    // ACTUALLY about to drive the hull (post fuel-burn, post chassis gate), whoever
+    // produced them. This is the alarm's data feed — one call per tick, at drive time.
+    this._driver.note(dt, out,
+      (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'));
+    // AI OMNI (the Lurcher): fold the hull-relative motor output into a world vector and take
+    // the player's driveOmni path — full-speed in ANY direction (no 0.7 strafe penalty, no
+    // turning circle), hull cosmetically eases to face its travel, gyro-stabilized turret
+    // holds its aim through the swing. A stationary pivot (aiming) stays on drive()'s turn.
+    // TRAVEL STATES ONLY: driveOmni owns the heading (faces travel), which breaks combat's
+    // contract — duel footwork strafes WHILE its `turn` keeps the nose (and fire gates) on
+    // the enemy. Routing combat through omni made engage orbit without shooting (tournament:
+    // engage-stuck ×2.4). Combat keeps classic drive() until the footwork becomes explicit
+    // ORBIT/KITE maneuvers that manage facing themselves (the Driver design).
+    const OMNI_STATES = { advance: 1, pursue: 1, retreat: 1, resupply: 1 };
+    driveChassis(v, out, dt, v._move.omni && OMNI_STATES[cmd.state]);
     applyAltitude(v, dt);
     decayAim(v, dt);
     if (v.dead) { this.unit = null; this.respawnT = 4; this._rising = false; return; }
@@ -7014,6 +7095,8 @@ class AICommander {
       dt,
       self: { x: px, z: pz, heading: h, type: v.type, shield: v.shield, hpFrac: v.hp / v.maxHp, fuelFrac: v.fuel / v.maxFuel, ammoFrac: v.ammo / v.maxAmmo },
       seesEnemy, enemy, heard, enemiesNear, alliesNear, flyer, shotArc: SHOT_ARC[v.type] ?? Math.PI / 5,
+      omni: !!v._move.omni,   // chassis translates any direction (Lurcher) — locomote decomposes motion
+      canStrafe: !!v._move.strafe,   // the driver knows his pedals — reflexes pick chassis-legal maneuvers
       worldR: islandBound || 0,   // hard travel rim (map centre radius) — flee bends along it instead of pinning
       underFire: (performance.now() - (v._hitByVehT || -1e9)) < 1600,   // an enemy vehicle shot us in the last ~1.6s
 
@@ -7185,6 +7268,12 @@ function publishAILive(dt) {
         units.push({
           type: u.type, state: u._aiState || '—',
           detail: stateDetail(sl && sl._dbg, u._aiState),   // the state's OBJECT — "advance to WHAT" (Jacob's ask)
+          // chain of command, bottom two layers: the driver's standing maneuver order and
+          // the pedals actually driven this tick (+ alarm count — a live unit with alarms
+          // has been failing to move; the lab flags it).
+          mnv: (sl && sl._dbg && sl._dbg.mnv) || null,
+          drv: (sl && sl._dbg && sl._dbg.drv) || null,
+          alarms: (sl && sl._dbg && sl._dbg.alarms) || 0,
           when: (u.ai && u.ai._when) || '', ctrl,
           hp: u.maxHp ? Math.round(100 * u.hp / u.maxHp) : null,
           ammo: u.maxAmmo ? Math.round(100 * u.ammo / u.maxAmmo) : null,
@@ -8918,6 +9007,9 @@ window.RR = {
   roadDeckY: (x, z) => roadDeckY(x, z),                       // debug: road/bridge surface height, or null
   bridgeDeckY: (x, z) => roadDeckY(x, z),                     // alias (kept for older verification scripts)
   navPlan: (v, x, z) => planPath(v, { x, z }),                 // debug: A* path for a unit
+  navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal }),   // match-wide driver counters
+  setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   navCellBlocked: (v, i, j) => cellBlocked(v, i, j),          // debug: nav passability of a cell
   astar: () => toggleAstarViz(),                              // open/close the A* search visualizer overlay
   get paused() { return paused; },                            // debug: is the sim frozen (full log or A* viz open)

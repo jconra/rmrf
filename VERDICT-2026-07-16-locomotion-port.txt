@@ -1,0 +1,28 @@
+VERDICT — 2026-07-16 locomotion port (locomote() wired into the old state machine)
+====================================================================================
+
+Batch: Locomotion.js (new steering primitive) + ports in AI.js (seek/assault/suppress/
+unblock) + main.js (VEH_MOVE strafe/omni flags, drive boundary, omni travel states) +
+Jotun chassis strafe gate + reverse-arc unblock.
+
+Protocol: two paired 30-seed tournaments (seeds 11+7k and fresh 311+7k), frozen vs current.
+
+Pooled (60 matches/side):        BEFORE      AFTER       DELTA
+  resolved                       49/60       44/60       -5 (both AFTER runs 22/30 — not noise)
+  suppress-stuck                 980         882         -10%  (orbit fix works)
+  advance-stuck                  587         686         +17%
+  engage-stuck                   331         404         +22%
+  idle-at-goal                   2715        3423        +26%
+  longest episode                40s         174s        new stuck class (seed 95, lurcher
+                                                          inland, blk=L, advance, 3 min)
+
+VERDICT: PARK. The primitive's math is proven (unit tests 6/6, Jotun combat strafe
+21.3u -> 0u, turning-circle orbit cured, suppress-stuck down) but wiring it into the old
+state machine created a new stuck class and cost resolutions. Not committed. Superseded
+by the Driver architecture (devblog/2026-07-16-driver-architecture.md): Locomotion.js
+becomes the Layer 0 motor core behind a proper order interface with alarm/flight-recorder
+logging, replacing exactly the wiring that failed here.
+
+Kept from this work regardless: Locomotion.js itself; the chassis capability flags
+(VEH_MOVE strafe/omni); the Jotun reverse-arc unblock concept (becomes ALIGN's Jotun
+flavor). Raw runs: /tmp/tourney-LOCO-{B4,AFT,AFT2,AFT3,B4b,AFT3b}.txt.
