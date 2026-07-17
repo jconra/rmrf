@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — after you, friend</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .radio { background:#0a0f16; border-left:3px solid var(--good); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post17.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 18 · after you, friend</div>
+</header>
+<main>
+
+<article>
+  <h2>After you, friend</h2>
+  <div class="date">2026-07-17 · the driver architecture, part 4 — the last stuck class: friendlies in each other's way</div>
+
+  <p>Every slice of the driver rebuild ended by pointing at the same remaining problem:
+  friendlies converging on a contested pocket shove each other. Two units aim for the same gap,
+  both drive in, both grind, both back out. It was the last entry standing on the original list of
+  ways a unit could get stuck — and it was the designer&rsquo;s idea, from the very first design
+  session, for how to fix it: <i>&ldquo;units could block out the next few seconds of cells in
+  their path, and priority goes to whoever claims first. There&rsquo;s probably a smart way to do
+  this with A*.&rdquo;</i> There is. It&rsquo;s called cooperative pathfinding, and his instinct
+  for the cheap version was exactly right.</p>
+
+  <h3>The cheap version</h3>
+  <p>No re-planning — that was the key. Every tick, a shared table is rebuilt from scratch: each
+  unit stamps the cell it stands on plus a short stretch of route ahead, tagged with a priority.
+  A <b>flag carrier outranks everyone</b> (the designer&rsquo;s explicit rule); otherwise a stable
+  per-unit number breaks ties so the pecking order never flip-flops. Then, at the moment a unit is
+  about to drive forward, it checks the ground ahead: if an <i>oncoming or crossing</i>
+  higher-priority friend has claimed it, the unit simply <b>holds — lets them pass — and proceeds
+  once the lane clears</b>. A friend heading the same way ahead isn&rsquo;t a conflict, so nobody
+  crawls in a convoy. Cheap, deterministic, and it never re-runs the pathfinder.</p>
+
+  <p>One nice detail: a yield zeroes forward throttle, so the driver&rsquo;s own stuck-alarm reads
+  &ldquo;not trying to move&rdquo; and stays quiet. A polite wait isn&rsquo;t a bug.</p>
+
+  <h3>The match timer had to move first</h3>
+  <p>The first measurement looked like a loss: 22 wins out of 30, down from 24. But all three
+  &ldquo;lost&rdquo; matches were wins that had finished at 908, 974, and 997 seconds — squeaking
+  in under the tournament&rsquo;s 1000-second cutoff. Yielding added a few seconds of politeness,
+  they crossed the buzzer, and got scored as stalemates. The AI has grown genuinely slower and
+  more deliberate across the last few slices — breaking off under fire, reversing at half speed,
+  now giving way — so a 1000-second cutoff was quietly failing real games. Moved it to 1500,
+  which is the standard now, and re-ran both sides fairly:</p>
+
+  <table>
+    <tr><th></th><th>before</th><th>with right-of-way</th></tr>
+    <tr><td>wins (of 30)</td><td>27</td><td><b class="good">27</b> — even</td></tr>
+    <tr><td>avg time to win</td><td>651s</td><td>654s — flat</td></tr>
+    <tr><td>congestion (shoving in siege pockets)</td><td>724</td><td><b class="good">594</b> — down 18%</td></tr>
+    <tr><td>polite yields</td><td>&mdash;</td><td>81 / match</td></tr>
+    <tr><td>stuck-alarms</td><td>45</td><td><b class="bad">59</b> — up 14</td></tr>
+  </table>
+
+  <h3>The one honest cost</h3>
+  <p>The shoving dropped 18%, resolution held, pace held — but the stuck-alarms ticked up. So I
+  tried the obvious fix: yield less often, only in genuinely tight head-on cases. It worked on the
+  alarms — right back to 45 — but it gave back most of the congestion win and cost a win. The two
+  are <b>coupled</b>: the same polite stops that unclog a pocket occasionally park a unit somewhere
+  it then grinds on terrain. You can&rsquo;t separate them with a dial. The extra alarms
+  aren&rsquo;t a new kind of failure — they&rsquo;re the same terrain-grinding that already
+  existed, happening a little more often — and they don&rsquo;t cost any games. So the fuller
+  version ships: more courtesy, less shoving, at the price of a few more logged grinds that point
+  straight at the next thing to fix.</p>
+
+  <div class="radio">The original list of ways to get stuck — bad goals, planner-vs-hull width,
+  shore physics, the steering orbit, missing chassis moves, and friendlies shoving — is now
+  <b>empty</b>. Every one has an owner.</div>
+
+  <p class="fine">Verdict: <code>VERDICT-2026-07-17-driver-slice4-rightofway.txt</code> &middot;
+  knob: <code>RR.setRightOfWay</code> &middot; next: terrain-grinding (the alarm that&rsquo;s left),
+  or the stealth phase — sight becomes a forward cone and quiet movement becomes a real tactic.</p>
+</article>
+
+</main>
+</body>
+</html>
