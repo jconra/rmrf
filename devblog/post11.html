@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the army got a repair truck</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .hero { text-align:center; padding:16px 0 6px; }
+  .hero .n { font-size:52px; font-weight:bold; line-height:1; }
+  .hero .cap { color:var(--dim); font-size:12px; margin-top:6px; }
+  .chart { background:var(--card2); border:1px solid #2a3a4d; border-radius:8px; padding:12px 8px 6px; margin:12px 0; }
+  .chart .ct { color:var(--dim); font-size:11px; letter-spacing:1px; padding:0 6px 4px; }
+  .chart svg { width:100%; height:auto; display:block; }
+  .disease { background:var(--card2); border:1px solid #2a3a4d; border-radius:8px; padding:12px 14px; margin:12px 0; }
+  .disease .seed { color:var(--warn); font-size:12px; letter-spacing:1px; }
+  .disease .name { color:var(--ink); font-size:14px; font-weight:bold; margin:2px 0 6px; }
+  .disease .cure { color:var(--good); font-size:12px; margin-top:8px; }
+  .radio { background:#0a0f16; border-left:3px solid var(--bad); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td .bad { color:var(--bad); font-weight:bold; } td .good { color:var(--good); font-weight:bold; }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post10.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post12.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 11 · the army got a repair truck</div>
+</header>
+<main>
+
+<article>
+  <h2>The army got a repair truck. Nobody's allowed to shoot it.</h2>
+  <div class="date">2026-07-10 · tower repair crews + gun purchases · designed by Jacob, measured by tournament</div>
+
+  <p>New logistics layer: each base parks <b>three jeeps</b> in a motor pool out back. When a
+  corner tower gets chewed up, a jeep rolls out with a three-man construction crew, parks under
+  the tower, and heals it at <b>1% per second</b> — a scratch takes seconds, a half-wrecked tower
+  takes the minute, and if it keeps taking fire mid-repair the crew just stays longer. The rules
+  split clean: <b>masonry is free</b> (the crew's exposed minutes are the cost), <b>hardware costs
+  scrap</b> — a replacement tower gun runs 3 scrap, rides out <i>on the jeep</i>, and is lost with
+  it. Even a tower blown to full rubble can be raised again — it rebuilds bottom-up, each course
+  re-seating in exact reverse of how it crumbled, because both directions read the same authored
+  fall thresholds.</p>
+
+  <p>The AI buys a gun only from a position of strength (10+ scrap banked, 5+ vehicles left), and
+  its sortie timing is a random 5–45s draw so you can't camp a wounded tower and pick off crews on
+  a metronome. Then we ran the 30-seed tournament with counters on everything.</p>
+
+  <div class="hero">
+    <div class="n" style="color:var(--good)">1,020</div>
+    <div class="cap">tower HP healed per match — three full towers' worth, every game</div>
+  </div>
+
+  <h3>What the crews actually did</h3>
+  <p>Across 30 full-map matches the two teams launched <b>118 sorties</b> (3.9 per match; the
+  busiest game ran 8). <b>86 completed</b> and drove home to re-park. <b>15 were shot off the
+  road</b> mid-job. The rest were still out working when the flag fell. And the headline inside
+  the headline: <b>50 of those jobs were full rubble resurrections</b> — a tower that had been
+  flattened to debris, raised course by course while the fight went on around it.</p>
+
+  <div class="chart">
+    <div class="ct">118 SORTIES, 30 MATCHES — HOW THEY ENDED</div>
+    <svg id="sortieSvg" viewBox="0 0 700 220"></svg>
+  </div>
+
+  <h3>The gun run is a real gamble</h3>
+  <p>Teams bought <b>19 replacement guns</b> (57 scrap). Only <b>11 made it onto a tower</b>.
+  The other <b>8 died in transit</b> — the jeep was destroyed carrying the cargo, scrap gone, no
+  refund. That's a <b>42% loss rate</b> on gun deliveries, which makes the purchase decision
+  genuinely interesting: the AI is rich when it buys, but the delivery window is the most
+  dangerous 30 seconds in the game.</p>
+
+  <div class="chart">
+    <div class="ct">REPLACEMENT GUNS — BOUGHT vs DELIVERED</div>
+    <svg id="gunSvg" viewBox="0 0 700 220"></svg>
+  </div>
+
+  <h3>Now the twist: nobody was aiming at them</h3>
+  <p>Jeeps took <b>63 hits</b> and lost <b>32 of their number</b> — 15 on the road, 17 raided in
+  the parked lot. Sounds like a hunted species. Except we checked the AI's targeting code: its
+  shot selection draws from exactly three lists — <b>enemy vehicles</b>, <b>siege structures</b>
+  (walls, tower guns, the HQ), and <b>obstacles blocking its path</b>. Jeeps are in none of them.
+  A commander <i>cannot decide</i> to shoot a repair truck.</p>
+
+  <div class="radio">every one of those 63 hits was stray fire — siege shells splashing into the
+  motor pool, tower crossfire, misses walking through a work site. the most-shot-at unit in the
+  game has never once been aimed at.</div>
+
+  <p>Which means the jeep-hunting layer — the whole "if you're worried about their repairs,
+  target the jeeps" counterplay the system was designed around — currently only exists for the
+  <i>human</i> player. You can hunt trucks. The AI can't. And even so, blind splash alone kills a
+  third of the fleet's deliveries. When commanders learn to hunt deliberately (the Hunter and
+  Rogue personas are built for exactly this), the escort problem becomes real strategy.</p>
+
+  <h3>Did free repairs stall the game?</h3>
+  <p>The worry with any healing mechanic in a flag-only-win game: infinite repair = infinite
+  siege. Jacob's counter when we designed it — scrap is finite, so only a team that already won
+  the economy can afford to keep its towers alive, and that team was winning anyway. The A/B
+  agrees:</p>
+
+  <table>
+    <tr><th></th><th>repairs + guns ON</th><th>OFF</th></tr>
+    <tr><td>resolution</td><td><span class="good">24/30 (80%)</span></td><td>24/30 (80%)</td></tr>
+    <tr><td>avg match length</td><td>603s</td><td>541s</td></tr>
+    <tr><td>stalemate seeds</td><td colspan="2">the same six, both ways</td></tr>
+  </table>
+
+  <p><b>Resolution-neutral.</b> Not one new stalemate. The entire cost of three rebuilt towers
+  per game is about a minute of extra match length — sieges grind slightly harder, which is the
+  texture we wanted, and the flag still falls.</p>
+
+  <div class="disease">
+    <div class="seed">THE INVISIBLE TRUCK</div>
+    <div class="name">A strategy layer only one side can play</div>
+    <p>The system works: crews repair, guns get delivered, the economy prices it, the match still
+    resolves. But its central tension — protect your jeeps, hunt theirs — is one-sided until the
+    AI can see a truck as a target.</p>
+    <div class="cure">NEXT: give Hunter/Rogue commanders a truck-hunting appetite, give the Turtle
+    an escort habit, and re-run the tournament to see what deliberate interdiction does to those
+    42%-risk gun runs.</div>
+  </div>
+
+  <h3>UPDATE, same day: we taught them to shoot the truck</h3>
+  <p>Jacob's call on the design: <b>no hunting mission</b> — "I'd just kill them if I see them.
+  Otherwise I worry it could distract them from winning the game." So it shipped as a target of
+  opportunity only: a ground gunner with an idle gun and no vehicle engaged pot-shots any enemy
+  jeep in its range, arc and line of sight. It never steers toward one. The re-run:</p>
+  <table>
+    <tr><th></th><th>blind fire</th><th>kill-on-sight</th></tr>
+    <tr><td>resolution</td><td>24/30</td><td><span class="good">26/30</span></td></tr>
+    <tr><td>avg match</td><td>603s</td><td><span class="good">542s</span></td></tr>
+    <tr><td>jeep hits</td><td>63</td><td><span class="bad">171</span></td></tr>
+    <tr><td>HP healed / match</td><td>1,020</td><td>789</td></tr>
+    <tr><td>gun deliveries lost</td><td>42%</td><td><span class="bad">75%</span></td></tr>
+  </table>
+  <p>Repair suppression un-stuck two of the six stalemates and gave back the minute the repair
+  system had added. The truck is visible now — and the delivery run is a genuine gamble.</p>
+
+  <p class="fine">Method: 30 seeds, full 480 map, 1000s cap, both teams AI. Cumulative per-match
+  counters (<code>RR.repairStats()</code>) aggregated by the tournament harness: sorties, HP
+  healed, rubble rebuilds, guns bought vs mounted, jeep hits, losses on the road vs in the lot.
+  A/B via the harness's new in-page knob (<code>RR.setRepairs(false)</code>).</p>
+</article>
+
+</main>
+<script>
+const D = {
+  sorties: [
+    { label: 'completed', sub: 'drove home, re-parked', top: '86', v: 86, color: '#58d17a' },
+    { label: 'shot on the road', sub: 'jeep lost mid-job', top: '15', v: 15, color: '#ff6a5a' },
+    { label: 'still out at the whistle', sub: 'match ended first', top: '17', v: 17, color: '#8fa3b3' },
+  ],
+  guns: [
+    { label: 'bought', sub: '3 scrap each', top: '19', v: 19, color: '#ffcf6a' },
+    { label: 'delivered + mounted', sub: 'tower shoots again', top: '11', v: 11, color: '#58d17a' },
+    { label: 'died in transit', sub: 'scrap lost with the jeep', top: '8', v: 8, color: '#ff6a5a' },
+  ],
+};
+function bars(id, data, max) {
+  const svg = document.getElementById(id);
+  const W = 700, H = 220, padB = 46, padT = 26;
+  const bw = Math.min(120, (W - 80) / data.length - 30);
+  let out = '';
+  data.forEach((d, i) => {
+    const x = 40 + i * ((W - 80) / data.length) + ((W - 80) / data.length - bw) / 2;
+    const h = (H - padB - padT) * (d.v / max);
+    const y = H - padB - h;
+    out += `<rect x="${x}" y="${H - padB}" width="${bw}" height="0" fill="${d.color}" rx="3" opacity="0.9">` +
+           `<animate attributeName="height" to="${h.toFixed(1)}" dur="0.9s" fill="freeze"/>` +
+           `<animate attributeName="y" to="${y.toFixed(1)}" dur="0.9s" fill="freeze"/></rect>`;
+    out += `<text x="${x + bw / 2}" y="${y - 8}" fill="${d.color}" font-size="15" font-weight="bold" ` +
+           `font-family="monospace" text-anchor="middle" opacity="0">` +
+           `<animate attributeName="opacity" to="1" dur="0.4s" begin="0.85s" fill="freeze"/>` +
+           `<animate attributeName="y" from="${y + 4}" to="${y - 8}" dur="0.4s" begin="0.85s" fill="freeze"/>${d.top}</text>`;
+    out += `<text x="${x + bw / 2}" y="${H - padB + 17}" fill="#cfe0ee" font-size="12" ` +
+           `font-family="monospace" text-anchor="middle">${d.label}</text>`;
+    if (d.sub) out += `<text x="${x + bw / 2}" y="${H - padB + 32}" fill="#5f7385" font-size="10" ` +
+           `font-family="monospace" text-anchor="middle">${d.sub}</text>`;
+  });
+  svg.innerHTML = out;
+}
+bars('sortieSvg', D.sorties, 90);
+bars('gunSvg', D.guns, 20);
+</script>
+</body>
+</html>

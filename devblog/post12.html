@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the commanders get a brain</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .hero { text-align:center; padding:16px 0 6px; }
+  .hero .n { font-size:52px; font-weight:bold; line-height:1; }
+  .hero .cap { color:var(--dim); font-size:12px; margin-top:6px; }
+  .chart { background:var(--card2); border:1px solid #2a3a4d; border-radius:8px; padding:12px 8px 6px; margin:12px 0; }
+  .chart .ct { color:var(--dim); font-size:11px; letter-spacing:1px; padding:0 6px 4px; }
+  .chart canvas { width:100%; height:auto; display:block; border-radius:4px; }
+  .radio { background:#0a0f16; border-left:3px solid var(--blue); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post11.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post13.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 12 · the commanders get a brain</div>
+</header>
+<main>
+
+<article>
+  <h2>The commanders get a brain: the neural net begins</h2>
+  <div class="date">2026-07-11 · the mission assigner, part 1 — the data pipeline</div>
+
+  <p>Every AI improvement in this lab so far has been a <b>rule we wrote by hand</b>. Shoot the
+  obstacle. Bench the mission that fails twice. Pull back when you're losing badly. Good rules —
+  but somebody had to notice each problem, invent each fix, and tune each threshold. Post 12 is
+  the start of something different: a piece of the AI that <b>writes its own rules</b>, by playing
+  thousands of matches and keeping whatever worked.</p>
+
+  <h3>What we picked for it to learn</h3>
+  <p>Not driving. Navigation stays A* and physics — a wrong path is a bug you can see and fix, and
+  we want it that way. The net gets the <b>strategy layer</b>, and one decision in particular.
+  Since the 3v3 update, each commander fields support units with role cards dealt from a fixed
+  table: a Warrior always brings a hunter and a home guard, a Turtle always brings two guards
+  and a counter-puncher. Same deal, every match, no matter what's actually happening on the
+  island. That table was always a placeholder. The learned version asks, every time a support
+  unit redeploys: <i>given what's happening right now — what role should this one field?</i></p>
+
+  <div class="radio">Losing towers at home with the enemy fleet still fat? Maybe deal a guard.
+  Their base is cracked open and our roster's healthy? Deal a second warrior and push. That's
+  the whole job: read the battlefield, pick one of four cards — <b>warrior · turtle · hunter ·
+  rogue</b>.</div>
+
+  <h3>So what IS a neural network?</h3>
+  <p>Strip the mystique: it's a stack of multiply-adds. You feed it a list of numbers describing
+  the situation (ours has <b>21</b> — match clock, fleet remaining, scrap, tower counts, fort
+  health both sides, flag status, what roles the teammates are running…). Each connection in the
+  net has a <b>weight</b> — how much that input matters. Each middle "neuron" sums up its weighted
+  inputs and fires if the total is positive. The four outputs each end up with a score, one per
+  role, and the commander plays the highest one. Watch it think:</p>
+
+  <div class="chart"><div class="ct">A FORWARD PASS — 21 battlefield numbers in, one role out (new situation every few seconds)</div>
+  <canvas id="netCv" width="700" height="380"></canvas></div>
+
+  <p>Every dot on the left is one fact about the battle, brighter = bigger. The lines are the
+  weights — the knowledge lives <i>there</i>, not in the neurons. Untrained, those weights are
+  random noise and the picks are nonsense. Training is the process of nudging millions of… well,
+  in our case <b>404</b> little numbers until the picks stop being nonsense.</p>
+
+  <h3>Where does the answer key come from?</h3>
+  <p>A net learns from graded examples. Ours come from a system this blog already knows: the
+  <b>mission report card</b> from post 6 — the one that grades every unit's tour of duty when it
+  dies (kills? base damage? a hand on the flag?) and benches missions that fail twice. That
+  grading is exactly a training label. So every tour any commander fields now becomes one row of
+  training data, automatically:</p>
+
+  <div class="chart"><div class="ct">ONE TOUR = ONE TRAINING EXAMPLE</div>
+  <canvas id="tourCv" width="700" height="230"></canvas></div>
+
+  <p>Snapshot the 21 numbers at deploy, remember which role was fielded, let the report card
+  grade what came back. Deploy → fight → grade → one line in the dataset. A 3v3 match produces
+  50–60 of these. The collector is running matches in the background as this post goes up:
+  <b>150 matches, ~8,000 graded tours</b>, about 45 seconds per match on the sim clock.</p>
+
+  <h3>The trap: you can't learn from a deck that never changes</h3>
+  <p>If we only recorded the fixed table's picks, the dataset could never answer "what if the
+  Turtle had fielded a rogue here?" — it never happens. The net would just learn to imitate the
+  table it's supposed to replace. So collection runs with an <b>explore policy</b>: 65% of tours
+  play the normal deck, and <b>35% field a random role instead</b>. Some of those random picks
+  will be terrible. Perfect — terrible picks with bad grades are exactly how the net learns
+  they're terrible <i>in that situation</i>.</p>
+
+  <h3>How the learning actually works</h3>
+  <p>Training is a loop of guess → grade → nudge. Show the net one recorded tour: it predicts how
+  well each role should do from those 21 numbers. Compare against what the report card actually
+  said happened. Every weight that pushed the guess in the wrong direction gets nudged the other
+  way — a tiny amount. One example teaches it almost nothing; eight thousand examples, replayed
+  over and over, wear grooves:</p>
+
+  <div class="chart"><div class="ct">GUESS &rarr; GRADE &rarr; NUDGE — the error shrinks as the weights settle</div>
+  <canvas id="trainCv" width="700" height="240"></canvas></div>
+
+  <h3>Ground rules (so we can trust it)</h3>
+  <ul>
+    <li><b>No cheating:</b> the 21 inputs only contain what the commander already legitimately
+    knows — its own state plus scouted intel. The net sees the same fog of war the rules did.</li>
+    <li><b>The persona survives:</b> slot 0 — the commander itself — always keeps its archetype.
+    The net assigns the <i>support</i> missions around it. A Warrior with a learned adjutant is
+    still a Warrior.</li>
+    <li><b>It's a knob:</b> <code>deck</code> / <code>explore</code> / <code>nn</code>. Default
+    is <code>deck</code> — zero behavior change until the weights earn their place.</li>
+    <li><b>The gate is the tournament:</b> same as every feature since post 5. 30 paired seeds,
+    net vs table, and the verdict file decides. Smarter decisions get kept; magic doesn't.</li>
+  </ul>
+
+  <div class="hero">
+    <div class="n" style="color:var(--purple)">21 &rarr; 16 &rarr; 4</div>
+    <div class="cap">the whole brain: 21 facts, 16 hidden neurons, 4 role scores — 404 weights, small enough to read</div>
+  </div>
+
+  <p>Part 2 will train it and report what it actually learned — which situations flip which
+  picks, and whether an 8,000-tour education beats a four-line table written by hand. If the
+  table wins, that's a result too, and it goes in the blog either way.</p>
+
+  <p class="fine">Pipeline: <code>RR.setMissionPolicy('explore')</code> &rarr; per-tour records via the
+  report card &rarr; <code>nn-collect.cjs</code> &rarr; JSONL dataset &rarr; offline trainer (next post) &rarr;
+  weights load back in as plain JSON — the in-game forward pass is 12 lines of JavaScript, no libraries.</p>
+</article>
+
+</main>
+<script>
+// ── shared helpers ─────────────────────────────────────────────────────────────
+const TAU = Math.PI * 2;
+function seededRand(seed) { let s = seed; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; }
+
+// ── 1. the network: animated forward pass ─────────────────────────────────────
+(function () {
+  const cv = document.getElementById('netCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const NIN = 21, NHID = 16, ROLES = ['WARRIOR', 'TURTLE', 'HUNTER', 'ROGUE'];
+  const RCOL = ['#ff6a5a', '#58d17a', '#ffcf6a', '#b88df0'];
+  const GROUPS = [  // input color groups, matches the real feature vector's structure
+    { n: 3, c: '#6ab7ff', label: 'clock + army' },
+    { n: 4, c: '#d9a441', label: 'roster' },
+    { n: 1, c: '#d9a441', label: '' },
+    { n: 4, c: '#ff6a5a', label: 'war state' },
+    { n: 2, c: '#58d17a', label: 'flags' },
+    { n: 3, c: '#8fa3b3', label: 'intel' },
+    { n: 4, c: '#b88df0', label: 'teammates' },
+  ];
+  const inCol = []; GROUPS.forEach(g => { for (let i = 0; i < g.n; i++) inCol.push(g.c); });
+  const X0 = 70, X1 = 350, X2 = 600;
+  const iy = i => 26 + i * (H - 60) / (NIN - 1);
+  const hy = i => 50 + i * (H - 110) / (NHID - 1);
+  const oy = i => 80 + i * (H - 170) / 3;
+  // fixed random weights (a fresh untrained brain each page load)
+  const rnd = seededRand(77);
+  const W1 = Array.from({ length: NHID }, () => Array.from({ length: NIN }, () => (rnd() - 0.5) * 2));
+  const W2 = Array.from({ length: 4 }, () => Array.from({ length: NHID }, () => (rnd() - 0.5) * 2));
+  let feat = [], hid = [], out = [], pick = 0, t0 = 0;
+  const CYCLE = 3600;   // ms per situation
+  function newSituation() {
+    feat = Array.from({ length: NIN }, () => Math.random());
+    hid = W1.map(row => Math.max(0, row.reduce((a, w, i) => a + w * feat[i], 0) / 4));
+    out = W2.map(row => Math.max(0, row.reduce((a, w, i) => a + w * hid[i], 0)));
+    const m = Math.max(...out, 0.001); out = out.map(v => v / m);
+    pick = out.indexOf(Math.max(...out));
+  }
+  newSituation();
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    let ph = ((ts - t0) % CYCLE) / CYCLE;               // 0..1 through the cycle
+    if (ph < 0.02 && ts - t0 > CYCLE * 0.9) { newSituation(); t0 = ts; ph = 0; }
+    const sweep1 = Math.min(1, ph / 0.35);              // pulse input→hidden
+    const sweep2 = Math.max(0, Math.min(1, (ph - 0.35) / 0.35));   // hidden→output
+    const settled = ph > 0.72;
+    ctx.clearRect(0, 0, W, H);
+    // edges in→hid (draw a light subset; all 336 would be soup)
+    for (let j = 0; j < NHID; j++) for (let i = 0; i < NIN; i += 2) {
+      const w = W1[j][i], a = feat[i] * Math.abs(w);
+      if (a < 0.25) continue;
+      ctx.strokeStyle = w > 0 ? 'rgba(106,183,255,' : 'rgba(255,106,90,';
+      ctx.strokeStyle += (0.05 + 0.3 * a * sweep1) + ')';
+      ctx.lineWidth = 0.5 + a;
+      ctx.beginPath(); ctx.moveTo(X0, iy(i)); ctx.lineTo(X1, hy(j)); ctx.stroke();
+    }
+    for (let j = 0; j < 4; j++) for (let i = 0; i < NHID; i++) {
+      const w = W2[j][i], a = hid[i] * Math.abs(w);
+      if (a < 0.12) continue;
+      ctx.strokeStyle = (w > 0 ? 'rgba(106,183,255,' : 'rgba(255,106,90,') + (0.05 + 0.35 * a * sweep2) + ')';
+      ctx.lineWidth = 0.5 + a * 1.5;
+      ctx.beginPath(); ctx.moveTo(X1, hy(i)); ctx.lineTo(X2 - 66, oy(j)); ctx.stroke();
+    }
+    // travelling pulses
+    if (ph < 0.35) for (let i = 0; i < NIN; i += 3) {
+      const x = X0 + (X1 - X0) * sweep1, y = iy(i) + (hy(i % NHID) - iy(i)) * sweep1;
+      ctx.fillStyle = 'rgba(223,232,239,0.8)'; ctx.beginPath(); ctx.arc(x, y, 2, 0, TAU); ctx.fill();
+    }
+    if (ph >= 0.35 && ph < 0.7) for (let i = 0; i < NHID; i += 2) {
+      const x = X1 + (X2 - 66 - X1) * sweep2, y = hy(i) + (oy(i % 4) - hy(i)) * sweep2;
+      ctx.fillStyle = 'rgba(223,232,239,0.8)'; ctx.beginPath(); ctx.arc(x, y, 2, 0, TAU); ctx.fill();
+    }
+    // input nodes
+    for (let i = 0; i < NIN; i++) {
+      ctx.fillStyle = inCol[i]; ctx.globalAlpha = 0.25 + 0.75 * feat[i];
+      ctx.beginPath(); ctx.arc(X0, iy(i), 4.5, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+    }
+    // group labels
+    let gi = 0;
+    for (const g of GROUPS) {
+      if (g.label) {
+        ctx.fillStyle = g.c; ctx.font = '10px monospace'; ctx.textAlign = 'right';
+        ctx.fillText(g.label, X0 - 12, iy(gi + (g.n - 1) / 2) + 3);
+      }
+      gi += g.n;
+    }
+    // hidden nodes
+    for (let i = 0; i < NHID; i++) {
+      const a = Math.min(1, hid[i]) * (sweep1 >= 1 ? 1 : sweep1 * 0.5);
+      ctx.fillStyle = '#dfe8ef'; ctx.globalAlpha = 0.12 + 0.8 * a;
+      ctx.beginPath(); ctx.arc(X1, hy(i), 5.5, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('21 inputs', X0, H - 8); ctx.fillText('16 hidden', X1, H - 8); ctx.fillText('4 role scores', X2 - 30, H - 8);
+    // outputs: score bars + pick
+    for (let j = 0; j < 4; j++) {
+      const v = out[j] * (sweep2 >= 1 ? 1 : sweep2);
+      ctx.fillStyle = '#0a0f16'; ctx.fillRect(X2 - 60, oy(j) - 9, 120, 18);
+      ctx.fillStyle = RCOL[j]; ctx.globalAlpha = j === pick && settled ? 1 : 0.55;
+      ctx.fillRect(X2 - 60, oy(j) - 9, 120 * v, 18); ctx.globalAlpha = 1;
+      ctx.font = 'bold 11px monospace'; ctx.textAlign = 'left';
+      ctx.fillStyle = j === pick && settled ? '#0c1118' : '#dfe8ef';
+      ctx.fillText(ROLES[j], X2 - 55, oy(j) + 4);
+      if (j === pick && settled) {
+        ctx.strokeStyle = RCOL[j]; ctx.lineWidth = 2;
+        ctx.strokeRect(X2 - 63, oy(j) - 12, 126, 24);
+        ctx.fillStyle = RCOL[j]; ctx.font = 'bold 11px monospace';
+        ctx.fillText('◀ play this', X2 + 68, oy(j) + 4);
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 2. one tour = one training example ─────────────────────────────────────────
+(function () {
+  const cv = document.getElementById('tourCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 6000;
+  let t0 = 0;
+  const stages = [
+    { x: 90,  label: 'DEPLOY',  sub: 'snapshot 21 numbers', c: '#6ab7ff' },
+    { x: 280, label: 'TOUR',    sub: 'fight the plan', c: '#ffcf6a' },
+    { x: 470, label: 'GRADE',   sub: 'the report card', c: '#58d17a' },
+    { x: 625, label: 'DATASET', sub: '+1 row', c: '#b88df0' },
+  ];
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % CYCLE) / CYCLE;
+    ctx.clearRect(0, 0, W, H);
+    // spine
+    ctx.strokeStyle = '#2a3a4d'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(60, 90); ctx.lineTo(660, 90); ctx.stroke();
+    stages.forEach((s, i) => {
+      const on = ph > i * 0.22;
+      ctx.fillStyle = s.c; ctx.globalAlpha = on ? 1 : 0.25;
+      ctx.beginPath(); ctx.arc(s.x, 90, 9, 0, TAU); ctx.fill();
+      ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(s.label, s.x, 62);
+      ctx.font = '10px monospace'; ctx.fillStyle = '#8fa3b3';
+      ctx.fillText(s.sub, s.x, 76);
+      ctx.globalAlpha = 1;
+    });
+    // the travelling unit
+    const ux = 90 + Math.min(ph / 0.66, 1) * (470 - 90);
+    if (ph < 0.7) {
+      ctx.fillStyle = '#dfe8ef';
+      ctx.fillRect(ux - 7, 84, 14, 9);                 // little hull
+      ctx.beginPath(); ctx.arc(ux, 84, 4, Math.PI, TAU); ctx.fill();   // turret dome
+    }
+    // deploy: feature ticks appear
+    if (ph > 0.02) {
+      const n = Math.min(21, Math.floor((ph / 0.2) * 21));
+      for (let i = 0; i < n; i++) {
+        ctx.fillStyle = '#6ab7ff'; ctx.globalAlpha = 0.7;
+        ctx.fillRect(48 + i * 4, 116, 3, 10 + (i * 37 % 14));
+        ctx.globalAlpha = 1;
+      }
+      ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+      ctx.fillText('feat[21] + role fielded', 48, 146);
+    }
+    // fight sparks mid-tour
+    if (ph > 0.25 && ph < 0.6) for (let i = 0; i < 5; i++) {
+      const sx = 250 + (i * 53 % 90), sy = 100 + (i * 31 % 30) - 45;
+      if ((ph * 10 + i) % 1 < 0.5) { ctx.fillStyle = '#ff6a5a'; ctx.fillRect(sx, sy, 3, 3); }
+    }
+    // grade stamps
+    const stamps = [['kills: 1', '#58d17a'], ['fortDmg: 210', '#58d17a'], ['flag: no', '#8fa3b3'], ['died: yes', '#ff6a5a']];
+    stamps.forEach((s, i) => {
+      if (ph > 0.55 + i * 0.05) {
+        ctx.fillStyle = s[1]; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(s[0], 430, 122 + i * 16);
+      }
+    });
+    // dataset row types itself
+    if (ph > 0.8) {
+      const row = '{feat:[…], role:"hunter", kills:1, fortDmg:210, died:1}';
+      const n = Math.floor(((ph - 0.8) / 0.18) * row.length);
+      ctx.fillStyle = '#b88df0'; ctx.font = '11px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(row.slice(0, n), 60, 190);
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 3. guess → grade → nudge: error shrinking over epochs ──────────────────────
+(function () {
+  const cv = document.getElementById('trainCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 9000;
+  const rnd = seededRand(31);
+  const noise = Array.from({ length: 60 }, () => (rnd() - 0.5));
+  let t0 = 0;
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % CYCLE) / CYCLE;
+    ctx.clearRect(0, 0, W, H);
+    // left: one weight being nudged (dial)
+    const cx = 130, cy = 110, R = 55;
+    ctx.strokeStyle = '#2a3a4d'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.arc(cx, cy, R, Math.PI * 0.75, Math.PI * 2.25); ctx.stroke();
+    const target = 0.72;
+    const wob = target + Math.exp(-ph * 4) * Math.sin(ph * 40) * 0.5;   // damped hunting
+    const ang = Math.PI * 0.75 + wob * Math.PI * 1.5;
+    ctx.strokeStyle = '#d9a441'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(ang) * R * 0.85, cy + Math.sin(ang) * R * 0.85); ctx.stroke();
+    ctx.fillStyle = '#8fa3b3'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('one weight (of 404)', cx, cy + R + 26);
+    ctx.fillText('each example nudges it', cx, cy + R + 40);
+    // right: error curve drawing itself
+    const gx = 280, gy = 30, gw = 390, gh = 150;
+    ctx.strokeStyle = '#2a3a4d'; ctx.lineWidth = 1;
+    ctx.strokeRect(gx, gy, gw, gh);
+    ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+    ctx.fillText('prediction error', gx, gy - 8);
+    ctx.textAlign = 'center'; ctx.fillText('training passes over the 8,000 tours →', gx + gw / 2, gy + gh + 18);
+    ctx.strokeStyle = '#58d17a'; ctx.lineWidth = 2; ctx.beginPath();
+    const n = Math.floor(ph * 60);
+    for (let i = 0; i <= n; i++) {
+      const x = gx + (i / 60) * gw;
+      const y = gy + gh - gh * (0.15 + 0.75 * Math.exp(-i / 14) + noise[Math.min(i, 59)] * 0.06 * Math.exp(-i / 25));
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+    if (ph > 0.97) { ctx.fillStyle = '#58d17a'; ctx.font = 'bold 11px monospace';
+      ctx.fillText('settled: the net now predicts the report card', gx + gw / 2, gy + gh - 12); }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

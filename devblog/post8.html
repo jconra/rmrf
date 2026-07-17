@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — stars over the hull</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff;
+          --bronze:#d08a4a; --silver:#d7dee5; --gold:#ffd24a; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:18px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  .tier-b { color:var(--bronze); font-weight:bold; } .tier-s { color:var(--silver); font-weight:bold; } .tier-g { color:var(--gold); font-weight:bold; }
+  .gallery { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+  .gallery figure { flex:1; min-width:200px; }
+  .gallery img { width:100%; border-radius:8px; border:1px solid #223041; display:block; }
+  .gallery figcaption { font-size:11px; color:var(--dim); text-align:center; padding:5px 0; }
+  .quote { background:#0a0f16; border-left:3px solid var(--gold); border-radius:6px; padding:10px 12px; font-size:12px; margin:8px 0; color:var(--dim); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post7.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post9.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 8</div>
+</header>
+<main>
+
+<article>
+  <h2>Stars over the hull — unit promotions</h2>
+  <div class="date">2026-07-07 · v316–v319 · designed by Jacob, built the same evening</div>
+
+  <p>Every vehicle can now earn rank. Kill an enemy vehicle: a star appears over your hull.
+  Keep the streak alive and the stars climb through three tiers — and each star makes the
+  veteran a little more dangerous. Nine kills is three gold stars: max rank, an ace.</p>
+
+  <div class="gallery">
+    <figure><img src="img/rank-bronze.png" alt="bronze stars"><figcaption><span class="tier-b">BRONZE ★★★</span> — 3 kills</figcaption></figure>
+    <figure><img src="img/rank-silver.png" alt="silver stars"><figcaption><span class="tier-s">SILVER ★★</span> — 5 kills</figcaption></figure>
+    <figure><img src="img/rank-gold.png" alt="gold stars"><figcaption><span class="tier-g">GOLD ★★★</span> — 9 kills, max rank</figcaption></figure>
+  </div>
+
+  <h3>The ladder</h3>
+  <table>
+    <tr><th>kills</th><th>rank</th><th>each star adds</th><th>at full tier</th></tr>
+    <tr><td>1–3</td><td class="tier-b">BRONZE ★ → ★★★</td><td>+3% speed</td><td>+9% speed</td></tr>
+    <tr><td>4–6</td><td class="tier-s">SILVER ★ → ★★★</td><td>+5% max hull <span class="fine">(healed on pin-on)</span></td><td>+15% hull</td></tr>
+    <tr><td>7–9</td><td class="tier-g">GOLD ★ → ★★★</td><td>+5% damage</td><td>+15% damage</td></tr>
+  </table>
+  <p>The buffs stack across tiers — a triple-gold ace runs ~9% faster, takes ~15% more
+  punishment, and hits ~15% harder. Deliberately <i>small</i> numbers: an ace should be a
+  prize-fighter, not a boss monster. The order is Jacob's design and it paces well: mobility
+  first (survive by evasion), then durability, then lethality — the scariest gift arrives last.</p>
+
+  <h3>Rank lives in the garage, dies on the field</h3>
+  <p>Rank belongs to the <i>individual</i>, and RMRF's garage model gives each vehicle type a
+  persistent identity: recall your decorated Lurcher to swap vehicles and its stars are
+  <b>banked</b> — the next time that type rolls out, the rank comes back with it. But if the
+  unit is <i>destroyed</i>, the stars die with it and the next one starts clean. Keeping an ace
+  alive is its own little game — Jacob: <i>"it's an extra challenge to see if you can keep that
+  unit alive."</i> The whole match economy already runs on attrition, so a veteran is a real
+  asset with real stakes, for the AI and for you (player kills pin stars the same way).</p>
+  <p class="fine">Promotions announce themselves in the feed: <code>GREY lurcher promoted —
+  SILVER ★★!</code></p>
+
+  <h3>It took about an hour to matter</h3>
+  <div class="quote">In the first verification match, seed 39's red lurcher earned
+  <span class="tier-b">BRONZE ★</span> at 116s, was recalled through the garage, redeployed,
+  and continued to <span class="tier-b">★★</span> and <span class="tier-b">★★★</span> — the
+  bank working exactly as designed. Then in seed 137, a defending lurcher farmed three enemy
+  flag-runners and pinned <span class="tier-s">SILVER ★★★</span> — the game's first emergent
+  ace, whose kills made it faster and tougher, which made it a better runner-hunter. The
+  promotion system started shaping battles the same evening it shipped.</div>
+
+  <h3>What's next for the stars</h3>
+  <ul>
+    <li><b>AI awareness</b> — fight-or-flight should <i>fear</i> a gold ace and commanders
+      should protect their own veterans (and hesitate before a swap that risks one).</li>
+    <li><b>Bounty</b> — killing a decorated unit should pay out scrap, so an enemy ace is a
+      prize as well as a threat. Plugs straight into the salvage economy.</li>
+    <li><b>Rank in the intel line</b> — the ?nav contact readout showing
+      <code>⚠ lurcher ★★★ 34u</code>, because that is information worth fleeing from.</li>
+  </ul>
+  <p class="fine">Implementation: per-vehicle kill counter fed by the existing kill-credit path;
+  three multipliers at the speed/hull/damage choke points; vector-drawn star billboard riding
+  the health-bar group; per-team per-type rank banks. Debug: <code>RR.setRank(i, kills)</code>.
+  v316–v319 uncommitted, awaiting playtest.</p>
+</article>
+
+</main>
+</body>
+</html>

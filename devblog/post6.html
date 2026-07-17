@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the war both sides won</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:18px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  svg { width:100%; height:auto; background:#0a0f16; border-radius:8px; margin:8px 0; }
+  .legend { display:flex; gap:14px; font-size:11px; color:var(--dim); flex-wrap:wrap; margin:4px 0; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
+  .dance { background:#0a0f16; border-radius:8px; padding:10px 12px; font-size:11px; color:var(--dim); margin:8px 0; max-height:180px; overflow-y:auto; line-height:1.8; }
+  .dance .fire { color:var(--bad); }
+  .ring { display:block; margin:10px auto; }
+  .pending { border:1px dashed #2a3a4d; border-radius:8px; padding:12px; color:var(--dim); font-size:12px; margin-top:10px; }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post5.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post7.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 6</div>
+</header>
+<main>
+
+<article>
+  <h2>The war both sides won (and neither finished)</h2>
+  <div class="date">2026-07-07 · seed 25 · stalemate in 10 of 11 sweeps · v314</div>
+
+  <p>Seed 25 outlived every fix. After the railgun, the flaps, the panic loops — it kept
+  stalemating, and its reports came back <i>clean</i>: no storms, no wedged units. So this one
+  got a war-correspondent treatment instead of a debugger: read the whole 800 seconds and ask
+  <b>why doesn't anybody win?</b></p>
+
+  <h3>The war, in one graph</h3>
+  <p>Each line is the damage a team has done to the <i>enemy</i> base (structure HP remaining).
+  Falling lines = real progress. Watch both lines dive — this is not a passive match:</p>
+  <svg id="warSvg" viewBox="0 0 700 260"></svg>
+  <div class="legend">
+    <span><span class="dot" style="background:#ff6a5a"></span>blue's base (red attacking)</span>
+    <span><span class="dot" style="background:#6ab7ff"></span>red's base (blue attacking)</span>
+    <span><span class="dot" style="background:#dfe8ef"></span>| = a vehicle destroyed</span>
+  </div>
+  <p>By t≈450: <b>both HQs dead, both flags exposed</b>, red's base stripped to 0 turrets, blue's
+  to 2. Twenty-one vehicles destroyed, kills 9–10. A fair, brutal, fully-functional war that
+  reached "either side can win at any moment"… and then produced nothing for 350 seconds.</p>
+
+  <h3>The last mile</h3>
+  <p>Red sent three runners at the exposed flag. Two died on approach; the third <b>grabbed it</b>
+  (t=706, <i>"breaking off toward home with the flag"</i>) and was run down by blue's intercept —
+  legitimate defense, that's the game working. Blue's runner is the story: from t=671 to the time
+  cap it looped like this and <b>never touched the flag once</b>:</p>
+  <div class="dance" id="danceLog"></div>
+
+  <h3>The two rings</h3>
+  <p>The dance is two constants fighting:</p>
+  <svg class="ring" id="ringSvg" viewBox="0 0 700 240"></svg>
+  <p><code>runnerFlee</code> trips when an enemy is within <b>60u</b> — and a defender camps the
+  exposed flag, so the fear-ring is centred right on the prize. The final-dash commit
+  (<code>capturing</code>: "beeline it, ignore everything") only engaged within <b>55u</b> of the
+  flag. The fear ring <b>enclosed</b> the commit ring: every approach hit fear at ~60u out, fled
+  to 100u, returned, hit fear again. The runner physically could not reach the radius where
+  bravery begins. Red's one successful grab happened in a moment the defender drifted wide.</p>
+  <p><b>Fix (v314):</b> <code>CAPTURE_COMMIT</code> 55 → 85 — the commit ring now encloses the
+  fear ring. Inside 85u of a grabbable flag, the runner goes deaf to fear and dashes: grab or die
+  trying. Both outcomes <i>resolve</i> — and the counter-play stays with the defender and the
+  intercept, where it belongs, instead of with an endless dance in the 60–100u shell.</p>
+  <div class="pending" id="s12">⏳ Sweep 12 (v314) is running — verification lands here.</div>
+
+  <h3>Takeaway</h3>
+  <p>Not every stalemate is a bug in the machinery. This one was a <i>doctrine</i> flaw — caution
+  calibrated for mid-game survival, still in charge during the endgame sprint, with the two radii
+  accidentally inverted. The detectors couldn't see it because nothing repeated <i>in place</i>;
+  it took reading the whole war like a story. Some bugs live in the plot, not the sentences.</p>
+  <p class="fine">Data: sweep-11 archive of seed 25 (fort curves, 21 deaths, the endgame loop) ·
+  fix: CAPTURE_COMMIT 55→85 (main.js) · v314 uncommitted.</p>
+</article>
+
+</main>
+<script src="data6.js"></script>
+<script src="data6b.js" onerror="void 0"></script>
+<script>
+const D = window.LAB6;
+// war graph: both eFort curves + death ticks
+(function () {
+  const svg = document.getElementById('warSvg'), W = 700, H = 260;
+  const c = D.curve, tMax = c[c.length - 1].t;
+  const fMax = Math.max(...c.flatMap(p => [p.rF, p.bF]));
+  const sx = t => t / tMax * (W - 50) + 35, sy = v => H - 30 - (v / fMax) * (H - 55);
+  const line = (key, col) => `<polyline points="${c.map(p => sx(p.t).toFixed(1) + ',' + sy(p[key]).toFixed(1)).join(' ')}" fill="none" stroke="${col}" stroke-width="2"><animate attributeName="stroke-dasharray" from="0,3000" to="3000,0" dur="2.4s" fill="freeze"/></polyline>`;
+  let out = `<line x1="35" y1="${H - 30}" x2="${W - 15}" y2="${H - 30}" stroke="#223041"/>` +
+    `<text x="35" y="${H - 10}" fill="#8fa3b3" font-size="11" font-family="monospace">0s</text>` +
+    `<text x="${W - 80}" y="${H - 10}" fill="#8fa3b3" font-size="11" font-family="monospace">${tMax}s</text>` +
+    `<text x="6" y="16" fill="#8fa3b3" font-size="11" font-family="monospace">enemy base HP</text>`;
+  out += line('rF', '#ff6a5a') + line('bF', '#6ab7ff');
+  for (const d of D.deaths) out += `<line x1="${sx(d.t).toFixed(1)}" y1="${H - 30}" x2="${sx(d.t).toFixed(1)}" y2="${H - 38}" stroke="#dfe8ef" stroke-width="1.5" opacity="0.7"/>`;
+  svg.innerHTML = out;
+})();
+// endgame dance log
+(function () {
+  const el = document.getElementById('danceLog');
+  el.innerHTML = D.dance.map(d => `t=${d.t}s ${/Taking fire/.test(d.msg) ? '<span class="fire">' + d.msg + '</span>' : d.msg}`).join('<br>');
+})();
+// the two rings diagram
+(function () {
+  const svg = document.getElementById('ringSvg'), cx = 350, cy = 120;
+  svg.innerHTML =
+    `<circle cx="${cx}" cy="${cy}" r="100" fill="none" stroke="#2a3a4d" stroke-dasharray="4,4"/>` +
+    `<text x="${cx + 74}" y="${cy - 78}" fill="#8fa3b3" font-size="11" font-family="monospace">flee clears (100u)</text>` +
+    `<circle cx="${cx}" cy="${cy}" r="60" fill="rgba(255,106,90,0.08)" stroke="#ff6a5a"/>` +
+    `<text x="${cx + 34}" y="${cy - 44}" fill="#ff6a5a" font-size="11" font-family="monospace">fear ring (60u)</text>` +
+    `<circle cx="${cx}" cy="${cy}" r="55" fill="none" stroke="#58d17a" stroke-dasharray="6,3" opacity="0.55"/>` +
+    `<text x="${cx - 190}" y="${cy + 62}" fill="#58d17a" font-size="11" font-family="monospace" opacity="0.7">old commit (55u) — unreachable</text>` +
+    `<circle cx="${cx}" cy="${cy}" r="85" fill="none" stroke="#58d17a" stroke-width="2"><animate attributeName="r" values="55;85" dur="1.6s" fill="freeze"/></circle>` +
+    `<text x="${cx + 52}" y="${cy + 84}" fill="#58d17a" font-size="12" font-family="monospace">new commit (85u)</text>` +
+    `<text x="${cx - 4}" y="${cy + 4}" font-size="14">⚑</text>` +
+    `<circle cx="${cx + 12}" cy="${cy - 8}" r="4" fill="#ff6a5a"/>` +
+    `<text x="${cx + 20}" y="${cy - 12}" fill="#8fa3b3" font-size="10" font-family="monospace">defender</text>`;
+})();
+if (window.LAB6B) { const el = document.getElementById('s12'); el.classList.remove('pending'); el.innerHTML = window.LAB6B.html; }
+</script>
+</body>
+</html>

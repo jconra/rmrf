@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab</title>
+<style>
+  :root {
+    --bg: #0c1118; --card: #131b26; --card2: #17212e; --ink: #dfe8ef; --dim: #8fa3b3;
+    --accent: #d9a441; --good: #58d17a; --bad: #ff6a5a; --warn: #ffcf6a; --blue: #6ab7ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font-family: 'Courier New', monospace; line-height: 1.55; padding-bottom: 60px; }
+  header { padding: 26px 18px 14px; border-bottom: 1px solid #223041; background: radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing: 6px; font-size: 22px; }
+  header .sub { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  main { max-width: 760px; margin: 0 auto; padding: 0 12px; }
+  article { background: var(--card); border: 1px solid #223041; border-radius: 10px; margin-top: 18px; padding: 16px; }
+  article h2 { color: var(--accent); font-size: 17px; letter-spacing: 1px; margin-bottom: 4px; }
+  article .date { color: var(--dim); font-size: 11px; margin-bottom: 12px; }
+  h3 { color: var(--blue); font-size: 14px; margin: 18px 0 6px; letter-spacing: 1px; }
+  p, li { font-size: 13px; color: var(--ink); margin: 8px 0; }
+  ul { padding-left: 18px; }
+  code { background: #0a0f16; padding: 1px 5px; border-radius: 4px; color: var(--warn); font-size: 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .chip { font-size: 11px; padding: 3px 8px; border-radius: 10px; background: var(--card2); border: 1px solid #2a3a4d; color: var(--dim); }
+  .big { font-size: 30px; font-weight: bold; }
+  .scoreboard { display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; }
+  .score { flex: 1; min-width: 130px; background: var(--card2); border-radius: 8px; padding: 12px; text-align: center; }
+  .score .lbl { font-size: 10px; color: var(--dim); letter-spacing: 1px; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 11px; }
+  .bar-row .lbl { width: 92px; color: var(--dim); text-align: right; flex-shrink: 0; }
+  .bar-track { flex: 1; background: #0a0f16; border-radius: 4px; height: 16px; overflow: hidden; }
+  .bar { height: 100%; width: 0; border-radius: 4px; transition: width 1.1s cubic-bezier(.2,.8,.2,1); display: flex; align-items: center; }
+  .bar span { font-size: 10px; padding-left: 6px; color: #06202c; font-weight: bold; }
+  svg { width: 100%; height: auto; background: #0a0f16; border-radius: 8px; margin: 8px 0; }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: var(--dim); flex-wrap: wrap; margin: 4px 0; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+  button { background: var(--card2); color: var(--ink); border: 1px solid #2a3a4d; border-radius: 6px;
+    font-family: inherit; font-size: 13px; padding: 7px 16px; margin: 6px 0; }
+  button:active { background: #223041; }
+  .loop-diagram { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 14px 0; font-size: 12px; }
+  .loop-box { border: 1px solid #2a3a4d; border-radius: 8px; padding: 10px 12px; background: var(--card2); text-align: center; transition: box-shadow .3s, border-color .3s; }
+  .loop-box.hot { border-color: var(--bad); box-shadow: 0 0 14px rgba(255,106,90,.35); }
+  .loop-arrow { color: var(--dim); font-size: 18px; }
+  .fine { color: var(--dim); font-size: 11px; }
+  .pending { border: 1px dashed #2a3a4d; border-radius: 8px; padding: 12px; color: var(--dim); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #223041; }
+  th { color: var(--dim); font-weight: normal; font-size: 11px; }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:10px;left:10px;z-index:50"><span style="background:#17212e;border:1px solid #2a3a4d;border-radius:8px;color:#3a4a5d;font-size:12px;padding:7px 12px;font-family:'Courier New',monospace">&#8249; previous</span></div>
+<div style="position:fixed;top:10px;right:10px;z-index:50"><a href="post2.html" style="background:#17212e;border:1px solid #2a3a4d;border-radius:8px;color:#dfe8ef;text-decoration:none;font-size:12px;padding:7px 12px;font-family:'Courier New',monospace">next &#8250;</a></div>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — headless matches, graded and dissected</div>
+</header>
+<main>
+
+<article>
+  <h2>Hunting “repetition without progress”</h2>
+  <div class="date">2026-07-07 · builds v299 → v301 · 6 fixed seeds × 800s sim per run</div>
+
+  <p>New tool: <code>richwatch.cjs</code> plays whole AI-vs-AI matches headless, samples every
+  commander once per sim-second, keeps the full decision-event archive, and flags the exact thing
+  we care about: <b>units doing something repetitive while achieving nothing</b>.</p>
+  <div class="chips">
+    <span class="chip">STATE-FLAP</span><span class="chip">MISSION-FLAP</span><span class="chip">MSG-REPEAT</span>
+    <span class="chip">STAGNANT</span><span class="chip">UNSTICK-STORM</span><span class="chip">NO-PROGRESS</span>
+  </div>
+
+  <div class="scoreboard">
+    <div class="score"><div class="lbl">MATCHES RESOLVED</div><div class="big"><span class="bad">2</span> → <span class="good" id="res2">3</span><span class="fine"> /6</span></div><div class="fine">run 1 → run 2</div></div>
+    <div class="score"><div class="lbl">WORST LOG SPAM</div><div class="big"><span class="bad">11,206</span> → <span class="good">0</span></div><div class="fine">same line, one match</div></div>
+    <div class="score"><div class="lbl">FIXES SHIPPED</div><div class="big warn">4</div><div class="fine">v300 · v301</div></div>
+  </div>
+
+  <h3>№1 — The gambit that deadlocked itself</h3>
+  <p>Three of six matches contained one log line repeated <b>thousands of times</b>:
+  <i>“Break off the grind — pull the lurcher back, Valkyrie’s going around the back!”</i>
+  That’s the stalemate gambit ordering a vehicle swap. The order was re-issued <b>every tick</b>,
+  because two safety rules fought each other:</p>
+  <div class="loop-diagram">
+    <div class="loop-box" id="lb1">rival within 46u<br><b>ABORT recall</b><br><span class="fine">“don’t drive home under fire”</span></div>
+    <div class="loop-arrow">⇄</div>
+    <div class="loop-box" id="lb2">gambit wants Valkyrie<br><b>COMMIT recall</b><br><span class="fine">“even with defenders near”</span></div>
+  </div>
+  <p>Abort and re-commit alternated forever. The unit received a steering command only every
+  <i>other</i> tick, the stalemate-breaking Valkyrie <b>never launched</b> — and the gambit exists
+  precisely for matches where an enemy is always nearby. One frozen 559-second lurcher duel sat
+  directly on top of this. <b>Fix (v300):</b> a committed recall now drives home even under fire —
+  that is what “commit” means.</p>
+
+  <h3>№2 — The sieger’s two-spot shuttle</h3>
+  <p>Seed 67’s report was a wall of the same event: a jotun in <code>suppress</code>, goal 75–185u
+  away, shuttling between two spots ~10u apart for the whole match. Two causes:</p>
+  <ul>
+    <li>The trek to a siege standoff can be 100u+ around terrain, but suppress travel had
+      <b>no A*</b> — just direct steering and bump-feelers.</li>
+    <li>A recent “if wedged, plant and shoot” fallback would plant even when there was
+      <b>nothing shootable</b> from that spot, silently resetting the stuck timers each cycle.</li>
+  </ul>
+  <p><b>Fix (v300):</b> suppress now path-follows A* until within 26u of its standoff, and the
+  plant-and-fire fallback requires an actual target (a bearing line on the tower, or a wall in
+  range to flatten). Seed 67 flipped from stalemate to <b>RESOLVED</b> on the re-run.</p>
+
+  <h3>№3 — Engage flap: the LOS strobe</h3>
+  <p>With the big blockers gone, run 2’s top signal became combat-state thrash:
+  <code>suppress↔engage ×54 in 21s</code>, <code>pursue↔engage ×50 in 36s</code>. In a duel both
+  hulls weave through cover, so line-of-sight blinks constantly — and every blink bounced the
+  whole state ladder. Watch it happen (replay of seed 25’s blue jotun, 20× speed; the dot is the
+  unit, colour = its state):</p>
+  <div class="legend">
+    <span><span class="dot" style="background:#ff6a5a"></span>engage</span>
+    <span><span class="dot" style="background:#ffcf6a"></span>pursue</span>
+    <span><span class="dot" style="background:#6ab7ff"></span>suppress</span>
+    <span><span class="dot" style="background:#8fa3b3"></span>other</span>
+  </div>
+  <svg id="flapSvg" viewBox="0 0 700 320"></svg>
+  <div class="bar-row"><span class="lbl">state timeline</span><div class="bar-track" style="height:22px"><svg id="flapStrip" viewBox="0 0 700 22" preserveAspectRatio="none" style="margin:0;border-radius:0"></svg></div></div>
+  <button id="flapBtn">▶ replay</button>
+  <p><b>Fix (v301):</b> <i>engage afterglow</i> — if a unit was fighting and its rival vanished
+  less than 0.9s ago, the brain keeps treating it as visible at its last seen position. Blinks
+  merge into one continuous engagement; the state only changes once the target is genuinely gone.
+  Entry into engage stays instant.</p>
+  <div class="pending" id="run3box">⏳ run 3 (v301, same six seeds) is in progress — results will appear here.</div>
+
+  <h3>What progress looks like on a graph</h3>
+  <p>Enemy-base structure HP over time, both teams. A healthy match grinds a base down; a broken
+  one is two flat lines — that flatness is what the <code>NO-PROGRESS</code> detector fires on.</p>
+  <svg id="fortSvg" viewBox="0 0 700 260"></svg>
+  <div class="legend" id="fortLegend"></div>
+
+  <h3>Issue counts, per seed (run 1 → run 2)</h3>
+  <div id="seedBars"></div>
+  <p class="fine">Bars are total flagged issues per seed; the label shows outcome. Fewer flags on
+  a seed that also resolves = genuinely healthier, not just quieter.</p>
+
+  <h3>Reproduce</h3>
+  <p class="fine"><code>cd ~/pw && node richwatch.cjs</code> → verdict in
+  <code>/tmp/richwatch.txt</code>, full per-second story in <code>/tmp/richwatch-&lt;seed&gt;.json</code>.
+  This page: <code>/var/www/html/rmrf/devblog/</code>.</p>
+</article>
+
+</main>
+<script src="data1.js"></script>
+<script src="data3.js" onerror="void 0"></script>
+<script>
+const D = window.LAB1;
+const SC = { engage: '#ff6a5a', pursue: '#ffcf6a', suppress: '#6ab7ff' };
+const scol = s => SC[s] || '#8fa3b3';
+
+// ---- flap replay -------------------------------------------------------------
+(function () {
+  const tr = D.flapTrace.trace; if (!tr.length) return;
+  const svg = document.getElementById('flapSvg');
+  const xs = tr.map(p => p.x), zs = tr.map(p => p.z);
+  const x0 = Math.min(...xs) - 8, x1 = Math.max(...xs) + 8, z0 = Math.min(...zs) - 8, z1 = Math.max(...zs) + 8;
+  const W = 700, H = 320, sx = x => (x - x0) / (x1 - x0) * (W - 40) + 20, sz = z => (z - z0) / (z1 - z0) * (H - 40) + 20;
+  let path = '';
+  tr.forEach((p, i) => { path += (i ? 'L' : 'M') + sx(p.x).toFixed(1) + ',' + sz(p.z).toFixed(1); });
+  svg.innerHTML = `<path d="${path}" fill="none" stroke="#2a3a4d" stroke-width="2"/>` +
+    tr.map(p => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sz(p.z).toFixed(1)}" r="2.4" fill="${scol(p.st)}" opacity="0.55"/>`).join('') +
+    `<circle id="flapDot" r="7" fill="${scol(tr[0].st)}" stroke="#fff" stroke-width="1.5"/>` +
+    `<text id="flapLbl" x="20" y="24" fill="#8fa3b3" font-size="13" font-family="monospace"></text>`;
+  const strip = document.getElementById('flapStrip');
+  const t0 = tr[0].t, t1 = tr[tr.length - 1].t;
+  strip.innerHTML = D.flapTrace.flips.map(f =>
+    `<rect x="${((f.t - t0) / (t1 - t0) * 700).toFixed(1)}" y="0" width="2.4" height="22" fill="${scol(f.to)}"/>`).join('');
+  const dot = document.getElementById('flapDot'), lbl = document.getElementById('flapLbl');
+  let i = 0, timer = null;
+  function step() {
+    const p = tr[i];
+    dot.setAttribute('cx', sx(p.x)); dot.setAttribute('cy', sz(p.z)); dot.setAttribute('fill', scol(p.st));
+    lbl.textContent = `t=${p.t | 0}s  state=${p.st || '?'}  goal ${p.gd == null ? '—' : p.gd + 'u'}`;
+    i = (i + 1) % tr.length;
+    if (i === 0) { clearInterval(timer); timer = null; document.getElementById('flapBtn').textContent = '▶ replay'; }
+  }
+  step();
+  document.getElementById('flapBtn').onclick = () => {
+    if (timer) { clearInterval(timer); timer = null; document.getElementById('flapBtn').textContent = '▶ replay'; return; }
+    i = 0; timer = setInterval(step, 85); document.getElementById('flapBtn').textContent = '⏸ pause';
+  };
+})();
+
+// ---- fort curves ---------------------------------------------------------------
+(function () {
+  const svg = document.getElementById('fortSvg'), W = 700, H = 260;
+  const sets = [
+    { d: D.fortResolved.curve, name: `seed ${D.fortResolved.seed} — resolved (${D.fortResolved.winner} wins)`, ca: '#58d17a', cb: '#2e7a48' },
+    { d: D.fortStale.curve, name: `seed ${D.fortStale.seed} — stalemate (flat = the disease)`, ca: '#ff6a5a', cb: '#8a3a30' },
+  ];
+  const tMax = Math.max(...sets.flatMap(s => s.d.map(p => p.t)));
+  const hpMax = Math.max(...sets.flatMap(s => s.d.flatMap(p => [p.a || 0, p.b || 0])));
+  const sx = t => t / tMax * (W - 60) + 40, sy = v => H - 24 - (v / hpMax) * (H - 48);
+  let out = `<line x1="40" y1="${H - 24}" x2="${W - 20}" y2="${H - 24}" stroke="#223041"/>` +
+    `<text x="40" y="${H - 8}" fill="#8fa3b3" font-size="11" font-family="monospace">0s</text>` +
+    `<text x="${W - 70}" y="${H - 8}" fill="#8fa3b3" font-size="11" font-family="monospace">${tMax | 0}s</text>` +
+    `<text x="6" y="18" fill="#8fa3b3" font-size="11" font-family="monospace">enemy base HP</text>`;
+  const leg = [];
+  for (const s of sets) {
+    for (const [key, col] of [['a', s.ca], ['b', s.cb]]) {
+      const pts = s.d.filter(p => p[key] != null).map(p => sx(p.t).toFixed(1) + ',' + sy(p[key]).toFixed(1)).join(' ');
+      out += `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2"><animate attributeName="stroke-dasharray" from="0,4000" to="4000,0" dur="2.2s" fill="freeze"/></polyline>`;
+    }
+    leg.push(`<span><span class="dot" style="background:${s.ca}"></span>${s.name}</span>`);
+  }
+  svg.innerHTML = out;
+  document.getElementById('fortLegend').innerHTML = leg.join(' ');
+})();
+
+// ---- per-seed issue bars ---------------------------------------------------------
+(function () {
+  const el = document.getElementById('seedBars');
+  const seeds = Object.keys(D.run1);
+  const tot = r => Object.values(r.counts).reduce((a, b) => a + b, 0);
+  const max = Math.max(...seeds.flatMap(s => [tot(D.run1[s] || { counts: {} }), tot(D.run2[s] || { counts: {} })]));
+  let html = '';
+  for (const s of seeds) {
+    const r1 = D.run1[s], r2 = D.run2[s];
+    const o = (r2.outcome || '').startsWith('RESOLVED') ? '<span class="good">✔ resolved</span>' : '<span class="bad">✘ stalemate</span>';
+    html += `<div style="margin:10px 0 2px;font-size:12px;color:#8fa3b3">seed ${s} · ${o}</div>`;
+    for (const [r, col, tag] of [[r1, '#8a3a30', 'run1'], [r2, '#3a6ea8', 'run2']]) {
+      const t = tot(r);
+      html += `<div class="bar-row"><span class="lbl">${tag} · ${t} issues</span><div class="bar-track"><div class="bar" data-w="${(t / max * 100).toFixed(0)}%" style="background:${col}"></div></div></div>`;
+    }
+  }
+  el.innerHTML = html;
+  requestAnimationFrame(() => requestAnimationFrame(() =>
+    document.querySelectorAll('.bar').forEach(b => b.style.width = b.dataset.w)));
+})();
+
+// ---- loop diagram pulse ------------------------------------------------------------
+(function () {
+  let on = 0;
+  setInterval(() => { on = 1 - on;
+    document.getElementById('lb1').classList.toggle('hot', !on);
+    document.getElementById('lb2').classList.toggle('hot', !!on);
+  }, 700);
+})();
+
+// ---- run 3 results (filled in when data3.js exists) --------------------------------
+if (window.LAB3) {
+  const b = document.getElementById('run3box');
+  b.classList.remove('pending');
+  b.innerHTML = window.LAB3.html;
+}
+</script>
+</body>
+</html>

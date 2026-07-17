@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — one driver per vehicle</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .radio { background:#0a0f16; border-left:3px solid var(--blue); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); }
+  pre.coc { background:#0a0f16; border:1px solid #2a3a4d; border-radius:6px; padding:10px 12px;
+            font-size:12px; color:var(--ink); overflow-x:auto; margin:10px 0; }
+  pre.coc .l0 { color:var(--dim); } pre.coc .l1 { color:var(--purple); }
+  pre.coc .l2 { color:var(--blue); } pre.coc .l3 { color:var(--warn); } pre.coc .l4 { color:var(--good); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post14.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 15 · one driver per vehicle</div>
+</header>
+<main>
+
+<article>
+  <h2>One driver per vehicle</h2>
+  <div class="date">2026-07-16 · the driver architecture, part 1 — a failed refactor, a design session, and 2,579 confessions</div>
+
+  <p>This one starts with a question from the designer that turned out to be the whole post:
+  <i>&ldquo;How come there are so many steering programs? Can&rsquo;t it just be built with layers of
+  abstraction so that travel, siege-standoff and combat all call the same function for steering?&rdquo;</i></p>
+
+  <p>He was right to ask. Travel steering, siege approach, duel footwork, the recall trip home,
+  the gate exit — each carried its own inline copy of &ldquo;turn toward the thing, drive at the
+  thing,&rdquo; and every copy re-grew the same diseases on its own schedule. The famous spinning
+  Lurcher was one of them: full throttle plus full turn around a goal inside the turning circle
+  is a stable orbit, and three separate steering copies were each capable of producing it.</p>
+
+  <h3>The experiment that half-worked</h3>
+  <p>First attempt: extract the ONE steering primitive (<code>locomote(kin, order)</code> — eased
+  throttle so a misaligned hull pivots instead of orbiting; omni chassis translate immediately in
+  any direction) and port the existing states onto it. The math was provably right — unit tests,
+  a forced-strafe probe showing the Jotun&rsquo;s illegal combat sidestep going from 21.3u to 0u,
+  the orbit class dead. The tournament said otherwise:</p>
+
+  <table>
+    <tr><th></th><th>before (60 matches)</th><th>after (60 matches)</th></tr>
+    <tr><td>resolved</td><td>49/60</td><td><b class="bad">44/60</b></td></tr>
+    <tr><td>suppress-stuck</td><td>980</td><td><b class="good">882</b></td></tr>
+    <tr><td>worst stuck episode</td><td>40s</td><td><b class="bad">174s</b></td></tr>
+  </table>
+
+  <p>The primitive fixed the orbit and created a new stuck class in the same breath — because the
+  <i>wiring</i> was still the old spaghetti: five call sites each deciding when steering applies,
+  what the goal is, and who owns the heading. Verdict file says PARK. The math survived; the
+  wiring was condemned.</p>
+
+  <h3>The design session</h3>
+  <p>Instead of iterating on wiring we were about to replace anyway, the designer specified the
+  real thing: <i>&ldquo;the vehicle just has a single driver. The driver knows how to go forward,
+  reverse, rotate, and strafe if it&rsquo;s not a Jotun&hellip; we don&rsquo;t want a bunch of
+  drivers waiting to jump in the seat depending on the situation.&rdquo;</i> And the line that
+  became the architecture&rsquo;s conscience: <i>&ldquo;I actually don&rsquo;t even like
+  stuck/jolt recovery. I feel like that should never happen. We don&rsquo;t have mud in the
+  game. If stuck happens then something failed.&rdquo;</i></p>
+
+  <p>So: <b>stuck is a bug report, not a situation.</b> The full spec lives in
+  <code>2026-07-16-driver-architecture.md</code> next to this post; the short version is four layers —</p>
+
+  <table>
+    <tr><th>layer</th><th>owns</th><th>examples</th></tr>
+    <tr><td><b>3 · mission</b></td><td>doctrine, objectives</td><td>unchanged — already clean</td></tr>
+    <tr><td><b>2 · vehicle commander</b></td><td>picking maneuvers</td><td>travel&rarr;GOTO; duel&rarr;ORBIT/KITE/ALIGN; the fight-or-flight score</td></tr>
+    <tr><td><b>1 · maneuvers</b></td><td>the order book</td><td>GOTO&middot;ALIGN&middot;JOUST&middot;HOLD&middot;ORBIT&middot;KITE&middot;BREAKAWAY&middot;REVERSE&#8209;OUT&middot;THREAD — with per-chassis eligibility (JOUST is the Valkyrie&rsquo;s strafing run; the Jotun never gets ORBIT)</td></tr>
+    <tr><td><b>0 · THE DRIVER</b></td><td>pedals + skill</td><td>throttle/rotate/strafe-if-able, square-up easing, collision anticipation</td></tr>
+  </table>
+
+  <p>And when movement fails anyway, no recovery dance: an <b>ALARM</b> — flight-recorder dump,
+  a counter that shames us in every tournament, and if the unit is still pinned after a grace
+  period it <b>scuttles itself</b>. A bug should cost the team, loudly. That&rsquo;s the incentive
+  structure for fixing root causes instead of apologizing for them.</p>
+
+  <h3>Slice 1: the driver takes the seat</h3>
+  <p>Shipped today: <code>js/Driver.js</code>. Travel states now issue standing <code>GOTO</code>
+  orders; the driver route-follows through the same A* cache and drives through the locomote core.
+  Combat footwork still steers itself under a <code>DIRECT</code> order — the driver observes
+  everything (flight recorder, watchdog) but doesn&rsquo;t grab the wheel mid-duel. That&rsquo;s a
+  later slice. The chain of command became a thing you can just read:</p>
+
+<pre class="coc"><span class="l0">WARRIOR</span>                              &larr; doctrine
+<span class="l1">ATTACK &middot; step=defend</span>                &larr; mission
+<span class="l2">tactical: lost sight &rarr; re-acquire</span>   &larr; commander
+<span class="l3">maneuver: GOTO(-39,65) 62% &middot; 18u left</span>  &larr; the standing order
+<span class="l4">driver:   fwd 1.0 &middot; left 0.3</span>          &larr; pedals this tick</pre>
+
+  <h3>2,579 confessions</h3>
+  <p>The best part of the slice is the <b>honesty rule</b>: a GOTO whose A* route ends short of
+  the goal is a <i>contract violation</i> — the order asked for somewhere unreachable, and before
+  today the unit walked the partial path silently and ground against whatever blocked the last
+  leg. First 30-match tournament with the contract being checked:</p>
+
+  <div class="radio">nav ALARMS: 2 (0.07/match) &middot; unreachable-GOTO contract violations: <b>2,579</b></div>
+
+  <p>Eighty-six impossible orders per match. The commanders have been lying to the drivers this
+  whole time, and every silent partial path was a stuck report waiting to happen. That number is
+  the to-do list for the next slice — each violation names its issuer.</p>
+
+  <p>The same tournament found the next wiring bug within the hour: the three longest stuck
+  episodes (182s/172s/116s) were all <code>return-to-base</code> Lurchers — the recall path was
+  feeding omni pedals (forward + sideways, assuming an independently-swinging nose) through the
+  classic tank drive, which turns the hull <i>while</i> strafing. That mismatch is a circling
+  machine. And the watchdog missed them, because an orbiting unit covers plenty of ground —
+  it just never gets anywhere. Two fixes: one chassis-correct drive boundary both call sites
+  share, and the watchdog now measures <b>progress toward the goal</b>, not motion. An orbit
+  is officially a form of standing still.</p>
+
+  <p class="fine"><b>Epilogue (next day):</b> three tournament rounds and two autopsies later —
+  the watchdog learned to catch orbits (moving without closing), creepers (0.3u/s wall-grinds),
+  order-churn stall laundering, and the partial-path freeze. Final board, pooled across two
+  30-seed sets: resolution 49/60 &rarr; <b class="good" style="color:var(--good)">50/60</b>, wins
+  ~50s faster, transit-stuck &minus;11%, the 182s/172s legacy creepers dead, alarms at 0.52/match
+  with a flight recording behind every one. The metric from here: <b>alarms per match &rarr;
+  zero</b> — not by silencing the alarm, but by running out of bugs. Spec:
+  <code>2026-07-16-driver-architecture.md</code> &middot; verdict:
+  <code>VERDICT-2026-07-17-driver-slice1.txt</code>.</p>
+</article>
+
+</main>
+</body>
+</html>

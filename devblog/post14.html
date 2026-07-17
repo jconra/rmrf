@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the net that loved turtles too much</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .hero { text-align:center; padding:16px 0 6px; }
+  .hero .n { font-size:44px; font-weight:bold; line-height:1; }
+  .hero .cap { color:var(--dim); font-size:12px; margin-top:6px; }
+  .chart { background:var(--card2); border:1px solid #2a3a4d; border-radius:8px; padding:12px 8px 6px; margin:12px 0; }
+  .chart .ct { color:var(--dim); font-size:11px; letter-spacing:1px; padding:0 6px 4px; }
+  .chart canvas { width:100%; height:auto; display:block; border-radius:4px; }
+  .radio { background:#0a0f16; border-left:3px solid var(--blue); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post13.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post15.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 14 · the net that loved turtles too much</div>
+</header>
+<main>
+
+<article>
+  <h2>The net that loved turtles too much</h2>
+  <div class="date">2026-07-12 · the mission assigner, part 3 — the fixed scorekeeper, the swing, and the wall</div>
+
+  <p>Part 2 ended with a plan: the scorekeeper couldn't see defense, so pay the guards —
+  credit kills made on our own half, credit downing a flag thief, penalize a flag lost on your
+  watch — then recollect, retrain, and re-fight the tournament. All of that happened overnight.
+  Along the way the <i>hand-written</i> defenders got better too (the turtle now guards the
+  shield generator and patches itself up between contacts; the hunter runs disruption tours —
+  both gated +2 resolutions and shipped). Then we retrained the net on 7,672 fresh tours,
+  every match of the collection resolving. And the net read the new scorecard very carefully.</p>
+
+  <div class="chart"><div class="ct">THE PENDULUM — same net, same game, different scorekeeper</div>
+  <canvas id="pendCv" width="700" height="260"></canvas></div>
+
+  <p>Under the offense-only card it benched the defenders (6% turtle). Under the fixed card it
+  benched the <i>attackers</i> — 62% turtle, warriors down to 8%. It learned real things on the
+  way: home fort destroyed → go rogue and steal a win; our runner is carrying their flag →
+  field a hunter to screen the chase; teammates all guarding → deal something else. Legible,
+  tactical, reasonable. Then it fought the hand table for 120 matches.</p>
+
+  <table>
+    <tr><th>net generation</th><th>reward</th><th>policy</th><th>vs the hand table</th></tr>
+    <tr><td>v1</td><td>offense only</td><td>48% warrior / 43% rogue</td><td><b class="good">won 32–26</b></td></tr>
+    <tr><td>v2</td><td>defense paid generously</td><td>62% turtle</td><td><b class="bad">lost 24–34</b></td></tr>
+    <tr><td>v3</td><td>defense paid by events only</td><td>59% turtle</td><td>not fought — same policy, same fate</td></tr>
+  </table>
+
+  <p>v3 was the control experiment: we removed the one credit we suspected of being a freebie
+  (points for "home fort intact on your watch" — guards sit home, home is intact where it's
+  quiet, credit for nothing). The net <b>still</b> went 59% turtle. That's the tell that this
+  isn't a scorecard bug anymore. It's something structural.</p>
+
+  <h3>The wall: nobody's tour buys the win</h3>
+  <p>Here's the uncomfortable truth the three generations triangulate. Guard tours really do
+  post the best per-tour numbers — tower-covered duels are the game's best kill farm (the
+  designer has been saying this since post 13, and now it's on the books). But RMRF has exactly
+  one victory condition: <b>carry the flag home</b>. A team of six excellent guards never wins
+  anything. The scorecard grades each tour on what <i>it</i> produced — and the one thing that
+  actually ends the match is produced by a handful of tours, at the very end, credited to
+  everyone equally:</p>
+
+  <div class="chart"><div class="ct">THE DILUTION — a match's ~50 tours, one flag capture, and where the win credit goes</div>
+  <canvas id="dilCv" width="700" height="240"></canvas></div>
+
+  <p>Every tour in a winning match gets the same little win bonus — the guard who farmed four
+  kills, the warrior who cracked the gate, the firebrat that died in a ditch at minute two.
+  The scorecard cannot say <i>"the gate-crack is what bought this."</i> So the net optimizes
+  what it can see — fat individual tours — and drifts toward an army of excellent
+  individuals that never wins together. Grading tours one at a time has hit its ceiling.</p>
+
+  <div class="radio">The consolation prizes are real: the net-as-diagnostic loop is what
+  produced the shield-guarding turtle, the harassing hunter, and the mine-kill credit fix.
+  The hand table the net keeps losing to is a much stronger opponent than it was three days
+  ago — <i>because</i> of the net. And v1 still plays even with it while fielding completely
+  different armies, which makes it a fine opt-in variety mode.</div>
+
+  <h3>The end boss: stop grading tours, start grading BRAINS</h3>
+  <p>The fix for "we can't tell which decision won the match" is beautifully blunt: <b>don't
+  try.</b> Stop scoring decisions. Score whole brains, by the only number that can't lie —
+  <b>did the team win the match?</b> It works like breeding, not like homework:</p>
+  <ul>
+    <li>Make a <b>population</b> of nets — say 20 copies with randomly nudged weights.</li>
+    <li>Let them <b>fight</b>: everyone plays matches in the headless sim (40 seconds each).</li>
+    <li><b>Selection:</b> the nets that win survive. The ones that lose are deleted.</li>
+    <li><b>Mutation:</b> survivors are copied with small random nudges to their 404 weights.</li>
+    <li>That's one <b>generation</b>. Repeat overnight.</li>
+  </ul>
+
+  <div class="chart"><div class="ct">EVOLUTION — twenty little brains, the winners breed, the win rate climbs</div>
+  <canvas id="evoCv" width="700" height="300"></canvas></div>
+
+  <p>Notice what disappeared: the scorecard. No per-tour grades, no reward weights to tune, no
+  dilution problem — a brain that deals six turtles simply loses its matches and is bred out,
+  and nobody ever had to figure out <i>why</i> it lost. The win itself is the teacher. The cost
+  is honesty of a different kind: evolution is a slow student. It needs thousands of matches —
+  which is exactly what a headless island that plays a full war in 40 seconds is for.</p>
+
+  <p class="fine">Scoreboard: v1 32–26 · v2 24–34 · hand table still champion. Doctrine gates:
+  turtle v2 28/29 vs 26/29, harass 30/30 vs 28/30 — both shipped. Verdicts in the repo;
+  all three weight generations kept. Next: the breeding pit.</p>
+</article>
+
+</main>
+<script>
+const TAU = Math.PI * 2;
+const ROLES = ['WARRIOR', 'TURTLE', 'HUNTER', 'ROGUE'];
+const RCOL = ['#ff6a5a', '#58d17a', '#ffcf6a', '#b88df0'];
+
+// ── 1. the pendulum: v1 policy ⇄ v2 policy ─────────────────────────────────────
+(function () {
+  const cv = document.getElementById('pendCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 6000;
+  const v1 = [0.48, 0.06, 0.04, 0.43], v2 = [0.08, 0.62, 0.15, 0.15];
+  let t0 = 0;
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % CYCLE) / CYCLE;
+    const k = ph < 0.5 ? Math.min(1, ph * 4) : Math.max(0, 1 - (ph - 0.5) * 4);   // ease v1→v2→v1
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = k < 0.5 ? '#dfe8ef' : '#5f7385';
+    ctx.fillText('SCORECARD: pay only offense (v1)', 180, 26);
+    ctx.fillStyle = k >= 0.5 ? '#dfe8ef' : '#5f7385';
+    ctx.fillText('pay defense generously (v2)', 520, 26);
+    for (let i = 0; i < 4; i++) {
+      const v = v1[i] + (v2[i] - v1[i]) * k;
+      const y = 56 + i * 46;
+      ctx.fillStyle = '#0a0f16'; ctx.fillRect(120, y, 460, 26);
+      ctx.fillStyle = RCOL[i]; ctx.fillRect(120, y, 460 * v, 26);
+      ctx.font = 'bold 12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#dfe8ef';
+      ctx.fillText(ROLES[i], 112, y + 18);
+      ctx.textAlign = 'left';
+      ctx.fillText(Math.round(v * 100) + '%', 588, y + 18);
+    }
+    ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('how often each role gets dealt — the reward knob steers the whole doctrine', W / 2, H - 10);
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 2. the dilution: 50 tours, one capture, win credit rains on everyone ───────
+(function () {
+  const cv = document.getElementById('dilCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 7000;
+  let t0 = 0;
+  // 50 tours with varied "own production" heights; tour 46 = the gate crack, 49 = the capture
+  let rs = 7; const rand = () => (rs = (rs * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const tours = Array.from({ length: 50 }, () => 8 + rand() * 30);
+  tours[46] = 52; tours[49] = 58;
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % CYCLE) / CYCLE;
+    ctx.clearRect(0, 0, W, H);
+    const gx = 40, gy = 34, gw = W - 80, gh = 130, bw = gw / 50;
+    // tour bars grow
+    const k1 = Math.min(1, ph / 0.3);
+    for (let i = 0; i < 50; i++) {
+      const h = tours[i] * 2 * k1 * Math.min(1, Math.max(0, (ph * 60 - i * 0.5)));
+      ctx.fillStyle = i === 46 ? '#d9a441' : i === 49 ? '#b88df0' : '#3a4a5d';
+      ctx.fillRect(gx + i * bw + 1, gy + gh - h, bw - 2, h);
+    }
+    ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    if (ph > 0.35) { ctx.fillStyle = '#d9a441'; ctx.fillText('the gate crack', gx + 46 * bw, gy - 12); }
+    if (ph > 0.4) { ctx.fillStyle = '#b88df0'; ctx.fillText('the capture ▶ WIN', gx + 42 * bw, gy + 2); }
+    // win credit rains equally
+    if (ph > 0.5) {
+      const k2 = Math.min(1, (ph - 0.5) / 0.3);
+      for (let i = 0; i < 50; i++) {
+        const y = gy + gh - tours[i] * 2 - 12 * k2;
+        ctx.fillStyle = 'rgba(88,209,122,' + (0.85 * k2) + ')';
+        ctx.fillRect(gx + i * bw + 1, y, bw - 2, 10 * k2);
+      }
+      ctx.fillStyle = '#58d17a'; ctx.font = 'bold 11px monospace';
+      ctx.fillText('+win bonus — the SAME for every tour, hero or ditch-diver', W / 2, gy + gh + 24);
+    }
+    if (ph > 0.85) {
+      ctx.fillStyle = '#ffcf6a';
+      ctx.fillText('the scorecard cannot say which tour bought the match', W / 2, gy + gh + 42);
+    }
+    ctx.fillStyle = '#5f7385'; ctx.textAlign = 'left';
+    ctx.fillText('one winning match — every bar is one tour of duty (height = its own stats)', gx, H - 8);
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 3. evolution: population → fight → select → mutate → repeat ────────────────
+(function () {
+  const cv = document.getElementById('evoCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const N = 20, GEN_MS = 2600;
+  let rs = 13; const rand = () => (rs = (rs * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  // each brain: fitness improves over generations; visualized as hue-jittered dots
+  let pop = Array.from({ length: N }, () => ({ f: rand() * 0.4 + 0.1, hue: rand() }));
+  let gen = 0, t0 = 0, curve = [];
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % GEN_MS) / GEN_MS;
+    const genI = Math.floor((ts - t0) / GEN_MS);
+    if (genI > gen) {   // advance a generation: select + mutate
+      pop.sort((a, b) => b.f - a.f);
+      const best = pop.slice(0, N / 2);
+      curve.push(best[0].f);
+      if (curve.length > 40) { curve = []; pop = Array.from({ length: N }, () => ({ f: rand() * 0.4 + 0.1, hue: rand() })); }
+      pop = best.concat(best.map(b => ({ f: Math.min(0.97, Math.max(0.05, b.f + (rand() - 0.42) * 0.14)), hue: Math.min(1, Math.max(0, b.hue + (rand() - 0.5) * 0.2)) })));
+      gen = genI;
+    }
+    ctx.clearRect(0, 0, W, H);
+    // arena: dots arranged in a grid; phase 0-0.4 = fights (pair flashes), 0.4-0.7 = losers fade, 0.7-1 = offspring pop in
+    const gx = 40, gy = 40, cols = 10, cell = 52;
+    const sorted = [...pop].sort((a, b) => b.f - a.f);
+    for (let i = 0; i < N; i++) {
+      const p = sorted[i];
+      const x = gx + (i % cols) * cell + cell / 2, y = gy + Math.floor(i / cols) * cell + cell / 2;
+      const isWinner = i < N / 2, isChild = i >= N / 2;
+      let alpha = 1, r = 9 + p.f * 8;
+      if (ph > 0.4 && ph < 0.7 && !isWinner) alpha = Math.max(0.08, 1 - (ph - 0.4) / 0.2);
+      if (ph >= 0.7 && isChild) { alpha = Math.min(1, (ph - 0.7) / 0.2); r *= 0.75 + 0.25 * alpha; }
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = 'hsl(' + Math.round(120 * p.hue + 260) + ',60%,' + Math.round(38 + p.f * 30) + '%)';
+      ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+      if (ph < 0.4 && ((ph * 24) | 0) % 3 === i % 3) {   // fight flashes
+        ctx.strokeStyle = 'rgba(255,207,106,0.8)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(x, y, r + 4, 0, TAU); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.font = '11px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = '#8fa3b3';
+    ctx.fillText('generation ' + (gen % 41), gx, 24);
+    ctx.fillStyle = ph < 0.4 ? '#ffcf6a' : ph < 0.7 ? '#ff6a5a' : '#58d17a';
+    ctx.fillText(ph < 0.4 ? 'FIGHT — every brain plays headless matches' : ph < 0.7 ? 'SELECT — losers are deleted' : 'MUTATE — winners copied with small nudges', gx + 130, 24);
+    // fitness curve
+    const cx = 40, cy = 168, cw = W - 80, ch = 100;
+    ctx.strokeStyle = '#2a3a4d'; ctx.strokeRect(cx, cy, cw, ch);
+    ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace';
+    ctx.fillText('best brain’s win rate', cx + 4, cy + 12);
+    ctx.fillText('generations →', cx + cw - 90, cy + ch + 14);
+    if (curve.length > 1) {
+      ctx.strokeStyle = '#58d17a'; ctx.lineWidth = 2; ctx.beginPath();
+      curve.forEach((f, i) => { const x = cx + (i / 40) * cw, y = cy + ch - f * ch; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.stroke();
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

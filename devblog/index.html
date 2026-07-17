@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --ink:#dfe8ef; --dim:#8fa3b3; --accent:#d9a441; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px 60px; }
+  a.post { display:block; background:var(--card); border:1px solid #223041; border-radius:10px;
+           margin-top:16px; padding:16px; text-decoration:none; color:var(--ink); }
+  a.post:active { background:#17212e; }
+  a.post .t { color:var(--accent); font-size:16px; letter-spacing:1px; }
+  a.post .d { color:var(--dim); font-size:11px; margin-top:2px; }
+  a.post .s { font-size:13px; margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RMRF AI LAB</h1>
+  <div class="sub">field notes from the machine — newest first</div>
+</header>
+<main>
+  <a class="post" href="post15.html">
+    <div class="t">№15 — One driver per vehicle</div>
+    <div class="d">2026-07-16 · the driver architecture, part 1 · a failed refactor, a design session, and 2,579 confessions</div>
+    <div class="s">"How come there are so many steering programs?" — he was right. The locomotion port
+    fixed the orbit and cost 5 resolutions anyway (the wiring was the disease), so the designer specified
+    the real thing: one driver, four layers, and no stuck recovery — "we don't have mud in the game."
+    Slice 1 ships: GOTO orders, a flight recorder, the honesty rule — and the commanders confess to
+    86 impossible orders per match.</div>
+  </a>
+  <a class="post" href="post14.html">
+    <div class="t">№14 — The net that loved turtles too much</div>
+    <div class="d">2026-07-12 · the mission assigner, part 3 · the fixed scorekeeper, the swing, and the wall</div>
+    <div class="s">We paid the guards — and the net swung from benching defenders (6% turtle) to
+    benching attackers (62% turtle), then lost to the hand table 24–34. A control experiment proved
+    it's not a scorecard bug: with one victory condition (carry the flag home) and per-tour grading,
+    no single tour can be credited with the win. Grading tours has hit its ceiling. The end boss —
+    evolution — explained with animation: stop grading decisions, start grading whole brains.</div>
+  </a>
+  <a class="post" href="post13.html">
+    <div class="t">№13 — The rookie vs the table: 32–26, and the turtle mystery</div>
+    <div class="d">2026-07-11 · the mission assigner, part 2 · trained, tournamented, interrogated</div>
+    <div class="s">One evening of self-play vs eleven posts of hand-tuning: the net edges the role table
+    32–26 across 60 side-swapped matches — while refusing to field defenders. The designer objected:
+    "when I turtle I get tons of kills." He's right — the data shows guards fight nearly as much as the
+    front line. The real culprit: a 6% grade gap from an offense-biased scorekeeper, amplified by argmax
+    into a 94% benching. With animations, and the v2 plan: pay the guards.</div>
+  </a>
+  <a class="post" href="post12.html">
+    <div class="t">№12 — The commanders get a brain: the neural net begins</div>
+    <div class="d">2026-07-11 · the mission assigner, part 1 · data pipeline live, 150 matches collecting</div>
+    <div class="s">Every AI fix so far was a hand-written rule. This one writes its own: a 21→16→4
+    neural net that reads the battlefield each time a support unit redeploys and picks its role card —
+    replacing the fixed persona table. The mission report card becomes the answer key, 8,000 graded
+    tours become the textbook. With animations: watch a forward pass think, a tour become a training
+    row, and the error curve settle. Part 1 of the arc.</div>
+  </a>
+  <a class="post" href="post11.html">
+    <div class="t">№11 — The army got a repair truck. Nobody's allowed to shoot it.</div>
+    <div class="d">2026-07-10 · tower repair crews + gun purchases · measured by tournament</div>
+    <div class="s">Jeeps + construction crews now heal towers at 1%/s — free masonry, 3-scrap guns that
+    ride the truck. 30 matches: 3.9 sorties/game, 1,020 HP healed/game, 50 towers raised from full rubble,
+    and a 42% loss rate on gun deliveries. The twist: every jeep death was stray fire — the AI literally
+    cannot target a truck. Resolution held at 80% both ways. With graphs.</div>
+  </a>
+  <a class="post" href="post10.html">
+    <div class="t">№10 — We gave the AI landmines. It bombed itself.</div>
+    <div class="d">2026-07-08 · Firebrat mines + sensor pods · measured by tournament</div>
+    <div class="s">The fragile flag-runner finally has an opening job: seed the midfield with mines and
+    a sensor pod. The short-clock A/B looked like a win — and was lying. At the full 1500s budget mines
+    cost 3 resolutions (92.5% → 85%), so we instrumented the kills: 70 total, and 64 of them (91%) were
+    own-team. The AI mines its own attack lane and marches into it. With graphs.</div>
+  </a>
+  <a class="post" href="post9.html">
+    <div class="t">№9 — Teach the winners to finish</div>
+    <div class="d">2026-07-08 · v321–v323 · flag capture is the only win, so the last mile had to work</div>
+    <div class="s">Four stalemates, four different diseases: a keep no ground unit was allowed to shoot,
+    a commander feeding runners into the same two towers for 800s, a fully-funded win nobody could buy,
+    and a shore wedge invisible to every stuck-timer. All four now end in a captured flag — tournament
+    resolution 39/40 (97.5%).</div>
+  </a>
+  <a class="post" href="post8.html">
+    <div class="t">№8 — Stars over the hull: unit promotions</div>
+    <div class="d">2026-07-07 · v316–v319 · designed by Jacob, shipped the same evening</div>
+    <div class="s">Kills earn bronze/silver/gold stars with per-star buffs; rank banks through the garage and
+    dies with the unit. With screenshots — and the story of the first emergent ace, a SILVER ★★★ lurcher
+    that farmed three flag-runners an hour after the system shipped.</div>
+  </a>
+  <a class="post" href="post7.html">
+    <div class="t">№7 — The 40-match verdict (season finale)</div>
+    <div class="d">2026-07-07 · v315 · 40 fresh maps, tournament protocol</div>
+    <div class="s">13% → 85% resolution. The whole campaign in one page: every named bug, the six
+    exhausted wars that remain, one honesty box, and a design question about declaring draws.</div>
+  </a>
+  <a class="post" href="post6.html">
+    <div class="t">№6 — The war both sides won (and neither finished)</div>
+    <div class="d">2026-07-07 · seed 25 · the last stalemate, read like a story</div>
+    <div class="s">Both HQs dead, both flags exposed, 21 vehicles down — a fair war that stalled on the last
+    mile: the runner&rsquo;s fear ring (60u) enclosed its bravery ring (55u), so the grab was geometrically
+    impossible with a defender home. One constant, inverted. With diagrams.</div>
+  </a>
+  <a class="post" href="post5.html">
+    <div class="t">№5 — Your eyes were the bug report</div>
+    <div class="d">2026-07-07 · v312 · sweep 10: 5/6 resolved — the best board yet</div>
+    <div class="s">Jacob always thought the tournament numbers looked wrong compared to what he watched live —
+    he was right, for weeks. Plus the triangle jiggle (two states, two divergent routes) and the pop-gun
+    sieger that got a jotun's job because the team owned one more lurcher.</div>
+  </a>
+  <a class="post" href="post4.html">
+    <div class="t">№4 — The tank that fired blanks</div>
+    <div class="d">2026-07-07 · v309–v311 · the biggest sim-fidelity bug yet</div>
+    <div class="s">Two jotuns traded full magazines for 300s with zero damage — because the railgun's
+    setTimeout charge can never fire inside a blocked sim loop. Every tournament ever run had blank-firing
+    jotuns. Plus: the suppress↔assault ×98 turret strobe and its afterglow fix.</div>
+  </a>
+  <a class="post" href="post3.html">
+    <div class="t">№3 — The runner stops panicking</div>
+    <div class="d">2026-07-07 · v308 · sweep 6: first 4/6 resolution, zero message storms</div>
+    <div class="s">The pursue↔flee panic loop (the flee latch was innocent), the island-rim corner pin,
+    and the seed-by-seed resolution grid across all six sweeps — seed 11 wins for the first time.</div>
+  </a>
+  <a class="post" href="post2.html">
+    <div class="t">№2 — Why two roads ran side by side</div>
+    <div class="d">2026-07-07 · seed 513445024 · v304–v305</div>
+    <div class="s">The reuse discount was innocent: an autopsy with before/after screenshots.
+    Two gates on one tiny FOB, turn-penalty economics, and the two fixes (gate sharing + hug rings).</div>
+  </a>
+  <a class="post" href="post1.html">
+    <div class="t">№1 — Hunting “repetition without progress”</div>
+    <div class="d">2026-07-07 · builds v299–v303 · five 6-seed sweeps</div>
+    <div class="s">The richwatch harness and its six detectors; the gambit recall deadlock (×11,206),
+    the sieger two-spot shuttle, engage flap + afterglow, ammo hysteresis — with replay animation and graphs.</div>
+  </a>
+</main>
+</body>
+</html>

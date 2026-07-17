@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the rookie vs the table</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .hero { text-align:center; padding:16px 0 6px; }
+  .hero .n { font-size:52px; font-weight:bold; line-height:1; }
+  .hero .cap { color:var(--dim); font-size:12px; margin-top:6px; }
+  .chart { background:var(--card2); border:1px solid #2a3a4d; border-radius:8px; padding:12px 8px 6px; margin:12px 0; }
+  .chart .ct { color:var(--dim); font-size:11px; letter-spacing:1px; padding:0 6px 4px; }
+  .chart canvas { width:100%; height:auto; display:block; border-radius:4px; }
+  .radio { background:#0a0f16; border-left:3px solid var(--blue); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post12.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post14.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 13 · the rookie vs the table</div>
+</header>
+<main>
+
+<article>
+  <h2>The rookie vs the table: what the net learned in one evening</h2>
+  <div class="date">2026-07-11 · the mission assigner, part 2 — training, tournament, and the turtle mystery</div>
+
+  <p>Part 1 ended with a promise: collect 150 matches of experience, train the 404-weight brain,
+  and put it in the ring against the hand-written role table it wants to replace. All three
+  happened the same day. The dataset came in at <b>7,189 graded tours</b> (148 of 150 matches
+  resolved). Training took <b>under a minute</b> — 53 passes over the data and the error curve
+  flattened, 6.5% better at predicting a tour's grade than any fixed per-role average could be.
+  The interesting part is never the error number, though. It's what the weights settled into.</p>
+
+  <h3>What it learned — nobody wrote these</h3>
+  <p>Because the net is small, we can interrogate it: freeze the battlefield at "average," sweep
+  one input from 0 to 1, and watch where the pick flips. Three rules fell out:</p>
+  <ul>
+    <li><b>Enemy fort healthy → warrior. Enemy fort under half → rogue.</b> When the walls are
+    up, send pressure; when the base is cracked, stop brawling and sneak the finish.</li>
+    <li><b>Firebrat roster full → rogue.</b> Runners to spare means sneaky plays are affordable.</li>
+    <li><b>Teammates all warriors → deal something else.</b> It learned army diversity.</li>
+  </ul>
+
+  <div class="chart"><div class="ct">SWEEP ONE INPUT, WATCH THE PICK FLIP — enemy fort health, everything else held average</div>
+  <canvas id="sweepCv" width="700" height="240"></canvas></div>
+
+  <p>Sensible instincts. But the sweeps also showed something suspicious: across almost every
+  battlefield we could compose, the net refused to deal <b>turtle</b> (6% of picks) or
+  <b>hunter</b> (4%). It had effectively fired the defenders. Before trusting it with an army,
+  two questions: does it win anyway, and is it <i>right</i> about the defenders?</p>
+
+  <h3>The tournament: 120 matches, no mercy</h3>
+  <p>Same gate as every feature since post 5, doubled: net-vs-table head-to-head over 30 seeds
+  <i>with sides swapped</i> (60 matches — nobody gets to blame spawn luck), plus 30 all-net and
+  30 all-table matches to check nothing about match resolution breaks.</p>
+
+  <div class="chart"><div class="ct">HEAD-TO-HEAD — 60 MATCHES, SIDES SWAPPED</div>
+  <canvas id="h2hCv" width="700" height="250"></canvas></div>
+
+  <table>
+    <tr><th></th><th>net</th><th>hand table</th></tr>
+    <tr><td>head-to-head wins</td><td><b class="good">32</b></td><td>26 <span class="fine">(2 unresolved)</span></td></tr>
+    <tr><td>seed pairs swept (won both sides)</td><td><b class="good">8</b></td><td>6 <span class="fine">(16 split)</span></td></tr>
+    <tr><td>resolution when playing itself</td><td>29/30 · 434s</td><td>29/30 · 402s</td></tr>
+    <tr><td>page errors across 120 matches</td><td colspan="2">0</td></tr>
+  </table>
+
+  <p>Read it honestly: <b>32–26 is a lean, not a knockout.</b> A first-generation net, educated
+  by one evening of self-play, played even-to-slightly-ahead of a table we tuned by hand across
+  eleven blog posts — while ignoring defenders entirely — and never got its flag farmed for the
+  insolence. That last part demanded an investigation.</p>
+
+  <h3>The turtle mystery</h3>
+  <p>The designer's reaction to "the net benched the defenders" was immediate: <i>"when I turtle
+  I get tons of kills — defenders have tower support and easy healing."</i> A testable claim. So
+  we pulled every turtle tour in the dataset and compared its kill record to the warriors':</p>
+
+  <div class="chart"><div class="ct">KILLS PER TOUR — GUARD DUTY vs FRONT LINE (2,611 turtle tours, 1,741 warrior tours)</div>
+  <canvas id="killCv" width="700" height="250"></canvas></div>
+
+  <p><b>The designer is right.</b> The distributions are nearly twins — 45% of turtle tours end
+  killless vs 41% of warrior tours, and turtles land two-plus kills almost as often (35% vs 37%).
+  Guard duty in this game is not passive; the fights come to you, and the towers help you win
+  them. The net did NOT bench the turtle because turtles sit idle. So why?</p>
+
+  <h3>A 6% grade gap becomes a 94% benching</h3>
+  <p>Average tour grade: warrior <b>0.914</b>, turtle <b>0.860</b>. Six percent. But the policy
+  plays <i>argmax</i> — always the highest-scoring card, never the runner-up. It doesn't deal
+  the second-best card a little less often; it deals it <b>never</b>:</p>
+
+  <div class="chart"><div class="ct">THE ARGMAX AMPLIFIER — a small grade gap, a total benching</div>
+  <canvas id="argmaxCv" width="700" height="230"></canvas></div>
+
+  <p>And where does the 6% come from? Look at the scorecard: kills (0.35 each), <b>fort damage
+  (0.9 — the jackpot)</b>, flag touches (1.2), match win (0.4), survival (0.25). Every big prize
+  is offensive. A turtle matches the warrior kill-for-kill but never touches the fort-damage
+  jackpot, because it's home guarding the fort instead of chewing one. Worse: a guard so
+  intimidating that <i>no attack ever comes</i> logs zeros across the board — a straight F for a
+  perfect shift. Defense's product is the attack that didn't happen, and a per-tour report card
+  can't see a counterfactual.</p>
+
+  <div class="radio">One more twist from the conditionals: even with the home fort under 60%
+  health — actively being sieged — warrior tours STILL grade above turtle tours, 0.848 to 0.813.
+  Under this scorekeeper the mathematically best defense is a counter-attack, so that's what the
+  net learned. The net isn't wrong. The scorekeeper is.</div>
+
+  <h3>Verdict, and the v2 plan</h3>
+  <p>The pipeline is proven — data, training, inference, tournament, all of it ran end-to-end in
+  a day. But the net stays <b>opt-in</b> (<code>deck</code> remains the default): we don't ship a
+  55% lean measured by a referee that can't see half the game. The fix isn't more net. It's a
+  fairer scorecard:</p>
+  <ul>
+    <li><b>Pay the guards:</b> credit a tour for own-fort HP <i>preserved</i> on its watch, for
+    the flag still being home when it ends, for enemies destroyed inside our perimeter.</li>
+    <li><b>Recollect, retrain, re-gate.</b> Fifteen more box-hours. If guards start getting dealt
+    when guarding pays, the scorekeeper was the disease. If the net <i>still</i> shuns them and
+    keeps winning — then tempo genuinely rules this game's meta, and that's a game-design
+    finding, not an AI bug.</li>
+  </ul>
+
+  <div class="hero">
+    <div class="n" style="color:var(--purple)">32–26</div>
+    <div class="cap">one evening of self-play vs eleven posts of hand-tuning — and the education is just getting started</div>
+  </div>
+
+  <p class="fine">Artifacts: 7,189-tour dataset, trainer, weights, and the 120-match A/B all in the
+  harness; verdict in the repo (VERDICT-nn-mission.txt). The net's whole brain is a JSON file —
+  swap it, and the commanders think differently next match.</p>
+</article>
+
+</main>
+<script>
+const TAU = Math.PI * 2;
+const ROLES = ['WARRIOR', 'TURTLE', 'HUNTER', 'ROGUE'];
+const RCOL = ['#ff6a5a', '#58d17a', '#ffcf6a', '#b88df0'];
+
+// ── 1. the sweep: enemy fort health slider flips the pick ──────────────────────
+(function () {
+  const cv = document.getElementById('sweepCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 7000;
+  let t0 = 0;
+  // stylized q-curves vs theirFort (shape matches the trained net's sweep: rogue high when fort low)
+  const q = f => [0.55 + 0.5 * f, 0.78 - 0.06 * f, 0.72 - 0.02 * f, 0.97 - 0.55 * f];
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % CYCLE) / CYCLE;
+    const f = ph < 0.5 ? ph * 2 : 2 - ph * 2;            // sweep 0→1→0
+    ctx.clearRect(0, 0, W, H);
+    // slider
+    const sx = 60, sw = 380, sy = 40;
+    ctx.strokeStyle = '#2a3a4d'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + sw, sy); ctx.stroke();
+    ctx.strokeStyle = '#6ab7ff';
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + sw * f, sy); ctx.stroke();
+    ctx.fillStyle = '#dfe8ef'; ctx.beginPath(); ctx.arc(sx + sw * f, sy, 8, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#8fa3b3'; ctx.font = '11px monospace'; ctx.textAlign = 'left';
+    ctx.fillText('enemy fort health: ' + Math.round(f * 100) + '%', sx, sy - 16);
+    ctx.fillText(f < 0.45 ? '(their base is cracked open)' : '(their walls are up)', sx + 210, sy - 16);
+    // role bars
+    const qs = q(f), m = Math.max(...qs);
+    const pick = qs.indexOf(m);
+    for (let i = 0; i < 4; i++) {
+      const y = 78 + i * 38;
+      ctx.fillStyle = '#0a0f16'; ctx.fillRect(sx + 100, y, 300, 22);
+      ctx.fillStyle = RCOL[i]; ctx.globalAlpha = i === pick ? 1 : 0.45;
+      ctx.fillRect(sx + 100, y, 300 * qs[i] / 1.1, 22); ctx.globalAlpha = 1;
+      ctx.font = 'bold 12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#dfe8ef';
+      ctx.fillText(ROLES[i], sx + 92, y + 15);
+      if (i === pick) {
+        ctx.strokeStyle = RCOL[i]; ctx.lineWidth = 2; ctx.strokeRect(sx + 97, y - 3, 306, 28);
+        ctx.fillStyle = RCOL[i]; ctx.textAlign = 'left';
+        ctx.fillText('◀ deal this', sx + 412, y + 15);
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 2. head-to-head tug ─────────────────────────────────────────────────────────
+(function () {
+  const cv = document.getElementById('h2hCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 5000;
+  let t0 = 0;
+  const rows = [
+    { label: 'wins (of 60)', a: 32, b: 26, gray: 2, grayL: 'unresolved' },
+    { label: 'seed pairs swept', a: 8, b: 6, gray: 16, grayL: 'split' },
+  ];
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const k = Math.min(1, ((ts - t0) % CYCLE) / 1200);   // fill then hold
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#b88df0'; ctx.fillText('THE NET', 40, 30);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#d9a441'; ctx.fillText('THE HAND TABLE', W - 40, 30);
+    rows.forEach((r, i) => {
+      const y = 70 + i * 80, total = r.a + r.b + r.gray, bw = W - 80;
+      const wa = bw * r.a / total * k, wg = bw * r.gray / total * k, wb = bw * r.b / total * k;
+      ctx.fillStyle = '#b88df0'; ctx.fillRect(40, y, wa, 26);
+      ctx.fillStyle = '#2a3a4d'; ctx.fillRect(40 + wa, y, wg, 26);
+      ctx.fillStyle = '#d9a441'; ctx.fillRect(40 + wa + wg, y, wb, 26);
+      if (k >= 1) {
+        ctx.font = 'bold 15px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = '#0c1118';
+        ctx.fillText(r.a, 48, y + 19);
+        ctx.textAlign = 'right'; ctx.fillText(r.b, 40 + wa + wg + wb - 8, y + 19);
+        ctx.fillStyle = '#8fa3b3'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(r.gray + ' ' + r.grayL, 40 + wa + wg / 2, y + 42);
+      }
+      ctx.fillStyle = '#8fa3b3'; ctx.font = '11px monospace'; ctx.textAlign = 'left';
+      ctx.fillText(r.label, 40, y - 8);
+    });
+    ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('sides swapped every seed — no spawn-luck excuses', W / 2, H - 14);
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 3. kill histograms: turtle vs warrior, nearly twins ─────────────────────────
+(function () {
+  const cv = document.getElementById('killCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 5000;
+  let t0 = 0;
+  const warr = [41, 22, 14, 9, 5, 9], turt = [45, 20, 13, 9, 5, 7];   // % at 0,1,2,3,4,5+ kills
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const k = Math.min(1, ((ts - t0) % CYCLE) / 1000);
+    ctx.clearRect(0, 0, W, H);
+    const gx = 60, gy = 30, gw = W - 120, gh = 150, bw = 34;
+    for (let i = 0; i < 6; i++) {
+      const x = gx + i * (gw / 6) + 20;
+      const hw = gh * warr[i] / 50 * k, ht = gh * turt[i] / 50 * k;
+      ctx.fillStyle = '#ff6a5a'; ctx.globalAlpha = 0.85;
+      ctx.fillRect(x, gy + gh - hw, bw, hw);
+      ctx.fillStyle = '#58d17a';
+      ctx.fillRect(x + bw + 4, gy + gh - ht, bw, ht); ctx.globalAlpha = 1;
+      if (k >= 1) {
+        ctx.font = '10px monospace'; ctx.textAlign = 'center';
+        ctx.fillStyle = '#ff6a5a'; ctx.fillText(warr[i] + '%', x + bw / 2, gy + gh - hw - 5);
+        ctx.fillStyle = '#58d17a'; ctx.fillText(turt[i] + '%', x + bw + 4 + bw / 2, gy + gh - ht - 5);
+      }
+      ctx.fillStyle = '#8fa3b3'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(i < 5 ? i + ' kills' : '5+', x + bw + 2, gy + gh + 16);
+    }
+    ctx.font = 'bold 11px monospace'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#ff6a5a'; ctx.fillText('■ warrior (front line)', gx, H - 12);
+    ctx.fillStyle = '#58d17a'; ctx.fillText('■ turtle (guard duty)', gx + 200, H - 12);
+    ctx.fillStyle = '#5f7385'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
+    ctx.fillText('guards fight nearly as much as the front line', W - 40, H - 12);
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+// ── 4. the argmax amplifier ─────────────────────────────────────────────────────
+(function () {
+  const cv = document.getElementById('argmaxCv'), ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CYCLE = 6000;
+  let t0 = 0;
+  function draw(ts) {
+    if (!t0) t0 = ts;
+    const ph = ((ts - t0) % CYCLE) / CYCLE;
+    ctx.clearRect(0, 0, W, H);
+    // left: the grades — two bars, nearly equal
+    const k1 = Math.min(1, ph / 0.25);
+    const gx = 70, gy = 40, gh = 130;
+    ctx.fillStyle = '#8fa3b3'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('average tour grade', gx + 80, gy - 14);
+    const hw = gh * 0.914 * k1, ht = gh * 0.860 * k1;
+    ctx.fillStyle = '#ff6a5a'; ctx.fillRect(gx, gy + gh - hw, 60, hw);
+    ctx.fillStyle = '#58d17a'; ctx.fillRect(gx + 90, gy + gh - ht, 60, ht);
+    if (k1 >= 1) {
+      ctx.font = 'bold 12px monospace'; ctx.fillStyle = '#ff6a5a'; ctx.fillText('0.914', gx + 30, gy + gh - hw - 6);
+      ctx.fillStyle = '#58d17a'; ctx.fillText('0.860', gx + 120, gy + gh - ht - 6);
+      // the tiny gap bracket
+      if (ph > 0.3) {
+        ctx.strokeStyle = '#ffcf6a'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(gx + 160, gy + gh - hw); ctx.lineTo(gx + 175, gy + gh - hw);
+        ctx.lineTo(gx + 175, gy + gh - ht); ctx.lineTo(gx + 160, gy + gh - ht); ctx.stroke();
+        ctx.fillStyle = '#ffcf6a'; ctx.font = '11px monospace'; ctx.textAlign = 'left';
+        ctx.fillText('6% gap', gx + 182, gy + gh - (hw + ht) / 2 + 4);
+      }
+    }
+    ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff6a5a'; ctx.fillText('warrior', gx + 30, gy + gh + 16);
+    ctx.fillStyle = '#58d17a'; ctx.fillText('turtle', gx + 120, gy + gh + 16);
+    // arrow
+    if (ph > 0.42) {
+      ctx.fillStyle = '#dfe8ef'; ctx.font = 'bold 22px monospace';
+      ctx.fillText('→', 340, gy + gh / 2 + 8);
+      ctx.fillStyle = '#8fa3b3'; ctx.font = '10px monospace';
+      ctx.fillText('argmax', 340, gy + gh / 2 + 26);
+    }
+    // right: the policy — how often each is dealt
+    if (ph > 0.5) {
+      const k2 = Math.min(1, (ph - 0.5) / 0.25);
+      const px = 420, py = 40;
+      ctx.fillStyle = '#8fa3b3'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('how often it gets dealt', px + 110, py - 14);
+      const w2 = 220 * 0.48 * k2, t2 = 220 * 0.06 * k2;
+      ctx.fillStyle = '#ff6a5a'; ctx.fillRect(px, py + 30, w2, 26);
+      ctx.fillStyle = '#58d17a'; ctx.fillRect(px, py + 90, t2, 26);
+      if (k2 >= 1) {
+        ctx.font = 'bold 12px monospace'; ctx.textAlign = 'left';
+        ctx.fillStyle = '#ff6a5a'; ctx.fillText('48%', px + w2 + 8, py + 48);
+        ctx.fillStyle = '#58d17a'; ctx.fillText('6% — benched', px + t2 + 8, py + 108);
+      }
+      ctx.font = '11px monospace'; ctx.textAlign = 'left';
+      ctx.fillStyle = '#ff6a5a'; ctx.fillText('warrior', px, py + 24);
+      ctx.fillStyle = '#58d17a'; ctx.fillText('turtle', px, py + 84);
+    }
+    if (ph > 0.85) {
+      ctx.fillStyle = '#ffcf6a'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('argmax never plays the runner-up — small bias in, total benching out', W / 2, H - 14);
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

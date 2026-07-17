@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the runner stops panicking</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:18px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:10px 0; }
+  th, td { text-align:center; padding:5px 4px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td.s { text-align:left; color:var(--dim); }
+  .win { color:var(--good); font-weight:bold; } .no { color:#5a3a38; }
+  .scoreboard { display:flex; gap:10px; margin:12px 0; flex-wrap:wrap; }
+  .score { flex:1; min-width:130px; background:var(--card2); border-radius:8px; padding:12px; text-align:center; }
+  .score .lbl { font-size:10px; color:var(--dim); letter-spacing:1px; }
+  .big { font-size:30px; font-weight:bold; }
+  .good { color:var(--good); } .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post2.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post4.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 3</div>
+</header>
+<main>
+
+<article>
+  <h2>The runner stops panicking</h2>
+  <div class="date">2026-07-07 · v308 · sweep 6 of 6 (same six seeds throughout)</div>
+
+  <div class="scoreboard">
+    <div class="score"><div class="lbl">MATCHES RESOLVED</div><div class="big"><span class="bad">2</span> → <span class="good">4</span><span class="fine"> /6</span></div><div class="fine">sweep 1 → sweep 6</div></div>
+    <div class="score"><div class="lbl">MESSAGE STORMS</div><div class="big"><span class="bad">21</span> → <span class="good">0</span></div><div class="fine">8+ repeats in 90s</div></div>
+    <div class="score"><div class="lbl">SEED 11</div><div class="big good">WON</div><div class="fine">first resolution in 6 sweeps</div></div>
+  </div>
+
+  <h3>The panic loop</h3>
+  <p>Sweep 5's top signal: capture firebrats bouncing <code>pursue↔flee</code> ×7–11 under fire,
+  spamming <i>"Taking fire — breaking off toward snatching the flag!"</i>. The flee latch looked
+  guilty but was innocent — it already has clean hysteresis (trip at 60u, clear at 100u). The
+  loop was the <i>other</i> half of the cycle: after a successful escape past 100u, the
+  <code>pursuing</code> condition — which unlike <code>runnerFlee</code> and
+  <code>threatened</code> had no runner gate — sent the firebrat <b>chasing the very enemy it
+  had just escaped</b>. Back inside 60u, flee again, repeat until dead.</p>
+  <p><b>Fix:</b> a flag runner never pursues sightings. It resumes the mission; the flee latch
+  handles genuine chasers. Sweep 6: the pursue↔flee signature is gone from every seed.</p>
+
+  <h3>The corner pin</h3>
+  <p>Seed 67's fleeing firebrat pressed itself against the island's hard travel rim at
+  (111,−87) and jolt-stormed there — flee steers pure away-from-threat, and away happened to
+  point off the world. <b>Fix:</b> near the rim, if the escape vector still presses outward,
+  bend it along the <i>tangent</i> (the side already matching the escape) with a slight inward
+  ease — the runner skirts the rim past its pursuer. Sweep 6: zero unstick storms, and seed 67
+  resolved.</p>
+
+  <h3>Resolution, seed by seed, across all six sweeps</h3>
+  <table>
+    <tr><th class="s">seed</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6 (v308)</th></tr>
+    <tr><td class="s">11 <span class="fine">(the holdout)</span></td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td><td class="win">✔</td></tr>
+    <tr><td class="s">25</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td><td class="win">✔</td><td class="no">✘</td></tr>
+    <tr><td class="s">39</td><td class="win">✔</td><td class="win">✔</td><td class="win">✔</td><td class="win">✔</td><td class="win">✔</td><td class="win">✔</td></tr>
+    <tr><td class="s">53</td><td class="no">✘</td><td class="no">✘</td><td class="win">✔</td><td class="win">✔</td><td class="no">✘</td><td class="win">✔</td></tr>
+    <tr><td class="s">67</td><td class="no">✘</td><td class="win">✔</td><td class="no">✘</td><td class="win">✔</td><td class="no">✘</td><td class="win">✔</td></tr>
+    <tr><td class="s">81</td><td class="win">✔</td><td class="win">✔</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘</td></tr>
+  </table>
+  <p class="fine">Same seeds, same time cap, every sweep — only the AI changed. Individual seeds
+  bounce (deterministic maps, chaotic battles), but the trend is real: every seed has now
+  resolved at least once, and sweep 6 is the first 4/6.</p>
+
+  <h3>What's left on the board</h3>
+  <ul>
+    <li>Seed 25's 305s <code>NO-PROGRESS</code> block — two jotuns in an engage/resupply grind
+      that damages nothing (the mid-field staring contest, next in line).</li>
+    <li>A slow valkyrie <code>suppress↔advance</code> wobble (×12 over 52s) at siege standoffs.</li>
+    <li>Mission-flap capture↔attack still cycles ~100s in stalemates — the escalating clear
+      window helped but didn't end it.</li>
+    <li>Seed 981's road layout shows 6 gap-pairs — parallel or staircase artifact, unchecked.</li>
+  </ul>
+  <p class="fine">Fixes this post: AI.js <code>pursuing</code> runner gate + flee map-edge
+  deflection (<code>view.worldR</code>). Sweep: <code>node ~/pw/richwatch.cjs</code> · v308
+  uncommitted.</p>
+</article>
+
+</main>
+</body>
+</html>

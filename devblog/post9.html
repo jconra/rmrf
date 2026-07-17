@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — teach the winners to finish</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:18px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .hero { text-align:center; padding:18px 0 8px; }
+  .hero .n { font-size:52px; font-weight:bold; }
+  .disease { background:var(--card2); border:1px solid #2a3a4d; border-radius:8px; padding:12px 14px; margin:12px 0; }
+  .disease .seed { color:var(--warn); font-size:12px; letter-spacing:1px; }
+  .disease .name { color:var(--ink); font-size:14px; font-weight:bold; margin:2px 0 6px; }
+  .disease .cure { color:var(--good); font-size:12px; margin-top:8px; }
+  .radio { background:#0a0f16; border-left:3px solid var(--accent); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td .ok { color:var(--good); font-weight:bold; }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post8.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post10.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 9 · the finisher chains</div>
+</header>
+<main>
+
+<article>
+  <h2>Teach the winners to finish</h2>
+  <div class="date">2026-07-08 · v321–v323 · flag capture is the ONLY win — ruled by the designer, so every broken last mile had to be repaired, not ruled around</div>
+
+  <p>Yesterday ended with a ruling: no annihilation victory, no concession rule — a match ends when
+  a flag comes home, full stop. That turned four "exhausted war" stalemates from a rules question
+  into an engineering list. Four seeds where one side had won the war and could not finish it.
+  It turned out to be four <i>different</i> diseases.</p>
+
+  <div class="hero">
+    <div class="n" style="color:#58d17a">4/4</div>
+    <div class="fine">broken finisher chains — all four now end in a captured flag</div>
+  </div>
+
+  <div class="disease">
+    <div class="seed">SEED 207</div>
+    <div class="name">The unshootable keep</div>
+    <p>Six firebrats and a valkyrie against a 297hp HQ with zero towers — stuck forever. The probe
+    showed a lurcher parked 33u from the keep, <b>ammo pinned at 68 for 160+ seconds</b>. It wasn't
+    missing; it was never firing. The HQ has been a solid obstacle since v156, which means a
+    line-of-sight ray to its own centre <i>always dies inside the building</i>. No LOS → no fire
+    clearance. The fallback shoots the nearest live <i>wall</i> — all rubble by then. The last
+    fallback needs the unit's nose physically pressed against it — but the standoff logic holds it
+    politely 24u away. Three layers of siege logic, each handing the job to the next, none allowed
+    to take the shot.</p>
+    <div class="cure">CURE: with no wall left, the keep itself becomes the demolish target — square
+    onto the hull and shell it open. Resolved 594s.</div>
+  </div>
+
+  <div class="disease">
+    <div class="seed">SEED 137</div>
+    <div class="name">Runner-feeding the tower gauntlet</div>
+    <p>Flag exposed, two towers still live on the approach. Runner dies to an enemy <i>vehicle</i> →
+    the doctrine escalates (clear the interceptor first). Runner dies to <i>towers</i> → "sneak in
+    wide"… and that's the whole plan. A fresh firebrat was rebuilt from scrap and shredded by the
+    same guns every ~30 seconds for 800 seconds, while two jotuns sat in the garage. The commander
+    was rich, patient, and wrong.</p>
+    <div class="radio">"Lost the runner — go quiet, we're sneaking the next one in wide!" ×26</div>
+    <div class="cure">CURE (the designer's own rule: "I would send a stronger unit to deal with the
+    problem"): stealth once — repeat tower-deaths force a timed SIEGE window that fields a real
+    sieger to silence the towers before the next grab. New radio line: "the towers keep shredding
+    our runners — silencing them first."</div>
+  </div>
+
+  <div class="disease">
+    <div class="seed">SEED 193</div>
+    <div class="name">The win nobody could buy</div>
+    <p>Flag grabbable, HQ dead, <b>15 scrap banked</b>, zero firebrats. The emergency build-a-runner
+    logic exists — inside <code>deploy()</code>, which only runs when a unit dies or gets recalled.
+    The stand-in lurcher never died (enemy eliminated) and capture never changes step, so the
+    commander orbited fuel-RTB loops for 800s with the win sitting fully funded in its bank.</p>
+    <div class="cure">CURE: a runner-swap check inside the recall logic — on capture with a grabbable
+    flag and a non-firebrat fielded, if a real runner is in the garage or affordable, force the
+    recall. deploy() then builds and fields it. Resolved 546s: "The flag's sitting right there —
+    pull the lurcher back, we're sending a real runner!"</div>
+  </div>
+
+  <div class="disease">
+    <div class="seed">SEED 137 (again)</div>
+    <div class="name">The wedge no timer could see</div>
+    <p>After the doctrine fixes, 137 became a live two-sided race — and then stalled anyway. The
+    tournament named it: <code>blue firebrat 802s @shore · why=wedged on terrain · blk=···</code>.
+    Every stuck reflex was blind to it: the still-timer resets because the hull micro-slides each
+    tick; the wedge-timer needs a feeler pressed on an obstacle (<code>blk=···</code> — nothing);
+    the nav blacklist keys off the still-timer. A runner ground against a shore slope for 13
+    minutes while three watchdogs reported all-clear.</p>
+    <div class="cure">CURE: a net-progress watchdog — 10s displacement window; wanted to move most
+    of it but covered &lt;4u → reverse-pivot jolt (alternating sides), blacklist the spot, replan.
+    Fires on <i>outcome</i>, not symptoms. Resolved 1186s.</div>
+  </div>
+
+  <h3>The scoreboard</h3>
+  <table>
+    <tr><th>seed</th><th>yesterday (1500s cap)</th><th>today</th></tr>
+    <tr><td>207</td><td>stuck — staring at a 297hp keep</td><td><span class="ok">WIN 594s</span></td></tr>
+    <tr><td>193</td><td>stuck — 15 scrap, no runner</td><td><span class="ok">WIN 546s</span></td></tr>
+    <tr><td>221</td><td>stuck — lone-jotun grind</td><td><span class="ok">WIN 1281s</span></td></tr>
+    <tr><td>137</td><td>stuck — tower gauntlet + shore wedge</td><td><span class="ok">WIN 1186s</span></td></tr>
+  </table>
+
+  <h3>The tournament check</h3>
+  <p>Same 40-seed protocol as №7, 1500s cap: <b>39/40 resolved</b> (v320 managed 36/40 at the same
+  cap), average win at 512s. The one holdout was seed 137's tournament run — whose 802s shore wedge
+  is exactly what the net-progress watchdog (landed one version later) exists to break. And the
+  determinism tell finally worked <i>for</i> us: seed 193 replayed tick-identical under the
+  watchdog build — zero false triggers in a healthy match.</p>
+
+  <h3>Where this leaves the war</h3>
+  <p>Every failure class the sim harness knows about now ends in a flag coming home. Resolution:
+  13% → 85% → <b>97.5%</b>, all of it under the designer's constraint that the win must be
+  <i>earned at the flag pedestal</i> — no annihilation shortcut, no declared draws. What's left is
+  tuning, not repair: the lone-jotun wars are slow, and the promotion economy (№8) hasn't met a
+  full tournament yet.</p>
+  <p class="fine">Protocol: <code>node ~/pw/finisherprobe.cjs &lt;seed&gt; 30000 700</code> ·
+  tournament <code>node ~/pw/tourney.cjs 40 30000</code> → /tmp/tourney-v322.txt ·
+  fixes in main.js (keep-demolish, runner-swap, net-progress watchdog) + AIStrategies.js
+  (tower-soften) · v321–v323, uncommitted pending playtest.</p>
+</article>
+
+</main>
+</body>
+</html>
