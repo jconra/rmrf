@@ -4931,6 +4931,92 @@ function steerToward(v, wx, wz) {
 // _driveHome once fed omni pedals (fwd+strafe from locomote) through classic drive(): the
 // hull turned WHILE strafing and the recall orbited its own goal for minutes (tournament
 // seeds 95/109/116, 182s worst). One helper, one contract, both call sites.
+// ── FRIENDLY RIGHT-OF-WAY (path reservation) ─────────────────────────────────
+// The last stuck class on the original catalog: friendlies converging on a contested
+// pocket shove each other (the elevated congestion alarms after slice 3). This is
+// cooperative pathfinding, the CHEAP way Jacob framed it — no A* replan. Each tick the
+// table is rebuilt from scratch: every field unit stamps the cell it holds plus a short
+// lookahead along its route, tagged with a deterministic PRIORITY (a flag carrier
+// outranks everyone; a stable per-unit ordinal breaks ties — no RNG, so the exact
+// instrument stays exact). At drive time a unit eases off when an ONCOMING/CROSSING
+// higher-priority friendly has claimed the ground just ahead — so two units never both
+// pile into a throat and then have to back out. A same-heading leader is NOT a conflict
+// (no convoy crawl). Rebuilt clean each tick → order-independent, no cross-tick state,
+// bit-deterministic.
+let aiRightOfWay = true;              // RR.setRightOfWay(false) to A/B the whole system
+const RESV = new Map();               // cellKey -> { prio, owner, vx, vz, x, z }
+let _resvSeq = 0;                     // monotonic per-unit ordinal source (stable tiebreak)
+const RESV_LOOKAHEAD = 6;             // cells of route stamped ahead (~ the next few seconds)
+function resvKey(i, j) { return (i + 4096) * 100000 + (j + 4096); }
+function unitPriority(v) {
+  // strict, deterministic total order. Flag carrier dominates (Jacob's explicit rule);
+  // otherwise the stable ordinal — an older unit (lower ordinal) has right of way, so
+  // the assignment never oscillates between two friendlies.
+  let p = -(v._resvOrd || 0);
+  for (const f of flags) if (f.carried && f.carrier === v) { p += 1e6; break; }
+  return p;
+}
+function _resvClaim(i, j, prio, v) {
+  const k = resvKey(i, j), cur = RESV.get(k);
+  if (!cur || prio > cur.prio) RESV.set(k, { prio, owner: v, vx: v._vx || 0, vz: v._vz || 0,
+    x: v.holder.position.x, z: v.holder.position.z });
+}
+function stampReservation(v) {
+  if (v._resvOrd == null) v._resvOrd = ++_resvSeq;
+  const prio = unitPriority(v), c = grid.cell;
+  const px = v.holder.position.x, pz = v.holder.position.z;
+  _resvClaim(Math.round(px / c), Math.round(pz / c), prio, v);      // the cell it holds
+  const nav = v._resvNav;
+  if (nav && nav.path && nav.idx < nav.path.length) {
+    // stamp the route ahead: sample points every ~one cell along the remaining waypoints
+    let lx = px, lz = pz, budget = RESV_LOOKAHEAD * c, idx = nav.idx;
+    while (budget > 0 && idx < nav.path.length) {
+      const w = nav.path[idx]; let dx = w.x - lx, dz = w.z - lz, d = Math.hypot(dx, dz);
+      if (d < 0.01) { idx++; continue; }
+      const stepN = Math.min(budget, d), ux = dx / d, uz = dz / d;
+      for (let s = c; s <= stepN; s += c) _resvClaim(Math.round((lx + ux * s) / c), Math.round((lz + uz * s) / c), prio, v);
+      budget -= stepN; lx += ux * stepN; lz += uz * stepN;
+      if (stepN >= d) idx++; else break;
+    }
+  } else {
+    // no route (combat maneuver, or first tick) — project along velocity, else heading
+    let dx = v._vx || 0, dz = v._vz || 0, sp = Math.hypot(dx, dz);
+    if (sp < 0.5) { dx = -Math.sin(v.heading); dz = -Math.cos(v.heading); sp = 1; }
+    dx /= sp; dz /= sp;
+    for (let k = 1; k <= RESV_LOOKAHEAD; k++) _resvClaim(Math.round((px + dx * c * k) / c), Math.round((pz + dz * c * k) / c), prio, v);
+  }
+}
+function updateReservations() {
+  if (!aiRightOfWay) return;
+  RESV.clear();
+  for (const v of combatants) if (!v.dead && !vehicleHidden(v)) stampReservation(v);
+}
+// Returns 1 (drive normally) or 0 (yield: hold forward, let the higher-priority friendly
+// clear). Only an ONCOMING/CROSSING claimant that's actually close counts — a same-heading
+// leader ahead is just someone to follow, not a conflict.
+function reservationYield(v) {
+  if (!aiRightOfWay || v._resvOrd == null) return 1;
+  const myPrio = unitPriority(v), c = grid.cell;
+  let dx = v._vx || 0, dz = v._vz || 0, sp = Math.hypot(dx, dz);
+  if (sp < 0.5) { dx = -Math.sin(v.heading); dz = -Math.cos(v.heading); sp = 1; }
+  dx /= sp; dz /= sp;
+  const px = v.holder.position.x, pz = v.holder.position.z;
+  for (let k = 1; k <= 2; k++) {
+    const cell = RESV.get(resvKey(Math.round((px + dx * c * k * 0.85) / c), Math.round((pz + dz * c * k * 0.85) / c)));
+    if (!cell || cell.owner === v || cell.prio <= myPrio) continue;
+    const od = Math.hypot(cell.x - px, cell.z - pz);
+    if (od > 14) continue;                                   // the claimant isn't near enough to conflict
+    const theirSp = Math.hypot(cell.vx, cell.vz);
+    if (theirSp > 0.5 && (dx * cell.vx + dz * cell.vz) / theirSp > 0.6) continue;   // same-direction leader → follow, don't yield
+    return 0;                                                // conflict — yield the ground
+    // (A tighter trigger — 11u / require head-on — was measured: it halved the yields and
+    // returned alarms to baseline, but gave back most of the congestion win AND a resolution.
+    // The anti-shove yields and the occasional grind-relocation are coupled; this trigger
+    // keeps the full congestion relief at the cost of ~14 more grind alarms across 30 matches.)
+  }
+  return 1;
+}
+
 function driveChassis(v, out, dt, omniTravel) {
   // REVERSE CAP (doctrine): every chassis backs up at HALF throttle — reverse is a
   // maneuver tool (kite, reverse-arc, backing out of a notch), never a fast way to
@@ -6461,10 +6547,12 @@ class AICommander {
     }
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
+    v._resvNav = this._nav;   // next tick's reservation stamp reads this route
     this._driver.order({ type: 'GOTO', x: home.x, z: home.z, arrive: reach, by: 'recall' });
     const s = this._driver.tick(dt) || steerToward(v, home.x, home.z);   // no route → direct beeline home (old fallback)
     const out = burnFuel(v, { fwd: s.fwd, turn: s.turn, strafe: s.strafe || 0 }, dt);
     if (out.strafe && !v._move.strafe) out.strafe = 0;   // same chassis gate as the main drive boundary
+    if (reservationYield(v) === 0) { out.fwd = 0; out.strafe = 0; v._yielding = true; } else v._yielding = false;   // let a higher-priority friendly clear
     this._driver.note(dt, out, '···');
     driveChassis(v, out, dt, v._move.omni);   // recall is a travel move — the omni hull slides home, no orbit
     v.ai._wantMove = s.fwd > 0.3 || Math.abs(s.strafe || 0) > 0.3;
@@ -6593,6 +6681,7 @@ class AICommander {
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
+    v._resvNav = this._nav;   // next tick's reservation stamp reads this unit's current route
     const routed = this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
     if (!routed) {
       if (cmd.mnv) {
@@ -6638,9 +6727,15 @@ class AICommander {
     // sidestep never checked the chassis) — clamp here at the drive boundary so NO behavior,
     // present or future, can slide a vehicle its chassis can't slide.
     if (out.strafe && !v._move.strafe) out.strafe = 0;
+    // FRIENDLY RIGHT-OF-WAY: an oncoming/crossing higher-priority friendly holds the ground
+    // ahead → hold forward and let it clear (turn is kept, so it can still aim/rotate).
+    // Zeroing fwd means the driver's watchdog reads "not trying to move" — a deliberate
+    // yield never trips a pin/grind alarm.
+    if (reservationYield(v) === 0) { out.fwd = 0; out.strafe = 0; v.ai._wantMove = false; v._yielding = true; Driver.yieldSamples++; }
+    else v._yielding = false;
     // Flight recorder + net-progress watchdog: the driver observes the pedals that are
-    // ACTUALLY about to drive the hull (post fuel-burn, post chassis gate), whoever
-    // produced them. This is the alarm's data feed — one call per tick, at drive time.
+    // ACTUALLY about to drive the hull (post fuel-burn, post chassis gate, post yield),
+    // whoever produced them. This is the alarm's data feed — one call per tick, at drive time.
     this._driver.note(dt, out,
       (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'));
     // AI OMNI (the Lurcher): fold the hull-relative motor output into a world vector and take
@@ -7315,7 +7410,7 @@ function stateDetail(d, st) {
     default:         return '';
   }
 }
-function updateCommanders(dt) { _astarFrameMs = 0; for (const cmd of commanders) cmd.update(dt); updateFlags(dt); publishAILive(dt); }
+function updateCommanders(dt) { _astarFrameMs = 0; updateReservations(); for (const cmd of commanders) cmd.update(dt); updateFlags(dt); publishAILive(dt); }
 
 // AI LAB LIVE OVERLAY: publish each commander's current mission to localStorage on a light
 // throttle (~2.5 Hz). The standalone ai-lab/commanders.html (same origin) reads this key and
@@ -9087,9 +9182,10 @@ window.RR = {
   bridgeDeckY: (x, z) => roadDeckY(x, z),                     // alias (kept for older verification scripts)
   navPlan: (v, x, z) => planPath(v, { x, z }),                 // debug: A* path for a unit
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
-  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy } }),   // match-wide driver counters
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples }),   // match-wide driver counters
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
+  setRightOfWay: on => { aiRightOfWay = !!on; if (!aiRightOfWay) RESV.clear(); return aiRightOfWay; },   // friendly path-reservation yielding (A/B knob)
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)

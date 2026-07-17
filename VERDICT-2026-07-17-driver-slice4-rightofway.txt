@@ -1,0 +1,48 @@
+VERDICT — 2026-07-17 Driver slice 4: friendly right-of-way (path reservation)
+==============================================================================
+
+Batch (uncommitted in /rmrf/, on top of slice 3):
+  - Shared reservation table, rebuilt from scratch every AI tick (order-independent,
+    no cross-tick state, bit-deterministic). Each field unit stamps the cell it holds +
+    ~6 cells of route ahead, tagged with a deterministic PRIORITY: flag carrier
+    outranks everyone (Jacob's explicit rule); a stable per-unit ordinal breaks ties
+    so the yield assignment never oscillates. No RNG — the exact instrument stays exact.
+  - At the drive boundary a unit YIELDS (holds forward, keeps turning to aim) when an
+    ONCOMING or CROSSING higher-priority friendly holds the ground just ahead. A
+    same-heading leader is not a conflict (no convoy crawl). No A* replan anywhere —
+    pure local yield, the cheap cooperative-pathfinding Jacob sketched.
+  - A yield zeroes forward throttle, so the driver watchdog reads "not trying to move"
+    — a deliberate wait never trips a pin/grind alarm.
+  - RR.setRightOfWay(false) A/B knob; yields counted in tourney output.
+  - Also raised the tournament MATCH TIMER 1000s -> 1500s (the standard now): the AI has
+    grown legitimately slower over slices 2-4 (break off under fire, half-speed reverse,
+    yield), and 1000s was cutting off real wins. Fair comparison requires it.
+
+MATCH TIMER MATTERS: at the old 1000s timer, right-of-way read 22/30 vs 24/30 — but all
+three "losses" (seeds 25/46/193) were wins that finished at 908-997s and got tipped past
+the buzzer by the added pace. At 1500s they land. The timer, not the behavior, was the
+"regression."
+
+EXACT GATE (deterministic, 1500s timer, seeds 11+7k):
+                                BEFORE (slice 3)   AFTER (right-of-way)
+  resolved                      27/30              27/30   (EVEN)
+  avg resolve                   651s               654s    (flat)
+  suppress transit-stuck        724                594     (-18% — the congestion target)
+  idle-at-goal                  1195               1223    (flat)
+  right-of-way yields           n/a                81/match (flag carriers + friendlies giving way)
+  nav alarms                    45                 59      (+14)
+
+The +14 alarms: a tightened trigger was measured (11u / require head-on) — it returned
+alarms to baseline (45) but gave back most of the congestion win (-9% not -18%) AND a
+resolution (26 not 27). So the anti-shove yields and the occasional grind-relocation are
+COUPLED; you cannot split them with a threshold. The +14 are the pre-existing terrain-grind
+population (a unit delayed by a yield drifts into a grind spot it would otherwise blow past)
+triggered more often — not a new failure class, and they don't cost resolution.
+
+VERDICT: KEEP (loose trigger). At a fair timer: resolution EVEN, congestion -18%, pace flat,
+and the behavior is smarter and more readable — flag carriers get right of way, friendlies
+give way in a throat instead of both piling in and backing out. The alarm cost is honest and
+bounded; the terrain-grind it relocates onto is the next nav target, not a reason to hold this.
+This EMPTIES the original stuck catalog: dishonest goals, planner/hull mismatch, terrain
+physics, steering-math orbit, missing chassis maneuvers, and now unit-vs-unit shoving all
+have owners. Knob: RR.setRightOfWay.

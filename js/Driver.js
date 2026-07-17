@@ -419,4 +419,5 @@ export class Driver {
 }
 Driver.alarmsTotal = 0;       // match-wide counters (the nightly "alarms per match" metric)
 Driver.violationsTotal = 0;
+Driver.yieldSamples = 0;      // ticks a unit spent yielding to a higher-priority friendly (right-of-way)
 Driver.violationsBy = {};     // unreachable orders per issuing state — names the Layer-2 bugs
