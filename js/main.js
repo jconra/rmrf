@@ -25,7 +25,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, FOF_DEFAULT } from './AI.js?v=109';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, FOF_DEFAULT } from './AI.js?v=109';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -458,7 +458,16 @@ function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; le
 // RNG, so a behavior tweak can be A/B'd on TRULY identical matches (same combat rolls; only the change
 // differs). Non-determinism otherwise buries subtle fixes in run-to-run noise. The LIVE GAME never
 // passes this param, so real play keeps native Math.random untouched. Set before anything reads it.
-if (QS.has('rngseed')) { const _seedRng = mulberry32((+QS.get('rngseed') >>> 0) || 1); Math.random = () => _seedRng(); }
+let _rngReseed = null;   // RR.reseed(n): rigs re-pin the stream AFTER load — async asset callbacks
+// consume a load-order-dependent amount of the stream, and under IO contention that order
+// occasionally swaps: ~1-in-N boots silently played a DIFFERENT match from the same seed
+// (the "ghost run" that sent a whole bisection chasing phantom causes). Re-seeding at
+// drive-start makes the match independent of everything the boot consumed.
+if (QS.has('rngseed')) {
+  let _seedRng = mulberry32((+QS.get('rngseed') >>> 0) || 1);
+  Math.random = () => _seedRng();
+  _rngReseed = n => { _seedRng = mulberry32((n >>> 0) || 1); };
+}
 const doctrineRng = QS.has('dseed') ? mulberry32((+QS.get('dseed') >>> 0) || 1) : Math.random;
 
 // ?perf — on-device profiler: per-frame CPU time BROKEN DOWN by system, so a stutter's cause
@@ -6585,9 +6594,20 @@ class AICommander {
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
     const routed = this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
-    // No GOTO issued (combat footwork / close-in / jolt): the brain's own motor output
-    // stands — the driver just observes it (recorder + watchdog stay hot under DIRECT).
-    if (!routed) this._driver.order({ type: 'DIRECT', by: cmd.state });
+    if (!routed) {
+      if (cmd.mnv) {
+        // The brain picked a COMBAT MANEUVER (ORBIT/KITE — slice 3): hand the order to the
+        // driver and let it drive; the brain keeps the fire decision (cmd.fire) and the
+        // fallback pedals it computed (kept when the driver has nothing better).
+        this._driver.order({ ...cmd.mnv, by: cmd.state });
+        const ms = this._driver.tick(dt);
+        if (ms) { cmd.fwd = ms.fwd; cmd.turn = ms.turn; cmd.strafe = ms.strafe || 0; }
+      } else {
+        // No order at all (close-in siege / lane-clear / jolt): the brain's own motor output
+        // stands — the driver just observes it (recorder + watchdog stay hot under DIRECT).
+        this._driver.order({ type: 'DIRECT', by: cmd.state });
+      }
+    }
     // UNREACHABLE SALVAGE bail: we committed to a scrap pile but A* found NO route to it (walled
     // off on a spit next to the base). Without this the brain just steers straight at it — nosing
     // into the wall forever (the nav line points through the wall). Blocklist the pile for a bit
@@ -9070,6 +9090,8 @@ window.RR = {
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy } }),   // match-wide driver counters
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
+  setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
+  reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)
   navCellBlocked: (v, i, j) => cellBlocked(v, i, j),          // debug: nav passability of a cell
   astar: () => toggleAstarViz(),                              // open/close the A* search visualizer overlay

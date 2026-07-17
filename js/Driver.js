@@ -22,7 +22,7 @@
 //            SELF-DESTRUCTS (loudly). No mud in this game: a stuck vehicle is a bug,
 //            and a bug should cost the team, not pirouette for minutes.
 
-import { locomote } from './Locomotion.js?v=1';
+import { locomote, wrapPi } from './Locomotion.js?v=1';
 
 const REC_MAX = 120;          // flight-recorder ring: ~12s at the 0.1s sample floor
 const REC_DT = 0.1;           // min seconds between recorder samples
@@ -89,10 +89,24 @@ export class Driver {
   //   o = { type:'GOTO', x, z, arrive, by, why } | { type:'DIRECT', by }
   order(o) {
     const cur = this.o;
-    const same = cur && cur.type === o.type && cur.by === o.by
+    let same = cur && cur.type === o.type && cur.by === o.by
       && (o.type !== 'GOTO' || (Math.abs(cur.x - o.x) < 2 && Math.abs(cur.z - o.z) < 2));
+    // Combat orders track a MOVING fight: the same maneuver against the same-ish geometry
+    // folds into the standing order (params refresh in place); a dir flip or a big jump
+    // is a genuinely new order.
+    if (same && o.type === 'ORBIT') same = cur.dir === o.dir && Math.abs(cur.cx - o.cx) < 6 && Math.abs(cur.cz - o.cz) < 6;
+    if (same && o.type === 'KITE') same = Math.abs(cur.toward.x - o.toward.x) < 6 && Math.abs(cur.toward.z - o.toward.z) < 6;
+    if (same && o.type === 'JOUST') {
+      if (!cur.done) return cur;                       // mid-pass: the plotted run line stands
+      // pass complete + the issuer still wants jousting → a FRESH pass on the OTHER side
+      // (the driver owns the serpentine; the brain just keeps saying "joust him").
+      o.side = -(cur.side || 1);
+      same = false;
+    }
     if (same) {
       if (o.type === 'GOTO') { cur.x = o.x; cur.z = o.z; cur.arrive = o.arrive; }   // goal drift
+      else if (o.type === 'ORBIT') { cur.cx = o.cx; cur.cz = o.cz; cur.radius = o.radius; cur.face = o.face; }
+      else if (o.type === 'KITE') { cur.tx = o.tx; cur.tz = o.tz; cur.toward = o.toward; }
       return cur;
     }
     o.t0 = 0;                   // order age (ticks up in note())
@@ -118,9 +132,113 @@ export class Driver {
   // DIRECT (the behavior's own motor output stands). GOTO: follow the A* route through
   // the shared nav cache; the last leg uses the order's arrive radius so the unit
   // settles instead of micro-hunting the exact cell centre.
+  //
+  // COMBAT MANEUVERS (slice 3 — the duel footwork as orders; the brain PICKS, the
+  // driver DRIVES, the fire gates stay upstairs):
+  //   ORBIT { cx, cz, radius, dir, face?{x,z} } — circle the center at radius, nose on
+  //     the face target (default: the center). Pedals: turn holds the face; the desired
+  //     world motion (tangent circling + radial in/out correction) is folded into the
+  //     hull frame — fwd closes/opens range, strafe carries the circle. This IS the old
+  //     strafe duel, one copy, chassis-aware. Issuers must not send it to a Jotun.
+  //   KITE { tx, tz, toward{x,z} } — retreat along `toward` while the nose stays on the
+  //     threat (tx,tz): locomote's goto/face split (a tank reverses at the doctrine cap,
+  //     an omni hull backpedals at full speed). Covers kite-to-support, the trap lure,
+  //     and the siege break-off with one order shape.
   tick(dt) {
     const o = this.o, v = this.v;
-    if (!o || o.type !== 'GOTO') return null;
+    if (!o) return null;
+    if (o.type === 'ORBIT') {
+      const p = v.holder.position;
+      // COLLISION RESPONSE (Layer-0 competency): barely moving while circling = something's
+      // in the lane (a wall stub, a shoving friendly) — circle the OTHER way around it.
+      // Driver-owned: the brain's re-orders keep their dir; only the execution flips.
+      this._blkClock(o, p, v, dt);
+      if (o._dirAdj == null || o._brainDir !== o.dir) { o._dirAdj = o.dir || 1; o._brainDir = o.dir; }
+      if (o._blkT > 1.2) { o._dirAdj = -o._dirAdj; o._blkT = 0; }
+      const dx = p.x - o.cx, dz = p.z - o.cz;
+      const d = Math.hypot(dx, dz) || 1;
+      const rx = dx / d, rz = dz / d;                       // radial out (center → us)
+      const tx = -rz * o._dirAdj, tz = rx * o._dirAdj;      // tangent, dir=+1 ccw viewed from +y
+      const rerr = d - o.radius;                            // + = too far out
+      const inpull = Math.max(-1, Math.min(1, -rerr / 8));  // radial correction gain
+      let mx = tx + rx * inpull, mz = tz + rz * inpull;     // desired world motion
+      const mm = Math.hypot(mx, mz) || 1; mx /= mm; mz /= mm;
+      const f = o.face || { x: o.cx, z: o.cz };
+      const faceErr = wrapPi(Math.atan2(-(f.x - p.x), -(f.z - p.z)) - v.heading);
+      const turn = Math.abs(faceErr) < 0.06 ? 0 : Math.max(-1, Math.min(1, faceErr * 2.2));
+      // world → hull frame (heading 0 = -Z): fwd along the nose, strafe to local right
+      const h = v.heading;
+      const fwd = Math.max(-1, Math.min(1, (mx * -Math.sin(h) + mz * -Math.cos(h)) * 1.2));
+      const strafe = Math.max(-1, Math.min(1, (mx * Math.cos(h) + mz * -Math.sin(h)) * 1.2));
+      return { fwd, turn, strafe, arrived: false };
+    }
+    if (o.type === 'KITE') {
+      // ROUTED retreat: follows the same A* cache as GOTO — only the FACING differs,
+      // waypoint by waypoint, gun on the threat the whole way. (v1 backed blind into
+      // terrain; v2 routed but emitted OMNI vector pedals — which maneuver orders drive
+      // through the CLASSIC tank drive, since turn must own the nose for the fire gates:
+      // the recall-orbit disease reborn, KITE pins at every route corner.) v3: the same
+      // world→hull fold ORBIT uses — desired motion toward the waypoint folded into
+      // fwd/strafe around whatever the nose is doing. A strafe chassis slides through
+      // corners; a tread chassis gets the fwd component only (its reverse-arc), the
+      // chassis gate downstream zeroes the strafe it doesn't have.
+      const p = v.holder.position;
+      // COLLISION RESPONSE: retreat lane blocked (terrain nub / a friendly shoving through
+      // the same pocket) → dodge the retreat bearing, alternating sides, wider each try.
+      // Driver-owned (_towardAdj): the brain keeps re-ordering its own retreat point.
+      this._blkClock(o, p, v, dt);
+      if (!o._towardAdj || o._brainTx !== o.toward.x || o._brainTz !== o.toward.z) {
+        o._towardAdj = { x: o.toward.x, z: o.toward.z }; o._brainTx = o.toward.x; o._brainTz = o.toward.z; o._dodgeN = 0;
+      }
+      if (o._blkT > 1.2) {
+        o._blkT = 0; o._dodgeN = (o._dodgeN || 0) + 1;
+        const a = 0.7 * Math.ceil(o._dodgeN / 2) * (o._dodgeN % 2 ? 1 : -1);
+        const ddx = o.toward.x - p.x, ddz = o.toward.z - p.z;
+        const cs = Math.cos(a), sn = Math.sin(a);
+        o._towardAdj = { x: p.x + ddx * cs - ddz * sn, z: p.z + ddx * sn + ddz * cs };
+      }
+      const dTo = Math.hypot(o._towardAdj.x - p.x, o._towardAdj.z - p.z);
+      const faceErr = wrapPi(Math.atan2(-(o.tx - p.x), -(o.tz - p.z)) - v.heading);
+      const turn = Math.abs(faceErr) < 0.06 ? 0 : Math.max(-1, Math.min(1, faceErr * 2.2));
+      if (dTo < (o.arrive || 2)) return { fwd: 0, turn, strafe: 0, arrived: true };
+      const wp = this.hooks.navWaypoint(this.nav, v, o._towardAdj, dt);
+      const g = wp || o._towardAdj;
+      let mx = g.x - p.x, mz = g.z - p.z; const mm = Math.hypot(mx, mz) || 1; mx /= mm; mz /= mm;
+      const h = v.heading;
+      const fwd = Math.max(-1, Math.min(1, (mx * -Math.sin(h) + mz * -Math.cos(h)) * 1.2));
+      const strafe = Math.max(-1, Math.min(1, (mx * Math.cos(h) + mz * -Math.sin(h)) * 1.2));
+      return { fwd, turn, strafe, arrived: false };
+    }
+    if (o.type === 'JOUST') {
+      // The Valkyrie's signature: a full-speed strafing run — target held ABEAM (the
+      // homing rack fires through the broadside window), blow past, EXTEND, done. The
+      // issuer re-orders per pass; the driver alternates sides itself, so consecutive
+      // passes serpentine the approach. No hover, no align: a jousting Valkyrie is
+      // never a sitting duck (the design ruling that spawned this order).
+      const p = v.holder.position;
+      if (!o._ax && o._ax !== 0) {
+        // plan the pass ONCE: a run line parallel to the approach, offset ABEAM to the
+        // chosen side — entered at a gate point BEFORE the target (so the closest approach
+        // really is the abeam distance, not a flattened diagonal), exited at the extension.
+        const adx = o.tx - p.x, adz = o.tz - p.z; const ad = Math.hypot(adx, adz) || 1;
+        const ux = adx / ad, uz = adz / ad;                     // approach direction
+        const px2 = -uz * (o.side || 1), pz2 = ux * (o.side || 1);   // lateral (side of the pass)
+        const ab = o.abeam || 14;
+        o._gx = o.tx + px2 * ab - ux * 16; o._gz = o.tz + pz2 * ab - uz * 16;   // entry gate
+        o._ax = o.tx + px2 * ab + ux * (o.extend || 35);                        // extension exit
+        o._az = o.tz + pz2 * ab + uz * (o.extend || 35);
+        o._phase = 'in';
+      }
+      if (o._phase === 'in' && Math.hypot(o._gx - p.x, o._gz - p.z) < 6) o._phase = 'run';
+      const gx = o._phase === 'in' ? o._gx : o._ax, gz = o._phase === 'in' ? o._gz : o._az;
+      const dGoal = Math.hypot(o._ax - p.x, o._az - p.z);
+      const dTgt = Math.hypot(o.tx - p.x, o.tz - p.z);
+      if (dGoal < 6 || (o.t0 > 5 && dTgt > (o.extend || 35))) { o.done = true; return { fwd: 0, turn: 0, strafe: 0, arrived: true }; }
+      return locomote(
+        { x: p.x, z: p.z, heading: v.heading, omni: !!v._move.omni },
+        { goto: { x: gx, z: gz }, arrive: 4 });   // nose on the run line, full speed
+    }
+    if (o.type !== 'GOTO') return null;
     const dest = { x: o.x, z: o.z };
     const wp = this.hooks.navWaypoint(this.nav, v, dest, dt);
     this._checkReach(dest);
@@ -129,6 +247,15 @@ export class Driver {
     return locomote(
       { x: v.holder.position.x, z: v.holder.position.z, heading: v.heading, omni: !!v._move.omni },
       { goto: wp, arrive: last ? Math.min(o.arrive || 2, 2) : 0.001 });
+  }
+
+  // Per-order blocked clock: accrues while the hull covers under 15% of nominal speed —
+  // the shared trigger for the maneuver collision responses above.
+  _blkClock(o, p, v, dt) {
+    const stepD = o._px == null ? 1 : Math.hypot(p.x - o._px, p.z - o._pz);
+    o._px = p.x; o._pz = p.z;
+    const nom = (v.def && v.def.speed) || 10;
+    if (stepD < nom * dt * 0.15) o._blkT = (o._blkT || 0) + dt; else o._blkT = 0;
   }
 
   // GOTO honesty (the contract): A* runs with partial:true, so an unreachable goal comes
@@ -266,6 +393,16 @@ export class Driver {
       const prog = o.d0 > 1 ? Math.max(0, Math.min(100, Math.round((1 - d / o.d0) * 100))) : 100;
       return `GOTO(${Math.round(o.x)},${Math.round(o.z)}) ${prog}% · ${Math.round(d)}u left`
         + (o.violated ? ' · UNREACHABLE' : '');
+    }
+    if (o.type === 'ORBIT') {
+      const p = this.v.holder.position;
+      const d = Math.hypot(o.cx - p.x, o.cz - p.z);
+      return `ORBIT r${Math.round(o.radius)} ${o.dir > 0 ? 'ccw' : 'cw'} · ${Math.round(d)}u out (${o.by || 'duel'})`;
+    }
+    if (o.type === 'KITE') return `KITE → (${Math.round(o.toward.x)},${Math.round(o.toward.z)}) · nose on threat (${o.by || 'duel'})`;
+    if (o.type === 'JOUST') {
+      const p = this.v.holder.position;
+      return `JOUST ${o.side > 0 ? 'stbd' : 'port'} pass · tgt ${Math.round(Math.hypot(o.tx - p.x, o.tz - p.z))}u ${o.done ? '· EXTENDED' : ''}`;
     }
     return `DIRECT (${o.by || 'combat'})`;
   }

@@ -1,0 +1,61 @@
+VERDICT — 2026-07-17 Driver slice 3 (duel footwork as orders) + the ghost hunt
+================================================================================
+
+Batch (uncommitted in /rmrf/, on top of slice 2):
+  1. ORBIT order — the strafe duel as a driver-executed maneuver: circle the rival at
+     the range band (pressing tightens the ring; a fleer's LEAD point becomes the face
+     target so pursuit cuts the corner), dir on the brain's jittered flip, radius kept
+     honest by the driver. Covers the Jotun-ambush blind-rear orbit too. Jotun ineligible.
+  2. KITE order — kite-to-support, the trap lure, and the siege break-off in one shape:
+     A*-routed retreat, waypoint by waypoint, nose (and gun) on the threat the whole way.
+     v1 backed blind into terrain; v2 emitted omni vector pedals through the classic
+     drive (the recall-orbit disease reborn); v3 uses ORBIT's world→hull fold. A tank
+     now retreats GUN-FIRST at the doctrine cap instead of showing its back.
+  3. JOUST order — the Valkyrie's signature vs ground targets (replaces its hover-strafe
+     duel): a full-speed pass entered at a gate that guarantees ~14u abeam, missiles
+     through the broadside window, extend 35u, done. The driver plans each pass and
+     alternates sides (serpentine); the brain re-deciding engage each tick IS the
+     between-passes fight-or-flight check. RR.setJoust for A/B.
+  4. Collision response (Layer-0 competency): a blocked ORBIT circles the other way; a
+     blocked KITE dodges its retreat bearing, alternating sides, wider each try —
+     driver-owned adjustments beneath the brain's standing order.
+  5. RR.reseed — see THE GHOST below. Instrument, not gameplay.
+
+THE GHOST (this slice's instrument war):
+  A bisection on "impossible" results — provably-dead code flipping match outcomes —
+  ended with the branch instrumented (0 executions, outcome still flipped) and finally a
+  repeat run: the original measurement was a GHOST. Async asset loading consumes a
+  load-order-dependent amount of the seeded RNG stream; under IO contention the order
+  occasionally swaps — same seed, silently different match, ~1-in-N boots. Several of
+  the day's intermediate gates were contaminated. Fix: RR.reseed(seed) re-pins the
+  stream at drive-start (rigs call it; live play untouched). Seed 11 hammered ×4 under
+  deliberate parallel contention: byte-identical. Third determinism leak found and
+  killed (archetype draw, rAF frames, now boot-order RNG drain).
+
+  The stuck metric also learned a new word: an ORBITING unit nets ~zero displacement BY
+  DESIGN — the tourney now buckets deliberate maneuver holds (ORBIT/KITE/JOUST labels)
+  apart from real transit-stuck.
+
+EXACT GATE (deterministic + reseed, seeds 11+7k, both sides ghost-proof):
+                                BEFORE (slice 2)   AFTER (slice 3)
+  resolved                      23/30              24/30
+  avg resolve                   536s               585s (fights run longer — gun-first
+                                                    retreats at half throttle prolong duels)
+  engage transit-stuck          157                98   (lowest ever recorded)
+  deliberate maneuvering        ~0                 323 samples (the new bucket)
+  suppress transit-stuck        312                677  (REAL — contested siege pockets,
+                                                    maneuvering units shoving; see below)
+  idle-at-goal                  1362               1013 (lowest ever recorded)
+  nav alarms                    17 (0.57/m)        44 (1.47/m)
+
+Reading: resolution up, engage the cleanest it has ever measured, idle at an all-time
+low — the fights themselves are the healthiest yet. The two elevated numbers point at
+ONE cause: congestion. Orbiting/kiting/jousting units sweep far more ground than the
+old stand-and-shoot duels, so contested pockets (especially sieges) produce unit-vs-
+unit shoving the driver alarms on. That is the LAST root cause on the original stuck
+catalog — friendly right-of-way / path reservation (the designer's time-window
+reservation idea) — and it is the next slice by design, not by accident.
+
+VERDICT: KEEP. The duel footwork is orders end to end; the chain-of-command display
+now reads ORBIT/KITE/JOUST live; every remaining failure is a named, reproducible,
+flight-recorded case. Alarms 1.47/match is the number the congestion slice drives down.

@@ -451,7 +451,9 @@ const BEHAVIORS = {
         fwd = ld > 4 ? 1 : 0;   // settle at the shield spot — the mines sit between us and them
         fire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap)) ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
         mem._wantMove = fwd > 0;
-        return { fwd, turn, fire, strafe: 0, state: mode };
+        // KITE order: bait for the lure point with eyes (and gun) ON the chaser the whole way.
+        return { fwd, turn, fire, strafe: 0, state: mode,
+          mnv: { type: 'KITE', tx: view.enemy.x, tz: view.enemy.z, toward: { x: view.lure.x, z: view.lure.z }, arrive: 4 } };
       }
       // SIEGE BREAK-OFF: dueling a vehicle while a tower is ACTIVELY HITTING us — that
       // crossfire is a losing trade, so slip the tower's guns while the nose tracks the
@@ -469,24 +471,30 @@ const BEHAVIORS = {
           const tdx = self.x - view.towerFire.x, tdz = self.z - view.towerFire.z;
           const td = Math.hypot(tdx, tdz) || 1;
           const away = { x: self.x + (tdx / td) * 24, z: self.z + (tdz / td) * 24 };
-          const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
-            { goto: away, face: { x: view.enemy.x, z: view.enemy.z }, arrive: 2 });
           const bfire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap))
             ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
           mem._wantMove = true;
-          return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: bfire, state: mode };
+          // KITE order: slip the firing tower's guns, nose on the rival (a Jotun's "away is
+          // behind me" reverse-arc falls out of the goto/face split in the driver).
+          return { fwd: 0, turn: 0, strafe: 0, fire: bfire, state: mode,
+            mnv: { type: 'KITE', tx: view.enemy.x, tz: view.enemy.z, toward: away, arrive: 2 } };
         }
       } else mem._breakoffT = null;   // guns quiet — re-arm for the next crossfire
       const pressured = self.hpFrac < 0.55 || dist < range * 0.6;
       // KITE — out-matched or pressed: fall back toward our own TOWER COVER while the turret
       // keeps bearing on the enemy. Steer the HULL at support; fire whenever the gun bears.
       if (tac.kite > 0.3 && view.support && pressured) {
+        // KITE order: retreat INTO our tower cover with the nose (and the gun) held on the
+        // chaser — the driver reverses a tank at the doctrine cap, backpedals an omni hull.
+        // (The old inline version drove nose-first at the support point: it out-ran the
+        // chaser but gave it our BACK the whole way.)
         const sx = view.support.x - self.x, sz = view.support.z - self.z;
         turn = clamp(wrapPi(Math.atan2(-sx, -sz) - self.heading) * 2.0, -1, 1);
         fwd = 1;
         fire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap)) ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
         mem._wantMove = true;
-        return { fwd, turn, fire, strafe: 0, state: mode };
+        return { fwd, turn, fire, strafe: 0, state: mode,
+          mnv: { type: 'KITE', tx: view.enemy.x, tz: view.enemy.z, toward: { x: view.support.x, z: view.support.z }, arrive: 6 } };
       }
       // BLOCKED LINE (shot-feedback): our last rounds kept detonating on the terrain/cover
       // between us and the target instead of on the enemy. Grinding the same shot is the
@@ -521,7 +529,7 @@ const BEHAVIORS = {
       // never trade there — if we're in front of a MOVING Jotun, let it roll by: hold fire,
       // ease out of the kill zone, and orbit hard toward its blind rear. Once we're off its
       // nose the normal press/strafe below takes over and we hit it from behind.
-      let holdOff = false;
+      let holdOff = false, mnv = null;
       if (view.enemy.type === 'jotun' && Math.hypot(view.enemy.vx || 0, view.enemy.vz || 0) > 1.5) {
         const rel = wrapPi(Math.atan2(self.x - view.enemy.x, self.z - view.enemy.z)
                          - Math.atan2(view.enemy.vx, view.enemy.vz));   // 0 = on its nose, ±π = behind it
@@ -531,6 +539,10 @@ const BEHAVIORS = {
           strafe = mem._strafeDir * Math.max(tac.strafe, 0.9);
           fire = false;
           if (dist < range * 0.9) fwd = -0.3;            // back out of the front arc
+          // ORBIT order: circle at range toward its blind rear, nose held on it — the driver
+          // keeps the radius honest (the old inline version drifted into the front arc).
+          if (view.canStrafe) mnv = { type: 'ORBIT', cx: view.enemy.x, cz: view.enemy.z,
+            radius: range * 0.95, dir: mem._strafeDir, face: { x: view.enemy.x, z: view.enemy.z } };
         }
       }
       // PRESS the advantage — close in, and CUT OFF a fleeing target by steering AHEAD of its
@@ -539,8 +551,21 @@ const BEHAVIORS = {
       // instead of letting it stroll home, heal to full, and come back (the reset that stalemates
       // AI-vs-AI). This OVERRIDES the Jotun's press=0, so a winning heavy actually chases and rakes
       // the fleer's exposed back the whole way — and when it stops at base to heal, it takes a beating.
+      // JOUST — the Valkyrie's signature vs GROUND targets: no hovering duel (a hovering
+      // aligner is a sitting duck) — a full-speed pass with the target abeam, missiles
+      // through the broadside window, extend, and REASSESS. The driver plans each pass and
+      // alternates sides (serpentine); the brain re-deciding engage every tick IS the
+      // between-passes fight-or-flight check — the moment the score flips, no more passes.
+      if (!holdOff && AI_JOUST && self.type === 'valkyrie' && view.enemy.type !== 'valkyrie' && los) {
+        const jfire = (Math.abs(err) < Math.PI * 0.65 && dist < Math.min(range * 1.3, fireCap))
+          ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;   // wide broadside gate — the rack homes
+        mem._wantMove = true;
+        return { fwd: 1, turn, fire: jfire, strafe: 0, state: mode,
+          mnv: { type: 'JOUST', tx: view.enemy.x, tz: view.enemy.z, side: 1 } };
+      }
       const winning = view.enemy.retreating || (view.enemy.hpFrac != null && view.enemy.hpFrac < self.hpFrac - 0.15);
-      if (!holdOff && (winning || tac.press >= 0.7)) {
+      const pressing = !holdOff && (winning || tac.press >= 0.7);
+      if (pressing) {
         if (dist > range * 0.5) fwd = 1;
         if (view.enemy.retreating) {
           const tx = view.enemy.x + (view.enemy.vx || 0) * 0.9, tz = view.enemy.z + (view.enemy.vz || 0) * 0.9;
@@ -559,6 +584,22 @@ const BEHAVIORS = {
           mem._strafeDir = mem.rng() < 0.5 ? -1 : 1; mem._strafeT = mem.t;
         }
         strafe = mem._strafeDir * tac.strafe;
+        // ORBIT order — the strafe duel with the radius kept honest by the driver: circle
+        // the rival at the range band (pressing pulls the ring tight to run a fleer down),
+        // dir on the jittered flip, nose on the enemy — or on the LEAD point of a runner,
+        // so pressing cuts the corner instead of tail-chasing. LOS required: with no shot
+        // to keep, the DIRECT circle-in-to-find-one behavior stands.
+        if (view.canStrafe && los) {
+          const f = (pressing && view.enemy.retreating)
+            ? { x: view.enemy.x + (view.enemy.vx || 0) * 0.9, z: view.enemy.z + (view.enemy.vz || 0) * 0.9 }
+            : { x: view.enemy.x, z: view.enemy.z };
+          mnv = { type: 'ORBIT', cx: view.enemy.x, cz: view.enemy.z,
+            radius: pressing ? range * 0.55 : range * 0.85, dir: mem._strafeDir, face: f };
+        }
+      }
+      if (mnv) {
+        mem._wantMove = true;
+        return { fwd, turn, fire, strafe, state: mode, mnv };
       }
     }
     mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
@@ -844,6 +885,8 @@ export function recActive() { return REC_ON; }
 // the default brain reads the new value next tick. getBrainConfig() with no key returns
 // a copy of the whole config so the harness can snapshot/restore it.
 export function setBrainConfig(k, v) { if (k in DEFAULT_BRAIN.config) DEFAULT_BRAIN.config[k] = v; return DEFAULT_BRAIN.config[k]; }
+let AI_JOUST = true;   // the Valkyrie's jousting attack runs (off → legacy hover-strafe duel; A/B knob)
+export function setJoust(on) { AI_JOUST = !!on; return AI_JOUST; }
 export function getBrainConfig(k) { return k ? DEFAULT_BRAIN.config[k] : { ...DEFAULT_BRAIN.config }; }
 function maybeRecord(view, mem, reason, state, out) {
   if (!REC_ON) return;
