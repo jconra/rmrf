@@ -34,7 +34,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass } from './AIStrategies.js?v=90';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn } from './AIStrategies.js?v=91';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5452,6 +5452,12 @@ class AICommander {
     const mine = this.fleetLeft(), theirs = ec.fleetLeft();
     return mine <= 5 && mine <= theirs - 3;
   }
+  // How many units we're DOWN in the attrition war (0 if even or ahead) — MissionScore's
+  // gradual 'losing' term scales with this instead of stepping at losingBadly's threshold.
+  fleetDeficit() {
+    const ec = commanders.find(c => c.team === this.targetTeam());
+    return ec ? Math.max(0, ec.fleetLeft() - this.fleetLeft()) : 0;
+  }
   // Battlefield snapshot for the mission assigner, from THIS commander's view (own state
   // + the same reads the doctrines already make — nothing new is revealed). Normalized
   // HISTORY sampling — one light sample every ~4s so the mission features can carry
@@ -5867,6 +5873,73 @@ class AICommander {
   // Live turrets on the FAR (rear) side of the enemy flag base — the guns a back-door runner
   // must drive past. A Firebrat should only sneak around the back when this is 0; if only the
   // FRONT towers are down it's suicide to loop into live rear guns, so it takes the front (Capture).
+  // ── DIRECTIONAL CAPTURE GEOMETRY (MissionScore A2) ─────────────────────────
+  // Four approach directions to the enemy flag base, defined off the axis from OUR home to
+  // THEIR base: front = the side we naturally arrive on, rear = the far side, left/right =
+  // the flanks. Used by the per-direction capture scores + the directional runner routing.
+  _dirBasis() {
+    const base = this.enemyBasePos(), from = this.homePos();
+    let fx = base.x - from.x, fz = base.z - from.z;
+    const d = Math.hypot(fx, fz) || 1; fx /= d; fz /= d;
+    return { base, fx, fz, lx: -fz, lz: fx };   // (lx,lz) = left-hand perpendicular
+  }
+  // Staging point 30u out on the given side of the enemy base (front/rear/left/right).
+  enemyApproach(dir) {
+    const b = this._dirBasis();
+    const s = dir === 'rear' ? { x: b.fx, z: b.fz } : dir === 'left' ? { x: b.lx, z: b.lz }
+      : dir === 'right' ? { x: -b.lx, z: -b.lz } : { x: -b.fx, z: -b.fz };
+    return { x: b.base.x + s.x * 30, z: b.base.z + s.z * 30 };
+  }
+  // Dead enemy turrets on the given side (0-2): the "door is open on that side" capture term.
+  // A corner tower guards two sides, so it counts toward both (same rule rearTowersLive uses).
+  towersDownDir(dir) {
+    const tt = this.targetTeam(), b = this._dirBasis();
+    const ax = dir === 'rear' ? b.fx : dir === 'left' ? b.lx : dir === 'right' ? -b.lx : -b.fx;
+    const az = dir === 'rear' ? b.fz : dir === 'left' ? b.lz : dir === 'right' ? -b.lz : -b.fz;
+    let down = 0;
+    for (const c of camps) {
+      if (c.team !== tt || c.role !== 'main') continue;
+      for (const w of c.walls) {
+        if (!w.turret) continue;
+        const p = w.group.position;
+        if ((p.x - b.base.x) * ax + (p.z - b.base.z) * az > 2)   // on this side
+          if (w.turret.dead || w.turret.falling) down++;
+      }
+    }
+    return Math.min(2, down);
+  }
+  // FOG-HONEST lane intel for a capture direction: reads only what the team has actually
+  // SEEN or HEARD (the contact notebook below + whether any of our units has had eyes on
+  // that approach recently). Never global truth — an unscouted lane is UNKNOWN, not clear.
+  //   'blocked' — a known enemy contact sits on that approach corridor
+  //   'clear'   — we had eyes on the corridor recently and know of nothing there
+  //   'unknown' — nobody's looked lately (neutral: confidence must be earned by scouting)
+  laneIntel(dir) {
+    const a = this.enemyApproach(dir), b = this.enemyBasePos();
+    const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;          // corridor midpoint
+    if (!this._laneSeenT) this._laneSeenT = {};
+    for (const u of this.liveUnits())
+      if ((u.holder.position.x - mx) ** 2 + (u.holder.position.z - mz) ** 2 < 45 * 45) { this._laneSeenT[dir] = this._matchT; break; }
+    const now = performance.now();
+    if (this._contacts) for (const c of this._contacts) {
+      if (now - c.t > 25000) continue;                          // stale sighting — no longer trusted
+      // distance from the contact to the corridor segment a→b
+      const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz || 1;
+      let t = ((c.x - a.x) * dx + (c.z - a.z) * dz) / len2; t = Math.max(0, Math.min(1, t));
+      const px2 = a.x + dx * t, pz2 = a.z + dz * t;
+      if ((c.x - px2) ** 2 + (c.z - pz2) ** 2 < 25 * 25) return 'blocked';
+    }
+    return (this._matchT - (this._laneSeenT[dir] || -1e9)) < 25 ? 'clear' : 'unknown';
+  }
+  // Contact notebook: every sight/sound detection any of our units makes lands here (capped,
+  // pruned by age in laneIntel) — the team's honest picture of where enemies have been.
+  _noteContact(x, z) {
+    if (!this._contacts) this._contacts = [];
+    const now = performance.now();
+    for (const c of this._contacts) if ((c.x - x) ** 2 + (c.z - z) ** 2 < 15 * 15) { c.x = x; c.z = z; c.t = now; return; }
+    this._contacts.push({ x, z, t: now });
+    if (this._contacts.length > 8) this._contacts.shift();
+  }
   rearTowersLive() {
     const tt = this.targetTeam(), base = this.enemyBasePos(), from = this.homePos();
     let dx = base.x - from.x, dz = base.z - from.z;
@@ -6588,6 +6661,7 @@ class AICommander {
       if (this.unit && this.unit.dead) {
         this.deaths++;
         this.failStreak = (this.failStreak || 0) + 1;
+        this._lostRecentT = this._matchT;            // MissionScore: recent-death boosts Attack for a bit
         const lost = this.unit.type;                 // attrition: that vehicle is gone from the roster
         if (this.roster[lost] != null) this.roster[lost] = Math.max(0, this.roster[lost] - 1);
         // MISSION REPORT CARD: grade the tour that just ended. Progress = any kill, any real
@@ -6601,6 +6675,11 @@ class AICommander {
           const step = this.strategy.step;
           const progress = this.kills > rec.kills0 || rec.flagTouched
             || rec.fort0 - fortHpOf(this.targetTeam()) > 60;   // more than a stray chip of base damage
+          // MissionScore success memory: a total-failure tour drops this mission to −4 (it
+          // decays back toward 0 over the next few decisions — the smooth anti-repeat); a
+          // tour that made progress forgives it immediately.
+          if (!this._missionSuccess) this._missionSuccess = {};
+          if (!progress) this._missionSuccess[step] = -4; else delete this._missionSuccess[step];
           if (!progress) {
             if (this._failStep === step) this._failN++; else { this._failStep = step; this._failN = 1; }
             this._failT = performance.now();
@@ -6826,7 +6905,7 @@ class AICommander {
     }
     // Remember WHERE the enemy was last seen (team-shared) so the Attack mission can recall
     // their last-known position instead of only marching to the fixed elevator (ai_behavior).
-    if (seen) this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() };
+    if (seen) { this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() }; this._noteContact(enemy.x, enemy.z); }
     // HEARING: if it can't SEE a rival, it may still HEAR one — engine drone from movers +
     // gunfire reports, damped by its own engine noise (same model as the player's sound HUD).
     // A heard contact is intel, NOT a firing solution — it only updates the team's last-known
@@ -6839,6 +6918,7 @@ class AICommander {
       if (loudest && loudest.loud > AI_HEARD_MIN) {
         heard = { x: loudest.pos.x, z: loudest.pos.z, loud: loudest.loud };
         this._lastEnemyPos = { x: heard.x, z: heard.z, t: performance.now(), heard: true };
+        this._noteContact(heard.x, heard.z);
       }
     }
     // GHOST CLEARED: we reached the last-known spot and there's nobody here to see OR hear —
@@ -7057,11 +7137,23 @@ class AICommander {
     // line to the next opens up. `flankSide` nudges the approach around to the side
     // instead of charging straight into the gap between two towers (see AI.js).
     let threat = null, threatD = TURRET_SENSE * TURRET_SENSE, threatCamp = null;
+    // SIEGE-BACK (MissionScore): this siege was scored to open the REAR lane — restrict the
+    // tower hunt to the enemy main base's rear-side turrets while any stand (fall back to the
+    // normal nearest-turret scan once the rear is silenced).
+    const backBias = this._siegeBack ? this._dirBasis() : null;
+    const rearOnly = backBias && (() => {
+      const tt = this.targetTeam();
+      for (const c of camps) { if (c.team !== tt || c.role !== 'main') continue;
+        for (const w of c.walls) { const t = w.turret;
+          if (t && !t.dead && !t.falling && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2) return true; } }
+      return false;
+    })();
     for (const c of camps) {
       if (c.team === this.team) continue;
       for (const w of c.walls) {
         const t = w.turret;
         if (!t || t.dead || t.falling) continue;
+        if (rearOnly && !(c.role === 'main' && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2)) continue;
         t.group.updateWorldMatrix(true, false);
         t.head.getWorldPosition(_threatV);
         const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
@@ -9186,6 +9278,9 @@ window.RR = {
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
   setRightOfWay: on => { aiRightOfWay = !!on; if (!aiRightOfWay) RESV.clear(); return aiRightOfWay; },   // friendly path-reservation yielding (A/B knob)
+  setMissionWeights: on => setMissionWeights(on),                       // MissionScore weighted picker vs the classic playbook (dual-brain A/B)
+  setMissionWeightsTeam: (team, on) => setMissionWeightsTeam(team, on), // per-team override → head-to-head: scorer vs classic in ONE match
+  missionScores: () => commanders.map(c => ({ team: c.team, arch: c.archetype, step: c.strategy && c.strategy.step, scores: c._missionScores || [] })),   // live weight breakdown per team
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)

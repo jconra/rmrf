@@ -269,6 +269,19 @@ class Capture extends Mission {
     if (f && f.carrier === cmd.unit) return cmd.homePos();            // carrying → run it home
     const flagPt = f ? { x: f.group.position.x, z: f.group.position.z } : cmd.enemyBasePos();
     if (this._displaced(f)) return flagPt;                            // loose in the field → straight at it
+    // MISSIONSCORE directional run: stage via the scored side's approach point, then grab —
+    // same reach-latch as the rogue sneak (goals must not flip while the runner commits).
+    // The 'front' direction stages on our own approach lane, so it latches almost instantly.
+    if (missionWeightsOn(cmd) && cmd._capDir && cmd.unit && cmd.enemyApproach) {
+      const u = cmd.unit.holder.position, ap = cmd.enemyApproach(cmd._capDir);
+      if (!cmd.unit._dirReached) {
+        const nearAp = Math.hypot(u.x - ap.x, u.z - ap.z) < 10;
+        const nearFlag = Math.hypot(u.x - flagPt.x, u.z - flagPt.z) < 22;
+        if (nearAp || nearFlag) cmd.unit._dirReached = true;
+        else return ap;
+      }
+      return flagPt;
+    }
     // Stealth run: sneak the runner in the back — but only when the rear is undefended (_sneak).
     // If the back towers are still up (only the front fell), go straight in the front instead.
     if (this._sneak(cmd) && cmd.unit) {   // loop to the rear, THEN grab
@@ -485,6 +498,176 @@ export function setRogueRearSiege(v) { ROGUE_REAR_SIEGE = !!v; }
 let REAR_SNEAK_GATE = true;
 export function setRearSneakGate(v) { REAR_SNEAK_GATE = !!v; }
 
+// ── MISSIONSCORE — a fight-or-flight for STRATEGY (blueprint: devblog/post19.html) ────────
+// Every candidate mission gets a signed weight from the board state; the commander runs the
+// top one. This is the same idea as fightScore() (combat), pointed at strategy — and the
+// hand-authored version of what the L2 mission net tried to learn. It REPLACES the persona
+// choose() cascade + the 2-strike report-card ban (the decaying `success` memory below is the
+// smooth anti-repeat: "never repeat a failing mission"). Behind RR.setMissionWeights — OFF by
+// default, so the classic playbook and this scorer both live in the build, knob-selectable.
+// Slice A1: scores the existing mission set (capture undirected). Directional capture,
+// Siege-back, and the fog-honest lane-clear land in A2.
+let MISSION_WEIGHTS = true;   // the DEFAULT brain since 2026-07-18 (verdict: equal-or-better on
+                              // every axis, better by design on finish/reroute; the classic
+                              // cascade stays selectable below as the A/B baseline)
+export function setMissionWeights(on) { MISSION_WEIGHTS = !!on; return MISSION_WEIGHTS; }
+// Per-team override (head-to-head A/B: scorer vs classic in ONE match, like the L2 net's
+// missionPolicyTeam). undefined = follow the global knob.
+const MISSION_WEIGHTS_TEAM = {};
+export function setMissionWeightsTeam(team, on) {
+  if (on == null) delete MISSION_WEIGHTS_TEAM[team]; else MISSION_WEIGHTS_TEAM[team] = !!on;
+  return MISSION_WEIGHTS_TEAM[team];
+}
+export function missionWeightsOn(cmd) {
+  const t = cmd && cmd.team;
+  if (t != null && t in MISSION_WEIGHTS_TEAM) return MISSION_WEIGHTS_TEAM[t];
+  return MISSION_WEIGHTS;
+}
+
+// fleet-comp: (a type's share of our remaining fleet − threshold) × 10, bonus-only. Play to
+// what we have — a Firebrat-heavy fleet leans capture, a Jotun-heavy one leans the front
+// siege, a Valkyrie-heavy one the rear siege (the flyer clears the walls to get there).
+const FLEET_FAV = { firebrat: ['capture', 0.40], lurcher: ['attack', 0.23], valkyrie: ['siege-back', 0.15], jotun: ['siege', 0.15] };
+// archetype nudges per mission (the personalities survive, like v.fofW biases the fight
+// score). A bare base key ('capture') applies to every direction of it.
+const PERSONA_BIAS = {
+  warrior: { attack: 2, siege: 1 },
+  turtle:  { defend: 2, scout: -1 },
+  hunter:  { attack: 1, siege: 1, trap: 3, scout: 1 },
+  rogue:   { capture: 1, 'capture-rear': 1, scout: 1, sap: 1, siege: 1, 'siege-back': 1 },
+};
+// A2: capture is DIRECTIONAL (front/left/right/rear — a stonewalled lane has three other
+// angles, and each direction remembers its own failures) and the rear siege is its own plan.
+const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
+  'capture-front', 'capture-left', 'capture-right', 'capture-rear',
+  'defend', 'intercept', 'scavenge', 'sap', 'trap'];
+
+// Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
+export function missionScore(cmd, key) {
+  const T = []; let w = 0;
+  const add = (label, v) => { if (v) { T.push([label, Math.round(v * 10) / 10]); w += v; } return v; };
+  const roster = cmd.roster || {}, fleet = cmd.fleetLeft() || 1, arch = cmd.archetype;
+  const exposed = cmd.flagExposed(), towers = cmd.turretsLive(), matchT = cmd._matchT || 0;
+  // GRADUAL terms (the house rule: a weight scales with how TRUE its condition is — no
+  // cliff-edges at arbitrary thresholds; only genuine facts stay binary):
+  const earlyB = Math.max(0, (120 - matchT) / 60);              // +2 at kickoff → 0 by 2min
+  const spareFB = Math.min(1.5, Math.max(0, (roster.firebrat || 0) - 1) * 0.75);  // per spare runner (re-anchored: 1 spare ≈ the proven binary's +1)
+  const lostAge = cmd._lostRecentT != null ? matchT - cmd._lostRecentT : 1e9;
+  const justLost = lostAge < 20 ? 2 * (1 - lostAge / 20) : 0;   // sting fades over 20s
+
+  const base = key.split('-')[0];   // 'capture-rear' → 'capture'; 'siege-back' → 'siege'
+  // CLOCK PRESSURE (Jacob's rule): the longer the match runs, the hungrier the WIN missions
+  // get — siege (opens the flag) and capture (takes it) ramp +1 per 5 minutes, capped at +3.
+  // Early game it's ~nothing; by late game somebody always forces a decision instead of two
+  // careful commanders trading patrols until the clock dies. Defense keeps its full emergency
+  // spikes — it just stops winning ties against offense in a long game.
+  if (base === 'siege' || base === 'capture') { const cp = Math.min(3, matchT / 300); if (cp >= 0.5) add('clock', Math.round(cp * 10) / 10); }
+  switch (base) {
+    case 'scout':
+      add('base', 1); if (earlyB >= 0.1) add('early', earlyB); break;
+    case 'attack': {
+      add('base', 1);
+      const fk2 = Math.max(0, 3 - cmd.kills) * 0.7;             // hungriest at zero kills, gone by three
+      if (fk2 >= 0.1) add('few kills', fk2);
+      if (justLost >= 0.1) add('just lost a unit', justLost); break;
+    }
+    case 'siege':
+      if (key === 'siege-back') {
+        // the rear-lane opener: worth running while REAR towers stand (1.5 each), extra when
+        // dropping them would open a rear capture the front can't offer
+        const rearUp = cmd.rearTowersLive ? cmd.rearTowersLive() : 0;
+        add('rear towers standing', rearUp * 1.5);
+        if (rearUp > 0 && exposed) add('opens rear capture', 1);
+      } else {
+        add('towers standing', towers * 1); if (!exposed) add('flag sealed', 2);
+        // CRACK THE KEEP: towers down but the HQ still seals the flag → siege is the ONLY
+        // way to open the win. The old cascade had a dedicated rung for this; without this
+        // term a dominant turtle sat home forever with the enemy base defenceless (seed 88:
+        // k11, towers flattened, defend 3.5 > siege 2 for 900 straight seconds).
+        if (cmd.fortDown && cmd.fortDown() && !exposed) add('crack the keep', 4);
+      }
+      break;
+    case 'capture': {
+      if (!exposed) add('flag sealed', -10);
+      else add('flag OPEN', 4);   // the win condition is on the table — outweigh routine fighting
+      if (cmd.flagGrabbable()) add('grabbable', 2);
+      const dir = key.includes('-') ? key.split('-')[1] : 'front';
+      add('towers down ' + dir, (cmd.towersDownDir ? cmd.towersDownDir(dir) : Math.min(2, 4 - towers)) * 1);
+      // fog-honest lane intel: +1 only for a lane we've had eyes on and know is empty; a lane
+      // with a KNOWN contact on it is actively repelling; unscouted = neutral (earn it by scouting)
+      if (cmd.laneIntel) { const li = cmd.laneIntel(dir); if (li === 'clear') add('lane clear', 1); else if (li === 'blocked') add('lane blocked', -2); }
+      if (spareFB >= 0.1) add('spare FB', spareFB); break;
+    }
+    case 'defend': {
+      if (cmd.homeAttack && cmd.homeAttack()) add('base under fire', 4);
+      // gradual, but RE-ANCHORED to the proven operating point: the old rule only turtled at
+      // a deficit of 3 — starting the lean at 1 made every slightly-behind team cagey and gave
+      // back five head-to-head wins. Now: down 2 → +1, down 3 → +2, down 4+ → +3 (capped).
+      const deficit = cmd.fleetDeficit ? cmd.fleetDeficit() : 0;
+      if (deficit >= 2) add('losing', Math.min(3, (deficit - 1) * 1)); break;
+    }
+    case 'intercept':
+      add('base', -5);
+      if (cmd.ourFlagStolen()) add('flag STOLEN', 12);
+      else if (cmd.ourFlagLoose && cmd.ourFlagLoose()) add('flag loose', 10); break;
+    case 'scavenge':
+      if (cmd.needsPartsRun && cmd.needsPartsRun()) add('need parts', 4); break;
+    case 'sap':
+      if (earlyB >= 0.1 && spareFB >= 0.5) add('opening sap', earlyB); break;
+    case 'trap':
+      if (arch === 'hunter' && cmd._trapMode && !cmd._trapDone) add('trap ready', 2); break;
+  }
+  // fleet-comp (play to strength) — a bare fav ('capture') covers all its directions
+  for (const t in FLEET_FAV) {
+    const [fav, thr] = FLEET_FAV[t];
+    if (fav === key || (fav === base && key !== 'siege-back')) { const b = ((roster[t] || 0) / fleet - thr) * 10; if (b > 0) add('fleet ' + t[0].toUpperCase(), b); }
+  }
+  // persona bias: the exact key's nudge plus the base key's (so rogue's capture +1 applies to
+  // every direction, and its capture-rear +1 stacks on top of that for the back door)
+  const PB = PERSONA_BIAS[arch] || {};
+  if (PB[base] && base !== key) add(arch, PB[base]);
+  if (PB[key]) add(arch, PB[key]);
+  // success memory (the anti-repeat): a just-failed mission sits at −4, drifts back to 0.
+  // Directional captures each carry their OWN memory — "front failed" leaves rear untouched.
+  const s = cmd._missionSuccess && cmd._missionSuccess[key]; if (s) add('success', s);
+  // affordability: a capture with no runner and no scrap to build one can't execute
+  if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')) add('no runner', -6);
+  return { total: Math.round(w * 10) / 10, terms: T };
+}
+
+// Pick the top-scoring mission. The success memory decays +1 every 8 SECONDS (not per call —
+// missionPick runs every tick, so a per-call decay let a −4 recover in a fifth of a second
+// and the anti-repeat barely bit; a failed plan should stay benched for ~half a minute).
+export function missionPick(cmd, incumbent = null) {
+  const S = cmd._missionSuccess || (cmd._missionSuccess = {});
+  // success memory forgives CONTINUOUSLY (+1 per 8s, smooth — the gradual-weights rule),
+  // so a benched plan eases back into contention instead of stepping.
+  const t = cmd._matchT || 0;
+  if (cmd._msnDecayT == null) cmd._msnDecayT = t;
+  const el = Math.max(0, t - cmd._msnDecayT); cmd._msnDecayT = t;
+  if (el > 0) for (const k in S) { S[k] = Math.min(0, Math.round((S[k] + el * 0.125) * 100) / 100); if (S[k] > -0.05) delete S[k]; }
+  let best = null, bestV = -1e9; const all = [];
+  for (const key of MSN_CANDS) {
+    const r = missionScore(cmd, key);
+    // INCUMBENT BONUS: the running plan is worth +1.5 just for being underway — near-tied
+    // scores must not flap the commander between missions every few seconds (autopsy: a
+    // siege↔scavenge↔attack cycle at 4-6s). A challenger has to genuinely beat the plan.
+    if (incumbent && key === incumbent) { r.total = Math.round((r.total + 1.5) * 10) / 10; r.terms.push(['running', 1.5]); }
+    all.push([key, r.total, r.terms]);
+    if (r.total > bestV) { bestV = r.total; best = key; }
+  }
+  all.sort((a, b) => b[1] - a[1]);
+  cmd._missionScores = all;   // exposed for the ai-lab console breakdown
+  cmd._missionTop = bestV;
+  return best;
+}
+// One-line troubleshooting breakdown of the current decision (top 3 with their term math).
+export function missionScoreLog(cmd) {
+  const a = cmd._missionScores; if (!a) return '';
+  return a.slice(0, 3).map(([k, v, terms]) =>
+    `${k} ${v >= 0 ? '+' : ''}${v}${terms.length ? ' (' + terms.map(([l, x]) => `${l} ${x >= 0 ? '+' : ''}${x}`).join(', ') + ')' : ''}`).join('  >  ');
+}
+
 class Doctrine {
   constructor(rng = Math.random, log = null) {
     this.rng = rng; this.log = log; this.t = 0;
@@ -522,7 +705,7 @@ class Doctrine {
     // of trading the last of the army out in the open — UNLESS we can win right now by
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
-    if (!next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; fk = 'losing_attrition'; }
+    if (!missionWeightsOn(cmd) && !next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; fk = 'losing_attrition'; }   // (weights: the 'losing +2' defend term carries this — a hard lock stalemated mirror matches)
     // HOME UNDER ATTACK (persona-weighted): enemy rounds are hitting our structures. The
     // tower's radio call used to be consumed only by a commander ALREADY in defend, so any
     // offense-minded persona simply never heard it: a Hunter idled at a stale mid-field goal
@@ -547,43 +730,71 @@ class Doctrine {
     // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
     // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
     // without a firebrat to actually grab the exposed flag).
-    if (!next && cmd.needsPartsRun && cmd.needsPartsRun()) { next = 'scavenge'; why = 'no runner left and no parts to build one'; fk = 'need_parts'; }
+    if (!missionWeightsOn(cmd) && !next && cmd.needsPartsRun && cmd.needsPartsRun()) { next = 'scavenge'; why = 'no runner left and no parts to build one'; fk = 'need_parts'; }
     // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
     // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
     // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
     // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
-    if (!next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) { next = 'siege'; why = 'their towers are down — crack the HQ while it is open'; fk = 'towers_down'; }
+    if (!missionWeightsOn(cmd) && !next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) { next = 'siege'; why = 'their towers are down — crack the HQ while it is open'; fk = 'towers_down'; }
     // STALEMATE GAMBIT: the match dragged on with the enemy base untouched — stop grinding the
     // mid-field duel and commit to the "Valkyrie around the back" siege (the Siege mission reads
     // cmd._gambit to force the flyer + rear flank, and rushBase suppresses engaging en route).
-    if (!next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) { next = 'siege'; why = 'stalemate — committing to the rear-door gambit'; fk = 'gambit'; }   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
+    if (!missionWeightsOn(cmd) && !next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) { next = 'siege'; why = 'stalemate — committing to the rear-door gambit'; fk = 'gambit'; }   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
-    if (!next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; fk = 'clear_path'; }
+    if (!missionWeightsOn(cmd) && !next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; fk = 'clear_path'; }
     // Tower-soften window (see onRunnerLost): the towers keep shredding runners → hold SIEGE
     // until they're silenced, instead of rebuilding a firebrat into the same guns each lap.
-    if (!next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; fk = 'soften'; }
+    if (!missionWeightsOn(cmd) && !next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; fk = 'soften'; }
     // OPENING SAPPER (persona-rolled): a Firebrat out to a home flank — lay mines on the way back,
     // drop a pod, scout that side — then fall through to the persona's real playbook.
-    if (!next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; fk = 'sapper'; }
+    if (!missionWeightsOn(cmd) && !next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; fk = 'sapper'; }
     // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
-    if (!next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; fk = 'trap'; }
+    if (!missionWeightsOn(cmd) && !next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; fk = 'trap'; }
     if (!next) {
-      // L2 mission net (opt-in policy): stands in for the persona playbook's choose() —
-      // the urgent/universal rungs above and the dwell + report-card bans below still apply.
-      const l2 = cmd.l2Pick ? cmd.l2Pick() : null;
-      if (l2) { next = l2; why = 'the L2 mission net'; }
-      else { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
-      fk = 'choose';
+      if (missionWeightsOn(cmd)) {
+        // MISSIONSCORE: the weighted picker owns the whole offensive/economy plan (the
+        // fortDown/gambit/soften/clearPath/scavenge/sap/trap rungs above are gated off when
+        // weights are on — the success memory + siege/scavenge terms subsume them, and killing
+        // the soften/clearPath loop is the seed-116 fix). Only the flag emergency (_urgent) and
+        // home-defense still hard-preempt.
+        const runningKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;
+        next = missionPick(cmd, runningKey); why = 'mission weights'; fk = 'weights';
+        // Directional keys map onto the base missions: 'capture-rear' runs the Capture mission
+        // approaching from the rear (cmd._capDir routes the runner); 'siege-back' runs Siege
+        // with the rear-tower bias (cmd._siegeBack gates the tower hunt).
+        cmd._msnKey = next;
+        if (next.startsWith('capture-')) { cmd._capDir = next.slice(8); next = 'capture'; }
+        else cmd._capDir = null;
+        cmd._siegeBack = next === 'siege-back';
+        if (next === 'siege-back') next = 'siege';
+      } else {
+        // L2 mission net (opt-in policy): stands in for the persona playbook's choose() —
+        // the urgent/universal rungs above and the dwell + report-card bans below still apply.
+        const l2 = cmd.l2Pick ? cmd.l2Pick() : null;
+        if (l2) { next = l2; why = 'the L2 mission net'; }
+        else { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
+        fk = 'choose';
+      }
     }
     // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
-    // don't repeat the bad decision; run its unblocker (unless that's banned too).
-    if (next && cmd.missionBanned && cmd.missionBanned(next)) {
+    // don't repeat the bad decision; run its unblocker. Superseded by the success memory when
+    // MissionScore is on, so skip it there.
+    if (!missionWeightsOn(cmd) && next && cmd.missionBanned && cmd.missionBanned(next)) {
       const alt = FAIL_ALT[next];
       if (alt && !cmd.missionBanned(alt)) { why = `${next} is benched — two units lost on it for nothing`; next = alt; fk = 'benched'; }
     }
     this._firedRung = fk;   // ai-lab decision-path: which rung justified the current decision this tick
-    if (next && next !== this.step && (this.t > DWELL || URGENT.has(next))) this._switch(next, cmd, why);
+    // Switch on dwell, on an urgent mission, OR (weights) when a fresh event has spiked the
+    // pick decisively past the running mission — so an exposed flag / lost unit re-decides now
+    // instead of waiting out the dwell.
+    const curKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;   // the RUNNING plan's full scored key
+    const decisive = missionWeightsOn(cmd) && next !== this.step && (cmd._missionTop != null) && (cmd._missionTop - (missionScore(cmd, curKey).total) >= 4);
+    // Weights re-think on a calmer clock (8s) than the classic cascade's 1.5s — the incumbent
+    // bonus + this dwell kill the flapping; a DECISIVE score jump (an event spike: flag opened,
+    // runner died) still switches immediately.
+    const dwell = missionWeightsOn(cmd) ? 8 : DWELL;
+    if (next && next !== this.step && (this.t > dwell || URGENT.has(next) || decisive)) this._switch(next, cmd, why);
   }
   // Emergencies that preempt any persona's plan: our flag's been lifted → run it down;
   // the thief died and dropped it in the field → go RECOVER it (any teammate's touch snaps
@@ -605,12 +816,25 @@ class Doctrine {
     // characterful line, the bracket names the transition and WHY it happened, so every
     // mission change in the log is auditable (from → to — reason).
     if (this.log) this.log(`${this.mission.cry(cmd)}   [${from} → ${key}${why ? ' — ' + why : ''}]`);
+    if (this.log && missionWeightsOn(cmd)) { const bd = missionScoreLog(cmd); if (bd) this.log(`  ↳ ${bd}`); }   // MissionScore troubleshooting breakdown
   }
   // Runner died storming the base → respond to WHY, instead of feeding another firebrat down
   // the same lane. Shot by an enemy VEHICLE → send an ATTACK to clear the interceptor first
   // (timed window). Shot by TOWERS on the approach → retry as a STEALTH capture: a wide rear
   // route around the hot zone (the flag's still grabbable, just not head-on).
   onRunnerLost(cmd, enemyHasUnits) {
+    if (missionWeightsOn(cmd)) {
+      // MISSIONSCORE: a dead runner is a FAILED capture — drop THAT DIRECTION's success
+      // memory and let the scorer re-decide from the board: attack the interceptor, re-siege,
+      // or send the next runner down a DIFFERENT lane (the other three directions keep their
+      // own clean records). No forced switch, no clear/soften timers: those loops (60s sweep ↔
+      // re-feed the runner up the same lane) are exactly what the weights replace.
+      if (!cmd._missionSuccess) cmd._missionSuccess = {};
+      const failedKey = (cmd._msnKey && cmd._msnKey.startsWith('capture-')) ? cmd._msnKey : 'capture-front';
+      cmd._missionSuccess[failedKey] = -4;
+      this.t = DWELL + 1;   // let the very next tick re-decide (event: our runner just died)
+      return;
+    }
     if (RUNNER_MODE === 'old') { this._switch(this.softenKey, cmd); return; }   // A/B baseline: blind re-siege
     // Defenders still alive → switch to ATTACK NOW (so the NEXT deploy is a fighter, not
     // another firebrat) and hold it there for a window to clear them, then resume the grab.

@@ -1,0 +1,56 @@
+VERDICT — 2026-07-18 MissionScore (the weighted mission picker replaces the playbook cascade)
+==============================================================================================
+
+Batch (uncommitted in /rmrf/): the commander's mission choice becomes ONE weight table —
+a fight-or-flight for strategy (blueprint: devblog/post19.html; story: post20.html).
+Dual-brain build: RR.setMissionWeights selects scorer vs classic cascade globally;
+RR.setMissionWeightsTeam(team, on) runs them head-to-head in one match.
+
+  - 13 scored missions: scout, attack, siege, siege-back (NEW rear-lane opener),
+    capture ×4 DIRECTIONS (front/left/right/rear), defend, intercept, scavenge, sap, trap.
+    The mission picks its own vehicle; what we own feeds the weight (fleet-comp:
+    (type share − threshold) × 10 — FB→capture .40, Lurcher→attack .23,
+    Valkyrie→siege-back .15, Jotun→siege .15).
+  - SUCCESS MEMORY (the designer's north star: never repeat a failing mission): a failed
+    tour drops that mission to −4, forgiven continuously (+1 per 8s). Directional captures
+    each carry their OWN record — a runner dying on the front leaves the rear's clean.
+  - FOG-HONEST LANE INTEL: a contact notebook fed only by what units actually saw/heard.
+    Lanes score clear +1 (recent eyes, nothing known), blocked −2 (known contact on the
+    corridor), unknown 0 — scouting EARNS capture confidence. No global-truth peeking.
+  - CLOCK PRESSURE (the designer's rule): siege + capture ramp +1 per 5 min (cap +3) —
+    late-game, somebody always forces a decision.
+  - CRACK-THE-KEEP +4 (towers down, flag sealed): a dominant team goes and finishes.
+  - GRADUAL WEIGHTS (house rule): terms scale with how true their condition is — early-game
+    fades over 2 min, few-kills tapers across 3, just-lost stings then fades over 20s,
+    losing scales with the fleet deficit (re-anchored to start at −2), success memory
+    decays continuously. Facts (flag OPEN, need-parts) stay binary.
+  - Anti-flap: +1.5 incumbent bonus + 8s re-think; DECISIVE score jumps (event spikes:
+    flag stolen +12, flag loose +10, runner died, flag opened) re-decide immediately.
+  - Every decision logs its full term math ("capture-right +11 (flag OPEN +4, lane clear
+    +1, ...)") — RR.missionScores() feeds the ai-lab console.
+
+TUNING ARC (each fix named by a deterministic log autopsy):
+  A1 draft weights:    mirror 22/30 · h2h 26–34 (loses)
+  + win-pressure (flag OPEN +4) & runner-death → success memory:   mirror 29/30
+  + directional captures & lane intel & siege-back:                h2h 27–23 (first win)
+  + crack-the-keep & attrition-unlock & clock pressure:            mirror 29/30 · h2h 35–22
+  + gradual weights (re-anchored):                                 mirror 28/30 @488s · h2h 31–28
+
+THE CHAOS-SHINE LESSON: the 35–22 didn't survive re-measurement (30–29, 31–28 on
+near-identical builds; the re-anchored mirror came out BYTE-IDENTICAL to the gradient
+round while h2h still moved). Even a 60-match deterministic head-to-head carries ±4–5
+games of build-to-build reshuffle. Determinism makes measurements exact, not comparisons
+noise-free. One shiny scoreboard is not a mandate.
+
+FINAL BOARD                       classic cascade      MissionScore
+  mirror health                   27/30 @ 654s         28/30 @ 488s  (fewer stales, 25% faster)
+  head-to-head                    —                    ~+2 margin (30/31/35 across runs; never behind)
+  chronic finish-failures         stuck loops          fixed by DESIGN (reroute, crack keep, clock)
+  seed 116 (8 doomed runners)     stale 1100s+         resolves — runner reroutes around the guard
+  explainability                  if-else archaeology  full term math on every decision
+  tuning                          ~300 builds of edits one readable table; weights evolvable later
+
+VERDICT: KEEP — MissionScore becomes the DEFAULT brain (the cascade stays in the build
+behind the knob as the A/B baseline). Equal-or-better on every measured axis, dramatically
+better on the designed behaviors and on being understood. Remaining upside: weight
+evolution (breed the table like the fight-or-flight weights).
