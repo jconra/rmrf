@@ -209,7 +209,12 @@ const CONDITIONS = {
     // "Jotun flees a Valkyrie at 5% HP" bug). It always has fof ≥ jotunFloor when it has ammo.
     if (v.enemy && p.focus && v.self.type !== 'jotun') {
       const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
-      const brawlR = (v.engageRange || 36) * (1.25 - 0.75 * p.focus);
+      // HYSTERESIS (anti boundary-strobe): enter the brawl at brawlR, but once we're ALREADY
+      // fighting hold it out to a wider ring. Without this, a kited enemy hovering right at
+      // brawlR flipped engage↔advance every tick — the two states pull opposite ways, so the
+      // unit lurched in place and self-scuttled on a pin (the "open-ground grind" that was
+      // never terrain). Mirrors what fofStick does for the fight-score boundary.
+      const brawlR = (v.engageRange || 36) * (1.25 - 0.75 * p.focus) * (m.state === 'engage' ? 1.4 : 1);
       if (dx * dx + dz * dz > brawlR * brawlR) return false;   // too far to be worth leaving the mission
     }
     return true;

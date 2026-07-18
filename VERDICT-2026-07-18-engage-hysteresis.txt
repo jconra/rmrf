@@ -1,0 +1,47 @@
+VERDICT — 2026-07-18 engage-distance hysteresis (the "terrain grind" that was really combat)
+=============================================================================================
+
+One-line change in AI.js (the `engaging` brain condition): once a unit is ALREADY in engage,
+hold the brawl out to 1.4× brawlR instead of dropping it the instant a kited enemy drifts one
+unit past the entry radius. Mirrors the fofStick bias that already anti-strobes the fight-SCORE
+boundary; this anti-strobes the DISTANCE boundary.
+
+THE HUNT (a forensics story, and two dead ends the instrument caught):
+  "Terrain grinding" (the leftover driver alarms) was assumed to be nav — hulls sliding walls
+  and shorelines. A geometry-fingerprint harvest (~/pw/grind-harvest.cjs: blocked-ring probe +
+  water distance + recorder tail per alarm) split 49 alarms into "water edge" (26) and "open
+  ground" (21). The open-ground class was misdiagnosed TWICE:
+    1. FUSED HULLS — one scene showed a "friendly at 0.8u", so I built a hull-ahead governor +
+       a separation nudge. Re-harvest came back BYTE-IDENTICAL; a separation counter read ZERO
+       overlaps all match. The "0.8u friendly" was the SAME unit measured against its own stale
+       alarm coordinate while it jittered in place. Both fixes reverted (no-ops).
+    2. SHORE MARGIN vs GOVERNOR — I credited a water-class drop to a shore-margin A* cost, but
+       never isolated it from the governor. Isolating it (shore-only) came back at 49 = fixing
+       NOTHING. The alarm count is CHAOS-SENSITIVE: any perturbation reshuffles the deterministic
+       matches ±10 alarms, and single-fix attribution is unreliable. All perturbation fixes
+       reverted to clean HEAD.
+  The one thing crisp through all of it: the flight recorder showed `ord` alternating
+  KITE(engage) ↔ GOTO(advance) EVERY TICK — a boundary strobe at AI.js:213. The engage
+  distance-gate had no hysteresis, so a kited enemy hovering at brawlR flipped the state each
+  tick; the two states pull ~180° apart, the unit lurched in place, netted zero, and
+  self-scuttled on a pin. That was the "open-ground grind" — combat, never terrain.
+
+FALSIFICATION: seed 25 (a flap map) 6 alarms → 2; every diagnosed strobe position gone.
+
+EXACT GATE (deterministic, MissionScore ± hysteresis, 30 seeds @1500s):
+                          BEFORE          AFTER
+  resolved                28/30           28/30   (identical seeds; 95 & 137 stale both)
+  avg resolve             488s            451s    (-8% — flapping units now finish their fight)
+  driver alarms           49              31      (-37%)
+  per-seed regressions    —               none (several sped up: 88 380s→144s, 116/186/207 faster)
+
+VERDICT: KEEP — a principled fix (kills a specific real oscillation), strictly better: same
+resolution, faster, fewer alarms, no regression. The difference between a FIX and a
+perturbation: a fix makes the diagnosed failure disappear reproducibly; a perturbation just
+moves the chaos around.
+
+RESIDUAL (the remaining 31, for later): ~8 still engage/KITE flaps (1.4× doesn't catch every
+geometry — a wider or velocity-aware hold could); seed 95 is a pathological map (15 of the 31);
+several are long-distance GOTO stalls (units on 150-240u treks at 0% — genuine nav, distinct
+from the flap). The chaos-sensitivity of the alarm count means these want the SAME discipline:
+principled fixes with falsification, not count-chasing.
