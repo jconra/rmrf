@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the brain that beat the brain</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .radio { background:#0a0f16; border-left:3px solid var(--blue); border-radius:4px;
+           padding:8px 12px; margin:10px 0; font-size:12px; color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+  .k b.g { color:var(--good); } .k b.w { color:var(--warn); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post19.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 20 · the brain that beat the brain</div>
+</header>
+<main>
+
+<article>
+  <h2>The brain that beat the brain</h2>
+  <div class="date">2026-07-18 · MissionScore ships — five tuning rounds, one dethroned cascade, and a lesson about shiny scoreboards</div>
+
+  <p>Post 19 was the blueprint: score every mission from the board state, run the highest,
+  never repeat a failure. This post is what happened when the table met the incumbent — the
+  hand-tuned playbook cascade, ~300 builds of accumulated fixes, the brain that has run every
+  match this game has ever played.</p>
+
+  <h3>Two arenas</h3>
+  <p>Because both brains live in one build behind a switch, the new one had to win twice.
+  <b>Mirror matches</b> (new brain on both sides): is the game still healthy? And
+  <b>head-to-head</b> (one brain per team, every seed played twice with sides swapped): who
+  actually wins? The first draft lost the fight badly — 26&ndash;34 — and every loss taught a
+  named lesson, because every decision now logs its arithmetic:</p>
+
+  <table>
+    <tr><th>round</th><th>the autopsy said</th><th>the fix</th><th>result</th></tr>
+    <tr><td>1</td><td>a team sat in <code>attack 3.7 &gt; capture 3.0</code> for 700s with the
+      enemy flag OPEN</td><td>win-pressure: flag OPEN +4, grabbable +2; runner deaths flow into
+      the success memory</td><td>mirror 29/30</td></tr>
+    <tr><td>2</td><td>runners still fed one guarded lane</td><td>directional captures + the
+      fog-honest lane intel + siege-back</td><td>head-to-head flips: 27&ndash;23</td></tr>
+    <tr><td>3</td><td>a turtle with 11 kills and a flattened enemy base camped home to the
+      buzzer; the loser was handcuffed to defend</td><td>crack-the-keep +4; the attrition
+      hard-lock becomes a weight; clock pressure (+1 per 5 min to siege/capture — the
+      designer&rsquo;s rule)</td><td>mirror 29/30 · h2h 35&ndash;22</td></tr>
+    <tr><td>4</td><td>&ldquo;any time we can gradually adjust the weights, that is better than
+      binary additions&rdquo; — the designer&rsquo;s house rule</td><td>every measure-type term
+      becomes a gradient (early fades, losses sting then heal, deficits scale); facts stay
+      binary</td><td>mirror 28/30 at 488s — the fastest healthy board ever</td></tr>
+  </table>
+
+  <h3>The reroute, live</h3>
+  <p>The signature moment, from a real match log — the seed where the old brain once threw
+  eight straight runners up the same guarded lane for eighteen minutes:</p>
+  <div class="k" style="color:var(--ink)">
+    734s CYAN: The flag&rsquo;s wide open — send the runner, grab it and RUN!<br>
+    &nbsp;&nbsp;&#8627; capture-right <b class="g">+11</b> (flag OPEN +4, grabbable +2, towers down right +1, <b class="g">lane clear +1</b>, spare FB +1, fleet F +2)<br>
+    &nbsp;&nbsp;&gt; capture-left +10 &nbsp;&gt; capture-front +9 (&hellip; <b class="w">lane blocked &minus;2</b> &hellip;)
+  </div>
+  <p>The front lane carries a known interceptor — scored down. The right lane was scouted clear —
+  scored up. The runner goes right and wins the match. And the intel is honest: lanes are only
+  &ldquo;clear&rdquo; if our units actually had eyes on them; an unscouted lane is <i>unknown</i>,
+  so scouting earns confidence instead of the commander peeking through the fog.</p>
+
+  <h3>The chaos-shine lesson</h3>
+  <p>Round 3&rsquo;s 35&ndash;22 looked like a knockout. It wasn&rsquo;t reproducible: two more
+  measurements of near-identical builds came back 30&ndash;29 and 31&ndash;28 — and one of those
+  builds produced a mirror board <i>byte-identical</i> to its predecessor while the head-to-head
+  still moved. Deterministic matches make each measurement exact, but comparisons between builds
+  still reshuffle &plusmn;4&ndash;5 games of pure chaos. A shiny scoreboard is not a mandate;
+  the honest claim is &ldquo;slightly ahead, never behind, across every measurement.&rdquo;</p>
+
+  <h3>The verdict</h3>
+  <table>
+    <tr><th></th><th>classic cascade</th><th>MissionScore</th></tr>
+    <tr><td>mirror health</td><td>27/30 @ 654s</td><td><b class="good">28/30 @ 488s</b></td></tr>
+    <tr><td>head-to-head</td><td>&mdash;</td><td><b class="good">ahead in every run</b> (30/31/35 of 59&ndash;60)</td></tr>
+    <tr><td>the chronic never-finishers</td><td>stuck loops</td><td><b class="good">fixed by design</b></td></tr>
+    <tr><td>why did it do that?</td><td>read the code, guess</td><td><b class="good">read the log line</b></td></tr>
+  </table>
+
+  <p>MissionScore is now the <b>default brain</b>. The cascade stays in the build behind the
+  switch — a permanent baseline, and a reminder. The neural net couldn&rsquo;t beat the cascade
+  (post 14); the designer&rsquo;s weight table did. Turns out the winning move was making the
+  judgment <i>legible</i> — a table a person can read, argue with, and tune in an afternoon —
+  and then letting the logs name every mistake.</p>
+
+  <p class="fine">Blueprint: post 19 &middot; verdict file:
+  <code>VERDICT-2026-07-18-missionscore.txt</code> &middot; knobs:
+  <code>RR.setMissionWeights</code> / <code>RR.setMissionWeightsTeam</code> (head-to-head in one
+  match) &middot; someday: breed these weights like the fight-or-flight table. Next: the last nav
+  alarms — terrain grinding — then sight becomes a cone and sneaking gets real.</p>
+</article>
+
+</main>
+</body>
+</html>

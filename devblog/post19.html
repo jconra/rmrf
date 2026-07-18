@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — one number per plan</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:820px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  .matrix-wrap { overflow-x:auto; margin:12px 0; border:1px solid #223041; border-radius:8px; -webkit-overflow-scrolling:touch; }
+  table.mx { border-collapse:collapse; font-size:11px; min-width:760px; width:100%; }
+  table.mx th, table.mx td { text-align:left; padding:5px 8px; border-bottom:1px solid #1c2836; border-right:1px solid #1c2836; vertical-align:top; white-space:nowrap; }
+  table.mx thead th { color:var(--blue); font-weight:normal; font-size:10px; letter-spacing:.5px; background:#0f1822; position:sticky; top:0; }
+  table.mx tbody th { color:var(--accent); font-weight:bold; background:#101a24; position:sticky; left:0; white-space:nowrap; }
+  table.mx td { color:var(--dim); }
+  table.mx .g { color:var(--good); } table.mx .r { color:var(--bad); } table.mx .w { color:var(--warn); }
+  table.mx tr.off th { color:var(--accent); } table.mx tr.def th { color:#8fd0ff; } table.mx tr.eco th { color:#c8a8f0; }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+  .k b.g { color:var(--good); } .k b.r { color:var(--bad); } .k b.w { color:var(--warn); }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post18.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post20.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 19 · one number per plan</div>
+</header>
+<main>
+
+<article>
+  <h2>One number per plan</h2>
+  <div class="date">2026-07-17 · the blueprint for MissionScore — a fight-or-flight for strategy</div>
+
+  <p>The AI already has a number that decides every fight: the fight-or-flight score, a stack of
+  weighted terms — my hp, my ammo, the matchup, the numbers, who has whose back — that adds up to
+  a single signed value. Positive, fight; negative, run. It works because it&rsquo;s <i>one place</i>
+  where every consideration meets.</p>
+
+  <p>Strategy has never had that. The commander picks its mission from a cascade of if-statements
+  and a persona playbook, and its only memory of failure is a crude &ldquo;ban a mission after two
+  strikes.&rdquo; So a winning team can throw the same doomed flag-runner up the same guarded lane
+  eight times in a row (that really happened — a match where the flag sat grabbable for eighteen
+  minutes while the runner died and died and died). The designer&rsquo;s rule for the fix is one
+  line: <b>the worst thing you can do is repeat a mistake.</b></p>
+
+  <p>So: <b>MissionScore</b> — a fight-or-flight for strategy. Every mission gets a weight from the
+  same board state; the commander runs the highest one. It&rsquo;s the job we hoped the neural net
+  would learn (it couldn&rsquo;t beat the hand-tuned table), written out by hand — and, like the
+  fight weights before it, a candidate to be <i>evolved</i> later.</p>
+
+  <h3>How it reads the board</h3>
+  <ul>
+    <li><b>Every mission is scored, including the emergencies.</b> &ldquo;Chase the flag thief&rdquo;
+    isn&rsquo;t a special override — it&rsquo;s just the Intercept mission, whose weight spikes the
+    instant our flag is picked up.</li>
+    <li><b>Events force a re-think.</b> Flag exposed, flag stolen, flag dropped, a unit lost — each
+    forces an immediate re-score instead of waiting out the current mission&rsquo;s dwell, so the
+    commander snaps to what just changed.</li>
+    <li><b>The mission picks its own vehicle.</b> We score ~14 missions, not 14&times;4 mission-and-vehicle
+    pairs. Which ride to send is the mission&rsquo;s call; what we <i>have</i> feeds the weight.</li>
+    <li><b>Never repeat a failure.</b> Every mission carries a <code>success</code> value: it drops
+    to &minus;4 when the mission fails and drifts back toward 0 a little each decision — so a
+    just-failed plan is suppressed, then slowly forgiven once something else works.</li>
+  </ul>
+
+  <h3>The table</h3>
+  <p>Missions down the side, weight sources across the top. Read a <i>column</i> to see everything a
+  factor touches — the <b>Front towers</b> column shows the same towers <i>encouraging</i> a front
+  siege while they stand and <i>encouraging</i> a front capture once they fall. (Scroll it sideways.)</p>
+
+  <div class="matrix-wrap">
+  <table class="mx">
+    <thead>
+      <tr>
+        <th>Mission</th><th>Base</th><th>Flag exposed?</th><th>Front towers</th><th>Rear towers</th>
+        <th>Left / Right towers</th><th>Fleet-comp<br>(share&minus;thr)&times;10</th><th>Own triggers</th><th>Persona</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="off"><th>Scout</th><td class="g">+1</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="g">unexplored &times;4 · early +2</td><td>Rogue/Hunter +1</td></tr>
+      <tr class="off"><th>Attack</th><td class="g">+1</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="g">Lurcher, thr .23</td><td class="g">few kills +2 · lost a unit +2 · lane blocked +2</td><td>Warrior +2 · Hunter +1</td></tr>
+      <tr class="off"><th>Siege &mdash; front</th><td>&mdash;</td><td class="g">sealed +2</td><td class="g">+1 / standing</td><td>&mdash;</td><td>&mdash;</td><td class="g">Jotun, thr .15</td><td>&mdash;</td><td>Warrior/Hunter +1</td></tr>
+      <tr class="off"><th>Siege &mdash; back</th><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="g">+1.5 / standing</td><td>&mdash;</td><td class="g">Valkyrie, thr .15</td><td class="g">opens rear capture +1</td><td>Rogue +2</td></tr>
+      <tr class="off"><th>Capture &mdash; front</th><td>&mdash;</td><td class="r">&minus;10 if not</td><td class="g">+1 / down (&le;+2)</td><td>&mdash;</td><td>&mdash;</td><td class="g">Firebrat, thr .40</td><td class="g">lane clear +1</td><td>Rogue +1</td></tr>
+      <tr class="off"><th>Capture &mdash; left</th><td>&mdash;</td><td class="r">&minus;10 if not</td><td>&mdash;</td><td>&mdash;</td><td class="g">+1 / left down</td><td class="g">Firebrat, thr .40</td><td class="g">lane clear +1</td><td>Rogue +1</td></tr>
+      <tr class="off"><th>Capture &mdash; right</th><td>&mdash;</td><td class="r">&minus;10 if not</td><td>&mdash;</td><td>&mdash;</td><td class="g">+1 / right down</td><td class="g">Firebrat, thr .40</td><td class="g">lane clear +1</td><td>Rogue +1</td></tr>
+      <tr class="off"><th>Capture &mdash; rear</th><td>&mdash;</td><td class="r">&minus;10 if not</td><td>&mdash;</td><td class="g">+2 if both down</td><td>&mdash;</td><td class="g">Firebrat, thr .40</td><td class="g">lane clear +1</td><td>Rogue +2</td></tr>
+      <tr class="off"><th>Trap</th><td>0</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="g">kit + a chaser to bait +2</td><td>Hunter +3</td></tr>
+      <tr class="def"><th>Defend</th><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="w">base under fire +4 · losing +2 · our flag exposed +2</td><td>Turtle +2</td></tr>
+      <tr class="def"><th>Intercept</th><td class="r">&minus;5</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="w">our flag STOLEN +12 &#9889;</td><td>&mdash;</td></tr>
+      <tr class="def"><th>Recover</th><td class="r">&minus;5</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="w">our flag LOOSE +10 &#9889;</td><td>&mdash;</td></tr>
+      <tr class="eco"><th>Scavenge</th><td>0</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="g">need parts, can&rsquo;t afford a runner +4</td><td>&mdash;</td></tr>
+      <tr class="eco"><th>Sap</th><td>0</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td class="g">early + spare FB +2 (one-shot)</td><td>Rogue/Hunter +1</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="fine">&#9889; = an event spike that also <i>forces</i> an immediate re-score. Two more
+  terms ride on <b>every</b> row and aren&rsquo;t drawn above:</p>
+  <div class="k">
+    <b class="r">Success</b> &nbsp;0 normally &rarr; drops to &minus;4 the moment a mission fails, then
+    +1 back toward 0 each decision. The anti-repeat memory — a plan that just died gets benched, then
+    forgiven once something else lands.<br><br>
+    <b class="r">Affordability</b> &nbsp;&minus;6 if we can&rsquo;t field or afford the mission&rsquo;s
+    vehicle at all (a Capture with no runner and no scrap for one). Keeps the scorer honest about
+    what&rsquo;s actually on the lot.
+  </div>
+
+  <h3>The fleet-comp term, in full</h3>
+  <p>Play to your strength. Each vehicle type, once it&rsquo;s a big enough share of the fleet, pushes
+  the mission it&rsquo;s built for. The push <b>scales</b>: <code>(type&rsquo;s share of the fleet
+  &minus; its threshold) &times; 10</code>, bonus-only.</p>
+  <ul>
+    <li><b>Firebrat</b> &rarr; Capture &nbsp;(threshold 0.40)</li>
+    <li><b>Lurcher</b> &rarr; Attack &nbsp;(0.23)</li>
+    <li><b>Valkyrie</b> &rarr; Siege-back &nbsp;(0.15)</li>
+    <li><b>Jotun</b> &rarr; Siege-front &nbsp;(0.15)</li>
+  </ul>
+  <p>Example — a fleet of 2 Firebrats and 2 Jotun: Jotun is half the fleet, so Siege-front gets
+  <b class="fine" style="color:var(--good)">(0.50 &minus; 0.15) &times; 10 = +3.5</b>; Firebrat is
+  also half, so Capture gets <b class="fine" style="color:var(--good)">(0.50 &minus; 0.40) &times; 10 =
+  +1.0</b>. A heavy-Jotun army naturally leans on the front siege; a runner-heavy one leans on the
+  grab — and it slides smoothly as the fleet takes losses.</p>
+
+  <h3>What you&rsquo;ll see</h3>
+  <p>Every decision logs its math, top plans first, straight into the AI Lab console:</p>
+  <div class="k" style="color:var(--ink)">
+    capture-rear <b class="g">+6</b> &nbsp;(exposed 0 · rear towers down +2 · rogue +2 · fleet FB +1 · success 0)<br>
+    siege-front &nbsp;<b class="w">+3</b> &nbsp;(+3 towers · flag sealed +1 · warrior +1 · success &minus;2)<br>
+    attack &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<b class="w">+2</b> &nbsp;(few kills +1 · just lost a unit +1)
+  </div>
+
+  <p class="fine">Status: blueprint. Next is Slice A — the scorer scaffold with these numbers, the
+  log breakdown, the success memory, and the forced re-score events, behind an A/B knob against
+  today&rsquo;s playbook. The numbers here are a starting point; they get tuned by watching those
+  reasons scroll, and this page is the map we&rsquo;ll tune against.</p>
+</article>
+
+</main>
+</body>
+</html>
