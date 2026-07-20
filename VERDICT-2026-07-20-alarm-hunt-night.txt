@@ -1,0 +1,55 @@
+VERDICT — 2026-07-20 night shift: the alarm hunt (post-commit b9d57ed work, UNCOMMITTED)
+=========================================================================================
+
+Jacob's directive: bring the ~30 residual nav alarms down; keep at it. Three real bugs found,
+fixed, and falsified; three residual mechanisms precisely diagnosed for next time.
+
+FIX 1 — TURRET_SENSE cap restored in the v2 standoff picker (js/main.js _pickStandoff).
+  The port dropped the classic 96u sense cap, so in pockets where the local fort was dead the
+  picker injected a tower from ACROSS THE MAP (139u) as the threat. The keep-promotion logic
+  (rightly) preferred the keep 14u away — and the two fought for the goal EVERY TICK (LOS to the
+  far tower flickered with the unit's own ±0.5u ping-pong: a closed feedback loop). Recorder
+  tail: three orders cycling at 10Hz with opposite pedals, net zero = the DIRECT(suppress) pin.
+  FALSIFIED: seed 32's three pins → gone (1 unrelated stall remains).
+
+FIX 2 — _stand2 added to the per-slot record (was commander-shared; multi-unit slots would
+  fight over one commitment). Not the observed oscillator, but a real latent bug.
+
+FIX 3 — "Won the war, wouldn't take the flag" (the 2 flattened-base stalemates).
+  Three stacked causes, all from the capture overhaul: (a) the escalating penalty benched ALL
+  capture lanes at −16 after 2 runner losses; (b) the slow decay was EATEN BY ROUNDING (per-tick
+  increment 0.05s×0.033≈0.0017 rounded to 2 decimals = 0 — the bench never lifted; seed 102 sat
+  at −13 with the flag open 400s after the last loss); (c) nothing said "the world changed".
+  Fixes: no-rounding decay + DECISIVE-EVENT FORGIVENESS — when the flag becomes newly exposed
+  (keep cracked), clear the capture bench: the runners died against a STANDING fort, that lesson
+  no longer describes the board (MissionScore's own philosophy). "Never repeat a mistake" keeps
+  its missing half: a lesson expires with the world it was learned in.
+  FALSIFIED: seed 102 (enemy eliminated + base flattened, stale 1500s) → capture at t315, WIN
+  at t665. Seed 32's stale → W17640.
+
+GATE (30 seeds @1500s, current build):
+  resolved 29/30 (only seed 95, the known pathological map)
+  avg resolve 646s · nav alarms 29 · violations 367
+  Alarm count vs the ship gate's 30: FLAT — the two thrash classes fixed tonight were largely
+  REPLACED by reshuffled residuals (chaos-sensitivity, as always). The wins are the two
+  formerly-unwinnable games and the two eliminated oscillation mechanisms, not the count.
+
+RESIDUALS — DIAGNOSED, ready for next session (all context captured, ~1-2 alarms/30 each):
+  1. SHORE STAND-DANCE (suppress DIRECT pins at waterlines, e.g. seed 60 red @(53.7,135.1)):
+     close-in suppress near a shore sweeps the hull ±60° at full turn rate with jolts — an
+     aim/steer oscillation vs water the 2.5u ring sees (blocked E/SE). Candidate: shore-margin
+     test on stand candidates for sinkers, or damp the square-up turn near blocked feelers.
+  2. GATE-BAND HUG (e.g. seed 60 blue @(-103.4,-67.2), gate cells 8u away): the closed-gate
+     PHYSICS band (halfNorm+VEH_R) is wider than the nav grid's blocked gate cells, so an A*
+     route can hug it; the omni hull presses the band and CREEPS (~0.15u/s — real progress, so
+     the progress-gated stuck-escalation never fires, but the net<20u alarm does). Candidates:
+     inflate the gate nav footprint by ~VEH_R (gateSideCells mechanism already exists), or make
+     the escalation trigger on creep-rate.
+  3. KITE/ENGAGE GRINDS (~4/30): the known velocity-aware-hold residual from the 07-18 verdict.
+
+TOOLING BANKED: ~/pw/_pinprobe*.cjs (physics at alarm moment), _standwatch/_flipwatch (per-tick
+goal/selector watch), _gatecheck2 (gate cells near a point). The forensic loop that cracked both
+oscillators: classify → recorder tail → tick-watch the selector → falsify on the exact seed.
+
+STATE: all three fixes UNCOMMITTED on local HEAD (per the batch rule — Jacob reviews in the
+morning). Machine shut down after this note per his request.

@@ -677,8 +677,18 @@ export function missionPick(cmd, incumbent = null) {
   // Decay is SLOW on purpose (Jacob: a failed mission shouldn't be repeated over and over) — a
   // benched plan eases back over ~half a minute per point, so a deep −14 stays out most of the
   // match unless the board genuinely changes. (Was +1/8s, which recovered before the next runner
-  // even died — the anti-repeat barely bit.)
-  if (el > 0) for (const k in S) { S[k] = Math.min(0, Math.round((S[k] + el * 0.033) * 100) / 100); if (S[k] > -0.05) delete S[k]; }
+  // even died — the anti-repeat barely bit.) NO rounding here: a per-tick increment (0.05s ×
+  // 0.033 ≈ 0.0017) rounded to 2 decimals is rounded BACK TO ZERO — the bench never lifted
+  // (seed 102: capture still −13 with the flag sitting open, 400s after the last loss).
+  if (el > 0) for (const k in S) { S[k] = Math.min(0, S[k] + el * 0.033); if (S[k] > -0.05) delete S[k]; }
+  // DECISIVE-EVENT FORGIVENESS: the flag just became EXPOSED (their keep cracked). The runners
+  // that died before, died against a STANDING fort — that lesson no longer describes the board
+  // (the whole MissionScore philosophy: score the situation in front of you). Clear the capture
+  // bench so an open flag can actually be wanted; the towers/defenders that remain still shape
+  // the score through their own live terms.
+  const exp = (() => { try { return cmd.flagExposed(); } catch (e) { return false; } })();
+  if (exp && !cmd._expForgave) { cmd._expForgave = true; for (const k in S) if (k === 'capture' || k.startsWith('capture-')) delete S[k]; }
+  else if (!exp) cmd._expForgave = false;
   let best = null, bestV = -1e9; const all = [];
   for (const key of MSN_CANDS) {
     const r = missionScore(cmd, key);

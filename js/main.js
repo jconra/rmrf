@@ -5167,6 +5167,7 @@ function freshSlot() {
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
     _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
     _standRot: 0, _standRotN: 0,                       // siege-stand rotation: driver said the standoff is unreachable → try the next bearing
+    _stand2: null,                                     // standoff v2 commitment — PER SLOT (left off the record once: two siege slots shared one commit and ping-ponged goals every tick — the DIRECT(suppress) pin class)
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
     _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
@@ -7010,7 +7011,9 @@ class AICommander {
         if (!t || t.dead || t.falling) continue;
         if (rearPred && !rearPred(cc, w)) continue;
         t.group.updateWorldMatrix(true, false); t.head.getWorldPosition(_threatV);
-        live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d: (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2 });
+        const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
+        if (d > TURRET_SENSE * TURRET_SENSE) continue;   // same sense cap as the classic scan — a tower across the MAP is not this unit's fight (an uncapped pick injected a 139u tower as threat and fought the keep-promotion for the goal every tick: the DIRECT(suppress) pin class)
+        live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d });
       }
     }
     if (!live.length) return null;
