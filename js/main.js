@@ -4646,6 +4646,19 @@ function cellBlocked(v, i, j) {
   if (islandBound && x * x + z * z > islandBound * islandBound) return true;
   const gw = gateCells.get(i + ',' + j);
   if (gw) return v._move.ignoreWalls ? false : gateBlocks(gw, v.team);   // shut enemy gate blocks; ally/open/breached/flyer → passable
+  // A shut gate's collision slab (blockedFor: halfNorm + VEH_R each side of the plane) is
+  // WIDER than the corridor/jamb cells above — cell centres one row off the plane sit 5u out
+  // vs a 4.6u slab edge, so A* could legally route a hull-width path along the door and leave
+  // the unit pressing it, creeping ~0.15u/s ("gate-band hug"). Mirror the slab here with the
+  // planning margin so nav stands off a shut gate exactly as far as collision does. Checked
+  // per-team like the corridor, so it opens the moment the gate is breached or held.
+  if (aiGateBand && !v._move.ignoreWalls) for (const g of gates) {
+    const ax = x - g.gx, az = z - g.gz;
+    if (ax * ax + az * az > 400) continue;             // >20u away — can't be in any slab
+    if (!gateBlocks(g.w, v.team)) continue;
+    if (Math.abs(ax * g.nx + az * g.nz) < g.halfNorm + VEH_R + VEH_R * 0.9 &&
+        Math.abs(ax * g.px + az * g.pz) < g.halfRun + VEH_R * 0.9) return true;
+  }
   if (roadNet.cells && roadNet.cells.has(i + ',' + j)) return false;
   if (elevatorPadAt(x, z)) return false;
   if (gateSideCells.has(i + ',' + j)) return true;   // a gate flank — force the centre throat
@@ -5072,6 +5085,7 @@ function driveChassis(v, out, dt, omniTravel) {
 const STAND_ROT_STEPS = [0.5, -0.5, 0.9, -0.9, 1.3, -1.3];
 let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverseCap toggles for A/B bisection)
 let aiStandRotOn = true;    // rotating stand search on/off (RR.setStandRot)
+let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab in nav (RR.setGateBand) — stops the gate-band hug
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
 setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
@@ -9466,6 +9480,7 @@ window.RR = {
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)
+  setGateBand: on => { aiGateBand = !!on; return aiGateBand; },         // nav mirrors the shut-gate physics slab (A/B the gate-band-hug fix)
   setSightCone: on => { sightCone = !!on; return sightCone; },          // forward vision cone on/off (stealth A/B tournament)
   getSightCone: () => sightCone,
   setConeAngles: (full, half, blind) => { if (full != null) CONE.full = full; if (half != null) CONE.half = half; if (blind != null) CONE.blind = blind; return { ...CONE }; },

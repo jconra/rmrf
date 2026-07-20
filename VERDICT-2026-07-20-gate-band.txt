@@ -1,0 +1,66 @@
+VERDICT — 2026-07-20 morning: gate-band hug fix (SHIPPED) + shore stand-dance (reverted)
+=========================================================================================
+
+Directive (morning): keep driving the residual nav alarms down. Two of the three night-verdict
+residuals were built and gated with the full isolation discipline. One ships; one reverts.
+
+--- SHIP: GATE-BAND HUG (js/main.js cellBlocked, knob RR.setGateBand / ?nogateband) ---------
+The bug (night verdict residual #2): a SHUT gate's collision slab in blockedFor is
+`halfNorm + VEH_R` each side of the door plane — WIDER than the nav grid's blocked gate cells.
+So A* could legally route a hull-width path along the closed door that the collision layer then
+refuses, leaving the omni hull pressing the band and CREEPING ~0.15u/s. Real progress, so the
+progress-gated stuck-escalation never fires — but the net<20u alarm does (and the unreachable-
+GOTO contract violation piles up every tick the driver refuses the nav goal).
+
+The fix: mirror the slab in cellBlocked, with the same planning margin the obstacle test uses
+(halfNorm + VEH_R + 0.9·VEH_R across the plane, halfRun + 0.9·VEH_R along it). Runs AFTER the
+corridor early-return (gateCells) so the single-file throat stays open; skipped for flyers and
+for any gate that doesn't block THIS unit (gateBlocks per-team) — so it can't strand an ally and
+it reopens the instant the gate is breached or held. 20u cull keeps it cheap in the A* hot loop.
+
+GATE (30 seeds @1500s, gate-band ON vs FROZEN a801c94, identical rig):
+                       FROZEN          SHIP (gate-band)
+  resolved             29/30 (st.95)   29/30 (st.95)     ← SAME stale seed, zero per-seed regress
+  avg resolve          646s            610s              (-6% faster)
+  nav alarms           29              25                (-14%)
+  contract violations  367             331               (-10%)
+Confirmed twice (knob-off on the both-fixes tree, and again on the reverted tree) — byte-
+identical 25/331/610. A principled correctness alignment (nav SHOULD match collision) that is
+strictly better in aggregate with no regression. KEEP.
+
+--- REVERT: SHORE STAND-DANCE (hull-footprint clearance on siege firing spots) ---------------
+The idea: a firing spot 2.5u off deep water passes _blocked but the R=3 hull's square-up sweep
+arcs into the shoreline and jolts (night residual #1). Fix tried: hullClearAt (centre + a ring
+at 1.5·VEH_R) replacing the bare _blocked in _pickStandoff spotOK, plus a proactive rotation
+walk on the in-DIRECT-range stand the driver's refusal never reaches.
+
+Why it's gone: isolated with a knob (RR.setShoreStand). Adding it ON TOP of gate-band:
+  resolved 29/30 → 28/30 (seeds 60 & 137 fall to stale: capture runners shore-wedged),
+  nav alarms 25 → 30 (WORSE), violations 331 → 192 (better, but bought with the above).
+It also NEVER FALSIFIED its own target case — seed 60's shore pin @(53.7,135.1) survived it
+unchanged (the pin is a fully water-LOCKED firing geometry: the tower is across the water, every
+bearing in the bounded rotation cone still faces the sea, so the exhaustible ±0.5..1.3rad walk
+gives up and the unit sits). All the fix did was perturb siege-stand geometry enough to reshuffle
+the chaos — a textbook perturbation, not a fix. The violation drop was chaos, not a mechanism.
+
+RESIDUAL (shore stand-dance, still open, for a future pass): the right shape is NOT rotate-
+around-the-tower — it's STEP INLAND (reduce the hold range / pull the stand back off the
+waterline toward the unit) when the radial spot is water-locked, so LOS is kept from a hull-clear
+tile. Needs its own falsification on a reproducible water-locked siege; don't ship on aggregate.
+
+--- ALSO DIAGNOSED (not touched — strategy/combat layer, high perturbation risk) --------------
+The seed-60 blue cluster (4 of 5 alarms in the deep forensics) is NOT gate-band and NOT shore:
+it's a STATE/STEP oscillation — the brain flips advance↔suppress↔engage within siege as LOS to
+the tower blinks, plus a siege↔defend step flip that yanked a unit standing at the enemy base
+252u home to "defend" for one tick. Same class as the engage-strobe that already got hysteresis
+(07-18), but in the siege state. Deferred deliberately: editing the mission/state machine blind
+is the exact chaos trap that bit twice. Wants a falsifiable hysteresis on the advance↔suppress
+boundary, mirroring fofStick — a clean future task.
+
+TOOLING BANKED: ~/pw/_resprobe{,2,3}.cjs (per-alarm gate state / physics ring / nav patch / live
+replan / slot commitments; alarm tails + neighbours; ghost-unit hunt). The ghost-unit probe
+confirmed the "friendly 0.8u away" in the tails is the SAME unit vs its own stale alarm coord —
+the 07-18 false positive, re-confirmed.
+
+STATE: gate-band committed + pushed; frozen refreshed. Shore fix reverted (0 refs). Knobs added:
+RR.setGateBand / ?nogateband.
