@@ -1,0 +1,41 @@
+DIAGNOSIS (not a fix — a characterized residual for a discuss-first combat change)
+==================================================================================
+2026-07-20: the KITE/engage grind (07-18 verdict's "~8 engage/KITE flaps" residual).
+
+HARVEST (current build 85ae0c6, ~/pw/_kiteharvest.cjs, 30 seeds): 7 engage/KITE alarms, of
+which ~2-3 are REAL oscillators (the rest recover after a beat). None cause a stalemate — every
+one of these games resolves. So it's ~2-3/30 transient alarms, low frequency.
+
+MECHANISM (from the recorder tails): an engage↔advance boundary strobe driven by seesEnemy
+BLINKING (not distance — the 07-18 brawlR×1.4 already holds the distance boundary). Concrete:
+  seed 102 blue lurcher @(25.7,50.2): ord cycles
+     KITE → (15,-145) nose on threat (engage)   f=-1  (reverse toward tower cover)
+     GOTO(4,101) advance to objective            f=+1  (drive to the mission goal)
+  The two states pedal OPPOSITE (retreat-to-cover vs advance-to-goal) → net zero → grind. The
+  enemy at (15,-145) is ~195u away (likely a Valkyrie, whose LOS over terrain blinks at range):
+  each time it's visible → engage→KITE; each time it blinks out → seesEnemy false → engage drops
+  → advance→GOTO. `pursuing` doesn't bridge the gap because it needs p.aggression>0.6, and these
+  low-aggression Lurchers fall straight through to advance.
+
+WHY IT'S NOT SHIPPED BLIND: the fix is a COMBAT-BEHAVIOR change, and Jacob's rules
+([[feedback-discuss-before-code]], [[feedback-smarter-over-winrate]], [[feedback-ai-change-
+tournament]]) say a combat change gets proposed + a before/after tournament (resolution delta,
+not just alarms), not an autonomous ship. Two candidate fixes to weigh:
+
+  (A) SIGHT-HOLD HYSTERESIS (mirror the shipped engage/suppress holds, one axis over): keep
+      `engaging` true for ~0.8s after LOS drops if the last sighting is fresh + within a hold
+      radius. Cost: _view must synthesize view.enemy from _lastEnemyPos during the hold (engage
+      behavior dereferences view.enemy), so it's real surgery in _view, not a one-liner. Risk:
+      a unit could keep firing at a ghost for the hold window.
+
+  (B) ENGAGE-RANGE SANITY CAP (regardless of focus): don't KITE-retreat from an enemy far beyond
+      your own weapon reach (the 195u case). Simpler, but it changes the focus-0 "fights on
+      sight" semantics — a real aggression/balance shift that MUST be tournament-gated.
+
+RECOMMENDATION: (A) is the principled one (it's the same anti-strobe philosophy as the two holds
+shipped today), but both touch combat balance — hand to Jacob for the call + a before/after
+tournament on whichever he picks. Tool: ~/pw/_kiteharvest.cjs (engage/KITE alarms + tails;
+NOTE its flip counter is inflated by the GOTO progress-% in labels — read ord-TYPE changes, not
+the raw count).
+
+STATE: no code change. Repo clean at 85ae0c6.
