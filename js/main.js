@@ -5086,6 +5086,7 @@ const STAND_ROT_STEPS = [0.5, -0.5, 0.9, -0.9, 1.3, -1.3];
 let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverseCap toggles for A/B bisection)
 let aiStandRotOn = true;    // rotating stand search on/off (RR.setStandRot)
 let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab in nav (RR.setGateBand) — stops the gate-band hug
+let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
 setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
@@ -7017,6 +7018,17 @@ class AICommander {
   // it isn't an A* every tick. Returns { threat, threatCamp, stand, w } or null (→ old keep/breach).
   _pickStandoff(v, rearPred) {
     const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
+    // HYSTERETIC sense cap (mirrors the engage/brawlR hold): a siege STARTS only on a tower
+    // within TURRET_SENSE (the night fix — a map-distant tower is not this unit's fight), but a
+    // COMMITTED stand HOLDS out to a wider ring. Without the hold, a tower sitting right at the
+    // 96u boundary dropped out of `live` on the unit's own ±1u jitter → the commitment was
+    // dropped → threat vanished → the brain flipped suppress→advance→back every tick (the two
+    // pull different directions and the hull lurched in place: the suppress/advance strobe that
+    // led the residual violation issuers). A far tower can only be HELD if it was first
+    // committed while inside the enter ring, so the night fix's protection is untouched.
+    // 1.15× hold: wide enough to swallow the unit's own jitter at the enter ring (the strobe),
+    // tight enough not to cling to a far tower it should let go (1.35× clung and cost alarms).
+    const ENTER2 = TURRET_SENSE * TURRET_SENSE, HOLD2 = aiStandHold ? (TURRET_SENSE * 1.15) ** 2 : ENTER2;
     const live = [];
     for (const cc of camps) {
       if (cc.team === this.team) continue;
@@ -7026,8 +7038,8 @@ class AICommander {
         if (rearPred && !rearPred(cc, w)) continue;
         t.group.updateWorldMatrix(true, false); t.head.getWorldPosition(_threatV);
         const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
-        if (d > TURRET_SENSE * TURRET_SENSE) continue;   // same sense cap as the classic scan — a tower across the MAP is not this unit's fight (an uncapped pick injected a 139u tower as threat and fought the keep-promotion for the goal every tick: the DIRECT(suppress) pin class)
-        live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d });
+        if (d > HOLD2) continue;
+        live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d, enter: d <= ENTER2 });
       }
     }
     if (!live.length) return null;
@@ -7036,11 +7048,14 @@ class AICommander {
     // Hold the committed stand while its tower lives and the spot is still valid (cheap check).
     const cm = this._stand2;
     if (cm) { const T = live.find(o => o.w === cm.w); if (T && spotOK(cm.x, cm.z, T)) return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cm.x, z: cm.z }, w: T.w }; this._stand2 = null; }
-    live.sort((a, b) => a.d - b.d);   // nearest tower first
+    // A FRESH siege only starts on a tower inside the enter ring (hold-only far towers can't seed one).
+    const fresh = live.filter(o => o.enter);
+    if (!fresh.length) return null;
+    fresh.sort((a, b) => a.d - b.d);   // nearest tower first
     const c = grid.cell, unitR = TURRET_HOLD[v.type] || 40, minR = Math.max(24, unitR * STAND.band);
     const reaches = (x, z) => { const p = planPath(v, { x, z }); if (!p || !p.length) return false; const e = p[p.length - 1]; return (e.x - x) ** 2 + (e.z - z) ** 2 <= (c * 2) ** 2; };
     let budget = 8;   // A* checks this (rare) re-pick
-    for (const T of live) {
+    for (const T of fresh) {
       const cands = [];
       for (const r of [unitR, (minR + unitR) / 2, minR]) for (let b = 0; b < 24; b++) {
         const th = b / 24 * Math.PI * 2, x = T.x + Math.sin(th) * r, z = T.z + Math.cos(th) * r;
@@ -9481,6 +9496,7 @@ window.RR = {
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)
   setGateBand: on => { aiGateBand = !!on; return aiGateBand; },         // nav mirrors the shut-gate physics slab (A/B the gate-band-hug fix)
+  setStandHold: on => { aiStandHold = !!on; return aiStandHold; },      // hysteretic siege sense — hold a committed stand past the enter ring (A/B the suppress/advance strobe fix)
   setSightCone: on => { sightCone = !!on; return sightCone; },          // forward vision cone on/off (stealth A/B tournament)
   getSightCone: () => sightCone,
   setConeAngles: (full, half, blind) => { if (full != null) CONE.full = full; if (half != null) CONE.half = half; if (blind != null) CONE.blind = blind; return { ...CONE }; },

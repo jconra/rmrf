@@ -1,0 +1,48 @@
+VERDICT — 2026-07-20 afternoon: hysteretic siege sense cap (SHIPPED)
+====================================================================
+
+The bug: the night fix put a HARD 96u sense cap on _pickStandoff (a map-distant tower is not
+this unit's fight). That cap introduced a BOUNDARY. A tower sitting near 96u dropped in and out
+of the picker's `live` set on the unit's own ±1u jitter → the committed stand (`_stand2`) was
+dropped (the committed tower was no longer found in `live`) → `view.threat` went null → the
+brain's `threatened` transition flipped OFF → state went suppress→advance→suppress every tick.
+The two states pull different directions (suppress → hold at the tower; advance → the mission
+objective), so the hull lurched in place and the alarm/contract-violation counters climbed. This
+is the same shape as the engage/brawlR strobe that already got hysteresis (07-18), one layer up.
+
+The fix (js/main.js _pickStandoff, knob RR.setStandHold / ?nostandhold): a HYSTERETIC sense cap.
+A siege still STARTS only on a tower within ENTER = 96u (fresh picks iterate `live.filter(enter)`
+— the night fix's map-distant protection is fully intact, since a far tower can only be HELD if
+it was first committed inside the enter ring). But a COMMITTED stand HOLDS out to 1.15×96 ≈ 110u,
+so the unit's jitter can't knock its own commitment out of `live`. 1.15× was tuned: it's wide
+enough to swallow the boundary jitter, tight enough not to cling to a far tower (1.35× clung and
+cost +9 alarms; 1.15× costs +3, within chaos noise, while keeping the wins).
+
+FALSIFICATION (deterministic, same seed, only the knob differs — tourney KNOB doesn't touch RNG):
+  seed 95 (the pathological never-resolver of this whole session):
+      HOLD OFF → STALE, 3 alarms, 20 contract violations
+      HOLD ON  → WON @W8051, 1 alarm, 3 violations
+  The committed siege completes instead of strobing forever. Clean, reproducible.
+  (A first "342→9 flip" probe result was a FALSE POSITIVE — the probe assigned unit ids via
+  Math.random(), polluting the RNG stream; the clean deterministic re-run above is the real one.
+  Caught + corrected before shipping — noting it so the mistake isn't repeated.)
+
+GATE (30 seeds @1500s, hold 1.15× vs FROZEN ed6fbb6 = gate-band only):
+                       FROZEN          SHIP (hysteresis)
+  resolved             29/30 (st.95)   30/30  (ZERO stalemates — seed 95 now resolves)
+  avg resolve          610s            562s   (-8%)
+  contract violations  331             265    (-20%; advance-issuer 104->79 = -24%, suppress -11%)
+  nav alarms           25              28     (+3 — chaos noise, NOT a mechanism regression: the
+                                              alarms are the general shore/pin mix reshuffled by
+                                              divergence, and duration-normalized they're flat-to-
+                                              down since more matches resolve, faster)
+Both 1.35× and 1.15× eliminated ALL stalemates and resolved seed 95 — reproduced across two hold
+widths, so it's the hysteresis genuinely helping the pathological siege finish, not a lucky seed.
+KEEP.
+
+STILL OPEN (next): shore stand-dance (step-inland, per the gate-band verdict); the siege↔defend
+STEP flip (distinct from this STATE flip — a mission-weight tie, not a sense boundary); KITE
+grinds (velocity-aware hold). Tools: ~/pw/_strobe.cjs (per-unit state-flip counter — now with a
+DETERMINISTIC uid, no RNG pollution), _resprobe{,2,3}.cjs.
+
+STATE: committed + pushed; frozen refreshed. Knob RR.setStandHold / ?nostandhold.
