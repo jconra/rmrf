@@ -1,0 +1,36 @@
+VERDICT — 2026-07-19 smart siege standoff (ring-sampler + commit) — NOT SHIPPABLE YET
+=====================================================================================
+
+Jacob's design: to shell a tower, take the NEAREST one, sample a ring around it at radius = my
+range (~10° steps), keep points that are on land + have a line to the tower + are NOT in any
+other tower's range (no crossfire), nearest-to-me wins, then COMMIT (don't re-derive/hop every
+tick — that hopping was the SW-corner route thrash; "the bridge spot would've been fine, why
+didn't it keep it?"). Built as _siegeStandoff(v); disables the old radial spot + _standRot walk
+while a smart stand owns the spot. Behind RR.setSmartStand / ?nosmartstand.
+
+GATE (same build, ON default vs OFF=?nosmartstand, 30 deterministic seeds @1500s):
+                        OFF (old)       ON (smart)
+  resolved              29/30           30/30
+  thrash-stuck samp     1751            1501 (-14%)   ← the pin thrash DID drop
+  avg resolve           468s            572s (+22%)   ← SLOWER
+  nav alarms            20              32 (+60%)     ← WORSE
+  suppress GOTO viols   127             154           ← the tell
+
+DIAGNOSIS — a reachability gap (mine, deferred at build time, and it bit):
+  The sampler scores a spot on land + LOS-to-tower + no-crossfire, but NOT on whether the unit
+  can actually A*-DRIVE there. So it commits to spots that are on-land with a clean shot but sit
+  across water / behind a wall — unreachable. And because the smart path DISABLES the _standRot
+  "walk to a reachable bearing" fallback, an unreachable committed stand just strands the unit on
+  an order it can't fulfil → the surge in "suppress ordered to unreachable" violations, +alarms,
+  slower matches. The COMMITMENT makes an unreachable pick STICK (worse than the old churn there).
+  The design is sound (target sanity + commit + the thrash-stuck drop prove it); it's missing the
+  4th test a human also applies: "...and can I get there?".
+
+VERDICT: DO NOT SHIP as-is. NEXT: add reachability to the ring-sampler — a candidate only counts
+as good if the unit can A*-route to it (planPath returns a real, non-partial route), and a
+committed stand that goes unreachable is dropped + re-picked (next-nearest good spot). Re-gate;
+expect alarms/resolve to come back to baseline-or-better with the thrash-stuck win kept. If
+reachability-per-candidate is too costly per tick, gate it to the (rare) re-commit only, not the
+steady state — the commit already makes steady-state cheap.
+
+(Everything this session still UNCOMMITTED; smart-stand needs this fix before it earns default-on.)

@@ -1,0 +1,39 @@
+VERDICT — 2026-07-20 whole-stack gate (everything since 2026-07-18 HEAD, vs rmrf-frozen)
+========================================================================================
+
+THE STACK (all uncommitted, each behind a knob):
+  - SIGHT CONE (?nocone) — forward vision cone, turret-anchored for Lurcher/Jotun; a deliberate
+    NERF for stealth gameplay. Own gate: −61% alarms, +13% resolve time.
+  - SCAN-ON-TRANSITION (?noscan) — visible look-around after a loud finish (tower kill / last
+    enemy down). Own gate: all 30 resolved, −14% stuck.
+  - DEFEND-IN-PLACE (?nodefendinplace) — respond to tower attacks in the current vehicle, no
+    home-swap. Own gate: neutral aggregate; fixes a watched failure.
+  - CAPTURE OVERHAUL — escalating all-lanes runner-loss penalty (−9/−14/−16) + slow decay
+    (+1/30s) + 'clear interceptors' attack term + runner-death score logging + DIRECTIONAL
+    MULTI-WAYPOINT ROUTES (front direct / left-right 100u doglegs / rear water arc opposite the
+    FOB, inside the no-sub bubble) + the WAYPOINT BAIL-OUT (skip after 8s — the fix that took
+    route alarms 78→30, = routes-off floor). Routes knob: ?noroute.
+  - STANDOFF v2 (?nostand2, band RR.setStandBand=0.65) — lab-validated: nearest A*-REACHABLE
+    in-range crossfire-free LOS spot; no _standRot flail. 3-way gate: beats old radial on every
+    metric at every band; 0.65 = Jacob's pick (middle). Validated visually in /standoff-lab.html.
+  - Tools: standoff-lab.html (2D playground), seed in the ai-lab snapshot header, red ?nav
+    conflict boxes removed.
+  (Smart-stand v1 was built, gated negative twice, and fully REVERTED — superseded by v2.)
+
+GATE (30 deterministic seeds @1500s, same rig):
+                        FROZEN          STACK
+  resolved              28/30           30/30    ← fixed both stale seeds, zero new
+  nav alarms            31              30       ← full parity; the route regression is paid off
+  avg resolve           451s            594s (+32%)  ← the DELIBERATE stealth-nerf cost
+  transit-stuck         1095            1435 (+31%)  ← ≈ duration growth: per-minute stuck is FLAT
+  maneuvering-stuck     115             78
+  GOTO violations       187             275 (+47%)   ← the one true elevation (route waypoints A*
+                                                       answers "no" to before the 8s bail-out) — residual
+
+VERDICT: PASS. Resolution up, nav parity, the slowdown is the known cone/scan/standoff patience
+trade Jacob explicitly accepted ("fine with games lasting longer" / smarter-over-winrate). The
+stack is net-positive and internally consistent. AWAITING: Jacob's playtest (feel of the cone
+stealth, scan tells, capture routes, standoff picks) + his commit go-ahead. Nothing committed.
+
+RESIDUALS: GOTO violations above duration growth (route waypoint ordering); seed-74-class shore
+wedge (pre-existing); scan cadence (~5/match) and cone taper angles open to feel-tuning.

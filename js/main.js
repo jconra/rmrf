@@ -34,7 +34,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn } from './AIStrategies.js?v=91';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn, setCapRoutes } from './AIStrategies.js?v=92';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -2823,6 +2823,33 @@ let AI_VISION = 66;   // base sight range (tunable via RR.setVision)
 // close; the Jotun is a big obvious target. Tunable via RR.setSight / RR.setVis.
 const SIGHT = { valkyrie: 1.5, lurcher: 1.0, firebrat: 1.0, jotun: 0.85 };
 const VIS   = { valkyrie: 1.5, jotun: 1.3, lurcher: 1.0, firebrat: 0.65 };
+// SIGHT CONE: a unit sees best where it LOOKS, not all around. Full visual range in the
+// forward ~90°-wide arc (±45°), tapering to HALF range at the flanks (90° off), then to
+// BLIND behind (135°+). A turreted unit aims the cone by its TURRET (the Lurcher watches
+// wherever its gun points — idle-sweeping ±34° when parked, snapping onto a target when it
+// engages); the Firebrat/Valkyrie have no turret, so they watch straight ahead by hull. The
+// falloff is gradual (no hard step), and it ONLY gates enemy visual detection — sound stays
+// a full 360° (soundSources), so a unit still HEARS whatever flanks it and turns to look.
+// Supply/scrap discovery stays 360° for now (this slice is about combat stealth). Tunable/
+// toggleable via RR.setSightCone + RR.setConeAngles for the A/B tournament.
+let sightCone = !QS.has('nocone');
+const CONE = { full: Math.PI / 4, half: Math.PI / 2, blind: Math.PI * 0.75 };   // ±45° full, 90° half, 135° blind
+// SCAN-ON-TRANSITION ("check the surroundings"): a unit that just finished something LOUD — it
+// dropped a tower it was sieging, or killed the enemy it was fighting — pauses, before rolling
+// off to its next objective, to sweep its surroundings once. The noise it made draws defenders,
+// so this is the visible "is the coast clear?" beat: a sneaking player sees the barrel come
+// around and aborts. A visible enemy ALWAYS wins (never scan with a target in sight). Only the
+// Lurcher (sweeps its turret) and Jotun (turns its heavy body — 30° turret can't scan); the
+// Firebrat/Valkyrie sit this out. Needs the cone to mean anything (a 360° unit already sees all
+// around). Toggle RR.setScan / tune RR.setScanParams.
+let aiScan = !QS.has('noscan');
+const SCAN = { arc: 5.76, max: 3.0, rate: 3.4, cool: 6000 };   // sweep ~330°, hard-cap 3s, Lurcher turret 3.4 rad/s, 6s per-unit cooldown
+function coneFactor(offAbs) {
+  if (offAbs <= CONE.full)  return 1;
+  if (offAbs <= CONE.half)  return 1 - 0.5 * (offAbs - CONE.full) / (CONE.half - CONE.full);    // 1 → 0.5
+  if (offAbs <= CONE.blind) return 0.5 * (1 - (offAbs - CONE.half) / (CONE.blind - CONE.half)); // 0.5 → 0
+  return 0;                                                                                      // behind → blind
+}
 // AI HEARING: how loud (same 0..1 audibility scale as the sound HUD) an unseen rival must
 // be before a unit investigates the noise. A heard contact only steers navigation — it is
 // NEVER a firing solution (enemy/seesEnemy stay line-of-sight). Gunfire easily clears this;
@@ -5045,6 +5072,10 @@ function driveChassis(v, out, dt, omniTravel) {
 const STAND_ROT_STEPS = [0.5, -0.5, 0.9, -0.9, 1.3, -1.3];
 let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverseCap toggles for A/B bisection)
 let aiStandRotOn = true;    // rotating stand search on/off (RR.setStandRot)
+let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
+let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
+setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
+const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold out at (0.55 close/fast … 0.85 far/safe). RR.setStandBand
 
 // ── THE DRIVER (js/Driver.js) ────────────────────────────────────────────────
 // Each slot seats a Driver: behaviors issue ORDERS (GOTO/DIRECT for now), the driver
@@ -5890,6 +5921,33 @@ class AICommander {
       : dir === 'right' ? { x: -b.lx, z: -b.lz } : { x: -b.fx, z: -b.fz };
     return { x: b.base.x + s.x * 30, z: b.base.z + s.z * 30 };
   }
+  // DIRECTIONAL CAPTURE ROUTE (Jacob's spec): an ORDERED list of waypoints the runner latches
+  // through, so each direction is a genuinely DIFFERENT PATH — not just a different endpoint.
+  //   front — direct: one near-front stage, then the flag (shortest).
+  //   left/right — a wide DOGLEG: a mid-point ~100u off the home→base centerline, then a point
+  //                off that side of the base, then the flag.
+  //   rear  — a WATER ARC swung to the side AWAY from the enemy FOB (so it never blunders into
+  //           the FOB guns), curving around behind the base. The Firebrat crosses water, so this
+  //           loops wide of the defended interior. Radius stays inside the ~95u no-sub bubble so
+  //           it can't aggro the submarine, and A* already hugs the coast (sub-water is costed).
+  enemyRoute(dir) {
+    const b = this._dirBasis(), E = b.base, H = this.homePos();
+    const mx = (H.x + E.x) / 2, mz = (H.z + E.z) / 2;
+    if (dir === 'left' || dir === 'right') {
+      const s = dir === 'left' ? 1 : -1;
+      return [{ x: mx + b.lx * 100 * s, z: mz + b.lz * 100 * s },   // 100u off the centerline, midfield
+              { x: E.x + b.lx * 45 * s, z: E.z + b.lz * 45 * s }];   // off that side of the base
+    }
+    if (dir === 'rear') {
+      const fob = this.enemyFobPos();
+      const s = ((fob.x - E.x) * b.lx + (fob.z - E.z) * b.lz) > 0 ? -1 : 1;   // OPPOSITE side from the FOB
+      const R = 85;                                                            // inside the no-sub bubble
+      const ux = b.lx * s, uz = b.lz * s;                                      // away-from-FOB perpendicular (arc start)
+      const arc = t => ({ x: E.x + R * (Math.cos(t) * ux + Math.sin(t) * b.fx), z: E.z + R * (Math.cos(t) * uz + Math.sin(t) * b.fz) });
+      return [arc(0), arc(Math.PI / 4), arc(Math.PI / 2)];                     // side → diagonal → behind the base
+    }
+    return [{ x: E.x - b.fx * 35, z: E.z - b.fz * 35 }];                       // front: one near stage, then the flag
+  }
   // Dead enemy turrets on the given side (0-2): the "door is open on that side" capture term.
   // A corner tower guards two sides, so it counts toward both (same rule rearTowersLive uses).
   towersDownDir(dir) {
@@ -6544,6 +6602,14 @@ class AICommander {
       && this.unit.type !== 'firebrat'
       && ((this.roster.firebrat || 0) > 0 || (aiScrapBuild && this.canAfford('firebrat')));
     if (this.strategy.step === this._stepAtDeploy && !hqSwap && !runnerSwap) return;   // same beat → keep the current unit (unless we need the flyer/runner)
+    // DEFEND under LIVE FIRE: our towers are being SHOT right now. No time to drive a mid-field
+    // responder all the way home and swap it for the "ideal" defender (a Lurcher) — by the time
+    // that arrives the towers are rubble. A fresh unit of WHATEVER we're already in, rushing the
+    // attacker NOW, wins: a tower-chewed enemy loses to a fresh responder (a fresh Valkyrie beats
+    // an enemy Valkyrie the towers have been grinding). Keep the current unit — Defend.objective
+    // already aims it straight at the attacker. Role optimization resumes once the fire stops
+    // (this doesn't consume the step change, so the maintenance swap still happens when it's safe).
+    if (aiDefendInPlace && this.strategy.step === 'defend' && this.homeAttack()) return;
     if (runnerSwap) {
       this._stepAtDeploy = this.strategy.step; this._recalling = true;
       this._recallForce = true;   // committed — same deadlock-proofing as the hqSwap recall
@@ -6650,6 +6716,14 @@ class AICommander {
       this._enemyGoneAnnounced = true;
       aiLog(this.team, `${this.cname}: Their whole fleet's down — the field is OURS! All units, press the base!`);
     }
+    // SCAN-ON-TRANSITION trigger (once per tick, team-wide): a tower we're sieging just fell, or
+    // we just scored a kill. Flag a pending sweep for ONE eligible idle unit to pick up in
+    // _scanUpdate — one loud event, one scan, not the whole team freezing in place.
+    if (aiScan && sightCone) {
+      const twr = this.turretsLive();
+      if (this._scanPrevTwr != null && (twr < this._scanPrevTwr || this.kills > (this._scanPrevKills || 0))) this._scanPending = performance.now();
+      this._scanPrevTwr = twr; this._scanPrevKills = this.kills;
+    }
     this._syncSlots();
     for (let i = 0; i < this._slots.length; i++) { this._bind(i); this._updateSlot(dt); this._unbind(i); }
   }
@@ -6718,7 +6792,7 @@ class AICommander {
     // runner is later gunned down, the plan produced something — don't ban it).
     if (this._mrec && !this._mrec.flagTouched) {
       const f = this.flag();
-      if (f && f.carrier === this.unit) this._mrec.flagTouched = true;
+      if (f && f.carrier === this.unit) { this._mrec.flagTouched = true; this._runnerLosses = 0; this._runnerInterceptT = null; }   // a runner reached the flag → the approach works, clear the escalating penalty
     }
     // Still riding the FOB lift up? Hold (no driving/firing) until it tops, then
     // detach so the brain takes the wheel — mirrors the player's deploy handover.
@@ -6757,11 +6831,12 @@ class AICommander {
     // to mines, which is how a bait Lurcher once side-stepped onto its own trap.
     if (this.strategy.lurePoint) { const lp = this.strategy.lurePoint(this); if (lp) view.lure = lp; }
     const cmd = v.ai.think(view);
+    const scanning = this._scanUpdate(v, view, cmd, dt);   // scan-on-transition: hold + sweep the surroundings before advancing
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
     v._resvNav = this._nav;   // next tick's reservation stamp reads this unit's current route
-    const routed = this._navOverride(v, view, cmd, dt);   // route travel states with A* (around water/trees, through gates)
+    const routed = !scanning && this._navOverride(v, view, cmd, dt);   // route travel states with A* (skipped mid-scan so it holds still)
     if (!routed) {
       if (cmd.mnv) {
         // The brain picked a COMBAT MANEUVER (ORBIT/KITE — slice 3): hand the order to the
@@ -6879,6 +6954,87 @@ class AICommander {
     }
   }
 
+  // SCAN-ON-TRANSITION executor (see the SCAN comment): holds the unit still and sweeps its
+  // look around once, before it commits to the next objective. Returns true while sweeping (the
+  // caller then skips A* routing so the unit doesn't drive off mid-look). A visible enemy always
+  // cancels it — the target is the priority. Lurcher spins its turret (cone = hull+turret angle
+  // follows); the Jotun turns its whole hull (its 30° turret can't scan). Mutates `cmd` to hold.
+  _scanUpdate(v, view, cmd, dt) {
+    if (!aiScan || !sightCone) return false;
+    if (v.type !== 'lurcher' && v.type !== 'jotun') return false;   // FB/Valk sit this out (no turret)
+    const now = performance.now();
+    if (view.seesEnemy) { v._scanT = 0; return false; }             // a target in sight is always priority
+    const hold = () => { cmd.fwd = 0; cmd.strafe = 0; cmd.mnv = null; cmd.fire = false; cmd.state = 'scan'; v.ai._wantMove = false; v._aimHold = 0; };
+    if (v._scanT > 0) {                                             // mid-sweep: advance it
+      if (v.type === 'lurcher') {
+        v.model.autoScan = false;
+        v._scanYaw += v._scanDir * SCAN.rate * dt; v.model.aimYaw = wrapPi(v._scanYaw);
+        v._scanSwept += SCAN.rate * dt;
+        hold(); cmd.turn = 0;                                       // body stays put; only the turret sweeps
+      } else {
+        v._scanSwept += Math.abs(wrapPi(v.heading - (v._scanLastH ?? v.heading))); v._scanLastH = v.heading;
+        hold(); cmd.turn = v._scanDir;                             // spin the heavy hull in place
+      }
+      if (v._scanSwept >= SCAN.arc || now - v._scanStart > SCAN.max * 1000) {
+        v._scanT = 0; this._scanCd = now + SCAN.cool;
+        if (v.type === 'lurcher' && v.model) { v.model.autoScan = true; v.model.aimYaw = 0; }   // hand the turret back to its idle sweep
+      }
+      return true;
+    }
+    // Start one? a pending loud-finish event, this unit's off cooldown, and it's a travel lull
+    // (not carrying the flag / fleeing / resupplying — those never dawdle).
+    const runner = this.flag && this.flag() && this.flag().carrier === v;
+    const busy = cmd.state === 'capture' || cmd.state === 'retreat' || cmd.state === 'resupply' || cmd.state === 'exit' || cmd.state === 'flee';
+    if (this._scanPending && now - this._scanPending < 1000 && now > (this._scanCd || 0) && !runner && !busy) {
+      this._scanPending = 0;
+      v._scanT = 1; v._scanStart = now; v._scanSwept = 0; v._scanDir = 1;
+      v._scanYaw = (v.model && v.model.aimYaw) || 0; v._scanLastH = v.heading;
+      hold(); if (v.type === 'jotun') cmd.turn = v._scanDir;
+      return true;
+    }
+    return false;
+  }
+
+  // STANDOFF (lab-validated): pick where to shell a tower FROM — the nearest spot the unit can
+  // actually DRIVE to that's within firing range (falloff ok), has a line to the tower, and isn't
+  // in any OTHER tower's range (no crossfire). Nearest live tower first; first tower with a valid
+  // reachable spot wins. Commits lightly (holds while the tower lives + the spot stays valid) so
+  // it isn't an A* every tick. Returns { threat, threatCamp, stand, w } or null (→ old keep/breach).
+  _pickStandoff(v, rearPred) {
+    const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
+    const live = [];
+    for (const cc of camps) {
+      if (cc.team === this.team) continue;
+      for (const w of cc.walls) {
+        const t = w.turret;
+        if (!t || t.dead || t.falling) continue;
+        if (rearPred && !rearPred(cc, w)) continue;
+        t.group.updateWorldMatrix(true, false); t.head.getWorldPosition(_threatV);
+        live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d: (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2 });
+      }
+    }
+    if (!live.length) return null;
+    const crossfire = (x, z, self) => { for (const O of live) { if (O.w === self.w) continue; if ((O.x - x) ** 2 + (O.z - z) ** 2 < O.range * O.range) return true; } return false; };
+    const spotOK = (x, z, T) => flyer || (!v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z, T));
+    // Hold the committed stand while its tower lives and the spot is still valid (cheap check).
+    const cm = this._stand2;
+    if (cm) { const T = live.find(o => o.w === cm.w); if (T && spotOK(cm.x, cm.z, T)) return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cm.x, z: cm.z }, w: T.w }; this._stand2 = null; }
+    live.sort((a, b) => a.d - b.d);   // nearest tower first
+    const c = grid.cell, unitR = TURRET_HOLD[v.type] || 40, minR = Math.max(24, unitR * STAND.band);
+    const reaches = (x, z) => { const p = planPath(v, { x, z }); if (!p || !p.length) return false; const e = p[p.length - 1]; return (e.x - x) ** 2 + (e.z - z) ** 2 <= (c * 2) ** 2; };
+    let budget = 8;   // A* checks this (rare) re-pick
+    for (const T of live) {
+      const cands = [];
+      for (const r of [unitR, (minR + unitR) / 2, minR]) for (let b = 0; b < 24; b++) {
+        const th = b / 24 * Math.PI * 2, x = T.x + Math.sin(th) * r, z = T.z + Math.cos(th) * r;
+        if (spotOK(x, z, T)) cands.push({ x, z, d: (x - px) ** 2 + (z - pz) ** 2 });
+      }
+      cands.sort((a, b) => a.d - b.d);   // nearest to the unit = least travel
+      for (const cd of cands) { if (budget <= 0) break; budget--; if (flyer || reaches(cd.x, cd.z)) { this._stand2 = { w: T.w, x: cd.x, z: cd.z }; return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cd.x, z: cd.z }, w: T.w }; } }
+    }
+    return null;
+  }
+
   _view(v, dt) {
     const px = v.holder.position.x, pz = v.holder.position.z, h = v.heading;
     const flyer = v._move.ignoreWalls;
@@ -6891,14 +7047,23 @@ class AICommander {
     // surrounded matters even if one foe ducks behind cover for a beat).
     let enemiesNear = 0, alliesNear = 0;
     const FIGHT_R2 = 48 * 48;
+    // Where this unit is LOOKING for the sight cone: the turret's actual world bearing for a
+    // turreted type (Lurcher/Jotun — reads the live mount angle, sweep and all), else the hull.
+    const lookAng = (sightCone && v.model && v.model.turretGroup) ? h + (v.model.turretGroup.rotation.y || 0) : h;
     for (const o of combatants) {                       // nearest VISIBLE rival of any other team
       if (o.dead || vehicleHidden(o)) continue;          // a unit still down the lift shaft isn't on the field yet
       const d = (o.holder.position.x - px) ** 2 + (o.holder.position.z - pz) ** 2;
       if (o.team === this.team) { if (o !== v && d < FIGHT_R2) alliesNear++; continue; }
       if (d < FIGHT_R2) enemiesNear++;
       // Per-vehicle visual range: how far WE see + how far THEY show, averaged (see the SIGHT/VIS tables).
-      const effR = AI_VISION * (mySight + (VIS[o.type] ?? 1)) * 0.5;
-      if (d < effR * effR && d < nearestD && (flyer || hasLOS(px, pz, o.holder.position.x, o.holder.position.z))) {
+      let effR = AI_VISION * (mySight + (VIS[o.type] ?? 1)) * 0.5;
+      // Sight cone: shrink the range by how far off our look direction the target sits (full
+      // ahead, half at the flank, blind behind). Sound (below) still catches a rear flanker.
+      if (sightCone) {
+        const bearing = Math.atan2(-(o.holder.position.x - px), -(o.holder.position.z - pz));
+        effR *= coneFactor(Math.abs(wrapPi(bearing - lookAng)));
+      }
+      if (effR > 0 && d < effR * effR && d < nearestD && (flyer || hasLOS(px, pz, o.holder.position.x, o.holder.position.z))) {
         nearestD = d; enemy = { x: o.holder.position.x, y: o.holder.position.y, z: o.holder.position.z, type: o.type, shield: o.shield, vx: o._vx || 0, vz: o._vz || 0,
           heading: o.heading, hpFrac: o.maxHp ? o.hp / o.maxHp : 1, retreating: o._aiState === 'retreat' || o._aiState === 'resupply' }; seen = o; seesEnemy = true;
       }
@@ -7148,7 +7313,16 @@ class AICommander {
           if (t && !t.dead && !t.falling && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2) return true; } }
       return false;
     })();
-    for (const c of camps) {
+    // NEW STANDOFF (lab logic): pick the target tower AND a reachable, in-range, crossfire-free,
+    // LOS firing spot in one shot. stand2 pins the spot so the threatStand math below uses it and
+    // skips the radial + _standRot walk. A later retarget (shoot-back/keep) drops it via identity.
+    let stand2 = null, stand2Ref = null;
+    if (aiStand2 && this.strategy.step === 'siege') {
+      const rearPred = rearOnly ? (cc, w) => cc.role === 'main' && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2 : null;
+      const so = this._pickStandoff(v, rearPred);
+      if (so) { threat = so.threat; threatCamp = so.threatCamp; stand2 = so.stand; stand2Ref = so.threat; }
+    }
+    if (!threat) for (const c of camps) {   // fallback nearest-turret scan (stand2 off / found nothing)
       if (c.team === this.team) continue;
       for (const w of c.walls) {
         const t = w.turret;
@@ -7257,7 +7431,12 @@ class AICommander {
                  : closeIn ? Math.min(24, TURRET_HOLD[v.type] || 24)
                  : breachWall ? Math.min(34, TURRET_HOLD[v.type] || 34)
                  : sniper;
-      if (breachWall) {
+      if (stand2 && threat === stand2Ref) {
+        // The lab-logic picker already chose a reachable, in-range, crossfire-free, LOS spot —
+        // use it and skip the radial + _standRot walk. Only active while a tower stands; once
+        // they're down, _pickStandoff returns null and the keep/breach logic takes the finish.
+        threatStand = { x: stand2.x, z: stand2.z };
+      } else if (breachWall) {
         // Plant OUTSIDE the latched breach wall (radial from base centre) and HOLD — hammer this
         // one wall down instead of circling and smearing fire across the ring.
         const cx = threatCamp.center.x, cz = threatCamp.center.z;
@@ -7283,7 +7462,7 @@ class AICommander {
       // unbroken ring for a ground unit — the driver refuses it (unreachable) and _navOverride
       // answers by advancing this rotation, so the stand walks around the tower until a
       // bearing the chassis can actually REACH comes up. Capped at one full circle.
-      if (threatStand && this._standRot) {
+      if (threatStand && this._standRot && !(stand2 && threat === stand2Ref)) {   // stand2 owns its spot — don't walk it
         const cs = Math.cos(this._standRot), sn = Math.sin(this._standRot);
         const rx = threatStand.x - threat.x, rz = threatStand.z - threat.z;
         threatStand = { x: threat.x + rx * cs - rz * sn, z: threat.z + rx * sn + rz * cs };
@@ -7593,7 +7772,7 @@ function publishAILive(dt) {
       const e = aiEvents[i];
       log.push({ t: e.t, team: _AI_LIVE_TEAM[e.team] || e.team, msg: e.msg });
     }
-    localStorage.setItem('rmrf-ai-live', JSON.stringify({ t: Date.now(), over: matchOver, teams, log }));
+    localStorage.setItem('rmrf-ai-live', JSON.stringify({ t: Date.now(), over: matchOver, seed: AI_LOG_SEED, teams, log }));
   } catch (e) { /* no storage (private mode) — overlay just stays idle */ }
 }
 
@@ -9284,6 +9463,18 @@ window.RR = {
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)
+  setSightCone: on => { sightCone = !!on; return sightCone; },          // forward vision cone on/off (stealth A/B tournament)
+  getSightCone: () => sightCone,
+  setConeAngles: (full, half, blind) => { if (full != null) CONE.full = full; if (half != null) CONE.half = half; if (blind != null) CONE.blind = blind; return { ...CONE }; },
+  setScan: on => { aiScan = !!on; return aiScan; },                      // scan-sweep at objective transitions on/off (stealth follow-on)
+  getScan: () => aiScan,
+  setScanParams: p => { Object.assign(SCAN, p || {}); return { ...SCAN }; }, // { arc, max, rate, cool } — tune the sweep
+  setDefendInPlace: on => { aiDefendInPlace = !!on; return aiDefendInPlace; }, // defend-under-fire responds in the current vehicle vs home-swap (A/B)
+  getDefendInPlace: () => aiDefendInPlace,
+  setStand2: on => { aiStand2 = !!on; return aiStand2; },                  // lab-logic standoff vs old radial+_standRot (A/B)
+  setCapRoutes: on => { setCapRoutes(!!on); return !!on; },                // multi-waypoint capture routes vs single staging (A/B)
+  setStandBand: b => { STAND.band = Math.max(0, Math.min(0.98, +b || 0.6)); return STAND.band; },   // how far out to stand (0.55 close/fast … 0.85 far/safe)
+  getStandBand: () => STAND.band,
   navCellBlocked: (v, i, j) => cellBlocked(v, i, j),          // debug: nav passability of a cell
   astar: () => toggleAstarViz(),                              // open/close the A* search visualizer overlay
   get paused() { return paused; },                            // debug: is the sim frozen (full log or A* viz open)
@@ -9700,14 +9891,8 @@ function updateNavOverlay() {
     o.label.sprite.material.opacity = hot ? 1 : 0.5;
     o.label.sprite.position.set(px, map.heightAt(px, pz) + (hot ? 17.5 : 15.5), pz);   // top-anchored sprite: position marks the label's TOP edge
     o.label.sprite.visible = true;
-    // RED CONFLICT CELLS: the squares this unit truly can't enter that its heading/beeline hits.
-    const conflicts = _navConflictCells(v, d, usingAstar);
-    for (let i = 0; i < conflicts.length; i++) {
-      const cm = _navCell(o, i), cc = conflicts[i];
-      cm.position.set(cc.x, map.heightAt(cc.x, cc.z) + 0.4, cc.z);
-      cm.material.opacity = hot ? 0.5 : 0.22;
-      cm.visible = true;
-    }
+    // (Red conflict-cell squares removed — they cluttered the view sitting right on the units.
+    // The blocked feelers are still in the flight recorder / STUCK label if needed for debugging.)
     if (usingAstar) {
       // GROUND unit on an A* route — trace the remaining path, bend marker + destination cone.
       const pts = nav.path, arr = o.posAttr.array;

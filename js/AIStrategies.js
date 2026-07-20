@@ -272,8 +272,28 @@ class Capture extends Mission {
     // MISSIONSCORE directional run: stage via the scored side's approach point, then grab —
     // same reach-latch as the rogue sneak (goals must not flip while the runner commits).
     // The 'front' direction stages on our own approach lane, so it latches almost instantly.
-    if (missionWeightsOn(cmd) && cmd._capDir && cmd.unit && cmd.enemyApproach) {
-      const u = cmd.unit.holder.position, ap = cmd.enemyApproach(cmd._capDir);
+    if (missionWeightsOn(cmd) && cmd._capDir && cmd.unit && cmd.enemyRoute) {
+      const u = cmd.unit.holder.position;
+      if (CAP_ROUTES) {
+        // Multi-waypoint route (front direct / left-right doglegs / rear water arc). Latch the whole
+        // route on the unit at first read, so a mid-run _capDir change doesn't flip this runner's
+        // path (the NEXT deploy picks the new direction). Then step waypoint→waypoint.
+        const route = cmd.unit._capRoute || (cmd.unit._capRoute = cmd.enemyRoute(cmd._capDir));
+        let idx = cmd.unit._capIdx || 0;
+        const now = cmd._matchT || 0;
+        let reached = false;
+        while (idx < route.length && Math.hypot(u.x - route[idx].x, u.z - route[idx].z) < 14) { idx++; reached = true; }   // consume reached waypoints
+        // BAIL-OUT: never grind ONE waypoint forever. If it can't be reached within CAP_WP_SKIP sec
+        // (unreachable/off-map/behind a wall), skip it — the 500s permanent-stuck becomes an 8s blip.
+        if (reached || cmd.unit._capWpT == null) cmd.unit._capWpT = now;                     // fresh waypoint → reset the clock
+        else if (idx < route.length && now - cmd.unit._capWpT > CAP_WP_SKIP) { idx++; cmd.unit._capWpT = now; }
+        cmd.unit._capIdx = idx;
+        const nearFlag = Math.hypot(u.x - flagPt.x, u.z - flagPt.z) < 22;
+        if (!nearFlag && idx < route.length) return route[idx];   // still staging → head for the next waypoint
+        return flagPt;                                            // route done (or on the doorstep) → grab it
+      }
+      // ROUTES OFF (?noroute): the pre-route single staging point — stage at the scored side, then grab.
+      const ap = cmd.enemyApproach(cmd._capDir);
       if (!cmd.unit._dirReached) {
         const nearAp = Math.hypot(u.x - ap.x, u.z - ap.z) < 10;
         const nearFlag = Math.hypot(u.x - flagPt.x, u.z - flagPt.z) < 22;
@@ -491,6 +511,11 @@ export function setTurtleGuard(v) { TURTLE_GUARD = !!v; }
 let HUNTER_HARASS = true;
 export function setHunterHarass(v) { HUNTER_HARASS = !!v; }
 export function setRogueRearSiege(v) { ROGUE_REAR_SIEGE = !!v; }
+// CAPTURE ROUTES (A/B knob): multi-waypoint directional runner paths (doglegs + rear water arc)
+// vs the pre-route single staging point. Isolates whether the routes are the nav regression.
+let CAP_ROUTES = true;
+export function setCapRoutes(v) { CAP_ROUTES = !!v; }
+const CAP_WP_SKIP = 8;   // sec a runner may chase one route waypoint before skipping it (anti permanent-stuck)
 
 // A back-door runner only sneaks around the rear when the REAR towers are dead; if the back is
 // still defended it takes the front instead (stops feeding Firebrats to live back-door guns).
@@ -569,7 +594,11 @@ export function missionScore(cmd, key) {
       add('base', 1);
       const fk2 = Math.max(0, 3 - cmd.kills) * 0.7;             // hungriest at zero kills, gone by three
       if (fk2 >= 0.1) add('few kills', fk2);
-      if (justLost >= 0.1) add('just lost a unit', justLost); break;
+      if (justLost >= 0.1) add('just lost a unit', justLost);
+      // CLEAR THE INTERCEPTORS: our runners keep dying to enemy DEFENDERS (not towers) — go hunt
+      // them down first. Escalates with each lost runner, fades ~30s after the last interception.
+      const rInt = (cmd._runnerInterceptT != null && matchT - cmd._runnerInterceptT < 30) ? Math.min(8, 3 * (cmd._runnerLosses || 0)) : 0;
+      if (rInt) add('clear interceptors', rInt); break;
     }
     case 'siege':
       if (key === 'siege-back') {
@@ -645,7 +674,11 @@ export function missionPick(cmd, incumbent = null) {
   const t = cmd._matchT || 0;
   if (cmd._msnDecayT == null) cmd._msnDecayT = t;
   const el = Math.max(0, t - cmd._msnDecayT); cmd._msnDecayT = t;
-  if (el > 0) for (const k in S) { S[k] = Math.min(0, Math.round((S[k] + el * 0.125) * 100) / 100); if (S[k] > -0.05) delete S[k]; }
+  // Decay is SLOW on purpose (Jacob: a failed mission shouldn't be repeated over and over) — a
+  // benched plan eases back over ~half a minute per point, so a deep −14 stays out most of the
+  // match unless the board genuinely changes. (Was +1/8s, which recovered before the next runner
+  // even died — the anti-repeat barely bit.)
+  if (el > 0) for (const k in S) { S[k] = Math.min(0, Math.round((S[k] + el * 0.033) * 100) / 100); if (S[k] > -0.05) delete S[k]; }
   let best = null, bestV = -1e9; const all = [];
   for (const key of MSN_CANDS) {
     const r = missionScore(cmd, key);
@@ -824,14 +857,26 @@ class Doctrine {
   // route around the hot zone (the flag's still grabbable, just not head-on).
   onRunnerLost(cmd, enemyHasUnits) {
     if (missionWeightsOn(cmd)) {
-      // MISSIONSCORE: a dead runner is a FAILED capture — drop THAT DIRECTION's success
-      // memory and let the scorer re-decide from the board: attack the interceptor, re-siege,
-      // or send the next runner down a DIFFERENT lane (the other three directions keep their
-      // own clean records). No forced switch, no clear/soften timers: those loops (60s sweep ↔
-      // re-feed the runner up the same lane) are exactly what the weights replace.
+      // MISSIONSCORE: a dead runner is a FAILED capture. The penalty ESCALATES with each loss so
+      // the commander can't feed six runners into the same guns (Jacob: don't repeat a mistake).
       if (!cmd._missionSuccess) cmd._missionSuccess = {};
+      const n = cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
+      const pen = -Math.min(16, 4 + 5 * n);   // −9, −14, −16… escalating (enough to unseat an OPEN-flag capture at +13.9)
       const failedKey = (cmd._msnKey && cmd._msnKey.startsWith('capture-')) ? cmd._msnKey : 'capture-front';
-      cmd._missionSuccess[failedKey] = -4;
+      if (enemyHasUnits) {
+        // DEFENDERS are the problem, not the lane — bench ALL capture directions and flag a window
+        // that boosts ATTACK (go clear the interceptors), then resume the grab once they're gone.
+        for (const k of ['capture', 'capture-front', 'capture-left', 'capture-right', 'capture-rear']) cmd._missionSuccess[k] = pen;
+        cmd._runnerInterceptT = cmd._matchT;
+      } else {
+        // Pure tower gauntlet → bench just THIS lane so the next runner tries a different route
+        // (the wide/rear arc), the other lanes keep their own records.
+        cmd._missionSuccess[failedKey] = pen;
+      }
+      // VISIBILITY (Jacob): show the re-evaluation after EVERY runner death — the switch-log only
+      // fires on a mission CHANGE, so a commander re-deciding "capture again" was silent. Now the
+      // penalized scores print each death, so you can watch capture drop and attack climb.
+      if (cmd.strategy && cmd.strategy.log) { const bd = missionScoreLog(cmd); if (bd) cmd.strategy.log(`  ↳ runner lost (×${n}) — ${bd}`); }
       this.t = DWELL + 1;   // let the very next tick re-decide (event: our runner just died)
       return;
     }

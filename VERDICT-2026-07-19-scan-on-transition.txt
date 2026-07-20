@@ -1,0 +1,48 @@
+VERDICT — 2026-07-19 scan-on-transition ("check the surroundings")
+=================================================================
+
+The stealth phase's second slice, and Jacob's redesign of my scrapped "check-six". A unit that
+just finished something LOUD — dropped a tower it was sieging, or killed the enemy it was
+fighting — pauses, before rolling to its next objective, to sweep its surroundings ONCE. The
+noise drew defenders; this is the visible "is the coast clear?" beat that lets a sneaking
+player see the barrel come around and abort. The turn drives the cone (no invisible detection
+cheat — Jacob's key correction): Lurcher spins its turret (cone = hull+turret angle), the Jotun
+turns its whole hull (30° turret can't scan). FB/Valk sit it out.
+
+DESIGN (Jacob's, via the Q&A):
+  - NOT a combat behavior. A visible enemy is ALWAYS priority — never scan with a target in
+    sight (and a target appearing cancels an in-progress scan).
+  - Trigger = a loud finish with no enemy now in view: tower we're sieging fell, OR we scored a
+    kill. One team-wide event flags ONE eligible idle unit (not the whole team freezing).
+  - Guards: never while carrying the flag / fleeing / resupplying; 6s per-unit cooldown; ~330°
+    sweep; hard 3s cap; the deliberate hold sets _wantMove=false so it can't trip a stuck alarm
+    (same trick as the right-of-way yield).
+  - Behind RR.setScan (?noscan) + RR.setScanParams, default on.
+
+GATE (same build, scan ON default vs scan OFF=?noscan, cone ON in both — byte-identical but the
+one flag; 30 deterministic seeds @1500s). This is a GUARDRAIL check (does it break anything),
+not a scoreboard:
+                        OFF             ON
+  resolved              29/30           30/30   (finished them ALL; no new never-finishers)
+  avg resolve           508s            487s (-4%)  faster despite adding ~2s holds
+  transit-stuck samp    1340            1152 (-14%)
+  idle-at-goal          688             256
+  GOTO violations       219             154 (-30%)
+  nav alarms            12              15 (+3 — inside the ±10 chaos band, not a regression)
+
+WHY FASTER, NOT SLOWER: a scanning unit that catches an approaching threat REACTS to it instead
+of blindly trundling to its next objective and getting picked off / wandering into a wedge. The
+pauses buy tighter endgames. (Attribution caveat: some of the delta is chaos reshuffle — but the
+DIRECTION is unambiguous: nothing blew up, resolution went UP, stuck went DOWN.)
+
+HEADLESS PROOF the sweep actually runs: 600s match, 5 distinct scans, Lurcher+Jotun both firing,
+maxSwept 5.61 rad (~321°) — sweeps COMPLETE the look-around, not cut off by the time cap.
+
+VERDICT: KEEP as default (pending Jacob's playtest feel — the visible tell is the real point,
+and only he can judge it). Guardrails hold cleanly. Open tuning question: ~5 scans/match may be
+too rare; cooldown + trigger breadth are the knobs if we want more.
+
+STEALTH PHASE STATUS: cone (shipped) + scan-on-transition (this). Possible later: silent-approach
+(commander orders throttle-capped ambush rolls — sound already scales with throttle), guard-scan
+(idle sentries sweeping a wide arc so you can't sneak up on a watchful guard — distinct from this
+post-kill scan). Neither committed yet; the sight-cone + scan slices are uncommitted on HEAD.

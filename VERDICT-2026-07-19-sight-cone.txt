@@ -1,0 +1,49 @@
+VERDICT — 2026-07-19 sight cone (stealth phase, slice 1: the cone itself)
+========================================================================
+
+Units no longer see in a 360° circle. Visual ENEMY detection now falls off by how far the
+target sits off the unit's LOOK direction: full range in the forward ±45° arc, tapering to
+HALF at the flanks (90°), to BLIND behind (135°+). Gradual falloff (no hard step). A turreted
+unit aims the cone by its TURRET (Lurcher reads the live mount angle — idle-sweeps ±34° when
+parked so it scans, snaps onto a target when it engages; Jotun too, tiny arc); Firebrat/
+Valkyrie have no turret → hull heading. Sound stays a full 360° (soundSources unchanged), so
+a rear flanker is still HEARD and the unit turns to investigate. Supply/scrap discovery stays
+360° this slice — the one changed variable is combat visual detection. Behind RR.setSightCone
+(?nocone) + RR.setConeAngles.
+
+THIS IS A NERF, BY DESIGN (Jacob: "it makes the game more interesting"). The gate is a
+GUARDRAIL check — does the game stay healthy — NOT a win-rate scoreboard. A weaker-but-more-
+interesting AI is the goal (see feedback_smarter_over_winrate).
+
+GATE (same build, cone ON default vs cone OFF=?nocone — byte-identical but the one flag, so
+NO cross-build chaos shuffle; 30 deterministic seeds @1500s):
+                        OFF (HEAD)      ON (default)
+  resolved              28/30           29/30      (un-stuck seed 95; 137 stale in BOTH)
+  avg resolve           451s            508s (+13%) honest cost of the nerf
+  driver alarms         31              12 (-61%)   detection is STABLER → less engage-flap
+  transit-stuck samp    1095            1340        BUT see below — one map, not a trend
+  GOTO violations       187             219 (+17%)  minor; units chase heard/remembered more
+
+THE ALARM DROP IS REAL: a 360° circle makes an edge target blink in/out of detection from any
+bearing, and that boundary flicker feeds the engage/KITE strobe we hunted on 07-18. A cone
+gives stable "what's in front" detection, so there's LESS strobe. The nerf calmed the thing we
+were chasing.
+
+THE STUCK INCREASE IS A MIRAGE (one unit, one map): seed 137 red firebrat wedges a shore
+corner @(59,131) on the capture step — 92s OFF, 784s ON. That single episode is ~346 of the
+~245-sample total increase, i.e. EVERY OTHER SEED COMBINED got LESS stuck with the cone on.
+Seed 137 is stale in BOTH builds (nobody wins either way); same shore-wedge nav pathology as
+seed 95, just left to sit longer because no enemy wandered over to dislodge it. Pre-existing
+"long-GOTO / shore-wedge" residual, NOT a cone regression.
+
+VERDICT: KEEP as default. Guardrails hold (resolution up, no new never-finishers), the game
+gets the flankable stealth Jacob wants, and it quietly REDUCED combat flap. The +13% resolve
+time is the fair price of half-blind units.
+
+NEXT (stealth phase, later slices — with numbers now in hand):
+  - CHECK-SIX: a unit that just fired briefly scans/sweeps behind (loud units get flanked).
+  - SILENT APPROACH: commander can order throttle-capped slow rolls for ambush (sound already
+    scales with throttle in soundSources — the hook is half-built).
+  - GUARD SCAN: parked guards rotate their watch instead of staring one lane.
+RESIDUAL (separate, not cone): seed 137 shore-wedge firebrat (& the seed-95 class) — genuine
+  nav, same discipline as the 07-18 alarms (principled fix + falsification, not count-chasing).
