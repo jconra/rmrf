@@ -406,7 +406,11 @@ const BEHAVIORS = {
       // sieger mid-route — richwatch caught jotuns doing exactly that for entire matches
       // (a brief wedge → plant → timers reset → skirt → wedge again: a two-spot shuttle).
       const barred = !view.flyer && (mem._stillT > 0.5 || mem._wedgeT > 0.5) && (canBear || demolish);
-      if (atStand || barred || demolish) {
+      // RE-EVALUATE ON THE WAY IN: don't march to the fixed close-in hold once a shot's
+      // already live — the instant ANYTHING (tower or demolish wall) is in range with a
+      // clear line, plant right here and pour fire. Only keeps closing when truly nothing
+      // is shootable yet, so most approaches never actually reach the tight hold at all.
+      if (atStand || barred || demolish || canBear) {
         const turn = clamp((demolish ? demoErr : err) * 2.2, -1, 1);   // square onto the wall (demolish) or tower
         const fwd = dist > want ? 0.4 : 0;                 // ease into range, then plant
         mem._wantMove = fwd > 0.3;

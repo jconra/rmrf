@@ -7459,9 +7459,12 @@ class AICommander {
       const finisher = this.enemyEliminated();
       const closeIn = aiBreachCommit ? (finisher || this.fortDown() || breached) : finisher;
       const sniper = TURRET_HOLD[v.type] || (ENGAGE_RANGE[v.type] || 36) * 0.9;
+      // These are worst-case fallback targets only, reached when NOTHING is shootable on
+      // the way in (see the canBear early-stop in AI.js combat()) — bumped from 24/34 so
+      // even that dead-end case doesn't land the unit in the middle of the base's wreckage.
       const hold = !aiBreachCommit ? (finisher ? Math.min(22, TURRET_HOLD[v.type] || 22) : sniper)
-                 : closeIn ? Math.min(24, TURRET_HOLD[v.type] || 24)
-                 : breachWall ? Math.min(34, TURRET_HOLD[v.type] || 34)
+                 : closeIn ? Math.min(36, TURRET_HOLD[v.type] || 36)
+                 : breachWall ? Math.min(44, TURRET_HOLD[v.type] || 44)
                  : sniper;
       if (stand2 && threat === stand2Ref) {
         // The lab-logic picker already chose a reachable, in-range, crossfire-free, LOS spot —

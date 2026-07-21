@@ -1,0 +1,52 @@
+SIEGE CLOSE-IN: re-evaluate for a shot on the way in, don't march to a fixed hold
+==================================================================================
+
+TRIGGER: seed 186, blue jotun. Traced the full match — it sieged correctly from range
+(60-190u) for most of the match, then once this camp dropped to 1/4 live towers, the
+existing "CLOSE IN to finish" rule (main.js, was ~24u hold once fortDown()/breached)
+drove it to (-115,-100), inside a wall cluster (walls alive as close as 8u away amid
+mostly-rubbled ones). It took heavy fire finishing the job (100hp -> 7hp), then needed
+~4.5s to pivot ~130 degrees for its retreat order (Locomotion.js PIVOT rule: fwd=0
+while bearing error > 0.6 rad — a real tank-chassis constraint, not a bug), and died
+about 1s after it started moving, before clearing the wreckage.
+
+Root cause was NOT a navigation/physics conflict (verified: Vehicles.js never gates
+heading rotation on collision — it's already unconditional every tick; A*'s cellBlocked
+margin already mirrors full hull width and already treats dead obstacles as passable).
+The actual lever was AI.js's combat() siege resolver: once in siege mode, it commits to
+skirting all the way to a FIXED close-in hold point (24u) regardless of whether a valid
+shot (clear LOS, in range, in arc — `canBear`) already opened up earlier along the way.
+
+FIX:
+1. js/AI.js combat(): added `canBear` to the stop condition (was `atStand||barred||
+   demolish`) — the unit now plants and fires the instant ANY tower or the demolish-wall
+   target is shootable, instead of continuing toward the tighter fixed point. Firing
+   itself was already opportunistic (`fire` computed independent of movement); only the
+   MOVEMENT target needed to also respect it.
+2. js/main.js: bumped the close-in fallback hold distances (24->36, 34->44) — these are
+   now worst-case-only targets, reached solely when nothing is shootable anywhere along
+   the approach, so even that dead-end doesn't land the unit mid-wreckage.
+3. ~/pw/tourney.cjs (rig-only, not in this repo): the TRANSIT-stuck classifier already
+   exempts ORBIT/KITE/JOUST as deliberate "maneuvering, not stuck." Extended this to a
+   genuine PIVOT: fwd=0 & |turn|>=0.99 is Locomotion.js's own documented rule for "bearing
+   error too large to drive yet" — real angular progress, misreported as a wedge before.
+
+GATE (30 seeds, PAR 16, full 480 map, 1500s cap; rmrf-frozen baseline vs rmrf modified):
+  resolved:              30/30 both (no stalemate regression)
+  avg resolve tick:       562s -> 536s   (faster / more decisive)
+  nav ALARMS:              28  -> 25     (fewer genuine pin/grind/stall escalations)
+  unreachable-GOTO viol.: 265  -> 232    (fewer)
+  TRANSIT-stuck samples: 1069  -> 1125   (up ~5%, but see below)
+  right-of-way YIELDS:   2136  -> 2699   (up ~26% — more stop/reassess near contested spots)
+
+The TRANSIT-stuck rise is read as benign: it's the stricter driver-owned alarm (the one
+that actually escalates to self-destruct on sustained failure) that improved, alongside
+faster resolves. Consistent with more frequent brief "stop and check for a shot" pauses
+from the new opportunistic behavior, not new pathology. The specific bug class (a unit
+deep in base wreckage) is visibly reduced: only one residual "wedged on terrain" episode
+in the modified run (seed 193, 12s, gd=56 - near the perimeter) vs. the original's much
+longer, much deeper cases (gd up to 253).
+
+Knobs: none added — this is unconditional (the old fixed-hold behavior had no A/B flag
+either). Kept per feedback_smarter_over_winrate: judged on sounder decisions + the two
+stricter alarm metrics, not the noisier raw stuck count.
