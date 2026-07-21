@@ -38,4 +38,21 @@ tournament on whichever he picks. Tool: ~/pw/_kiteharvest.cjs (engage/KITE alarm
 NOTE its flip counter is inflated by the GOTO progress-% in labels — read ord-TYPE changes, not
 the raw count).
 
-STATE: no code change. Repo clean at 85ae0c6.
+UPDATE 2026-07-21 — FIX (A) TRIED + REJECTED (net-negative). Implemented a KITE-specific afterglow
+(cfg.kiteGlow=2.5 vs engageGlow 0.9): once a hurt unit commits to a retreat-to-cover, hold the
+sighting through blinks so it doesn't drop to advance and drive back at the enemy. Clean A/B on
+one build (RR.aiConfig('kiteGlow',0.9)=off vs 2.5=on), 30 seeds:
+    resolved     30/30 → 30/30   (no change — already 30/30 from the siege hysteresis)
+    nav alarms   28    → 34       (+6, WORSE)
+    violations   265   → 265      (FLAT — advance issuer 79→72 but suppress 140→157: the hold
+                                   didn't remove churn, it RELOCATED it from advance to suppress)
+    avg resolve  562s  → 553s      (-2%, noise)
+No clean grind falsification either (seed 102 slightly slower, 109 faster — chaos). Holding engage
+longer just keeps a hurt unit in the combat states longer (lingering on a ghost), moving the churn
+and adding pins. REVERTED to shipped state — a perturbation, not a fix, same as the shore try.
+LEFT FOR LATER: fix (B) engage-range cap (don't KITE-retreat from an enemy far beyond weapon
+reach — the 195u case), which attacks the ROOT (why engage a far enemy at all) rather than
+papering over the blink; it shifts focus-0 "fights on sight" semantics, so it needs its own
+before/after tournament with an eye on resolution, not just alarms.
+
+STATE: no net code change. Repo clean at 85ae0c6 (kiteGlow fully reverted, 0 refs).
