@@ -1,0 +1,55 @@
+RIGHT-OF-WAY RESERVATION: friendly-only + flyer-exempt (was neither)
+========================================================================
+
+TRIGGER: seed 32, blue valkyrie, misdiagnosed the previous morning as a resupply-target
+flip-flop. Full re-investigation (position/hp/ammo/foeT trace, then raw _view() +
+mission-objective + Driver-order dump, then _yielding/_resvOrd directly) found the real
+cause: `v._yielding: true` for the entire 44s freeze, with a red lurcher sitting a
+constant 8.9u away. The reservation system (main.js stampReservation/reservationYield,
+~line 4986-5058) is named and commented "FRIENDLY right-of-way" throughout but never
+actually checked team — `for (const v of combatants) ... stampReservation(v)` stamps
+every vehicle on BOTH teams into the same global RESV map, and reservationYield only
+checks `cell.prio <= myPrio`, never `cell.owner.team`. So a unit could — and did —
+defer forever to an enemy that would never reciprocate: a permanent, silent stand-off,
+invisible to the AI decision log because the commander's state never changed (no
+transition = no log line), only visible by reading the frozen position + `_yielding`
+flag directly.
+
+SECOND FINDING (Jacob's): the valkyrie is also a FLYER (`ignoreWalls: true`) and should
+never have been on the ground reservation grid at all — flyers already skip every other
+ground system in this codebase (`blockedFor`'s `if (move.ignoreWalls) return false`,
+`_navOverride`'s `if (v._move.ignoreWalls) return` at its very top) but the reservation
+system had no such exemption, making it the one inconsistent system.
+
+FIX:
+1. stampReservation(v): `if (v._move.ignoreWalls) return;` at the top — flyers never
+   claim a cell. This also leaves `_resvOrd` unset for them, which reservationYield's
+   own existing null-check already treats as "never yields" for free.
+2. reservationYield(v): added `if (cell.owner.team !== v.team) continue;` in the
+   candidate-cell loop — only ever defer to a FRIENDLY, matching the name that was
+   already there. An enemy occupying the path is something to fight or route around,
+   not a traffic-priority negotiation partner.
+
+GATE (30 seeds vs frozen): 30/30 resolved both sides, no stalemates.
+  avg resolve tick:      536s -> 508s   (faster)
+  nav ALARMS:              25 -> 17     (-32%, the metric that actually escalates)
+  TRANSIT-stuck samples: 506  -> 463    (-8.5%)
+  right-of-way YIELDS:  2699  -> 0
+  contract violations:   232  -> 272    (+17%, the one worse number — see below)
+
+The right-of-way collapse to EXACTLY zero is itself strong evidence of how big this bug
+was: this tournament setup fields only one unit per team at a time, so a legitimate
+friendly-friendly conflict was structurally impossible — meaning ALL 2699 yields/match
+in the baseline were this exact cross-team stand-off, not the intended feature.
+
+One new standout appeared (seed 130, red lurcher, 164s stuck) — traced and confirmed
+UNRELATED: no enemy in sight the whole episode (foeT null throughout), frozen near a
+shore with blk=··R, GOTO target flipping between two nearby points. Same shape as the
+already-known shore/standoff-picking category (see the seed-116 water-inlet case), not
+a reservation issue — any code change reshuffles the whole match's RNG timeline, so this
+specific unit's path simply didn't exist in the baseline run. Flagged as a separate,
+still-open item, not a regression from this fix.
+
+Kept. The metrics that matter (nav alarms, resolve speed, the near-total explanation of
+the yield stat) are a clear net positive; the one worse number (contract violations)
+doesn't trace back to this change's mechanism.

@@ -5002,6 +5002,11 @@ function _resvClaim(i, j, prio, v) {
     x: v.holder.position.x, z: v.holder.position.z });
 }
 function stampReservation(v) {
+  // Flyers never touch the ground reservation grid — same convention as blockedFor/
+  // _navOverride (both already skip ignoreWalls entirely). A flyer occupies different
+  // airspace than a grounder; it has no cell to claim and nothing to yield for. Leaving
+  // _resvOrd unset also makes reservationYield's own null-check exempt it below, for free.
+  if (v._move.ignoreWalls) return;
   if (v._resvOrd == null) v._resvOrd = ++_resvSeq;
   const prio = unitPriority(v), c = grid.cell;
   const px = v.holder.position.x, pz = v.holder.position.z;
@@ -5044,6 +5049,12 @@ function reservationYield(v) {
   for (let k = 1; k <= 2; k++) {
     const cell = RESV.get(resvKey(Math.round((px + dx * c * k * 0.85) / c), Math.round((pz + dz * c * k * 0.85) / c)));
     if (!cell || cell.owner === v || cell.prio <= myPrio) continue;
+    // FRIENDLY right-of-way ONLY — the name always said so, the code never checked it. An
+    // enemy occupying our path is a fight, not a traffic conflict: it has no reason to ever
+    // clear the cell for us, so deferring to it is a permanent, silent stand-off (traced:
+    // seed 32's valkyrie froze 44s+ yielding to a red lurcher 9u away that was never going
+    // to move). Enemies get resolved by the fight-or-flight/engage ladder, not by yielding.
+    if (cell.owner.team !== v.team) continue;
     const od = Math.hypot(cell.x - px, cell.z - pz);
     if (od > 14) continue;                                   // the claimant isn't near enough to conflict
     const theirSp = Math.hypot(cell.vx, cell.vz);
