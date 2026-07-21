@@ -1,0 +1,64 @@
+SEED 130 STANDOFF STRAND: fully diagnosed, two fixes tried, both REJECTED
+============================================================================
+
+TRIGGER: seed 130, red lurcher, 164s stuck (t=424-590), position frozen at a shallow
+spit poking out into open water. Full diagnosis (with screenshot confirmation):
+
+1. `defend` mission fired (home-attack trigger) and sent the unit at
+   `homeAttack()`'s RAW recorded attack coordinates (89,-137) — zero reachability
+   check anywhere in that code path.
+2. A* found only a PARTIAL path (62% of the way, 26u short — logged as a genuine
+   [NAV CONTRACT] unreachable violation) because the true destination sits across
+   genuinely impassable deep water from this side. The unit walked to the end of
+   the partial route and stopped — a shallow spit, confirmed visually via screenshot
+   (open blue ocean on 3 sides, sandy shore + base structures visible only in the
+   distance).
+3. Verified directly: A* was NEVER the blocker — a fresh path back to the ford's
+   start, and all the way home, both come back fully valid. Nothing was asking the
+   unit to go anywhere reachable during this stretch; the instant a genuinely
+   reachable order arrived (low-fuel RTB), it moved immediately and the episode ended.
+4. Verified directly (instrumented `_pickStandoff` live): the "newer", reachability-
+   checked siege standoff picker was NOT failing — it succeeded every tick with a
+   valid, reachable candidate. But a separate, older "KILL THE KEEP" rule in `_view()`
+   discards that pick whenever CURRENT line-of-sight is blocked (`!turretLOS`),
+   promoting to the enemy HQ's raw center coordinate instead — a fallback explicitly
+   designed with "no LOS gate — if it's walled, we break a path to it" and zero
+   reachability check. Checking LOS from the CURRENT position while mid-transit to an
+   already-validated stand is checking the wrong thing (of course there's no LOS yet
+   — the unit hasn't arrived).
+
+FIX TRIED (two parts):
+  A. main.js: only let `!turretLOS` trigger the HQ promotion when there's no `stand2`
+     (i.e., _pickStandoff found nothing) — don't discard an already-validated,
+     reachable pick just because of momentary no-LOS while still en route.
+  B. AIStrategies.js: added `cmd.canReach(x,z)` (a commander method wrapping the same
+     unbudgeted planPath+endpoint-distance check _pickStandoff already uses) and
+     gated Defend.objective()'s two raw-coordinate returns (homeAttack(), lastEnemyPos())
+     on it, so Defend stops blindly committing to unreachable remembered points.
+
+Both DIRECTLY VERIFIED to fix the exact seed 130 case (0 stuck episodes afterward,
+re-run with the full precise episode tracker).
+
+GATE (30 seeds vs frozen):
+  Both together: nav ALARMS 17 -> 38 (+123%), TRANSIT-stuck 463 -> 614 (+33%), avg
+    resolve 508s -> 543s (slower). Contract violations improved slightly (272->243).
+  Fix A ALONE (isolated by reverting B, re-gating): nav ALARMS 17 -> 48 (+182%,
+    WORSE than combined) — so A is independently and substantially bad, ruling out
+    "it's just B's expensive canReach() calls."
+
+DIAGNOSIS: this is the FOURTH rejected fix tonight in the same shape — hard-commit
+on supply targets, suppress-far hysteresis (x2), and now "stop discarding a validated
+pick on momentary no-LOS." Every one indepedently regressed nav alarms even though
+each one's underlying logic was sound and each one fixed its specific traced case.
+The emerging pattern: this codebase's frequent re-evaluation / bail-to-simpler-
+fallback behavior is doing real, accidental stabilizing work that isn't understood
+yet — removing any single instance of "twitchy" reactivity, even when it looks like
+an obvious flip-flop bug locally, seems to remove resilience elsewhere in ways that
+show up as worse alarms broadly. Sample size is now large enough (4/4) that this
+looks systemic, not four unlucky one-offs.
+
+REVERTED (both parts). Recommend NOT attempting a fifth narrower/gentler version of
+"add a reachability check" or "add stickiness" without first understanding WHY
+frequent re-evaluation is load-bearing here — e.g. instrumenting what the OLD
+(pre-fix) behavior was actually accomplishing on the seeds that got worse, before
+trying to preserve that benefit while also fixing the traced strand.
