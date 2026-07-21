@@ -1,0 +1,49 @@
+SUPPRESS FAR-TRAVEL FLIP-FLOP: fix attempted (2 band widths), REJECTED both times
+====================================================================================
+
+TRIGGER: seed 116, red lurcher, repeated long stuck episodes (up to 22s) around
+(-2,136)/(28,130) — a spot where a water inlet presses right up against a base wall.
+Traced it: the `mnv` debug label alternated EVERY TICK between two entirely different
+GOTO destinations (`GOTO(28,130)` and `GOTO(-95,125)`), net position frozen for 400+
+real seconds. Root cause (confirmed in code, main.js _navOverride, suppress branch):
+the far-mission-objective-route vs close-radial-standoff-route split uses a single 70u
+squared-distance cutoff both ways — when distance hovers right at that boundary, the
+destination (and its whole separate A* path cache) trades every tick, so neither route
+ever holds long enough to make progress. Same shape of bug as the ALREADY-fixed seed-11
+issue this exact code block's comment describes, just a fresh case sitting on the same
+threshold with no hysteresis.
+
+FIX TRIED (v1): ENTER/HOLD hysteresis exactly mirroring _pickStandoff's own established
+pattern (TURRET_SENSE ring + 1.15x hold) — enter far-route past 70u, only return to the
+close route once under 55u (a flat 15u dead zone).
+  Directly verified fixed the seed 116 case: unit passes through in ~1s instead of
+  oscillating for 400+s.
+  GATE (30 seeds vs frozen): mixed. avg resolve 536s->522s (faster), TRANSIT-stuck
+  1125->1066 (-5%), BUT nav ALARMS 25->40 (+60%!) and contract violations 232->257
+  (+11%) — both worse on the metrics this session has been treating as the authoritative
+  gate (they trigger real escalation/self-destruct, unlike the softer diagnostic stat).
+
+FIX TRIED (v2): narrowed the band to match _pickStandoff's actual RATIO (70/1.15≈60.9)
+rather than a flat 15u gap, hoping a tighter dead zone would cut the side-effect while
+keeping the fix.
+  GATE: nav ALARMS 25->36 (+44%, better than v1 but still clearly worse), contract
+  violations back to baseline (232, no change), TRANSIT-stuck now roughly FLAT (1119,
+  no longer a clear win). Narrowing helped a little but didn't fix the core problem.
+
+DIAGNOSIS: every version of "make the far-route stickier" pushes nav alarms up
+somewhere else, even though it cleanly solves the exact oscillation it targets. Best
+guess: the far/close split isn't only exercised by pure long-distance transit — it's
+also live during active combat repositioning, where distance legitimately swings a lot
+faster than in a calm travel case. Any stickiness added here delays entering the
+close-in combat-steered mode in those live-fire scenarios, which is a worse trade than
+the narrow oscillation it fixes. This needs a fix that's hysteretic ONLY while genuinely
+just travelling (not under fire / not mid-engagement), not a blanket band on distance
+alone — a bigger design question than a one-line constant change.
+
+REVERTED (both versions). Two issues now flagged as needing real design discussion
+rather than more overnight guessing: this one, and the resupply-target flip-flop
+(see VERDICT-2026-07-21-supply-target-flipflop-REJECTED.txt). Both share the same
+underlying shape — "stop this heuristic from flip-flopping at a boundary" — and both
+punished naive hysteresis. Worth discussing as one topic: maybe the fix is a shared
+primitive (a generic "sticky choice" helper with a stall-aware release valve) rather
+than one-off bands in each spot.
