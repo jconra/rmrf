@@ -31,6 +31,23 @@ couldn't actually reach — a much worse failure mode than the flip-flop it repl
 
 REVERTED. Real fix needs a stuck-aware release valve (e.g. drop the commit if no real
 progress toward it over some window, same shape as the driver's own net-progress
-watchdog) rather than committing unconditionally. Left for a future session with
-Jacob's input on the design rather than a second unsupervised guess overnight — this
-class of "commit vs. re-evaluate" tradeoff deserves a discussion, not a coin flip.
+watchdog) rather than committing unconditionally.
+
+SECOND ATTEMPT TRIED (same night): softened to pure hysteresis instead of a hard commit
+— kept the per-tick re-evaluation (so an unreachable/destroyed pick still naturally
+loses over time), just gave whichever source was picked LAST tick a 25u distance bonus
+so a rival has to be meaningfully closer to steal it, rather than any nanometer closer.
+
+GATE: still net-negative, though milder (no stalemates this time). TRANSIT-stuck 1125
+-> 1249 (+11%), nav ALARMS 25 -> 27, contract violations 232 -> 242, avg resolve 536s
+-> 543s, and a NEW standout: seed 102 red jotun stuck in resupply for 192s (nothing
+remotely that long in baseline). Even a soft bias toward "keep the current pick" seems
+to fight against something that WANTS to keep re-adapting — plausibly the front line
+itself moves during a match, so "nearest supply" continuously shifting isn't purely
+noise, it's tracking real battlefield change; damping that responsiveness cost more
+than the flip-flop it was meant to cure.
+
+REVERTED again. Two independent designs (hard commit, soft hysteresis) both made this
+worse. Leaving the underlying issue (seed 32's real 36s flip-flop episode is still
+reproducible on frozen) undecided rather than trying a third unsupervised guess — this
+needs Jacob's input on what "stability" should even mean here before another attempt.
