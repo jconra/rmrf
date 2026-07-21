@@ -1,0 +1,36 @@
+SUPPLY TARGET FLIP-FLOP: fix attempted, REJECTED as net-negative
+==================================================================
+
+TRIGGER: seed 32, blue valkyrie, 36s "TRANSIT-stuck" in resupply/siege. Traced it: gd
+to its resupply target shrank steadily (92 -> 77 -> 61 -> 45) then jumped BACK up to
+150 as it re-routed, fuel draining the whole time (44 -> 20) without ever arriving.
+Root cause (confirmed in code): `_supply` (main.js, in _view) recomputes "nearest valid
+source" from scratch every tick with no commitment — two similarly-distant candidates
+(FOB vs home, or FOB vs a depot) can flip mid-transit as relative distance see-saws.
+
+FIX TRIED: commit to one source for the whole trip (mirroring _pickStandoff's existing
+hold pattern for the analogous siege-standoff problem) — hold the current pick as long
+as it's still a live source (base alive / depot not dead), only re-picking once fully
+topped off or the held source dies.
+
+GATE (30 seeds vs frozen, same siege-closein-fixed baseline): REGRESSED badly.
+  resolved:    30/30 -> 25/30  (5 NEW stalemates)
+  idle-at-goal:  535 -> 3281   (+513%)
+  TRANSIT-stuck: 1125 -> 1900  (+69%)
+  nav ALARMS:     25 -> 28     (worse)
+  longest episode: a firebrat stuck in `flee` for 1200s — essentially the whole match.
+
+DIAGNOSIS OF THE REGRESSION: the commit only invalidates on "topped off" or "source
+destroyed" — it never accounts for the source becoming physically UNREACHABLE (blocked
+path, contested ground, geometry). The old per-tick re-pick was flip-floppy, but that
+same "keep re-evaluating" behavior was ALSO an accidental escape hatch: if one candidate
+turned out to be a dead end, drift/repositioning would eventually make a DIFFERENT
+candidate win the "nearest" comparison and the unit would go there instead. Committing
+removed that escape hatch and left units hard-locked onto sources they sometimes
+couldn't actually reach — a much worse failure mode than the flip-flop it replaced.
+
+REVERTED. Real fix needs a stuck-aware release valve (e.g. drop the commit if no real
+progress toward it over some window, same shape as the driver's own net-progress
+watchdog) rather than committing unconditionally. Left for a future session with
+Jacob's input on the design rather than a second unsupervised guess overnight — this
+class of "commit vs. re-evaluate" tradeoff deserves a discussion, not a coin flip.
