@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Lab · Editor</title>
+<script src="/oops.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #0d141c; color: #dfe8ef;
+    font-family: 'Courier New', monospace; letter-spacing: 0.3px; overflow: hidden; }
+  #wrap { display: flex; flex-direction: column; height: 100%; }
+  header { padding: 9px 14px; border-bottom: 1px solid rgba(255,255,255,0.12);
+    background: #0a1017; display: flex; align-items: center; gap: 14px; flex: none; }
+  header h1 { font-size: 14px; letter-spacing: 3px; }
+  header a, header button { font-family: inherit; font-size: 11px; letter-spacing: 1px;
+    color: #cfe0ee; background: #18283a; border: 1px solid #2f4a63; border-radius: 4px;
+    padding: 5px 10px; cursor: pointer; text-decoration: none; }
+  header button:hover, header a:hover { background: #21384f; }
+  header .sp { flex: 1; }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #palette { width: 132px; flex: none; background: #0a1017; border-right: 1px solid rgba(255,255,255,0.12);
+    overflow-y: auto; padding: 8px; }
+  #palette.collapsed { display: none; }
+  #btnAddNode { font-size: 16px !important; font-weight: bold; line-height: 1; padding: 3px 10px !important; }
+  #zoomind { position: absolute; bottom: 8px; right: 12px; font-size: 10px; opacity: 0.45;
+    pointer-events: none; }
+  #palette .pt { font-size: 9px; letter-spacing: 1.5px; opacity: 0.5; margin: 8px 0 4px; }
+  #palette button { display: block; width: 100%; text-align: left; font-family: inherit; font-size: 11px;
+    color: #cfe0ee; background: #14202d; border: 1px solid #243747; border-radius: 4px;
+    padding: 5px 7px; margin-bottom: 4px; cursor: pointer; }
+  #palette button:hover { background: #1d2f40; border-color: #3a5a76; }
+  /* The grid lives on the viewport and is panned/zoomed via background-position/size in
+     applyView(), so it tiles forever — there's no edge to drag a node off of. */
+  #scroll { flex: 1; overflow: hidden; position: relative; cursor: grab; touch-action: none;
+    background-color: #0b121a;
+    background-image:
+      linear-gradient(rgba(120,160,200,0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(120,160,200,0.07) 1px, transparent 1px),
+      radial-gradient(rgba(150,190,225,0.16) 1.4px, transparent 1.5px); }
+  #canvas { position: absolute; left: 0; top: 0; width: 6000px; height: 4000px; transform-origin: 0 0; }
+  /* overflow:visible so cables still render when a node is dragged outside the canvas box */
+  #cables { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  #cables path { pointer-events: stroke; cursor: pointer; }
+
+  .node { position: absolute; width: 240px; background: #15212e; border: 1px solid #3a5f8c;
+    border-radius: 7px; box-shadow: 0 3px 10px rgba(0,0,0,0.4); font-size: 11px; }
+  .node .nhead .grip { opacity: 0.35; cursor: grab; font-size: 12px; }
+  .node .ntitle-in { font-weight: bold; color: #e8f0f7 !important; }
+  .node .nnotes { width: 100%; min-height: 56px; resize: vertical; line-height: 1.4;
+    font-family: inherit; font-size: 10.5px; background: #0c151e; color: #cfe0ee;
+    border: 1px solid #2a3f52; border-radius: 3px; padding: 4px 5px; }
+  /* short arrow label, attached just outside its plug */
+  .node .plabel { position: absolute; display: flex; align-items: center; gap: 2px; z-index: 4; white-space: nowrap; }
+  .node .plabel .plabel-in { width: 62px; font-family: inherit; font-size: 10px; background: rgba(10,16,23,0.9);
+    color: #dfe8ef; border: 1px solid #2a3f52; border-radius: 3px; padding: 1px 4px; }
+  .node .plabel .rmarrow { cursor: pointer; opacity: 0.4; font-size: 11px; }
+  .node .plabel .rmarrow:hover { color: #ff8a8a; opacity: 1; }
+  .node .addarrow { align-self: flex-start; font-size: 10px; background: #18283a;
+    border: 1px solid #2f4a63; color: #cfe0ee; border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+  .node .addarrow:hover { background: #21384f; }
+  .node.kdata { border-color: #2f7d72; } .node.kflow { border-color: #3a5f8c; }
+  .node.kaction { border-color: #b8702f; }
+  .node .nhead { display: flex; align-items: center; gap: 5px; padding: 5px 7px;
+    border-bottom: 1px solid rgba(255,255,255,0.1); cursor: grab; border-radius: 7px 7px 0 0; }
+  .node.kdata .nhead { background: #16322d; } .node.kflow .nhead { background: #16273a; }
+  .node.kaction .nhead { background: #3a2913; }
+  .node .nhead .ntitle { font-weight: bold; letter-spacing: 0.5px; flex: 1; }
+  .node .nhead .nid { font-size: 8px; opacity: 0.45; }
+  .node .nhead .ndel { cursor: pointer; opacity: 0.5; padding: 0 2px; }
+  .node .nhead .ndel:hover { opacity: 1; color: #ff8a8a; }
+  .node .nbody { padding: 6px 7px; display: flex; flex-direction: column; gap: 5px; }
+  .node .row { display: flex; align-items: center; gap: 4px; position: relative; }
+  .node .row label { font-size: 9px; opacity: 0.6; min-width: 30px; }
+  .node select, .node input { font-family: inherit; font-size: 10.5px; background: #0c151e;
+    color: #dfe8ef; border: 1px solid #2a3f52; border-radius: 3px; padding: 2px 4px; flex: 1; min-width: 0; }
+  .node input.log { color: #ffd9a0; }
+  .node .caserow { display: flex; align-items: center; gap: 4px; position: relative; font-size: 10px; }
+  .node .caserow .ck { flex: 1; opacity: 0.85; }
+  .node .caserow .rmc { cursor: pointer; opacity: 0.5; } .node .caserow .rmc:hover { color: #ff8a8a; opacity: 1; }
+
+  /* embedded condition editor (the IF/ON bar + nested expression boxes) */
+  .cond { margin: 2px 0; }
+  .condhead { display: flex; align-items: center; gap: 5px; padding: 3px 5px; cursor: pointer;
+    background: #0e1a26; border: 1px solid #2a4258; border-radius: 4px; }
+  .condhead:hover { background: #112433; }
+  .condhead .ccaret { opacity: 0.7; width: 9px; }
+  .condhead .clabel { font-size: 8.5px; letter-spacing: 1px; opacity: 0.6; }
+  .condhead .csum { font-size: 10px; color: #cfe0ee; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; flex: 1; }
+  .condhead .csum.bad { color: #ff9a9a; }
+  .condbody { padding: 5px 2px 2px; display: flex; align-items: flex-start; gap: 4px; flex-wrap: wrap; }
+
+  .box { border: 1px solid #34506a; border-radius: 6px; margin: 2px 0; background: #131f2b;
+    display: inline-block; vertical-align: top; }
+  .box.invalid { border-color: #c0506a; box-shadow: 0 0 0 1px #c0506a55; }
+  .box .bh { display: flex; align-items: center; gap: 5px; padding: 3px 6px; }
+  .box .bh .caret { cursor: pointer; opacity: 0.6; width: 10px; }
+  .box .bh .chip { font-size: 7.5px; letter-spacing: 1px; padding: 1px 5px; border-radius: 7px;
+    background: rgba(255,255,255,0.08); opacity: 0.85; }
+  .box .bh .sum { font-style: italic; opacity: 0.85; font-size: 10px; }
+  .echildren { padding: 2px 6px 6px 14px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .eslot { display: flex; align-items: center; gap: 5px; margin: 2px 0; }
+  .eslot > .lab { font-size: 8.5px; opacity: 0.5; min-width: 12px; }
+  .clr { cursor: pointer; opacity: 0.45; font-size: 11px; align-self: center; } .clr:hover { color: #ff8a8a; opacity: 1; }
+  .box select, .box input { font-size: 10px; padding: 2px 4px; flex: none; }
+  .box input[type=number] { width: 58px; }
+  .op { color: #c0a060; font-weight: bold; padding: 0 1px; }
+  .box select.spawn, .condbody > select.spawn { border-style: dashed; opacity: 0.85; }
+  .k-field .bh { background: #1a3a35; } .k-const .bh { background: #2a323b; }
+  .k-op .bh { background: #2c2546; } .k-cmp .bh { background: #3a3018; }
+  .k-logic .bh { background: #173a28; } .k-match .bh { background: #3a1d30; }
+  .addin { font-size: 9px; background: #18283a; border: 1px solid #2f4a63; color: #cfe0ee;
+    border-radius: 4px; padding: 2px 6px; cursor: pointer; }
+
+  .plug { position: absolute; width: 11px; height: 11px; border-radius: 50%;
+    background: #0c151e; border: 2px solid #5fb0a4; cursor: crosshair; z-index: 3; }
+  .plug[data-kind="flow"] { border-color: #6f9fd0; border-radius: 2px; }
+  .plug.pend { box-shadow: 0 0 0 3px rgba(255,255,255,0.35); }
+  .plug.din { left: -7px; } .plug.dout { right: -7px; top: 9px; }
+  .plug.fin { top: -7px; left: 50%; margin-left: -5px; }
+  .plug.fout { right: -7px; }
+  .plabel { position: absolute; right: 12px; font-size: 8.5px; opacity: 0.6; white-space: nowrap; }
+  #hint { position: absolute; bottom: 8px; left: 140px; font-size: 10px; opacity: 0.5; pointer-events: none; }
+  #exportbox { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
+    align-items: center; justify-content: center; z-index: 50; }
+  #exportbox.show { display: flex; }
+  #exportpanel { width: 72%; height: 66%; display: flex; flex-direction: column; gap: 8px; }
+  #exportta { flex: 1; width: 100%; background: #0c151e; color: #cfe0ee;
+    border: 1px solid #34506a; border-radius: 6px; font-family: inherit; font-size: 11px; padding: 10px; resize: none; }
+  #exportbtns { display: flex; align-items: center; gap: 10px; }
+  #exportbtns button { font-family: inherit; font-size: 11px; letter-spacing: 1px; color: #cfe0ee;
+    background: #18283a; border: 1px solid #2f4a63; border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+  #exportbtns button:hover { background: #21384f; }
+  #exportstatus { font-size: 11px; opacity: 0.7; }
+  #exportstatus.bad { color: #ff9a9a; opacity: 1; } #exportstatus.ok { color: #8fe6a8; opacity: 1; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <button id="btnAddNode" title="add a new note">+</button>
+    <h1>AI&nbsp;LAB&nbsp;·&nbsp;EDITOR</h1>
+    <span class="sp"></span>
+    <button id="btnSave">save</button>
+    <button id="btnExport">export JSON</button>
+  </header>
+  <div id="main">
+    <div id="scroll"><div id="canvas"><svg id="cables"></svg></div>
+      <div id="zoomind"></div>
+    </div>
+  </div>
+</div>
+<div id="exportbox"><div id="exportpanel">
+  <textarea id="exportta" spellcheck="false" placeholder="paste a sketch's JSON here and hit “load this JSON”"></textarea>
+  <div id="exportbtns">
+    <button id="btnImport">load this JSON</button>
+    <button id="btnCloseExport">close</button>
+    <span id="exportstatus"></span>
+  </div>
+</div></div>
+<script type="module" src="./editor.js"></script>
+</body>
+</html>

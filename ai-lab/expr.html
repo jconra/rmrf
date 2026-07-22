@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Lab · Condition (nested boxes)</title>
+<script src="/oops.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #0d141c; color: #dfe8ef;
+    font-family: 'Courier New', monospace; letter-spacing: 0.3px; }
+  header { padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.12); background: #0a1017;
+    display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 14px; letter-spacing: 3px; }
+  header a { font-size: 11px; color: #9fc4e0; text-decoration: none; }
+  #panel { max-width: 760px; margin: 22px auto; padding: 0 18px; }
+  #summary { background: #111c28; border: 1px solid #2a445c; border-radius: 7px;
+    padding: 12px 14px; margin-bottom: 16px; }
+  #summary .lbl { font-size: 9px; letter-spacing: 2px; opacity: 0.5; }
+  #summary .txt { font-size: 15px; margin-top: 5px; color: #e8f0f7; }
+  #summary .badge { font-size: 10px; padding: 2px 8px; border-radius: 9px; margin-left: 8px; }
+  .ok { background: #1d4a2e; color: #8fe6a8; } .bad { background: #4a1d1d; color: #ff9a9a; }
+
+  /* nested boxes = the expression tree */
+  .box { border: 1px solid #34506a; border-radius: 7px; margin: 4px 0; background: #131f2b;
+    display: inline-block; vertical-align: top; min-width: 0; }
+  .box.invalid { border-color: #c0506a; box-shadow: 0 0 0 1px #c0506a55; }
+  .bh { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: default; }
+  .bh .caret { cursor: pointer; opacity: 0.6; width: 12px; }
+  .bh .chip { font-size: 8.5px; letter-spacing: 1px; padding: 1px 6px; border-radius: 8px;
+    background: rgba(255,255,255,0.08); opacity: 0.85; }
+  .bh .sum { font-style: italic; opacity: 0.85; font-size: 12px; }
+  .children { padding: 2px 8px 8px 20px; }
+  .slot { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .slot > .lab { font-size: 9px; opacity: 0.5; min-width: 14px; }
+  .clr { cursor: pointer; opacity: 0.45; font-size: 12px; } .clr:hover { color: #ff8a8a; opacity: 1; }
+  select, input { font-family: inherit; font-size: 12px; background: #0c151e; color: #dfe8ef;
+    border: 1px solid #2a3f52; border-radius: 4px; padding: 3px 6px; }
+  input[type=number] { width: 70px; }
+  .op { color: #c0a060; font-weight: bold; padding: 0 2px; }
+  .spawn { border-style: dashed; opacity: 0.85; }
+  /* kind tints */
+  .k-field .bh { background: #1a3a35; } .k-const .bh { background: #2a323b; }
+  .k-op .bh { background: #2c2546; } .k-cmp .bh { background: #3a3018; }
+  .k-logic .bh { background: #173a28; } .k-match .bh { background: #3a1d30; }
+  .addin { font-size: 10px; background: #18283a; border: 1px solid #2f4a63; color: #cfe0ee;
+    border-radius: 4px; padding: 2px 7px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI&nbsp;LAB&nbsp;·&nbsp;CONDITION</h1>
+  <a href="./editor.html">&laquo; node editor</a>
+  <span style="flex:1"></span>
+  <span style="font-size:11px;opacity:.5">prototype — nested-box expression editor</span>
+</header>
+<div id="panel">
+  <div id="summary">
+    <div class="lbl">BRANCH brGate &mdash; "Still in gate?"  (click a box's +/- to collapse to its title)</div>
+    <div class="txt"><span id="sumtext"></span><span id="sumbadge" class="badge"></span></div>
+  </div>
+  <div id="tree"></div>
+</div>
+<script type="module" src="./expr.js"></script>
+</body>
+</html>
