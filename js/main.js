@@ -34,7 +34,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn, setCapRoutes } from './AIStrategies.js?v=92';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn, setCapRoutes, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1383,6 +1383,29 @@ let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit
 let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
 let aiMineAvoid = !QS.has('nomineavoid'); // soft-steer AI ground units around mines their team has spotted
 let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
+
+// ── DEEP LOG (RR.setDeepLog / ?deeplog) ──────────────────────────────────────────
+// Raw console.log tracing for the decision points that turned out hardest to see from
+// the outside tonight (the standoff picker, the HQ-promotion fallback, Defend's raw-
+// coordinate objective) — every one of them silently swapped to older/unchecked logic
+// with zero signal that it happened. Off by default (console spam nobody wants
+// permanently); flip on with RR.setDeepLog(true) or load with ?deeplog when actually
+// chasing something. dlog() logs on CHANGE or every ~3s heartbeat (so a value that's
+// silently stuck — the actual bug shape tonight — still prints periodically instead of
+// going quiet), keyed per call-site so different units/teams don't stomp each other.
+let aiDeepLog = QS.has('deeplog');
+if (aiDeepLog) setDeepLogStrategies(true);   // sync AIStrategies.js's copy of the flag when set via ?deeplog at load
+const _dlogState = new Map();
+function dlog(key, value, msg) {
+  if (!aiDeepLog) return;
+  const now = performance.now();
+  const s = _dlogState.get(key);
+  const snap = JSON.stringify(value);
+  if (!s || s.snap !== snap || now - s.t > 3000) {
+    console.log(`[DEEPLOG ${key}] ${msg}`, value);
+    _dlogState.set(key, { snap, t: now });
+  }
+}
 const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beelines it and ignores turrets/fire (final-dash commit).
                              // MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
                              // fear-ring, and with the commit at 55 the ring ENCLOSED the dash zone — the runner ping-ponged in
@@ -2150,6 +2173,10 @@ function updateProjectileHits() {
                         || (pos.x - hf.x) ** 2 + (pos.z - hf.z) ** 2 < 70 * 70;
           if (!nearHome) continue;
           c._homeAttack = { x: pos.x, z: pos.z, t: performance.now() };
+          // This raw (x,z) is what Defend.objective() sends a responder straight at, with no
+          // reachability check anywhere downstream — see AIStrategies.js's dlog2 on that function.
+          dlog(`homeAttackRecorded:${c.team}`, { x: +pos.x.toFixed(0), z: +pos.z.toFixed(0) },
+            `${c.cname}: home-attack position recorded (defenders will be sent straight here, unchecked).`);
           if (c._slots.some(s => s.strategy && s.strategy.step === 'defend') && (!c._homeAttackLogT || performance.now() - c._homeAttackLogT > 15000)) {
             c._homeAttackLogT = performance.now();
             aiLog(c.team, `${c.cname}: They're hitting our towers — get back there and jump them!`);
@@ -6521,6 +6548,12 @@ class AICommander {
       const obj = d2s > 70 * 70 ? this.strategy.objective(this) : null;
       dest = obj || view.threatStand; slack = 14;
       if (!obj) this._destIsStand = true;   // final approach to the radial standoff (rotation applies)
+      // No hysteresis on this 70u split (last night's diagnosis, unresolved) — logging the MODE
+      // (not just distance) means dlog's own change-detection surfaces flip-flopping for free:
+      // rapid repeat log lines here == the route swapping every tick between two divergent A*
+      // caches, same shape traced on seed 116 (400s+ frozen at the boundary).
+      dlog(`suppressFarSplit:${this.team}`, { unit: v.type, mode: obj ? 'far-objective' : 'close-radial', distU: +Math.sqrt(d2s).toFixed(0) },
+        `${this.cname} ${v.type}: suppress route mode = ${obj ? 'FAR (mission objective)' : 'CLOSE (radial standoff)'} at ${Math.round(Math.sqrt(d2s))}u from stand.`);
     }
     else {
       if (st === 'unstick') {
@@ -7053,28 +7086,66 @@ class AICommander {
         live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d, enter: d <= ENTER2 });
       }
     }
-    if (!live.length) return null;
+    if (!live.length) {
+      // Coarse position bucket (nearest 40u), not the exact drifting coordinate — while
+      // travelling, exact px/pz changes every tick and would re-trigger the "on change" log
+      // every single frame, defeating the point of the throttle. This still re-logs if the
+      // unit moves to a meaningfully different area, and always heartbeats every ~3s regardless.
+      dlog(`pickStandoff:${this.team}`, { unit: v.type, areaX: Math.round(px / 40) * 40, areaZ: Math.round(pz / 40) * 40 },
+        `${this.cname} ${v.type}: no towers within sensing range (HOLD2) — _pickStandoff bails to the old radial/HQ fallback. (at ${Math.round(px)},${Math.round(pz)})`);
+      return null;
+    }
     const crossfire = (x, z, self) => { for (const O of live) { if (O.w === self.w) continue; if ((O.x - x) ** 2 + (O.z - z) ** 2 < O.range * O.range) return true; } return false; };
     const spotOK = (x, z, T) => flyer || (!v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z, T));
     // Hold the committed stand while its tower lives and the spot is still valid (cheap check).
     const cm = this._stand2;
-    if (cm) { const T = live.find(o => o.w === cm.w); if (T && spotOK(cm.x, cm.z, T)) return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cm.x, z: cm.z }, w: T.w }; this._stand2 = null; }
+    if (cm) {
+      const T = live.find(o => o.w === cm.w);
+      if (T && spotOK(cm.x, cm.z, T)) {
+        dlog(`pickStandoff:${this.team}`, { unit: v.type, holding: { x: +cm.x.toFixed(0), z: +cm.z.toFixed(0) }, towerX: +T.x.toFixed(0), towerZ: +T.z.toFixed(0) },
+          `${this.cname} ${v.type}: holding committed stand (tower still live, spot still valid).`);
+        return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cm.x, z: cm.z }, w: T.w };
+      }
+      dlog(`pickStandoff:${this.team}`, { unit: v.type, was: { x: +cm.x.toFixed(0), z: +cm.z.toFixed(0) }, towerStillLive: !!T },
+        `${this.cname} ${v.type}: committed stand invalidated (${T ? 'spot no longer OK — blocked/no LOS/crossfire' : 'tower no longer live'}) — re-picking.`);
+      this._stand2 = null;
+    }
     // A FRESH siege only starts on a tower inside the enter ring (hold-only far towers can't seed one).
     const fresh = live.filter(o => o.enter);
-    if (!fresh.length) return null;
+    if (!fresh.length) {
+      dlog(`pickStandoff:${this.team}`, { unit: v.type, liveCount: live.length },
+        `${this.cname} ${v.type}: ${live.length} tower(s) live but none inside the ENTER ring — can't seed a fresh stand, falling back.`);
+      return null;
+    }
     fresh.sort((a, b) => a.d - b.d);   // nearest tower first
     const c = grid.cell, unitR = TURRET_HOLD[v.type] || 40, minR = Math.max(24, unitR * STAND.band);
     const reaches = (x, z) => { const p = planPath(v, { x, z }); if (!p || !p.length) return false; const e = p[p.length - 1]; return (e.x - x) ** 2 + (e.z - z) ** 2 <= (c * 2) ** 2; };
     let budget = 8;   // A* checks this (rare) re-pick
+    let triedCands = 0, triedTowers = 0;
     for (const T of fresh) {
+      triedTowers++;
       const cands = [];
       for (const r of [unitR, (minR + unitR) / 2, minR]) for (let b = 0; b < 24; b++) {
         const th = b / 24 * Math.PI * 2, x = T.x + Math.sin(th) * r, z = T.z + Math.cos(th) * r;
         if (spotOK(x, z, T)) cands.push({ x, z, d: (x - px) ** 2 + (z - pz) ** 2 });
       }
       cands.sort((a, b) => a.d - b.d);   // nearest to the unit = least travel
-      for (const cd of cands) { if (budget <= 0) break; budget--; if (flyer || reaches(cd.x, cd.z)) { this._stand2 = { w: T.w, x: cd.x, z: cd.z }; return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cd.x, z: cd.z }, w: T.w }; } }
+      for (const cd of cands) {
+        if (budget <= 0) break;
+        budget--; triedCands++;
+        if (flyer || reaches(cd.x, cd.z)) {
+          this._stand2 = { w: T.w, x: cd.x, z: cd.z };
+          dlog(`pickStandoff:${this.team}`, { unit: v.type, towerX: +T.x.toFixed(0), towerZ: +T.z.toFixed(0), standX: +cd.x.toFixed(0), standZ: +cd.z.toFixed(0), triedCands, triedTowers },
+            `${this.cname} ${v.type}: fresh stand picked after checking ${triedCands} candidate spot(s) across ${triedTowers} tower(s).`);
+          return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cd.x, z: cd.z }, w: T.w };
+        }
+      }
     }
+    // Jacob's example case: every candidate spot around every fresh tower failed (blocked/no
+    // LOS/crossfire) or wasn't actually A*-reachable — this is exactly the silent-fallback moment
+    // that stranded a lurcher across open water (seed 130): nothing here says so unless deeplog is on.
+    dlog(`pickStandoff:${this.team}`, { unit: v.type, triedCands, triedTowers, budgetLeft: budget },
+      `${this.cname} ${v.type}: checked ${triedCands} candidate spot(s) across ${triedTowers} tower(s), none reachable/clear — reverting to the old radial/HQ fallback.`);
     return null;
   }
 
@@ -7365,17 +7436,21 @@ class AICommander {
       const so = this._pickStandoff(v, rearPred);
       if (so) { threat = so.threat; threatCamp = so.threatCamp; stand2 = so.stand; stand2Ref = so.threat; }
     }
-    if (!threat) for (const c of camps) {   // fallback nearest-turret scan (stand2 off / found nothing)
-      if (c.team === this.team) continue;
-      for (const w of c.walls) {
-        const t = w.turret;
-        if (!t || t.dead || t.falling) continue;
-        if (rearOnly && !(c.role === 'main' && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2)) continue;
-        t.group.updateWorldMatrix(true, false);
-        t.head.getWorldPosition(_threatV);
-        const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
-        if (d < threatD) { threatD = d; threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; threatCamp = c; }
+    if (!threat) {
+      for (const c of camps) {   // fallback nearest-turret scan (stand2 off / found nothing) — RAW distance, no reachability/LOS check at all
+        if (c.team === this.team) continue;
+        for (const w of c.walls) {
+          const t = w.turret;
+          if (!t || t.dead || t.falling) continue;
+          if (rearOnly && !(c.role === 'main' && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2)) continue;
+          t.group.updateWorldMatrix(true, false);
+          t.head.getWorldPosition(_threatV);
+          const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
+          if (d < threatD) { threatD = d; threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; threatCamp = c; }
+        }
       }
+      if (threat) dlog(`nearestTurretFallback:${this.team}`, { unit: v.type, threatX: +threat.x.toFixed(0), threatZ: +threat.z.toFixed(0), distU: +Math.sqrt(threatD).toFixed(0) },
+        `${this.cname} ${v.type}: _pickStandoff found nothing usable — fell back to the RAW nearest turret by distance (no reachability/LOS check).`);
     }
     // KILL THE KEEP: the flag HQ is a first-class siege target, not a last resort. The flag only
     // exposes when the HQ building falls, so hoarding it until all four turrets are dead is what
@@ -7403,7 +7478,19 @@ class AICommander {
         // The stalemate GAMBIT goes straight for the KEEP (that's the whole point — crack the HQ,
         // expose the flag, win — not trade tower-for-tower while the enemy's tied up mid-field).
         const promote = this._gambit || (aiKeepBreach ? (!threat || !turretLOS) : !threat);
-        if (promote) { threat = hqPt; threatCamp = ec; hqThreat = true; }
+        if (promote) {
+          // This silently THROWS AWAY whatever `threat` already was (including a validated,
+          // reachable _pickStandoff pick — stand2 truthy) in favor of the HQ's raw center point,
+          // which has NO reachability check at all ("no LOS gate — if it's walled, we break a
+          // path to it" above). Traced: this is exactly what stranded a lurcher across open
+          // water for 164s (seed 130) — the good pick existed, this promotion discarded it.
+          dlog(`hqPromotion:${this.team}`, {
+            unit: v.type, reason: this._gambit ? 'gambit' : !threat ? 'no-threat-at-all' : 'no-turretLOS',
+            hadStand2: !!stand2, discardedThreat: threat ? { x: +threat.x.toFixed(0), z: +threat.z.toFixed(0) } : null,
+            hqX: +hqPt.x.toFixed(0), hqZ: +hqPt.z.toFixed(0)
+          }, `${this.cname} ${v.type}: promoting to HQ${stand2 ? ' — DISCARDING an already-validated reachable stand' : ''} (reason: ${this._gambit ? 'gambit' : !threat ? 'no threat at all' : 'no current LOS on picked threat'}).`);
+          threat = hqPt; threatCamp = ec; hqThreat = true;
+        }
       }
     }
     // SHOOT BACK: a turret that LANDED A HIT on us in the last 4s IS the threat — not the
@@ -9520,6 +9607,8 @@ window.RR = {
   setDefendInPlace: on => { aiDefendInPlace = !!on; return aiDefendInPlace; }, // defend-under-fire responds in the current vehicle vs home-swap (A/B)
   getDefendInPlace: () => aiDefendInPlace,
   setStand2: on => { aiStand2 = !!on; return aiStand2; },                  // lab-logic standoff vs old radial+_standRot (A/B)
+  setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
+  getDeepLog: () => aiDeepLog,
   setCapRoutes: on => { setCapRoutes(!!on); return !!on; },                // multi-waypoint capture routes vs single staging (A/B)
   setStandBand: b => { STAND.band = Math.max(0, Math.min(0.98, +b || 0.6)); return STAND.band; },   // how far out to stand (0.55 close/fast … 0.85 far/safe)
   getStandBand: () => STAND.band,

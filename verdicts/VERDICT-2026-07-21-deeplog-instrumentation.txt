@@ -1,0 +1,45 @@
+DEEP LOG: gated, throttled console tracing at tonight's silent-fallback decision points
+==========================================================================================
+
+Jacob's ask: rather than more one-off Playwright probing to reverse-engineer what's
+happening (slow, error-prone — we got a couple of things wrong before double-checking
+directly), add permanent but GATED logging at the decision points that turned out
+hardest to see from outside, so both of us can watch it happen live going forward.
+
+NEW: RR.setDeepLog(true) / ?deeplog query param. Off by default — zero console noise,
+zero behavior change (verified: 5-seed tournament, deeplog code present but flag off,
+produces BIT-IDENTICAL output to the pre-instrumentation frozen baseline).
+
+Throttle shape (dlog() in main.js, dlog2() in AIStrategies.js — same shape, kept
+separate to avoid a circular import): logs on CHANGE of the given value, or every ~3s
+heartbeat regardless — so a value that's silently STUCK (the actual shape of tonight's
+bugs) still prints periodically instead of going quiet, while a continuously-varying
+value (exact position while travelling) doesn't spam every tick either (bucketed to
+the nearest 40u where that mattered).
+
+LOGGED, with the actual variables in the output:
+- `_pickStandoff` (main.js): every outcome — no towers in sensing range, holding a
+  committed stand, invalidating one (tower dead vs spot no longer clear — distinguished),
+  no fresh tower in the enter ring, a fresh pick succeeding (with how many candidates/
+  towers it checked), and Jacob's own example case verbatim: checked N candidates
+  across M towers, none reachable/clear, reverting to the old fallback.
+- The raw nearest-turret fallback firing (main.js) — only reachable when the above
+  found nothing; logs the raw pick with no validation, by construction.
+- The "KILL THE KEEP" HQ-promotion (main.js) — logs the reason (gambit / no threat at
+  all / no current LOS) and CRITICALLY flags when it's discarding an already-validated
+  stand2 pick, which is exactly the silent substitution that stranded seed 130's lurcher.
+- `Defend.objective()` (AIStrategies.js) — which of the four branches fired
+  (homeAttack raw position / lastEnemyPos on our half / home for maintenance /
+  patrolSpot), all of which currently have zero reachability check.
+- `_homeAttack` recording (main.js) — the raw position the moment it's stamped, since
+  that's what Defend blindly sends a responder at.
+- The suppress far/close 70u route split (main.js, unresolved from last night) — logs
+  the MODE (far-objective vs close-radial) and distance each time it's evaluated;
+  rapid repeated lines here are the literal signature of the route flip-flopping.
+- `missionPick`'s incumbent-vs-runner-up gap (AIStrategies.js) — flags near-ties
+  (gap < 1.5, where the incumbent bonus stops being decisive) and explicit mission
+  changes, so thrash risk is visible before it actually starts thrashing.
+
+Not a fix for anything — pure observability, same convention as the codebase's own
+existing debug knobs. All committed, no gate/tournament needed since it's provably a
+no-op when off.

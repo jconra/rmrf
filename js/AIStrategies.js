@@ -349,18 +349,36 @@ class Defend extends Mission {
   get key() { return 'defend'; }
   wantVehicle(cmd) { return cmd.ownTowersDown() ? 'valkyrie' : this.doc.role('defend'); }
   objective(cmd) {
+    // Both `atk` and `p` are raw remembered coordinates (a tower's radio call, a sighting) with
+    // NO reachability guarantee anywhere in this function — traced tonight (seed 130) to a unit
+    // sent straight at homeAttack()'s raw position across open water, stranded for 164s with no
+    // error/log anywhere in this path. Logging every branch so that's visible if it happens again.
     const atk = cmd.homeAttack();                 // our structures are being SHOT — beats hearing range
-    if (atk) return atk;
+    if (atk) {
+      dlog2(`defendObjective:${cmd.team}`, { unit: cmd.unit ? cmd.unit.type : null, x: +atk.x.toFixed(0), z: +atk.z.toFixed(0) },
+        `${cmd.cname}: Defend objective = homeAttack() raw position (no reachability check).`);
+      return atk;
+    }
     const p = cmd.lastEnemyPos();                 // seen OR heard contact (team intel, ~12s fresh)
     if (p) {
       const home = cmd.homeBasePos(), en = cmd.enemyBasePos();
       const dh = (p.x - home.x) ** 2 + (p.z - home.z) ** 2, de = (p.x - en.x) ** 2 + (p.z - en.z) ** 2;
-      if (dh < de) return p;                      // on OUR half → run it down; their half = bait, hold the lane
+      if (dh < de) {
+        dlog2(`defendObjective:${cmd.team}`, { unit: cmd.unit ? cmd.unit.type : null, x: +p.x.toFixed(0), z: +p.z.toFixed(0) },
+          `${cmd.cname}: Defend objective = lastEnemyPos() on our half (no reachability check).`);
+        return p;                      // on OUR half → run it down; their half = bait, hold the lane
+      }
     }
     // QUIET WATCH = MAINTENANCE TIME: nothing shooting us, nothing on our half → top the
     // hull at home before resuming the lane (guards fight at whatever they carry in; a
     // fresh guard wins the duels a worn one loses). Any contact above pre-empts this.
-    if (TURTLE_GUARD && cmd.unit && cmd._home && cmd.unit.hp < cmd.unit.maxHp * 0.85) return cmd._home;
+    if (TURTLE_GUARD && cmd.unit && cmd._home && cmd.unit.hp < cmd.unit.maxHp * 0.85) {
+      dlog2(`defendObjective:${cmd.team}`, { unit: cmd.unit.type, hpFrac: +(cmd.unit.hp / cmd.unit.maxHp).toFixed(2) },
+        `${cmd.cname}: Defend objective = home (quiet watch, topping off — hp below 85%).`);
+      return cmd._home;
+    }
+    dlog2(`defendObjective:${cmd.team}`, { unit: cmd.unit ? cmd.unit.type : null },
+      `${cmd.cname}: Defend objective = patrolSpot() (nothing shooting us, nothing on our half).`);
     return cmd.patrolSpot();
   }
   shoot(cmd) { return false; }
@@ -506,6 +524,22 @@ let ROGUE_REAR_SIEGE = true;
 // maintenance. Off = the legacy turtle (team-kill siege flip, plain lane patrol).
 let TURTLE_GUARD = true;
 export function setTurtleGuard(v) { TURTLE_GUARD = !!v; }
+// DEEP LOG (synced from main.js's RR.setDeepLog — same flag, kept local to avoid a circular
+// import back to main.js). Same "log on change or ~3s heartbeat" shape so a value stuck silent
+// (the actual bug shape found tonight) still surfaces instead of going quiet.
+let DEEP_LOG = false;
+export function setDeepLog(v) { DEEP_LOG = !!v; return DEEP_LOG; }
+const _dlogState2 = new Map();
+function dlog2(key, value, msg) {
+  if (!DEEP_LOG) return;
+  const now = performance.now();
+  const s = _dlogState2.get(key);
+  const snap = JSON.stringify(value);
+  if (!s || s.snap !== snap || now - s.t > 3000) {
+    console.log(`[DEEPLOG ${key}] ${msg}`, value);
+    _dlogState2.set(key, { snap, t: now });
+  }
+}
 // HUNTER HARASS (A/B knob): with no live contact to hunt, the hunter runs disruption
 // tours on the enemy half instead of a generic attack push. Off = legacy hunter.
 let HUNTER_HARASS = true;
@@ -702,6 +736,14 @@ export function missionPick(cmd, incumbent = null) {
   all.sort((a, b) => b[1] - a[1]);
   cmd._missionScores = all;   // exposed for the ai-lab console breakdown
   cmd._missionTop = bestV;
+  // Gap between #1 and #2 — small AND changing means the incumbent bonus (+1.5) isn't decisive
+  // and the pick could start flapping soon. Logs on mode/gap change, so a genuine near-tie
+  // stretch prints repeatedly (the actual pre-thrash signature) rather than going quiet.
+  if (all.length > 1) {
+    const gap = +(all[0][1] - all[1][1]).toFixed(1);
+    dlog2(`missionPick:${cmd.team}`, { picked: best, runnerUp: all[1][0], gap, incumbent, changed: incumbent != null && best !== incumbent },
+      `${cmd.cname}: mission pick = ${best} (runner-up ${all[1][0]}, gap ${gap})${gap < 1.5 ? ' — NEAR-TIE, thrash risk' : ''}${incumbent && best !== incumbent ? ` — CHANGED from ${incumbent}` : ''}.`);
+  }
   return best;
 }
 // One-line troubleshooting breakdown of the current decision (top 3 with their term math).
