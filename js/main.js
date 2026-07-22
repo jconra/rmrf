@@ -7474,21 +7474,34 @@ class AICommander {
         // either, the demolish/break-through logic below chews a wall path straight to it, so it
         // gets flattened WHILE the back towers still stand (revealing the flag). We do NOT pull off
         // a turret that's out in the open shooting at us. OFF = old rule (only once all turrets die).
-        const turretLOS = threat && (flyer || hasLOS(px, pz, threat.x, threat.z));
+        // WHAT MATTERS is whether the unit can actually GET somewhere useful, not whether it
+        // currently sees the tower — LOS from the current position is a bad proxy while still
+        // mid-transit to an already-picked, already-reachable stand (of course there's no LOS
+        // yet, it hasn't arrived). Check a real path instead: to the picked STAND if _pickStandoff
+        // gave us one (that's what the unit is actually walking toward), else to the raw
+        // fallback threat itself. Traced: this false-"no path" via LOS is exactly what stranded
+        // a lurcher across open water for 164s (seed 130) — _pickStandoff had a good, reachable
+        // stand every tick, and the old !turretLOS check discarded it anyway.
+        const navTarget = stand2 || threat;
+        const hasPathNow = threat && navTarget && (flyer || (() => {
+          const p = planPath(v, { x: navTarget.x, z: navTarget.z });
+          if (!p || !p.length) return false;
+          const e = p[p.length - 1];
+          return (e.x - navTarget.x) ** 2 + (e.z - navTarget.z) ** 2 <= (grid.cell * 2) ** 2;
+        })());
         // The stalemate GAMBIT goes straight for the KEEP (that's the whole point — crack the HQ,
         // expose the flag, win — not trade tower-for-tower while the enemy's tied up mid-field).
-        const promote = this._gambit || (aiKeepBreach ? (!threat || !turretLOS) : !threat);
+        const promote = this._gambit || (aiKeepBreach ? (!threat || !hasPathNow) : !threat);
         if (promote) {
           // This silently THROWS AWAY whatever `threat` already was (including a validated,
           // reachable _pickStandoff pick — stand2 truthy) in favor of the HQ's raw center point,
           // which has NO reachability check at all ("no LOS gate — if it's walled, we break a
-          // path to it" above). Traced: this is exactly what stranded a lurcher across open
-          // water for 164s (seed 130) — the good pick existed, this promotion discarded it.
+          // path to it" above).
           dlog(`hqPromotion:${this.team}`, {
-            unit: v.type, reason: this._gambit ? 'gambit' : !threat ? 'no-threat-at-all' : 'no-turretLOS',
+            unit: v.type, reason: this._gambit ? 'gambit' : !threat ? 'no-threat-at-all' : 'no-path-to-stand',
             hadStand2: !!stand2, discardedThreat: threat ? { x: +threat.x.toFixed(0), z: +threat.z.toFixed(0) } : null,
             hqX: +hqPt.x.toFixed(0), hqZ: +hqPt.z.toFixed(0)
-          }, `${this.cname} ${v.type}: promoting to HQ${stand2 ? ' — DISCARDING an already-validated reachable stand' : ''} (reason: ${this._gambit ? 'gambit' : !threat ? 'no threat at all' : 'no current LOS on picked threat'}).`);
+          }, `${this.cname} ${v.type}: promoting to HQ${stand2 ? ' — DISCARDING an already-validated reachable stand' : ''} (reason: ${this._gambit ? 'gambit' : !threat ? 'no threat at all' : 'no path to the picked stand right now'}).`);
           threat = hqPt; threatCamp = ec; hqThreat = true;
         }
       }
@@ -8134,7 +8147,7 @@ function ensureAiLogEl() {
   el = document.createElement('div'); el.id = 'ai-log';
   el.innerHTML =
     `<div id="ai-log-head"><span id="ai-log-title">AI LOG · ${AI_LOG_TAG}</span>` +
-    '<span id="ai-log-btns"><a class="lg-link" href="/ai-lab/console.html" target="_blank" rel="noopener" title="Open the AI Lab live console (split A|B + full log)">LAB ↗</a>' +
+    '<span id="ai-log-btns"><a class="lg-link" href="/ai-lab/" target="_blank" rel="noopener" title="Open the AI Lab live console (split A|B + full log)">LAB ↗</a>' +
     '<span class="lg-btn" data-act="export" title="Copy a snapshot to share">⧉</span>' +
     '<span class="lg-btn" data-act="minus">–</span>' +
     '<span class="lg-btn" data-act="plus">+</span></span></div>' +
@@ -10002,32 +10015,8 @@ function updateNavOverlay() {
     o.line.material.opacity = hot ? 0.95 : 0.32;
     o.dest.material.opacity = hot ? 0.85 : 0.3;
     o.wp.material.opacity = hot ? 1 : 0.35; o.wp.material.transparent = true;
-    // FLOATING LABEL: nav method (A* vs direct), state, stuck reason, latest log line.
-    const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
-    const combat = d && (d.state === 'engage' || d.state === 'suppress');
-    let method, mColor;
-    if (usingAstar) { method = `A* route · ${Math.max(0, nav.path.length - Math.min(nav.idx, nav.path.length))} wp left`; mColor = '#8fffa8'; }
-    else if (combat) { method = `COMBAT · ${d.state === 'suppress' ? 'holding range' : 'engaging'}`; mColor = '#ff9d6a'; }   // steering at the enemy/turret, not navigating
-    else if (flyer) { method = 'DIRECT · flies over'; mColor = '#8fd0ff'; }
-    else { method = 'DIRECT · no A* route'; mColor = '#ffcf6a'; }   // amber: grounder beelining, A* gave nothing
-    const lines = [{ text: `${v.type.toUpperCase()} · ${d ? d.state : '?'}${d && d.gd != null ? ' · ' + d.gd + 'u to go' : ''}`, color: col.getStyle(), size: 34, bold: true },
-                   { text: method, color: mColor, size: 30 }];
-    // CONTACT LINE — what the unit is DETECTING right now: ⚠ a rival vehicle in sight (with
-    // type + distance), ◎ an enemy turret sensed in range, ♪ a heard-but-unseen contact.
-    if (d && (d.foeD != null || d.turD != null || d.heard)) {
-      const parts = [];
-      if (d.foeD != null) parts.push(`⚠ ${d.foeT} ${d.foeD}u`);
-      if (d.turD != null) parts.push(`◎ turret ${d.turD}u`);
-      if (d.heard && d.foeD == null) parts.push('♪ hears trouble');
-      lines.push({ text: parts.join(' · '), color: d.foeD != null ? '#ff5f4a' : '#ffd24a', size: 28, bold: d.foeD != null });
-    }
-    if (d && d.stuck) lines.push({ text: `STUCK ${d.stuck}s${d.stuckWhy ? ' · ' + d.stuckWhy : ''}`, color: '#ff6a5a', size: 28 });
-    let msg = lastAiMsg(cmd.team);
-    if (msg) { const c = msg.indexOf(': '); if (c >= 0) msg = msg.slice(c + 2); lines.push({ text: msg, color: 'rgba(210,225,235,0.72)', size: 24, wrap: true }); }
-    _drawNavLabel(o.label, lines);
-    o.label.sprite.material.opacity = hot ? 1 : 0.5;
-    o.label.sprite.position.set(px, map.heightAt(px, pz) + (hot ? 17.5 : 15.5), pz);   // top-anchored sprite: position marks the label's TOP edge
-    o.label.sprite.visible = true;
+    // Floating per-unit text label removed (Jacob: that info now lives in the AI Lab Decision
+    // Spine) — o.label.sprite stays hidden (set false at the top of this function each frame).
     // (Red conflict-cell squares removed — they cluttered the view sitting right on the units.
     // The blocked feelers are still in the flight recorder / STUCK label if needed for debugging.)
     if (usingAstar) {

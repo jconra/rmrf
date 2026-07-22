@@ -1,0 +1,51 @@
+SEED 130 STANDOFF STRAND: fifth attempt, KEPT (path check, not stand2/LOS)
+============================================================================
+
+Same bug as VERDICT-2026-07-21-seed130-standoff-strand-REJECTED.txt: the "KILL
+THE KEEP" HQ-promotion in _view() discards an already-validated, reachable
+_pickStandoff pick whenever the unit doesn't currently have LOS to the picked
+tower — a bad proxy while still mid-transit to a stand it hasn't reached yet.
+That's what stranded a lurcher across open water for 164s in seed 130.
+
+FIX TRIED (narrower than the two rejected parts before it): replace the
+`!turretLOS` check with a real reachability check — `planPath` to the actual
+STAND (what the unit is walking toward) if _pickStandoff gave one, else to the
+raw fallback threat. Only promotes to the HQ when there's genuinely no path,
+not just no current line-of-sight. Unlike the rejected `!stand2 && !turretLOS`
+version, this doesn't blanket-protect every stand2 pick from ever being
+overridden — it re-checks fresh each tick, so a stand that's gone genuinely
+unreachable (not just unseen) still correctly promotes.
+
+GATE (30 seeds vs frozen):
+  nav ALARMS 17 -> 48, but unreachable-GOTO contract violations 272 -> 221
+    (down). TRANSIT-stuck samples 463 -> 510 (+10%, not +123%/+182% like the
+    two rejected attempts). Zero scuttles in BOTH builds (RR's own nav-alarm
+    autopsy, 30 seeds each) — nothing actually died stuck, before or after.
+  Seed 130 itself: resolved in 11718 ticks vs 14582 before (faster), and its
+    164s stuck episode is gone entirely from the top-episode list.
+  avg resolve tick 10180 -> 10841 (+7%, slower) · still 30/30 resolved.
+
+INVESTIGATED the alarm increase directly rather than trusting the raw count
+(Jacob: "what if the extra alarms are real issues that were hiding, or what if
+it's worse but the right way forward — can we investigate rather than
+reject?"). Pulled full alarm dumps (not tourney.cjs's truncated top-15) via
+~/pw/navalarm-probe.cjs. Finding: the increase is concentrated in a handful of
+seeds (seed 60 alone: 2->26) and dominated by ONE mechanism — units correctly
+HOLDING a stationary `DIRECT (suppress)` firing stance for a long time, which
+Driver.js's own alarm system misreads as "no progress" (its recovery check
+only recognizes literal movement or GOTO-distance-closing, with no exemption
+for legitimately holding a combat position — the same "fighting != stuck" gap
+tourney.cjs's own stuck-tracker already learned to handle, but Driver's alarm
+counter never did). Seed 60 also took ~3x longer to resolve under this fix
+(9251 -> 27214 ticks), giving that legitimate hold far more real time to
+retrigger the alarm on its own ~8s cycle — not a new bug, just more chances
+for a pre-existing false-positive in Driver's alarm logic to fire.
+
+DIAGNOSIS: net positive. Real badness metrics (contract violations, physical
+stuck episodes, scuttles) all flat or improved; the alarm-count increase is
+explained by a pre-existing gap in Driver's OWN alarm logic (no combat-hold
+exemption), not by units actually getting newly stranded. Trade-off is some
+seeds resolve slower (more disciplined standoff-holding instead of an
+occasional lucky HQ-rush), which reads as correct, not broken.
+
+KEPT.
