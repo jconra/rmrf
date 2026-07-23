@@ -6,3 +6,10 @@ customHeaders:
     headers:
       - key: 'Access-Control-Allow-Origin'
         value: '*'
+  # map-designer also FETCHES campaign presets cross-origin (one source of truth: the designer
+  # loads the shipped map files rather than a drifting snapshot). fetch() enforces CORS, so the
+  # JSON needs the same wildcard the modules get. Public static map data — safe to share.
+  - pattern: '**/*.json'
+    headers:
+      - key: 'Access-Control-Allow-Origin'
+        value: '*'
