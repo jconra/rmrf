@@ -1,0 +1,71 @@
+VERDICT — siege standoff: out-of-reach release valve        2026-07-23
+====================================================================
+rmrf (candidate) vs ~/rmrf-frozen (baseline) · 30 seeds · full 480 map · det kit
+
+PROBLEM (from the seed-60 dig + the 30-seed reachsurvey)
+--------------------------------------------------------
+A sieger in state=suppress can end up holding a target that sits BEYOND its own
+SHOT_REACH: it cannot fire from there, and nothing in the loop ever revisits the
+decision. Survey (pw/reachsurvey.cjs, 30 seeds): 74 such "held out of reach" stretches,
+1554 unit-sec wasted, 48 of them never fired a shot. Seed 60 was the extreme — a dozen
+consecutive lurchers each parked ~70u off a 42u gun, 27214-tick resolve vs ~10800 avg.
+Two root causes identified:
+  (1) DEAD BAND — nav arrives at slack 14u but the brain's atStand is 9u, so a unit can
+      be "arrived" to nav and "not arrived" to the brain, parked in the 9-14u gap.
+  (2) NO RELEASE — a genuinely unreachable stand is never given up.
+
+CANDIDATES TESTED (each an independent knob)
+--------------------------------------------
+  A  baseline (frozen)
+  B  both fixes on
+  C  arrive-only  (aiStandArrive: nav drives to the firing spot at the brain's 9u tol)
+  D  release-only (aiStandRelease v1: out-of-reach + not-firing for 12s -> drop stand, re-pick)
+  D2 release-only REFINED (v1 + "not closing" gate: only release if range to target
+     is also not shrinking — a unit still MARCHING in is out of range for the whole
+     approach and must not be released)
+
+RESULTS (avg resolve tick / transit-stuck samples / suppress-stuck samples)
+---------------------------------------------------------------------------
+  A  baseline        10734   514   341
+  B  both            11749   977   672      REGRESSION (arrive drags it)
+  C  arrive-only     11476   708   473      REGRESSION — driving units all the way into
+                                            firing spots doubles grinding on maps where the
+                                            spot is behind walls/terrain.  -> DROPPED
+  D  release v1      11114   495   233      high-variance: 12 seeds faster, 12 slower.
+                                            Net +3.5% dragged by TWO false-fires:
+                                            seed 200 +14280, seed 25 +9728 (released units
+                                            that were still marching in, not stuck).
+  D2 release REFINED 10450   452   276      CLEAN WIN vs baseline on all three:
+                                            resolve -2.6%, transit-stuck -12%, suppress -19%.
+
+D2 PER-SEED vs baseline (net -8518 ticks / 30)
+----------------------------------------------
+  22 of 30 unchanged (valve fires only when something is genuinely stuck — low blast radius)
+  faster: 60 -10918 · 88 -1811 · 207 -1686 · 172 -1152 · 186 -1118
+  slower: 74 +4133 · 179 +3375 · 67 +656
+  The v1 catastrophes (200, 25) are GONE — both back to baseline exactly (valve no longer
+  fires on them). The cost: 74 and 179 were WINS under v1 and became losses under v2 — the
+  "not closing" gate is conservative enough there to withhold a release that would have helped.
+
+VERDICT
+-------
+  arrive  : DROPPED (net harmful).
+  release : SHIP. All three aggregate metrics improve, 22/30 untouched, net faster.
+            Aligns with "smarter decisions beat win-rate": a unit no longer sits at full ammo
+            outside its own range doing nothing.
+
+  RESIDUAL RESOLVED (pw/releaseprobe.cjs, pw/winnerchk.cjs): seeds 74/179 regress ~+3-4k NOT
+  from churn or a bad decision — it's chaotic divergence. The valve fires only 2 (seed 74) /
+  3 (seed 179) times all match, each a correct release (unit genuinely idle out of its own
+  range), and the SAME team still wins both (74 GREEN, 179 GREEN, on and off). One rare, right
+  repositioning at t~360s ripples through the multi-agent sim into a longer — but still won —
+  match. Suppressing those correct releases to shorten two specific seeds' clocks would be
+  overfitting. The aggregate (5 faster / 3 slower, net -8518, same winners) is the real signal.
+
+REPRO
+-----
+  pw/reachsurvey.cjs 30 6                 # size the problem
+  pw/standgate.sh                         # A/B/C/D four-run gate
+  BASE=rmrf node pw/tourney.cjs 30 30000 6 out.txt "RR.setStandArrive(false)" ""   # D2 alone
+  knobs: RR.setStandArrive(bool) · RR.setStandRelease(bool)  ·  ?nostandarrive / ?nostandrelease
+  files: js/main.js (_navOverride release block ~6531; suppress slack ~6553) — UNCOMMITTED as of this run.

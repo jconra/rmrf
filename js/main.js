@@ -5128,6 +5128,8 @@ let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab i
 let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
+let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
+const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
 setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
 const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold out at (0.55 close/fast … 0.85 far/safe). RR.setStandBand
 
@@ -6523,6 +6525,35 @@ class AICommander {
     if (v._move.ignoreWalls) return;
     if (cmd.breakAim) return;     // brain is squaring up to shoot a blocker — don't steer it around
     const st = cmd.state;
+    // RELEASE VALVE: a sieger holding a target it is sitting OUTSIDE its own weapon range of
+    // is doing nothing but waiting to be shot — it cannot fire from here, so no amount of
+    // patience helps. Nothing else in the loop ever revisits that stand, so a unit could hold
+    // one for a whole match at full ammo (survey: 48 of 74 such stretches never fired a shot).
+    // Give the position up and re-pick: try the next bearing, or start the geometry fresh.
+    if (aiStandRelease && st === 'suppress' && view.threat) {
+      const reach = SHOT_REACH[v.type] || 42;
+      const tD = Math.hypot(view.threat.x - v.holder.position.x, view.threat.z - v.holder.position.z);
+      // Trading fire means it IS working — only an idle gun counts as held-out-of-reach.
+      const firing = (performance.now() - (v._lastFireT || -1e9)) < 2000;
+      // …and a unit still MARCHING in is out of range for the whole approach — releasing it
+      // then just drops a good stand mid-trek and churns (seed 200 tripled, seed 25 +55%).
+      // Only a unit that is out of range AND no longer CLOSING is genuinely stuck: latch the
+      // range when the clock starts, and zero it the moment the unit makes real progress in.
+      const closing = v._oorRefD != null && tD < v._oorRefD - 8;
+      if (tD > reach && !firing && !closing) {
+        if (!v._oorT) v._oorRefD = tD;
+        v._oorT = (v._oorT || 0) + dt;
+      } else { v._oorT = 0; v._oorRefD = tD; }
+      if (v._oorT > STAND_RELEASE_S) {
+        v._oorT = 0;
+        this._stand2 = null;                 // drop the committed spot so the picker runs again
+        this._nav.path = null;
+        if (aiStandRotOn && this._standRotN < STAND_ROT_STEPS.length) {
+          this._standRot = STAND_ROT_STEPS[this._standRotN]; this._standRotN++;
+        } else { this._standRot = 0; this._standRotN = 0; }   // cone exhausted — fresh geometry
+        aiLog(this.team, `${this.cname}: Been sat outside my own range of that target — picking a new firing position.`);
+      }
+    } else if (v._oorT) v._oorT = 0;
     let dest = null, slack = 9;
     if (st === 'exit') { dest = this._exit || this.strategy.objective(this); slack = 5; }   // thread the gate via A*
     // Use the RESOLVED goal the brain is acting on (view.goal already folds in the shield-grab
@@ -9624,6 +9655,7 @@ window.RR = {
   setDefendInPlace: on => { aiDefendInPlace = !!on; return aiDefendInPlace; }, // defend-under-fire responds in the current vehicle vs home-swap (A/B)
   getDefendInPlace: () => aiDefendInPlace,
   setStand2: on => { aiStand2 = !!on; return aiStand2; },                  // lab-logic standoff vs old radial+_standRot (A/B)
+  setStandRelease: on => { aiStandRelease = !!on; return aiStandRelease; },// give up a firing position held outside our own weapon range (A/B)
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
   getDeepLog: () => aiDeepLog,
   setCapRoutes: on => { setCapRoutes(!!on); return !!on; },                // multi-waypoint capture routes vs single staging (A/B)
