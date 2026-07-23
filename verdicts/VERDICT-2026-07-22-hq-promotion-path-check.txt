@@ -49,3 +49,13 @@ seeds resolve slower (more disciplined standoff-holding instead of an
 occasional lucky HQ-rush), which reads as correct, not broken.
 
 KEPT.
+
+CORRECTION (2026-07-22, after probing seed 60 on its own):
+The paragraph above attributes seed 60's alarms to units holding a
+DIRECT(suppress) firing stance. That was a hypothesis, and it was wrong.
+A dedicated probe shows seed 60's 26 alarms break down as {pin 24, stall 2}
+-- overwhelmingly "pin" (units wanting to move and physically jammed,
+mostly behind a teammate), not a stationary combat hold. The rest of the
+diagnosis stands unchanged: zero scuttles, and the count is inflated because
+this seed resolves ~3x slower under the fix, giving the same units far more
+~8s windows to retrigger. See VERDICT-2026-07-22-fighting-exemption.txt.

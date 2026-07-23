@@ -68,6 +68,7 @@ export class Driver {
     this._noProgWins = 0;      // consecutive windows with no net progress
     this._alarmT = -1;         // >=0: seconds since the alarm fired (grace countdown)
     this._lastPed = null;      // pedals actually driven this tick (set by note())
+    this._firedInWin = false;  // any real shot fired during the current watch window
   }
 
   // Re-seat the driver each tick. A NEW vehicle (fresh deploy / swap) resets the
@@ -77,7 +78,7 @@ export class Driver {
       this.v = v; this.o = null; this.rec.length = 0; this.alarms = 0; this.violations = 0;
       this._recT = 0; this._winT = 0; this._wantT = 0; this._noProgWins = 0; this._alarmT = -1;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
-      this._winD = null; this._lastGoto = null; this._cmdT = 0; this._why = 'pin';
+      this._winD = null; this._lastGoto = null; this._cmdT = 0; this._why = 'pin'; this._firedInWin = false;
     }
     this.nav = nav; this.team = team; this.cname = cname;
   }
@@ -286,9 +287,10 @@ export class Driver {
   // Observe the tick that actually drove the vehicle — whatever produced the pedals
   // (a GOTO above, or the behavior's own combat footwork under DIRECT). Feeds the
   // flight recorder and the net-progress watchdog. Call ONCE per tick, at drive time.
-  note(dt, ped, blk) {
+  note(dt, ped, blk, firing) {
     const v = this.v; if (!v || v.dead) return;
     this._lastPed = ped;
+    if (firing) this._firedInWin = true;
     const o = this.o; if (o) o.t0 += dt;
     // flight recorder (ring)
     this._recT += dt;
@@ -338,9 +340,16 @@ export class Driver {
       const avgCmd = this._cmdT / WATCH_WIN; this._cmdT = 0;
       const nom = (v.def && v.def.speed) || 10;
       const ground = avgCmd > GRIND_CMD_MIN && moved < avgCmd * nom * WATCH_WIN * GRIND_FRAC;
-      const noProg = pinned || ground;
+      // FIGHTING exemption: a unit planted and trading fire (DIRECT/suppress at a standoff)
+      // legitimately shows zero net displacement by design — that's not the same failure as
+      // being wedged. Any actual shot fired during this window (ammo genuinely spent, not
+      // just an intent to fire — see fireVehicle's _lastFireT stamp) counts as real activity
+      // and clears the no-progress verdict, same distinction the tourney harness's own
+      // stuck-tracker already draws (ammo-decrease-based) that this alarm never had.
+      const noProg = (pinned || ground) && !this._firedInWin;
       this._why = pinned ? 'pin' : ground ? 'grind' : this._why;
       this._noProgWins = noProg ? this._noProgWins + 1 : 0;
+      this._firedInWin = false;
       // RECOVERY (alarm stand-down), judged once per window: real ground covered AND — when
       // still on a GOTO — real closing on the goal (≥4u/window ≈ 0.5u/s). An orbit moves
       // without closing; a creeper closes without moving fast; neither counts as recovered.

@@ -1654,6 +1654,7 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
   if (!veh || veh.dead) return;
   if (veh.ammo <= 0) { if (veh.isPlayer) updatePlayerHud(); return; }   // dry — rearm at a depot/base
   veh.ammo -= 1;
+  veh._lastFireT = performance.now();   // Driver's nav-alarm watchdog: a real shot means "fighting", not "stuck"
   if (veh.isPlayer) updatePlayerHud();
   const idx = veh.def.soundIndex;
   if (playSound) { try { if (sound) sound.fireGun(); } catch (e) { /* best-effort */ } }
@@ -6950,8 +6951,11 @@ class AICommander {
     // Flight recorder + net-progress watchdog: the driver observes the pedals that are
     // ACTUALLY about to drive the hull (post fuel-burn, post chassis gate, post yield),
     // whoever produced them. This is the alarm's data feed — one call per tick, at drive time.
+    // "recently" (not just "this exact tick") since note() runs BEFORE this tick's own
+    // fire decision below — last tick's shot (or this tick's, once it lands) both count.
+    const firingNow = (performance.now() - (v._lastFireT || -1e9)) < 250;
     this._driver.note(dt, out,
-      (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'));
+      (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'), firingNow);
     // AI OMNI (the Lurcher): fold the hull-relative motor output into a world vector and take
     // the player's driveOmni path — full-speed in ANY direction (no 0.7 strafe penalty, no
     // turning circle), hull cosmetically eases to face its travel, gyro-stabilized turret

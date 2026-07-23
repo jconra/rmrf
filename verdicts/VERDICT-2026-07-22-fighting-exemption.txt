@@ -1,0 +1,53 @@
+NAV ALARM: FIGHTING EXEMPTION (a unit trading fire is not a unit stuck)
+=======================================================================
+
+Driver.js's no-progress watchdog judged every ~8s window on displacement
+alone: a unit that didn't cover WATCH_MIN_MOVE ground, or that spent real
+pedal without converting it to distance, was scored as making no progress.
+That has no notion of a unit deliberately planted at a standoff trading
+fire, which shows zero net displacement BY DESIGN. tourney.cjs's own
+stuck-tracker already learned this lesson (its fighting bucket exempts units
+whose ammo is dropping); Driver's alarm counter never did.
+
+FIX: track whether the unit actually fired during the window.
+  - main.js fireVehicle stamps veh._lastFireT on every real shot (ammo spent).
+  - main.js passes a `firing` flag (shot within the last 250ms) into
+    Driver.note(); Driver sets this._firedInWin.
+  - The window verdict becomes `(pinned || ground) && !this._firedInWin`,
+    and _firedInWin resets each window.
+A real shot is the evidence — not a target, not an intent, not a stance.
+A unit holding a stance and NOT shooting still correctly alarms.
+
+GATE (30 seeds vs frozen):
+  nav ALARMS            48 -> 40   (-8, the point of the change)
+  resolved              30/30 -> 30/30
+  avg resolve           542s -> 536s   (flat)
+  TRANSIT-stuck samples 510 -> 514      (flat)
+  fighting samples      657 -> 654      (flat)
+  contract violations   221 -> 211      (down)
+  scuttles              0 -> 0
+  Per-seed determinism held except seeds 67/74/81/88/186, which shifted
+  slightly — expected, since suppressing an alarm changes the grace-timer
+  bookkeeping those units carry.
+
+SEED 60 SPECIFICALLY (the seed that motivated this, probed on its own):
+  alarms 26 -> 24, by-reason {pin 24, stall 2} -> {pin 22, stall 2}.
+  Resolve tick identical (27214), scuttles 0 both.
+  Only 2 of its alarms cleared. This CORRECTS the guess recorded in
+  VERDICT-2026-07-22-hq-promotion-path-check.txt: seed 60 is not dominated
+  by units holding a DIRECT(suppress) firing stance, it is dominated by
+  "pin" — units that WANT to move and are physically jammed (mostly behind
+  a teammate). A jammed unit usually isn't shooting, so the fire exemption
+  correctly does not excuse it. Seed 60's count stays high for the reason
+  already recorded: under the HQ-path fix it resolves ~3x slower, giving
+  jammed units many more ~8s windows to retrigger.
+
+  So the -8 aggregate came from OTHER seeds, where units genuinely were
+  planted and trading fire. That is exactly the case this fix targets.
+
+DIAGNOSIS: narrow, well-evidenced, no cost. Removes a class of false alarm
+without touching any real-badness metric. The remaining "pin" alarms are a
+separate question (units jamming each other) and are left alone deliberately
+-- they may well be pointing at a real crowding bug worth chasing next.
+
+KEPT.
