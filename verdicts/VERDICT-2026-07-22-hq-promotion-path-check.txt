@@ -50,12 +50,18 @@ occasional lucky HQ-rush), which reads as correct, not broken.
 
 KEPT.
 
-CORRECTION (2026-07-22, after probing seed 60 on its own):
-The paragraph above attributes seed 60's alarms to units holding a
-DIRECT(suppress) firing stance. That was a hypothesis, and it was wrong.
-A dedicated probe shows seed 60's 26 alarms break down as {pin 24, stall 2}
--- overwhelmingly "pin" (units wanting to move and physically jammed,
-mostly behind a teammate), not a stationary combat hold. The rest of the
-diagnosis stands unchanged: zero scuttles, and the count is inflated because
-this seed resolves ~3x slower under the fix, giving the same units far more
-~8s windows to retrigger. See VERDICT-2026-07-22-fighting-exemption.txt.
+NOTE (2026-07-22, after probing seed 60 on its own):
+The original attribution above -- suppress-holds -- is CORRECT. Seed 60's 26
+alarms break down as {pin 24, stall 2} by alarm reason, but 21 of those 24
+carry the order label `DIRECT (suppress)`. Reason and order are separate
+fields: a unit parked in a firing stance still accrues _wantT, so it trips
+the `pinned` test (wanted to move, covered no ground) even though nothing is
+physically blocking it. "pin" is not a synonym for "wedged".
+
+(An earlier revision of this note claimed the opposite -- that these were
+jammed units rather than combat holds. That came from reading the alarm's
+`why` field as if it described the unit's order. It does not. Retracted.)
+
+Zero scuttles, and the count is inflated because this seed resolves ~3x
+slower under the fix, giving the same units far more ~8s windows to
+retrigger. See VERDICT-2026-07-22-fighting-exemption.txt.

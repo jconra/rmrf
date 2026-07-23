@@ -33,21 +33,31 @@ GATE (30 seeds vs frozen):
 SEED 60 SPECIFICALLY (the seed that motivated this, probed on its own):
   alarms 26 -> 24, by-reason {pin 24, stall 2} -> {pin 22, stall 2}.
   Resolve tick identical (27214), scuttles 0 both.
-  Only 2 of its alarms cleared. This CORRECTS the guess recorded in
-  VERDICT-2026-07-22-hq-promotion-path-check.txt: seed 60 is not dominated
-  by units holding a DIRECT(suppress) firing stance, it is dominated by
-  "pin" — units that WANT to move and are physically jammed (mostly behind
-  a teammate). A jammed unit usually isn't shooting, so the fire exemption
-  correctly does not excuse it. Seed 60's count stays high for the reason
-  already recorded: under the HQ-path fix it resolves ~3x slower, giving
-  jammed units many more ~8s windows to retrigger.
+  Only 2 of its alarms cleared, and the reason is worth recording:
+  21 of the 24 "pin" alarms carry the order label `DIRECT (suppress)`.
+  Alarm reason and order label are SEPARATE fields — a unit parked in a
+  firing stance still accrues _wantT, so it trips the `pinned` test (wanted
+  to move, covered no ground) with nothing physically blocking it. "pin"
+  does not mean "wedged". The hq-promotion verdict's original suppress-hold
+  attribution was right; a mid-session note claiming otherwise misread the
+  `why` field as the unit's order and has been retracted there.
 
-  So the -8 aggregate came from OTHER seeds, where units genuinely were
-  planted and trading fire. That is exactly the case this fix targets.
+  So these ARE the case this fix targets, and it still didn't excuse them —
+  which means those lurchers are holding a suppress stance WITHOUT actually
+  spending ammo inside an 8s window. That is the open question (see below),
+  not a flaw in the exemption: the exemption keys on a real shot on purpose.
+
+  The -8 aggregate therefore came from other seeds, where units in a firing
+  stance were genuinely shooting.
 
 DIAGNOSIS: narrow, well-evidenced, no cost. Removes a class of false alarm
-without touching any real-badness metric. The remaining "pin" alarms are a
-separate question (units jamming each other) and are left alone deliberately
--- they may well be pointing at a real crowding bug worth chasing next.
+without touching any real-badness metric.
+
+OPEN QUESTION (next thread to pull): in seed 60 two lurchers — one per team,
+at near-mirrored positions (a ~(-71,-140), b ~(54,135)) — sit motionless in
+DIRECT(suppress) for a long stretch, alarming every ~8s and never firing
+enough to clear the exemption. A stalemate pair like that plausibly explains
+why this seed takes 27214 ticks. Whether they are dry, out of LOS, or stuck
+in a stance they should have abandoned is being measured, not guessed.
 
 KEPT.
