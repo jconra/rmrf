@@ -3,7 +3,7 @@
 // with a live controls panel. Garage + vehicles land in later milestones.
 
 import * as THREE from 'three';
-import { IslandMap, DEFAULTS } from './IslandMap.js?v=68';
+import { IslandMap, DEFAULTS } from './IslandMap.js?v=75';
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
@@ -17,6 +17,7 @@ import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map p
 import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?v=1';
 import { RoadNetwork } from './Roads.js?v=85';
 import { Foliage } from './Foliage.js?v=5';
+import { setWindTime, setGrassRoot, setGrassTip, setGrassRootBand, getGrassColors } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock + grass colour tuning
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=69';
 import { Elevator } from './Elevator.js?v=3';
@@ -1223,6 +1224,7 @@ function placeCampsAuto() {
 // Foliage (procedural low-poly props; scattered on load and on every rebuild).
 const foliage = new Foliage();
 foliage.build();
+let grassDensityMul = 1;   // RR.setGrassDensity — in-game tuning of how thick the grass scatters
 function scatterFoliage() {
   if (!foliage.props) return;
   const sites = camps.map(c => ({ x: c.center.x, z: c.center.z }));
@@ -1236,8 +1238,40 @@ function scatterFoliage() {
       if (roadNet.cells.has((ci + di) + ',' + (cj + dj))) return true;
     return false;
   };
-  foliage.scatter(map, sites, { density: 1, avoid: onRoad });
+  foliage.scatter(map, sites, { density: 1, avoid: onRoad, bladeMask: !QS.has('noblademask'), grassDensity: grassDensityMul });
   if (!foliage.group.parent) scene.add(foliage.group);
+}
+
+// TEMP grass tuning panel (?grasstune): tune the grass colour + density against the REAL lit
+// terrain, since the playground's flat ground reads differently. Colour is live (uniforms);
+// density re-scatters on release. Not shown in normal play.
+if (QS.has('grasstune')) {
+  const gc = getGrassColors();
+  const p = document.createElement('div');
+  p.style.cssText = 'position:fixed;top:10px;right:10px;z-index:99999;background:rgba(12,17,24,.9);color:#dbe6ee;' +
+    'padding:11px 13px;border:1px solid #2b3a47;border-radius:9px;font:12px system-ui,sans-serif;width:210px';
+  p.innerHTML =
+    '<div style="font-weight:700;margin-bottom:7px;letter-spacing:.5px">🌱 grass tune</div>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0">root ' +
+      '<input type="color" id="gtRoot" value="' + gc.root + '" style="width:70px;height:24px"></div>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0">tip ' +
+      '<input type="color" id="gtTip" value="' + gc.tip + '" style="width:70px;height:24px"></div>' +
+    '<div style="margin:7px 0">root band <b id="gtBandV">' + gc.band.toFixed(2) + '</b><br>' +
+      '<input type="range" id="gtBand" min="0" max="0.6" step="0.02" value="' + gc.band + '" style="width:100%"></div>' +
+    '<div style="margin:7px 0">density <b id="gtDensV">1.00</b>× <span style="color:#7f95a6">(release to apply)</span><br>' +
+      '<input type="range" id="gtDens" min="0" max="4" step="0.1" value="1" style="width:100%"></div>' +
+    '<textarea id="gtOut" readonly style="width:100%;height:52px;margin-top:6px;background:#0a0f16;color:#a7e0b0;' +
+      'border:1px solid #2b3a47;border-radius:5px;font:11px monospace;padding:5px"></textarea>';
+  document.body.appendChild(p);
+  const $ = id => p.querySelector(id);
+  const out = () => { $('#gtOut').value = 'root: ' + $('#gtRoot').value + '  tip: ' + $('#gtTip').value +
+    '\nband: ' + (+$('#gtBand').value).toFixed(2) + '  density: ' + (+$('#gtDens').value).toFixed(2) + '×'; };
+  $('#gtRoot').oninput = e => { setGrassRoot(e.target.value); out(); };
+  $('#gtTip').oninput = e => { setGrassTip(e.target.value); out(); };
+  $('#gtBand').oninput = e => { setGrassRootBand(+e.target.value); $('#gtBandV').textContent = (+e.target.value).toFixed(2); out(); };
+  $('#gtDens').oninput = e => { $('#gtDensV').textContent = (+e.target.value).toFixed(2); out(); };
+  $('#gtDens').onchange = e => { grassDensityMul = +e.target.value; scatterFoliage(); };   // re-scatter on release
+  out();
 }
 
 // --- Vehicles ----------------------------------------------------------
@@ -5150,11 +5184,13 @@ const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold
 // a net-progress watchdog whose ALARM dumps an autopsy (and, pinned long enough past
 // the grace, scuttles the unit — a stuck vehicle is a bug, not a situation).
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
+const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
 const driverHooks = {
   navWaypoint,
   log: aiLog,
   alarm: d => {
+    if (d && d.team) navAlarmsByTeam[d.team] = (navAlarmsByTeam[d.team] || 0) + 1;
     navAlarms.push(d); if (navAlarms.length > 40) navAlarms.shift();
     // trimmed copy for the live ai-lab console (full recordings stay in-memory via RR.navAlarms)
     try {
@@ -7821,7 +7857,10 @@ function setupCommanders() {
   if (QS.has('noai')) return;
   const teamIds = [...new Set(camps.filter(c => c.role === 'main').map(c => c.team))];
   const aiTeams = teamIds.filter(t => TEAM_CTRL[t] === 'ai');
-  const archs = assignArchetypes(aiTeams.length, doctrineRng);   // distinct doctrines → a real contrast each match (seedable via ?dseed)
+  // ?arch=warrior,turtle forces each AI side's doctrine (in aiTeams order) for round-robin
+  // persona-vs-persona testing; absent, deal distinct doctrines seeded by ?dseed as normal.
+  const forcedArch = QS.get('arch') ? QS.get('arch').split(',').map(s => s.trim()) : null;
+  const archs = forcedArch || assignArchetypes(aiTeams.length, doctrineRng);   // distinct doctrines → a real contrast each match (seedable via ?dseed)
   aiTeams.forEach((t, i) => {
     const designed = cfgRulesFor(t);   // a designed map fixes each side's doctrine
     const cmd = new AICommander(t, (designed && designed.team.archetype) || archs[i]);
@@ -9619,8 +9658,16 @@ window.RR = {
   damageTapAt: (x, y) => damageTapAt(x, y),
   rebuild: (patch) => rebuild(patch),
   frame: () => frameMap(),
-  look: (x, z, dist, pitch) => { orbit.target.set(x, 0, z); orbit.dist = dist; if (pitch != null) orbit.pitch = pitch; updateCamera(); },
+  look: (x, z, dist, pitch, yaw) => { orbit.target.set(x, 0, z); orbit.dist = dist; if (pitch != null) orbit.pitch = pitch; if (yaw != null) orbit.yaw = yaw; updateCamera(); },
+  freeCam: () => { spectateFree = true; },   // debug/shot: stop the spectate follow so a rig can pin the camera
+  scatterFoliage: () => scatterFoliage(),    // debug/shot: re-scatter foliage on demand
+  setGrassRoot: (h) => setGrassRoot(h),      // live grass colour tuning (uniforms — no re-scatter)
+  setGrassTip: (h) => setGrassTip(h),
+  setGrassRootBand: (v) => setGrassRootBand(v),
+  setGrassDensity: (m) => { grassDensityMul = Math.max(0, +m); scatterFoliage(); return grassDensityMul; },   // re-scatters
+  getGrassColors: () => getGrassColors(),
   get foliage() { return foliage; },
+  get camera() { return camera; },   // debug: headless shot rigs position the camera for close-ups
   get roadNet() { return roadNet; },
   get vehicles() { return vehicles; },
   get elevators() { return elevators; },
@@ -9645,6 +9692,7 @@ window.RR = {
   bridgeDeckY: (x, z) => roadDeckY(x, z),                     // alias (kept for older verification scripts)
   navPlan: (v, x, z) => planPath(v, { x, z }),                 // debug: A* path for a unit
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
+  navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples }),   // match-wide driver counters
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
@@ -10327,7 +10375,7 @@ function animate() {
     // show the hologram instead of the hangar. The field sim stays frozen, same as the
     // garage always is — placing is calm; the construction run after deploy is the risk.
     if (fortPlace || towerPick) {
-      waterT += dt; map.tickWater(waterT);   // keep the water alive so the aerial doesn't read as a freeze-frame
+      waterT += dt; map.tickWater(waterT); setWindTime(waterT);   // keep the water + grass alive so the aerial doesn't read as a freeze-frame
       renderer.render(scene, camera);
       return;   // rAF is already queued at the top of animate()
     }
@@ -10361,7 +10409,7 @@ function animate() {
       _pfT('shadows', () => updateShadows());  // ground-projected vehicle silhouette shadows
       _pfT('projectiles', () => { projectiles.update(dt); updateProjectileHits(); });
       if (foliage) foliage.update(dt);       // tree topple animations
-      waterT += dt; map.tickWater(waterT);   // animate the water-surface ripples
+      waterT += dt; map.tickWater(waterT); setWindTime(waterT);   // animate the water ripples + grass sway
       _pfT('destruct', () => destructibles.update(dt));
       updateFx(dt);
       updateHealthBars();

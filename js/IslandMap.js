@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { Noise2D } from './noise.js';
-import { makeTerrainMaterial } from './TerrainMaterial.js?v=13';
+import { makeTerrainMaterial } from './TerrainMaterial.js?v=20';
 
 const CHUNK = 48;   // cells per chunk edge
 const EDGE_APRON = 8;   // outer cells deepened to open sea so the map border reads as deep blue (no shallow water at the boundary) and the mesh edge blends into the ocean plane
@@ -583,6 +583,29 @@ export class IslandMap {
     const ci = this._cellAt(x, z);
     if (ci == null) return 0;
     return Math.max(0, this.tileH[ci]);
+  }
+
+  // Grass-texture splat mask at a world point (0..1) — reproduces TerrainMaterial's fragment
+  // shader so callers can place grass tufts EXACTLY where the grass texture shows, not by the
+  // coarser tile class. Same inputs as the shader: the macro grassiness stored in the aGrass
+  // vertex attribute (this._grass), height-gated, thresholded by grassAmount. The per-pixel
+  // noise jitter the shader adds (±0.08) is fine detail and omitted here.
+  grassSplatAt(x, z) {
+    const G = this._grass;
+    if (!G) return 0;
+    const y = this.heightAt(x, z);
+    if (y <= 0) return 0;                          // water
+    const p = this.params, VX = p.cols + 1, VZ = p.rows + 1;
+    // world -> fractional vertex-grid coords (matches pos = g*tile - halfWorld in _buildMesh)
+    const gxf = (x + this.worldW / 2) / p.tile, gzf = (z + this.worldH / 2) / p.tile;
+    const gx = Math.max(0, Math.min(VX - 2, Math.floor(gxf))), gz = Math.max(0, Math.min(VZ - 2, Math.floor(gzf)));
+    const fx = gxf - gx, fz = gzf - gz;
+    const g0 = G[gz * VX + gx] * (1 - fx) + G[gz * VX + gx + 1] * fx;         // bilinear sample of aGrass
+    const g1 = G[(gz + 1) * VX + gx] * (1 - fx) + G[(gz + 1) * VX + gx + 1] * fx;
+    const vGrass = g0 * (1 - fz) + g1 * fz;
+    const field = vGrass * smoothstep(0.05, 0.7, y);   // hgate: sand low on the beach, grass higher
+    const thr = 1 - p.grassAmount;
+    return smoothstep(thr - 0.05, thr + 0.05, field);
   }
 
   // World point for a cell centre.

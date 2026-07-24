@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { TILE } from './IslandMap.js';
+import { Noise2D } from './noise.js';
 import { makeTree, makeDeadTree, makeBush, makePlant, makeRock, makePalm } from './Plants.js?v=1';
 import { makeBlobShadowInstanced } from './BlobShadow.js?v=1';
 
@@ -14,6 +15,7 @@ const MAKERS = {
   bush:  { make: makeBush,  variants: 2 },
   palm:  { make: makePalm,  variants: 2 },               // beach trees (on sand)
   tree:  { make: makeTree,  variants: 3, scale: 1.7 },   // inland trees (on grass) — native model is small, so size it up
+  rock:  { make: makeRock,  variants: 3, scale: 1.1 },   // decorative stones (cosmetic, no collision), on grass + sand
 };
 
 const _m = new THREE.Matrix4();
@@ -101,13 +103,11 @@ export class Foliage {
       let cat;
       const r = Math.random();
       if (t === TILE.GRASS) {
-        if (r > 0.55) continue;             // lush but not crowded
-        cat = r < 0.18 ? 'tree'             // inland trees
-            : r < 0.38 ? 'plant'            // grasses
-            : 'bush';                       // some bushes
+        if (r > 0.24) continue;             // trees + bushes + a few rocks stay sparse; grass gets its own PATCHY pass below
+        cat = r < 0.12 ? 'tree' : r < 0.21 ? 'bush' : 'rock';   // inland trees, some bushes, a scatter of stones
       } else {
-        if (r > 0.22) continue;             // beaches: sparser
-        cat = r < 0.09 ? 'tree' : 'palm';   // mostly palms, a few trees down on the sand
+        if (r > 0.24) continue;             // beaches: sparser
+        cat = r < 0.09 ? 'tree' : r < 0.21 ? 'palm' : 'rock';   // mostly palms, a few trees + rocks down on the sand
       }
       const list = this.props[cat];
       if (!list || !list.length) continue;
@@ -122,6 +122,34 @@ export class Foliage {
         yaw: Math.random() * Math.PI * 2,
         scale: list[idx].baseScale * sMul * (0.8 + Math.random() * 0.5),
       });
+    }
+
+    // ── Grass distribution: spread across grassy INTERIORS with soft thick/thin variation from a
+    // low-frequency noise — not a solid carpet (costly + flat), not tight circular clumps (reads
+    // artificial). Airy where the noise dips, fuller where it peaks. grassDensity (RR.setGrassDensity)
+    // scales it live for in-game tuning; bounded overall.
+    if (this.props.plant && this.props.plant.length && opts.bladeMask !== false) {
+      const gMul = opts.grassDensity ?? 1;
+      const splat = (x, z) => !map.grassSplatAt || map.grassSplatAt(x, z);
+      const clearOf = (x, z) => {
+        for (const b of bases) { const dx = x - b.x, dz = z - b.z; if (dx * dx + dz * dz < baseR2) return false; }
+        return !(opts.avoid && opts.avoid(x, z));
+      };
+      const pnoise = new Noise2D(((map.params.seed ^ 0x51ed) >>> 0) || 1);
+      const PATCH_FREQ = 0.028;                 // low freq → soft grass regions ~35u across
+      const gAttempts = Math.floor(map.params.cols * map.params.rows * 4.32 * density * gMul);   // base tuned to the chosen 2.7x
+      for (let i = 0; i < gAttempts; i++) {
+        const x = (Math.random() - 0.5) * map.worldW, z = (Math.random() - 0.5) * map.worldH;
+        if (map.heightAt(x, z) <= 0.3) continue;
+        if (map.tileAt(x, z) !== TILE.GRASS || splat(x, z) < 0.78 || !clearOf(x, z)) continue;   // grass interior, off fringes/bases
+        const pf = pnoise.fbm(x * PATCH_FREQ, z * PATCH_FREQ, 2);   // ~0..1
+        const dens = Math.max(0, (pf - 0.4) / 0.6);                 // empty below the noise midline, ramps up above
+        if (Math.random() > dens * 0.55) continue;                  // 0.55 cap keeps even the fullest spots airy
+        const idx = (Math.random() * this.props.plant.length) | 0, key = 'plant:' + idx;
+        let arr = buckets.get(key); if (!arr) buckets.set(key, arr = []);
+        arr.push({ x, z, y: map.heightAt(x, z), yaw: Math.random() * Math.PI * 2,
+          scale: this.props.plant[idx].baseScale * 1.5 * (0.75 + Math.random() * 0.6) });   // 50% larger blades
+      }
     }
 
     // Build InstancedMeshes: one per leaf part of each used prop.

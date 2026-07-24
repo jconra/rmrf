@@ -143,6 +143,30 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
           // Near shore keeps the full wet-sand→turquoise→deep gradient.
           waterC = mix(uDeep, waterC, vShore);
           diffuseColor.rgb = mix(landC, waterC, vWaterF);
+          // SURF FOAM that washes IN toward the island. The surf LINE (band centre) climbs the
+          // beach and recedes, and because its position is keyed off vHeight it follows the
+          // shoreline CONTOUR — so the foam advances inward all around the island instead of
+          // diagonal stripes crossing it. Coarse noise desyncs different stretches of coast so
+          // it's not one uniform pulse; finer noise breaks the band into froth. Pure fragment
+          // maths + the mask sampler already bound → zero new geometry or draw calls.
+          float wcoarse = texture2D(uMask, vTerrUV * 0.016 + 2.3).r;                // slow, LARGE along-coast desync
+          // WAVE CRESTS that roll IN from deep water to the beach. The crest phase = vHeight*K −
+          // uTime*S: equal-depth lines are parallel to shore, and the phase advances toward higher
+          // ground over time, so each crest is a shore-parallel band MARCHING from deep → shallow →
+          // up the beach. Foam tops the crests only, inside the surf zone around the waterline.
+          float surfZone = 1.0 - smoothstep(0.0, 0.22, abs(vHeight));               // wave-action band (thinner → shallow flats don't white out)
+          float wavePhase = vHeight * 7.5 - uTime * 1.0 + wcoarse * 3.0;            // crests travel deep→shallow (+ per-coast desync); slower roll-in
+          float crest = smoothstep(0.45, 0.96, 0.5 + 0.5 * sin(wavePhase));         // bright only on the crest tops
+          // BLOTCHY froth: three octaves at LARGER, incommensurate scales (bigger features, and a
+          // repeat period so long it never reads as tiling) summed into FBM, then thresholded into
+          // sharp irregular patches. Smooth UVs (drift is a time offset only) → no mip wash-out.
+          float n1 = texture2D(uMask, vTerrUV * 0.34 + vec2(uTime * 0.005, uTime * 0.016)).r;
+          float n2 = texture2D(uMask, vTerrUV * 0.135 + vec2(uTime * 0.008, -uTime * 0.006) + 3.7).r;
+          float n3 = texture2D(uMask, vTerrUV * 0.052 + vec2(-uTime * 0.003, uTime * 0.002) + 8.1).r;
+          float fbm = n1 * 0.42 + n2 * 0.37 + n3 * 0.34;                 // ~0.56 mean, big organic blobs
+          float blotch = smoothstep(0.50, 0.66, fbm);                    // sharp-ish cut → blotchy patches, not a smooth wash
+          float foam = surfZone * vShore * crest * blotch * 0.45;        // more translucent surf
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.96, 0.98, 0.99), foam);
         }`)
       // ALL water is glossy (near-mirror 0.12) so the whole sea reflects the sky env +
       // the overhead sun as a glint — matched by the open-ocean floor plane (set to the
