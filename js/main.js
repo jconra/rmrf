@@ -908,7 +908,7 @@ function buildConfigRoads() {
   if (!roadNet.group.parent) scene.add(roadNet.group);
 }
 function buildRoads() {
-  if (configBases) { buildConfigRoads(); return; }   // custom map → the painted roads, not A* auto-routing
+  if (configBases) { buildConfigRoads(); placeResupplies(); return; }   // custom map → the painted roads, not A* auto-routing
   const byTeam = {};
   for (const c of camps) (byTeam[c.team] ??= {})[c.role] = c;
   const conns = [];
@@ -926,6 +926,7 @@ function buildRoads() {
   roadNet.setObstacles(camps);
   roadNet.build(conns);
   if (!roadNet.group.parent) scene.add(roadNet.group);
+  placeResupplies();   // AFTER roads exist so supply sites can actually see + avoid them (was placed during placeCamps, before any road)
 }
 
 const CAMP_SIZE = 9;   // main base: ODD cells per side (3-cell gate centres on a cell)
@@ -1063,7 +1064,8 @@ function placeCamps() {
   });
 
   buildFlags();        // capturable flag at each main base
-  placeResupplies();   // neutral fuel/ammo/shield points of interest
+  // placeResupplies() moved to the END of buildRoads() — it must run AFTER roads exist so depot
+  // sites can avoid them (they were landing on roads because roadNet was empty here).
   scatterScrap();      // salvage piles out toward the map rim (scouting reward)
   configureSubZone();   // arm the deep-water sub zone (the sub itself spawns on demand)
   resetRepairs();       // clear any repair crews + refill the jeep pools for the new match
@@ -1202,7 +1204,7 @@ function placeCampsFromConfig(assets) {
   });
 
   buildFlags();
-  placeResupplies();
+  // placeResupplies() moved to the END of buildRoads() (runs after roads exist — see there).
   scatterScrap();
   configureSubZone();
   resetRepairs();
@@ -3111,14 +3113,24 @@ function onCapture(team, f) {
 const FUEL_RATE = 28, AMMO_RATE = 6, SHIELD_RATE = 55, REPAIR_RATE = 13;   // per second
 
 // Find an open land point ~targetR from map centre, clear of bases and each other.
+// A supply depot has a real footprint (radius ~2.2 cells), so a road-free CENTRE cell isn't
+// enough — a road running under its body still poked through (the ammo-depot-on-the-road bug).
+// Check every cell within the footprint (+ a little margin), not just the centre.
+function roadUnderFootprint(x, z, worldR) {
+  if (!roadNet.cells) return false;
+  const c = grid.cell, ci = Math.round(x / c), cj = Math.round(z / c), n = Math.ceil(worldR / c);
+  for (let di = -n; di <= n; di++) for (let dj = -n; dj <= n; dj++)
+    if (di * di + dj * dj <= (n + 0.35) * (n + 0.35) && roadNet.cells.has((ci + di) + ',' + (cj + dj))) return true;
+  return false;
+}
+
 function neutralSite(targetR) {
   for (let t = 0; t < 240; t++) {
     const ang = Math.random() * Math.PI * 2;
     const r = targetR * (0.78 + Math.random() * 0.44);
     const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
     if (!map.isLand(x, z) || blockedAt(x, z)) continue;
-    const ci = Math.round(x / grid.cell), cj = Math.round(z / grid.cell);   // don't drop a supply on a road/bridge
-    if (roadNet.cells && roadNet.cells.has(ci + ',' + cj)) continue;
+    if (roadUnderFootprint(x, z, grid.cell * 2.6)) continue;   // keep the whole depot BODY off roads/bridges, not just its centre cell
     let ok = true;
     for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 28) { ok = false; break; }
     if (ok) for (const rp of resupplies) if (Math.hypot(x - rp.pos.x, z - rp.pos.z) < 24) { ok = false; break; }
@@ -3145,8 +3157,7 @@ function bisectorSite(reach) {
     const off = baseOff * (1 - (t / 80) * 0.75) * (0.9 + Math.random() * 0.2);
     const x = mx + px * off * sign, z = mz + pz * off * sign;
     if (!map.isLand(x, z) || blockedAt(x, z)) continue;
-    const ci = Math.round(x / grid.cell), cj = Math.round(z / grid.cell);   // don't drop a supply on a road/bridge
-    if (roadNet.cells && roadNet.cells.has(ci + ',' + cj)) continue;
+    if (roadUnderFootprint(x, z, grid.cell * 2.6)) continue;   // keep the whole depot BODY off roads/bridges, not just its centre cell
     let ok = true;
     for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 28) { ok = false; break; }
     if (ok) for (const rp of resupplies) if (Math.hypot(x - rp.pos.x, z - rp.pos.z) < 24) { ok = false; break; }
