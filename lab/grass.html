@@ -10,7 +10,7 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd0e6; font-family: system-ui, sans-serif; }
   #c { position: fixed; inset: 0; display: block; }
   #panel {
-    position: fixed; top: 10px; left: 10px; width: 288px; max-height: calc(100vh - 20px); overflow-y: auto;
+    position: fixed; top: 10px; left: 10px; width: 292px; max-height: calc(100vh - 20px); overflow-y: auto;
     background: rgba(16,22,28,0.86); color: #dbe6ee; border: 1px solid #2b3a47; border-radius: 10px;
     padding: 12px 14px; font-size: 12px; backdrop-filter: blur(4px);
   }
@@ -23,9 +23,12 @@
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .grp { border-top: 1px solid #26333e; margin-top: 10px; padding-top: 6px; }
   .grp > .lbl { color: #6f8797; font-size: 10px; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 4px; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .seg button { font-size: 11px; padding: 7px 4px; }
+  .seg button.on { background: #2a6c9a; border-color: #4a9fe0; color: #fff; }
   #stats { margin-top: 10px; font-size: 11px; color: #9fb3c2; line-height: 1.5; }
   #stats b { color: #dff0ff; }
-  #out { width: 100%; margin-top: 8px; height: 92px; font: 11px/1.4 ui-monospace, monospace; resize: vertical;
+  #out { width: 100%; margin-top: 8px; height: 96px; font: 11px/1.4 ui-monospace, monospace; resize: vertical;
           background: #0c1218; color: #a7e0b0; border: 1px solid #2b3a47; border-radius: 6px; padding: 6px; }
   .hint { color: #6f8797; font-size: 10px; margin-top: 6px; }
   button { background: #22303c; color: #cfe3f2; border: 1px solid #37505f; border-radius: 6px; padding: 5px 8px; cursor: pointer; font-size: 11px; }
@@ -40,6 +43,16 @@
 <div id="panel">
   <h1>🌱 GRASS PLAYGROUND</h1>
 
+  <div class="grp"><div class="lbl">Blade style (triangles each)</div>
+    <div class="seg" id="styles">
+      <button data-s="cone" class="on">Cone · 12</button>
+      <button data-s="spike">Spike · 1</button>
+      <button data-s="blade">Blade · 2</button>
+      <button data-s="billboard">Billboard · 2</button>
+    </div>
+    <div class="hint" id="styleHint"></div>
+  </div>
+
   <div class="grp"><div class="lbl">Field</div>
     <div class="row"><label>Tufts <b id="v_count"></b></label><input type="range" id="count" min="200" max="12000" step="100"></div>
     <div class="row"><label>Blades / tuft <b id="v_blades"></b></label><input type="range" id="blades" min="2" max="18" step="1"></div>
@@ -52,8 +65,8 @@
       <div class="row"><label>H min <b id="v_hmin"></b></label><input type="range" id="hmin" min="0.1" max="1.2" step="0.02"></div>
       <div class="row"><label>H max <b id="v_hmax"></b></label><input type="range" id="hmax" min="0.2" max="2.0" step="0.02"></div>
     </div>
-    <div class="row"><label>Width <b id="v_width"></b></label><input type="range" id="width" min="0.01" max="0.14" step="0.005"></div>
-    <div class="row"><label>Lean <b id="v_lean"></b></label><input type="range" id="lean" min="0" max="1.4" step="0.05"></div>
+    <div class="row"><label>Width <b id="v_width"></b></label><input type="range" id="width" min="0.01" max="0.16" step="0.005"></div>
+    <div class="row"><label>Lean (not billboard) <b id="v_lean"></b></label><input type="range" id="lean" min="0" max="1.4" step="0.05"></div>
   </div>
 
   <div class="grp"><div class="lbl">Colour (live)</div>
@@ -76,7 +89,7 @@
       <button id="regen">↻ New scatter</button>
       <button id="copy">⧉ Copy values</button>
     </div>
-    <div class="hint">Drag to orbit · scroll to zoom. Colour + wind update live; field/blade sliders re-scatter.</div>
+    <div class="hint">Drag to orbit · scroll/pinch to zoom. Colour + wind are live; style / field / blade sliders re-scatter.</div>
   </div>
 </div>
 
@@ -99,13 +112,9 @@ function placeCam() {
                       cam.tz + cam.dist * Math.cos(cp) * Math.cos(cam.yaw));
   camera.lookAt(cam.tx, 0.6, cam.tz);
 }
-function resize() {
-  const w = innerWidth, h = innerHeight;
-  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
-}
+function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
 addEventListener('resize', resize); resize();
 
-// simple orbit
 let drag = null;
 canvas.addEventListener('pointerdown', e => drag = { x: e.clientX, y: e.clientY });
 addEventListener('pointerup', () => drag = null);
@@ -116,91 +125,133 @@ addEventListener('pointermove', e => {
 });
 canvas.addEventListener('wheel', e => { cam.dist = Math.max(4, Math.min(80, cam.dist + e.deltaY * 0.02)); placeCam(); e.preventDefault(); }, { passive: false });
 
-// lights (just so the ground reads; grass does its own shading in-shader)
 scene.add(new THREE.HemisphereLight('#cfe9ff', '#5a6b3a', 0.9));
 const sun = new THREE.DirectionalLight('#fff6e0', 1.1); sun.position.set(6, 12, 4); scene.add(sun);
 const SUN_DIR = new THREE.Vector3(6, 12, 4).normalize();
 
-// ── grass shader (mirrors the game: aH weight drives BOTH the colour gradient and the wind
-// sway; the wave PHASE comes from each vertex's world XZ so it ripples across the patch). ──
+// ── grass shader: aH weight drives colour gradient + wind sway; when uBillboard is on, each
+// blade rotates around its VERTICAL axis to face the camera (Y-billboard — stays upright,
+// never edge-on) using its baked base position aBase. Wave phase from world XZ → travels. ──
 const uni = {
-  uTime:     { value: 0 },
-  uWindAmp:  { value: 0.13 },
-  uWindFreq: { value: 0.16 },
-  uWindSpeed:{ value: 1.6 },
-  uRoot:     { value: new THREE.Color('#7d9a44') },
-  uTip:      { value: new THREE.Color('#31501d') },
-  uSun:      { value: SUN_DIR },
+  uTime:      { value: 0 },
+  uWindAmp:   { value: 0.13 },
+  uWindFreq:  { value: 0.16 },
+  uWindSpeed: { value: 1.6 },
+  uBillboard: { value: 0 },
+  uRoot:      { value: new THREE.Color('#7d9a44') },
+  uTip:       { value: new THREE.Color('#31501d') },
+  uSun:       { value: SUN_DIR },
 };
 const grassMat = new THREE.ShaderMaterial({
   uniforms: uni,
+  side: THREE.DoubleSide,          // flat blades must show from both faces
   vertexShader: `
     attribute float aH;
-    uniform float uTime, uWindAmp, uWindFreq, uWindSpeed;
+    attribute vec3 aBase;
+    uniform float uTime, uWindAmp, uWindFreq, uWindSpeed, uBillboard;
     varying float vH; varying vec3 vN;
     void main() {
       vH = aH;
-      vec3 p = position;
-      float ph  = p.x * uWindFreq + p.z * uWindFreq * 0.85 + uTime * uWindSpeed;
-      float ph2 = p.x * uWindFreq * 0.42 - p.z * uWindFreq * 0.55 + uTime * uWindSpeed * 0.6;
-      p.x += aH * uWindAmp * (sin(ph) + 0.5 * sin(ph2));
-      p.z += aH * uWindAmp * 0.8 * (cos(ph * 0.9) + 0.5 * sin(ph2));
-      vN = normalMatrix * normal;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      vec3 world;
+      if (uBillboard > 0.5) {
+        vec3 rel = position - aBase;                       // canonical: x = width, y = height
+        vec3 toCam = cameraPosition - aBase; toCam.y = 0.0;
+        vec3 fwd = normalize(toCam + vec3(0.0, 0.0, 0.0001));
+        vec3 right = vec3(fwd.z, 0.0, -fwd.x);
+        world = aBase + right * rel.x + vec3(0.0, rel.y, 0.0);
+        vN = fwd;
+      } else {
+        world = position;
+        vN = normalMatrix * normal;
+      }
+      float ph  = world.x * uWindFreq + world.z * uWindFreq * 0.85 + uTime * uWindSpeed;
+      float ph2 = world.x * uWindFreq * 0.42 - world.z * uWindFreq * 0.55 + uTime * uWindSpeed * 0.6;
+      world.x += aH * uWindAmp * (sin(ph) + 0.5 * sin(ph2));
+      world.z += aH * uWindAmp * 0.8 * (cos(ph * 0.9) + 0.5 * sin(ph2));
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
     }`,
   fragmentShader: `
     uniform vec3 uRoot, uTip, uSun;
     varying float vH; varying vec3 vN;
     void main() {
       vec3 col = mix(uRoot, uTip, vH);
-      float d = max(dot(normalize(vN), normalize(uSun)), 0.0);
-      gl_FragColor = vec4(col * (0.5 + 0.55 * d), 1.0);
+      float d = abs(dot(normalize(vN), normalize(uSun)));   // abs → double-sided flat blades stay lit
+      gl_FragColor = vec4(col * (0.62 + 0.42 * d), 1.0);
     }`,
 });
 
-// ground
 const ground = new THREE.Mesh(new THREE.CircleGeometry(80, 48).rotateX(-Math.PI / 2),
   new THREE.MeshStandardMaterial({ color: '#6f8b3a', roughness: 1 }));
 ground.position.y = -0.01; scene.add(ground);
 
-let grassMesh = null, bladeCount = 0, triCount = 0;
+// one blade in canonical orientation (width along X, height along Y) + aH; the caller bakes
+// aBase and (for non-billboard) applies the world transform.
+function makeBlade(style, bl, width) {
+  let g;
+  if (style === 'cone') {
+    g = new THREE.CylinderGeometry(0, width, bl, 4, 1);
+    g.translate(0, bl / 2, 0);
+    g.deleteAttribute('uv');
+  } else if (style === 'spike') {                    // 1 triangle: two base verts → a tip
+    g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([-width, 0, 0, width, 0, 0, 0, bl, 0], 3));
+    g.computeVertexNormals();
+  } else {                                           // 'blade' / 'billboard': tapered quad, 2 triangles
+    const tw = width * 0.28;                          // tip narrower than base → tapered
+    g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([
+      -width, 0, 0,  width, 0, 0,  tw, bl, 0,
+      -width, 0, 0,  tw, bl, 0,  -tw, bl, 0,
+    ], 3));
+    g.computeVertexNormals();
+  }
+  const pos = g.attributes.position, aH = new Float32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) aH[i] = Math.min(1, Math.max(0, pos.getY(i) / bl));
+  g.setAttribute('aH', new THREE.BufferAttribute(aH, 1));
+  return g;
+}
+
+let grassMesh = null, bladeCount = 0, triCount = 0, triPer = 0;
 
 function buildField(P) {
   if (grassMesh) { scene.remove(grassMesh); grassMesh.geometry.dispose(); }
   const geos = [];
   const hmax = Math.max(P.hmin + 0.02, P.hmax);
+  const _m = new THREE.Matrix4();
   for (let t = 0; t < P.count; t++) {
     const tx = (Math.random() - 0.5) * P.area, tz = (Math.random() - 0.5) * P.area;
     for (let bld = 0; bld < P.blades; bld++) {
       const bl = P.hmin + Math.random() * (hmax - P.hmin);
-      const g = new THREE.CylinderGeometry(0, P.width, bl, 4, 1);
-      g.translate(0, bl / 2, 0);                       // base at y=0
-      // aH: 0 at the base, 1 at the tip (drives gradient + sway weight)
-      const pos = g.attributes.position, aH = new Float32Array(pos.count);
-      for (let i = 0; i < pos.count; i++) aH[i] = Math.min(1, Math.max(0, pos.getY(i) / bl));
-      g.setAttribute('aH', new THREE.BufferAttribute(aH, 1));
-      const m = new THREE.Matrix4()
-        .makeTranslation(tx + (Math.random() - 0.5) * P.spread, 0, tz + (Math.random() - 0.5) * P.spread)
-        .multiply(new THREE.Matrix4().makeRotationY(Math.random() * Math.PI * 2))
-        .multiply(new THREE.Matrix4().makeRotationZ((Math.random() - 0.5) * P.lean));
-      g.applyMatrix4(m);
+      const g = makeBlade(P.style, bl, P.width);
+      const bx = tx + (Math.random() - 0.5) * P.spread, bz = tz + (Math.random() - 0.5) * P.spread;
+      if (P.style === 'billboard') {
+        g.translate(bx, 0, bz);                        // keep canonical; the shader faces it to the camera
+      } else {
+        _m.makeTranslation(bx, 0, bz)
+          .multiply(new THREE.Matrix4().makeRotationY(Math.random() * Math.PI * 2))
+          .multiply(new THREE.Matrix4().makeRotationZ((Math.random() - 0.5) * P.lean));
+        g.applyMatrix4(_m);
+      }
+      const n = g.attributes.position.count, ab = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) { ab[i * 3] = bx; ab[i * 3 + 2] = bz; }
+      g.setAttribute('aBase', new THREE.BufferAttribute(ab, 3));
       geos.push(g);
     }
   }
   const merged = mergeGeometries(geos);
   geos.forEach(g => g.dispose());
+  uni.uBillboard.value = P.style === 'billboard' ? 1 : 0;
   grassMesh = new THREE.Mesh(merged, grassMat);
   scene.add(grassMesh);
   bladeCount = P.count * P.blades;
   triCount = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3;
+  triPer = Math.round(triCount / bladeCount);
   updateStats();
 }
 
-// minimal geometry merge (BufferGeometryUtils isn't imported to keep this one-file) — all our
-// blade geos share the same attributes (position, normal, uv, aH), so a straight concat works.
+// minimal concat merge — all blade geos share [position, normal, aH, aBase].
 function mergeGeometries(list) {
-  const attrs = ['position', 'normal', 'uv', 'aH'];
-  const sizes = { position: 3, normal: 3, uv: 2, aH: 1 };
+  const attrs = ['position', 'normal', 'aH', 'aBase'], sizes = { position: 3, normal: 3, aH: 1, aBase: 3 };
   let vTotal = 0, iTotal = 0;
   for (const g of list) { vTotal += g.attributes.position.count; iTotal += g.index ? g.index.count : g.attributes.position.count; }
   const out = new THREE.BufferGeometry();
@@ -209,10 +260,7 @@ function mergeGeometries(list) {
   let vOff = 0, iOff = 0;
   for (const g of list) {
     const vc = g.attributes.position.count;
-    for (const a of attrs) {
-      const src = g.attributes[a], dst = out.attributes[a].array, s = sizes[a];
-      dst.set(src.array.subarray(0, vc * s), vOff * s);
-    }
+    for (const a of attrs) { const s = sizes[a]; out.attributes[a].array.set(g.attributes[a].array.subarray(0, vc * s), vOff * s); }
     if (g.index) { for (let i = 0; i < g.index.count; i++) idx[iOff++] = g.index.array[i] + vOff; }
     else { for (let i = 0; i < vc; i++) idx[iOff++] = i + vOff; }
     vOff += vc;
@@ -222,12 +270,18 @@ function mergeGeometries(list) {
 }
 
 // ── controls ────────────────────────────────────────────────────────────────
-const P = { count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8 };
+const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8 };
+const STYLE_HINT = {
+  cone: 'the current game blade — a 3D 4-sided cone. Heaviest.',
+  spike: 'one flat triangle tapering to a point. Leanest; vanishes edge-on unless dense.',
+  blade: 'a flat tapered quad — reads most blade-like. Vanishes edge-on unless dense.',
+  billboard: 'flat quad that turns to face you (stays upright) — never edge-on, only 2 tris.',
+};
 const ids = ['count', 'blades', 'spread', 'area', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq'];
 const el = {}; ids.forEach(id => el[id] = document.getElementById(id));
 const rootEl = document.getElementById('root'), tipEl = document.getElementById('tip');
+const hex = c => '#' + c.getHexString();
 
-function hex(c) { return '#' + c.getHexString(); }
 function syncLabels() {
   el.count.value = P.count; document.getElementById('v_count').textContent = P.count;
   el.blades.value = P.blades; document.getElementById('v_blades').textContent = P.blades;
@@ -241,28 +295,24 @@ function syncLabels() {
   el.wspeed.value = uni.uWindSpeed.value; document.getElementById('v_wspeed').textContent = uni.uWindSpeed.value.toFixed(2);
   el.wfreq.value = uni.uWindFreq.value; document.getElementById('v_wfreq').textContent = uni.uWindFreq.value.toFixed(2);
   rootEl.value = hex(uni.uRoot.value); tipEl.value = hex(uni.uTip.value);
+  document.getElementById('styleHint').textContent = STYLE_HINT[P.style];
 }
 function updateStats() {
   document.getElementById('stats').innerHTML =
-    `blades: <b>${bladeCount.toLocaleString()}</b> · triangles: <b>${Math.round(triCount).toLocaleString()}</b> · fps: <b id="fps">–</b>`;
+    `style: <b>${P.style}</b> (<b>${triPer}</b> tri/blade) · blades: <b>${bladeCount.toLocaleString()}</b> · triangles: <b>${Math.round(triCount).toLocaleString()}</b> · fps: <b id="fps">–</b>`;
   document.getElementById('out').value =
-`blades/tuft: ${P.blades}   (Plants.js makePlant)
-blade height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}
+`blade style: ${P.style}  (${triPer} tri/blade)
+blades/tuft: ${P.blades}   height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}
 root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}
 wind: amp ${uni.uWindAmp.value.toFixed(3)}  freq ${uni.uWindFreq.value.toFixed(2)}  speed ${uni.uWindSpeed.value.toFixed(2)}
-density feel: ${bladeCount.toLocaleString()} blades over a ${P.area}×${P.area} patch  (≈ ${(bladeCount / (P.area * P.area)).toFixed(1)} blades/u²)`;
+${bladeCount.toLocaleString()} blades over ${P.area}×${P.area}  (≈ ${(bladeCount / (P.area * P.area)).toFixed(1)}/u²) · ${Math.round(triCount).toLocaleString()} tris total`;
 }
 
 let regenT = null;
 const regen = () => { clearTimeout(regenT); regenT = setTimeout(() => buildField(P), 40); };
-el.count.oninput = e => { P.count = +e.target.value; document.getElementById('v_count').textContent = P.count; regen(); };
-el.blades.oninput = e => { P.blades = +e.target.value; document.getElementById('v_blades').textContent = P.blades; regen(); };
-el.spread.oninput = e => { P.spread = +e.target.value; document.getElementById('v_spread').textContent = P.spread.toFixed(2); regen(); };
-el.area.oninput = e => { P.area = +e.target.value; document.getElementById('v_area').textContent = P.area; regen(); };
-el.hmin.oninput = e => { P.hmin = +e.target.value; document.getElementById('v_hmin').textContent = P.hmin.toFixed(2); regen(); };
-el.hmax.oninput = e => { P.hmax = +e.target.value; document.getElementById('v_hmax').textContent = P.hmax.toFixed(2); regen(); };
-el.width.oninput = e => { P.width = +e.target.value; document.getElementById('v_width').textContent = P.width.toFixed(3); regen(); };
-el.lean.oninput = e => { P.lean = +e.target.value; document.getElementById('v_lean').textContent = P.lean.toFixed(2); regen(); };
+const bindRange = (id, key, dp) => el[id].oninput = e => { P[key] = +e.target.value; document.getElementById('v_' + id).textContent = dp != null ? (+e.target.value).toFixed(dp) : e.target.value; regen(); };
+bindRange('count', 'count'); bindRange('blades', 'blades'); bindRange('spread', 'spread', 2); bindRange('area', 'area');
+bindRange('hmin', 'hmin', 2); bindRange('hmax', 'hmax', 2); bindRange('width', 'width', 3); bindRange('lean', 'lean', 2);
 el.wamp.oninput = e => { uni.uWindAmp.value = +e.target.value; document.getElementById('v_wamp').textContent = (+e.target.value).toFixed(3); updateStats(); };
 el.wspeed.oninput = e => { uni.uWindSpeed.value = +e.target.value; document.getElementById('v_wspeed').textContent = (+e.target.value).toFixed(2); updateStats(); };
 el.wfreq.oninput = e => { uni.uWindFreq.value = +e.target.value; document.getElementById('v_wfreq').textContent = (+e.target.value).toFixed(2); updateStats(); };
@@ -270,10 +320,15 @@ rootEl.oninput = e => { uni.uRoot.value.set(e.target.value); updateStats(); };
 tipEl.oninput = e => { uni.uTip.value.set(e.target.value); updateStats(); };
 document.getElementById('regen').onclick = () => buildField(P);
 document.getElementById('copy').onclick = () => { document.getElementById('out').select(); document.execCommand('copy'); };
+document.querySelectorAll('#styles button').forEach(btn => btn.onclick = () => {
+  P.style = btn.dataset.s;
+  document.querySelectorAll('#styles button').forEach(b => b.classList.toggle('on', b === btn));
+  document.getElementById('styleHint').textContent = STYLE_HINT[P.style];
+  buildField(P);
+});
 
 syncLabels(); placeCam(); buildField(P);
 
-// animate
 let last = performance.now(), fpsT = 0, fpsN = 0;
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
