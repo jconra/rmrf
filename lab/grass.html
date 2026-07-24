@@ -74,7 +74,16 @@
       <div class="row"><label>Root</label><input type="color" id="root"></div>
       <div class="row"><label>Tip</label><input type="color" id="tip"></div>
     </div>
+    <div class="two">
+      <div class="row"><label>Ground</label><input type="color" id="ground"></div>
+      <div class="row"><label>&nbsp;</label><button id="matchGround" style="width:100%">root = ground</button></div>
+    </div>
     <div class="row"><label>Root band <b id="v_rootband"></b></label><input type="range" id="rootband" min="0" max="0.6" step="0.02"></div>
+    <div class="seg" style="grid-template-columns:1fr 1fr; margin-top:6px">
+      <button data-lit="1" class="on" id="lit">Lit (form)</button>
+      <button data-lit="0" id="unlit">Unlit (exact match)</button>
+    </div>
+    <div class="hint">Unlit + <b>root = ground</b> → the blade bottom is pixel-identical to the ground.</div>
   </div>
 
   <div class="grp"><div class="lbl">Wind (live)</div>
@@ -142,6 +151,7 @@ const uni = {
   uRoot:      { value: new THREE.Color('#7d9a44') },
   uTip:       { value: new THREE.Color('#31501d') },
   uRootBand:  { value: 0.25 },     // bottom fraction held at solid root colour before the gradient starts
+  uUnlit:     { value: 0 },         // 1 = ignore lighting → base outputs root colour exactly (matches an unlit ground)
   uSun:       { value: SUN_DIR },
 };
 const grassMat = new THREE.ShaderMaterial({
@@ -174,18 +184,20 @@ const grassMat = new THREE.ShaderMaterial({
     }`,
   fragmentShader: `
     uniform vec3 uRoot, uTip, uSun;
-    uniform float uRootBand;
+    uniform float uRootBand, uUnlit;
     varying float vH; varying vec3 vN;
     void main() {
       float g = clamp((vH - uRootBand) / max(0.001, 1.0 - uRootBand), 0.0, 1.0);   // hold the bottom band at root, then gradient
       vec3 col = mix(uRoot, uTip, g);
-      float d = abs(dot(normalize(vN), normalize(uSun)));   // abs → double-sided flat blades stay lit
-      gl_FragColor = vec4(col * (0.62 + 0.42 * d), 1.0);
+      float d = abs(dot(normalize(vN), normalize(uSun)));
+      float lit = mix(0.62 + 0.42 * d, 1.0, uUnlit);   // unlit → base = root colour EXACTLY (matches the unlit ground)
+      gl_FragColor = vec4(col * lit, 1.0);
     }`,
 });
 
+// Unlit ground (MeshBasicMaterial) so its shown colour IS its colour — a stable match target.
 const ground = new THREE.Mesh(new THREE.CircleGeometry(80, 48).rotateX(-Math.PI / 2),
-  new THREE.MeshStandardMaterial({ color: '#6f8b3a', roughness: 1 }));
+  new THREE.MeshBasicMaterial({ color: '#6f8b3a' }));
 ground.position.y = -0.01; scene.add(ground);
 
 // one blade in canonical orientation (width along X, height along Y) + aH; the caller bakes
@@ -298,7 +310,7 @@ function syncLabels() {
   el.wamp.value = uni.uWindAmp.value; document.getElementById('v_wamp').textContent = uni.uWindAmp.value.toFixed(3);
   el.wspeed.value = uni.uWindSpeed.value; document.getElementById('v_wspeed').textContent = uni.uWindSpeed.value.toFixed(2);
   el.wfreq.value = uni.uWindFreq.value; document.getElementById('v_wfreq').textContent = uni.uWindFreq.value.toFixed(2);
-  rootEl.value = hex(uni.uRoot.value); tipEl.value = hex(uni.uTip.value);
+  rootEl.value = hex(uni.uRoot.value); tipEl.value = hex(uni.uTip.value); document.getElementById('ground').value = hex(ground.material.color);
   document.getElementById('rootband').value = uni.uRootBand.value; document.getElementById('v_rootband').textContent = uni.uRootBand.value.toFixed(2);
   document.getElementById('styleHint').textContent = STYLE_HINT[P.style];
 }
@@ -308,7 +320,7 @@ function updateStats() {
   document.getElementById('out').value =
 `blade style: ${P.style}  (${triPer} tri/blade)
 blades/tuft: ${P.blades}   height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}
-root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}   root band: ${uni.uRootBand.value.toFixed(2)}
+root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}   root band: ${uni.uRootBand.value.toFixed(2)}   lighting: ${uni.uUnlit.value ? 'UNLIT' : 'lit'}   ground: ${hex(ground.material.color)}
 wind: amp ${uni.uWindAmp.value.toFixed(3)}  freq ${uni.uWindFreq.value.toFixed(2)}  speed ${uni.uWindSpeed.value.toFixed(2)}
 ${bladeCount.toLocaleString()} blades over ${P.area}×${P.area}  (≈ ${(bladeCount / (P.area * P.area)).toFixed(1)}/u²) · ${Math.round(triCount).toLocaleString()} tris total`;
 }
@@ -324,6 +336,13 @@ el.wfreq.oninput = e => { uni.uWindFreq.value = +e.target.value; document.getEle
 document.getElementById('rootband').oninput = e => { uni.uRootBand.value = +e.target.value; document.getElementById('v_rootband').textContent = (+e.target.value).toFixed(2); updateStats(); };
 rootEl.oninput = e => { uni.uRoot.value.set(e.target.value); updateStats(); };
 tipEl.oninput = e => { uni.uTip.value.set(e.target.value); updateStats(); };
+document.getElementById('ground').oninput = e => { ground.material.color.set(e.target.value); updateStats(); };
+document.getElementById('matchGround').onclick = () => { uni.uRoot.value.copy(ground.material.color); rootEl.value = hex(uni.uRoot.value); updateStats(); };
+document.querySelectorAll('.seg [data-lit]').forEach(btn => btn.onclick = () => {
+  uni.uUnlit.value = btn.dataset.lit === '0' ? 1 : 0;
+  document.querySelectorAll('.seg [data-lit]').forEach(b => b.classList.toggle('on', b === btn));
+  updateStats();
+});
 document.getElementById('regen').onclick = () => buildField(P);
 document.getElementById('copy').onclick = () => { document.getElementById('out').select(); document.execCommand('copy'); };
 document.querySelectorAll('#styles button').forEach(btn => btn.onclick = () => {
