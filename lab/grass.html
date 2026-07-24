@@ -1,0 +1,289 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Grass Playground — RMRF</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd0e6; font-family: system-ui, sans-serif; }
+  #c { position: fixed; inset: 0; display: block; }
+  #panel {
+    position: fixed; top: 10px; left: 10px; width: 288px; max-height: calc(100vh - 20px); overflow-y: auto;
+    background: rgba(16,22,28,0.86); color: #dbe6ee; border: 1px solid #2b3a47; border-radius: 10px;
+    padding: 12px 14px; font-size: 12px; backdrop-filter: blur(4px);
+  }
+  #panel h1 { font-size: 13px; margin: 0 0 8px; letter-spacing: .5px; color: #8fd0ff; }
+  .row { margin: 9px 0; }
+  .row label { display: flex; justify-content: space-between; margin-bottom: 3px; color: #b8c6d2; }
+  .row label b { color: #eaf3fa; font-variant-numeric: tabular-nums; font-weight: 600; }
+  input[type=range] { width: 100%; accent-color: #5ab0ff; }
+  input[type=color] { width: 100%; height: 26px; border: none; background: none; padding: 0; cursor: pointer; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grp { border-top: 1px solid #26333e; margin-top: 10px; padding-top: 6px; }
+  .grp > .lbl { color: #6f8797; font-size: 10px; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 4px; }
+  #stats { margin-top: 10px; font-size: 11px; color: #9fb3c2; line-height: 1.5; }
+  #stats b { color: #dff0ff; }
+  #out { width: 100%; margin-top: 8px; height: 92px; font: 11px/1.4 ui-monospace, monospace; resize: vertical;
+          background: #0c1218; color: #a7e0b0; border: 1px solid #2b3a47; border-radius: 6px; padding: 6px; }
+  .hint { color: #6f8797; font-size: 10px; margin-top: 6px; }
+  button { background: #22303c; color: #cfe3f2; border: 1px solid #37505f; border-radius: 6px; padding: 5px 8px; cursor: pointer; font-size: 11px; }
+  button:hover { background: #2c3e4d; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <h1>🌱 GRASS PLAYGROUND</h1>
+
+  <div class="grp"><div class="lbl">Field</div>
+    <div class="row"><label>Tufts <b id="v_count"></b></label><input type="range" id="count" min="200" max="12000" step="100"></div>
+    <div class="row"><label>Blades / tuft <b id="v_blades"></b></label><input type="range" id="blades" min="2" max="18" step="1"></div>
+    <div class="row"><label>Tuft spread <b id="v_spread"></b></label><input type="range" id="spread" min="0.03" max="0.6" step="0.01"></div>
+    <div class="row"><label>Patch size <b id="v_area"></b></label><input type="range" id="area" min="8" max="60" step="1"></div>
+  </div>
+
+  <div class="grp"><div class="lbl">Blade</div>
+    <div class="two">
+      <div class="row"><label>H min <b id="v_hmin"></b></label><input type="range" id="hmin" min="0.1" max="1.2" step="0.02"></div>
+      <div class="row"><label>H max <b id="v_hmax"></b></label><input type="range" id="hmax" min="0.2" max="2.0" step="0.02"></div>
+    </div>
+    <div class="row"><label>Width <b id="v_width"></b></label><input type="range" id="width" min="0.01" max="0.14" step="0.005"></div>
+    <div class="row"><label>Lean <b id="v_lean"></b></label><input type="range" id="lean" min="0" max="1.4" step="0.05"></div>
+  </div>
+
+  <div class="grp"><div class="lbl">Colour (live)</div>
+    <div class="two">
+      <div class="row"><label>Root</label><input type="color" id="root"></div>
+      <div class="row"><label>Tip</label><input type="color" id="tip"></div>
+    </div>
+  </div>
+
+  <div class="grp"><div class="lbl">Wind (live)</div>
+    <div class="row"><label>Strength <b id="v_wamp"></b></label><input type="range" id="wamp" min="0" max="0.4" step="0.005"></div>
+    <div class="row"><label>Speed <b id="v_wspeed"></b></label><input type="range" id="wspeed" min="0" max="4" step="0.05"></div>
+    <div class="row"><label>Wave scale <b id="v_wfreq"></b></label><input type="range" id="wfreq" min="0.02" max="0.6" step="0.01"></div>
+  </div>
+
+  <div id="stats"></div>
+  <div class="grp"><div class="lbl">Values (hand these back)</div>
+    <textarea id="out" readonly></textarea>
+    <div style="display:flex; gap:6px; margin-top:6px;">
+      <button id="regen">↻ New scatter</button>
+      <button id="copy">⧉ Copy values</button>
+    </div>
+    <div class="hint">Drag to orbit · scroll to zoom. Colour + wind update live; field/blade sliders re-scatter.</div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#9fd0e6');
+scene.fog = new THREE.Fog('#9fd0e6', 40, 110);
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 400);
+const cam = { yaw: 0.7, pitch: 0.42, dist: 16, tx: 0, tz: 0 };
+function placeCam() {
+  const cp = Math.max(0.08, Math.min(1.45, cam.pitch));
+  camera.position.set(cam.tx + cam.dist * Math.cos(cp) * Math.sin(cam.yaw),
+                      cam.dist * Math.sin(cp),
+                      cam.tz + cam.dist * Math.cos(cp) * Math.cos(cam.yaw));
+  camera.lookAt(cam.tx, 0.6, cam.tz);
+}
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+// simple orbit
+let drag = null;
+canvas.addEventListener('pointerdown', e => drag = { x: e.clientX, y: e.clientY });
+addEventListener('pointerup', () => drag = null);
+addEventListener('pointermove', e => {
+  if (!drag) return;
+  cam.yaw -= (e.clientX - drag.x) * 0.005; cam.pitch += (e.clientY - drag.y) * 0.005;
+  drag = { x: e.clientX, y: e.clientY }; placeCam();
+});
+canvas.addEventListener('wheel', e => { cam.dist = Math.max(4, Math.min(80, cam.dist + e.deltaY * 0.02)); placeCam(); e.preventDefault(); }, { passive: false });
+
+// lights (just so the ground reads; grass does its own shading in-shader)
+scene.add(new THREE.HemisphereLight('#cfe9ff', '#5a6b3a', 0.9));
+const sun = new THREE.DirectionalLight('#fff6e0', 1.1); sun.position.set(6, 12, 4); scene.add(sun);
+const SUN_DIR = new THREE.Vector3(6, 12, 4).normalize();
+
+// ── grass shader (mirrors the game: aH weight drives BOTH the colour gradient and the wind
+// sway; the wave PHASE comes from each vertex's world XZ so it ripples across the patch). ──
+const uni = {
+  uTime:     { value: 0 },
+  uWindAmp:  { value: 0.13 },
+  uWindFreq: { value: 0.16 },
+  uWindSpeed:{ value: 1.6 },
+  uRoot:     { value: new THREE.Color('#7d9a44') },
+  uTip:      { value: new THREE.Color('#31501d') },
+  uSun:      { value: SUN_DIR },
+};
+const grassMat = new THREE.ShaderMaterial({
+  uniforms: uni,
+  vertexShader: `
+    attribute float aH;
+    uniform float uTime, uWindAmp, uWindFreq, uWindSpeed;
+    varying float vH; varying vec3 vN;
+    void main() {
+      vH = aH;
+      vec3 p = position;
+      float ph  = p.x * uWindFreq + p.z * uWindFreq * 0.85 + uTime * uWindSpeed;
+      float ph2 = p.x * uWindFreq * 0.42 - p.z * uWindFreq * 0.55 + uTime * uWindSpeed * 0.6;
+      p.x += aH * uWindAmp * (sin(ph) + 0.5 * sin(ph2));
+      p.z += aH * uWindAmp * 0.8 * (cos(ph * 0.9) + 0.5 * sin(ph2));
+      vN = normalMatrix * normal;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }`,
+  fragmentShader: `
+    uniform vec3 uRoot, uTip, uSun;
+    varying float vH; varying vec3 vN;
+    void main() {
+      vec3 col = mix(uRoot, uTip, vH);
+      float d = max(dot(normalize(vN), normalize(uSun)), 0.0);
+      gl_FragColor = vec4(col * (0.5 + 0.55 * d), 1.0);
+    }`,
+});
+
+// ground
+const ground = new THREE.Mesh(new THREE.CircleGeometry(80, 48).rotateX(-Math.PI / 2),
+  new THREE.MeshStandardMaterial({ color: '#6f8b3a', roughness: 1 }));
+ground.position.y = -0.01; scene.add(ground);
+
+let grassMesh = null, bladeCount = 0, triCount = 0;
+
+function buildField(P) {
+  if (grassMesh) { scene.remove(grassMesh); grassMesh.geometry.dispose(); }
+  const geos = [];
+  const hmax = Math.max(P.hmin + 0.02, P.hmax);
+  for (let t = 0; t < P.count; t++) {
+    const tx = (Math.random() - 0.5) * P.area, tz = (Math.random() - 0.5) * P.area;
+    for (let bld = 0; bld < P.blades; bld++) {
+      const bl = P.hmin + Math.random() * (hmax - P.hmin);
+      const g = new THREE.CylinderGeometry(0, P.width, bl, 4, 1);
+      g.translate(0, bl / 2, 0);                       // base at y=0
+      // aH: 0 at the base, 1 at the tip (drives gradient + sway weight)
+      const pos = g.attributes.position, aH = new Float32Array(pos.count);
+      for (let i = 0; i < pos.count; i++) aH[i] = Math.min(1, Math.max(0, pos.getY(i) / bl));
+      g.setAttribute('aH', new THREE.BufferAttribute(aH, 1));
+      const m = new THREE.Matrix4()
+        .makeTranslation(tx + (Math.random() - 0.5) * P.spread, 0, tz + (Math.random() - 0.5) * P.spread)
+        .multiply(new THREE.Matrix4().makeRotationY(Math.random() * Math.PI * 2))
+        .multiply(new THREE.Matrix4().makeRotationZ((Math.random() - 0.5) * P.lean));
+      g.applyMatrix4(m);
+      geos.push(g);
+    }
+  }
+  const merged = mergeGeometries(geos);
+  geos.forEach(g => g.dispose());
+  grassMesh = new THREE.Mesh(merged, grassMat);
+  scene.add(grassMesh);
+  bladeCount = P.count * P.blades;
+  triCount = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3;
+  updateStats();
+}
+
+// minimal geometry merge (BufferGeometryUtils isn't imported to keep this one-file) — all our
+// blade geos share the same attributes (position, normal, uv, aH), so a straight concat works.
+function mergeGeometries(list) {
+  const attrs = ['position', 'normal', 'uv', 'aH'];
+  const sizes = { position: 3, normal: 3, uv: 2, aH: 1 };
+  let vTotal = 0, iTotal = 0;
+  for (const g of list) { vTotal += g.attributes.position.count; iTotal += g.index ? g.index.count : g.attributes.position.count; }
+  const out = new THREE.BufferGeometry();
+  for (const a of attrs) out.setAttribute(a, new THREE.BufferAttribute(new Float32Array(vTotal * sizes[a]), sizes[a]));
+  const idx = new Uint32Array(iTotal);
+  let vOff = 0, iOff = 0;
+  for (const g of list) {
+    const vc = g.attributes.position.count;
+    for (const a of attrs) {
+      const src = g.attributes[a], dst = out.attributes[a].array, s = sizes[a];
+      dst.set(src.array.subarray(0, vc * s), vOff * s);
+    }
+    if (g.index) { for (let i = 0; i < g.index.count; i++) idx[iOff++] = g.index.array[i] + vOff; }
+    else { for (let i = 0; i < vc; i++) idx[iOff++] = i + vOff; }
+    vOff += vc;
+  }
+  out.setIndex(new THREE.BufferAttribute(idx, 1));
+  return out;
+}
+
+// ── controls ────────────────────────────────────────────────────────────────
+const P = { count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8 };
+const ids = ['count', 'blades', 'spread', 'area', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq'];
+const el = {}; ids.forEach(id => el[id] = document.getElementById(id));
+const rootEl = document.getElementById('root'), tipEl = document.getElementById('tip');
+
+function hex(c) { return '#' + c.getHexString(); }
+function syncLabels() {
+  el.count.value = P.count; document.getElementById('v_count').textContent = P.count;
+  el.blades.value = P.blades; document.getElementById('v_blades').textContent = P.blades;
+  el.spread.value = P.spread; document.getElementById('v_spread').textContent = P.spread.toFixed(2);
+  el.area.value = P.area; document.getElementById('v_area').textContent = P.area;
+  el.hmin.value = P.hmin; document.getElementById('v_hmin').textContent = P.hmin.toFixed(2);
+  el.hmax.value = P.hmax; document.getElementById('v_hmax').textContent = P.hmax.toFixed(2);
+  el.width.value = P.width; document.getElementById('v_width').textContent = P.width.toFixed(3);
+  el.lean.value = P.lean; document.getElementById('v_lean').textContent = P.lean.toFixed(2);
+  el.wamp.value = uni.uWindAmp.value; document.getElementById('v_wamp').textContent = uni.uWindAmp.value.toFixed(3);
+  el.wspeed.value = uni.uWindSpeed.value; document.getElementById('v_wspeed').textContent = uni.uWindSpeed.value.toFixed(2);
+  el.wfreq.value = uni.uWindFreq.value; document.getElementById('v_wfreq').textContent = uni.uWindFreq.value.toFixed(2);
+  rootEl.value = hex(uni.uRoot.value); tipEl.value = hex(uni.uTip.value);
+}
+function updateStats() {
+  document.getElementById('stats').innerHTML =
+    `blades: <b>${bladeCount.toLocaleString()}</b> · triangles: <b>${Math.round(triCount).toLocaleString()}</b> · fps: <b id="fps">–</b>`;
+  document.getElementById('out').value =
+`blades/tuft: ${P.blades}   (Plants.js makePlant)
+blade height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}
+root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}
+wind: amp ${uni.uWindAmp.value.toFixed(3)}  freq ${uni.uWindFreq.value.toFixed(2)}  speed ${uni.uWindSpeed.value.toFixed(2)}
+density feel: ${bladeCount.toLocaleString()} blades over a ${P.area}×${P.area} patch  (≈ ${(bladeCount / (P.area * P.area)).toFixed(1)} blades/u²)`;
+}
+
+let regenT = null;
+const regen = () => { clearTimeout(regenT); regenT = setTimeout(() => buildField(P), 40); };
+el.count.oninput = e => { P.count = +e.target.value; document.getElementById('v_count').textContent = P.count; regen(); };
+el.blades.oninput = e => { P.blades = +e.target.value; document.getElementById('v_blades').textContent = P.blades; regen(); };
+el.spread.oninput = e => { P.spread = +e.target.value; document.getElementById('v_spread').textContent = P.spread.toFixed(2); regen(); };
+el.area.oninput = e => { P.area = +e.target.value; document.getElementById('v_area').textContent = P.area; regen(); };
+el.hmin.oninput = e => { P.hmin = +e.target.value; document.getElementById('v_hmin').textContent = P.hmin.toFixed(2); regen(); };
+el.hmax.oninput = e => { P.hmax = +e.target.value; document.getElementById('v_hmax').textContent = P.hmax.toFixed(2); regen(); };
+el.width.oninput = e => { P.width = +e.target.value; document.getElementById('v_width').textContent = P.width.toFixed(3); regen(); };
+el.lean.oninput = e => { P.lean = +e.target.value; document.getElementById('v_lean').textContent = P.lean.toFixed(2); regen(); };
+el.wamp.oninput = e => { uni.uWindAmp.value = +e.target.value; document.getElementById('v_wamp').textContent = (+e.target.value).toFixed(3); updateStats(); };
+el.wspeed.oninput = e => { uni.uWindSpeed.value = +e.target.value; document.getElementById('v_wspeed').textContent = (+e.target.value).toFixed(2); updateStats(); };
+el.wfreq.oninput = e => { uni.uWindFreq.value = +e.target.value; document.getElementById('v_wfreq').textContent = (+e.target.value).toFixed(2); updateStats(); };
+rootEl.oninput = e => { uni.uRoot.value.set(e.target.value); updateStats(); };
+tipEl.oninput = e => { uni.uTip.value.set(e.target.value); updateStats(); };
+document.getElementById('regen').onclick = () => buildField(P);
+document.getElementById('copy').onclick = () => { document.getElementById('out').select(); document.execCommand('copy'); };
+
+syncLabels(); placeCam(); buildField(P);
+
+// animate
+let last = performance.now(), fpsT = 0, fpsN = 0;
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  uni.uTime.value += dt;
+  renderer.render(scene, camera);
+  fpsN++; fpsT += dt;
+  if (fpsT > 0.5) { const f = document.getElementById('fps'); if (f) f.textContent = Math.round(fpsN / fpsT); fpsT = 0; fpsN = 0; }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
