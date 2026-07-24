@@ -58,6 +58,7 @@
     <div class="row"><label>Blades / tuft <b id="v_blades"></b></label><input type="range" id="blades" min="2" max="18" step="1"></div>
     <div class="row"><label>Tuft spread <b id="v_spread"></b></label><input type="range" id="spread" min="0.03" max="0.6" step="0.01"></div>
     <div class="row"><label>Patch size <b id="v_area"></b></label><input type="range" id="area" min="8" max="60" step="1"></div>
+    <div class="row"><label>Sink into ground <b id="v_sink"></b></label><input type="range" id="sink" min="0" max="0.3" step="0.01"></div>
   </div>
 
   <div class="grp"><div class="lbl">Blade</div>
@@ -258,6 +259,7 @@ function buildField(P) {
   geos.forEach(g => g.dispose());
   uni.uBillboard.value = P.style === 'billboard' ? 1 : 0;
   grassMesh = new THREE.Mesh(merged, grassMat);
+  grassMesh.position.y = -P.sink;   // bury the base below the ground so its bottom edge is occluded
   scene.add(grassMesh);
   bladeCount = P.count * P.blades;
   triCount = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3;
@@ -286,14 +288,14 @@ function mergeGeometries(list) {
 }
 
 // ── controls ────────────────────────────────────────────────────────────────
-const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8 };
+const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8, sink: 0.06 };
 const STYLE_HINT = {
   cone: 'the current game blade — a 3D 4-sided cone. Heaviest.',
   spike: 'one flat triangle tapering to a point. Leanest; vanishes edge-on unless dense.',
   blade: 'a flat tapered quad — reads most blade-like. Vanishes edge-on unless dense.',
   billboard: 'flat quad that turns to face you (stays upright) — never edge-on, only 2 tris.',
 };
-const ids = ['count', 'blades', 'spread', 'area', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq'];
+const ids = ['count', 'blades', 'spread', 'area', 'sink', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq'];
 const el = {}; ids.forEach(id => el[id] = document.getElementById(id));
 const rootEl = document.getElementById('root'), tipEl = document.getElementById('tip');
 const hex = c => '#' + c.getHexString();
@@ -303,6 +305,7 @@ function syncLabels() {
   el.blades.value = P.blades; document.getElementById('v_blades').textContent = P.blades;
   el.spread.value = P.spread; document.getElementById('v_spread').textContent = P.spread.toFixed(2);
   el.area.value = P.area; document.getElementById('v_area').textContent = P.area;
+  el.sink.value = P.sink; document.getElementById('v_sink').textContent = P.sink.toFixed(2);
   el.hmin.value = P.hmin; document.getElementById('v_hmin').textContent = P.hmin.toFixed(2);
   el.hmax.value = P.hmax; document.getElementById('v_hmax').textContent = P.hmax.toFixed(2);
   el.width.value = P.width; document.getElementById('v_width').textContent = P.width.toFixed(3);
@@ -319,7 +322,7 @@ function updateStats() {
     `style: <b>${P.style}</b> (<b>${triPer}</b> tri/blade) · blades: <b>${bladeCount.toLocaleString()}</b> · triangles: <b>${Math.round(triCount).toLocaleString()}</b> · fps: <b id="fps">–</b>`;
   document.getElementById('out').value =
 `blade style: ${P.style}  (${triPer} tri/blade)
-blades/tuft: ${P.blades}   height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}
+blades/tuft: ${P.blades}   height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}   sink: ${P.sink.toFixed(2)}
 root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}   root band: ${uni.uRootBand.value.toFixed(2)}   lighting: ${uni.uUnlit.value ? 'UNLIT' : 'lit'}   ground: ${hex(ground.material.color)}
 wind: amp ${uni.uWindAmp.value.toFixed(3)}  freq ${uni.uWindFreq.value.toFixed(2)}  speed ${uni.uWindSpeed.value.toFixed(2)}
 ${bladeCount.toLocaleString()} blades over ${P.area}×${P.area}  (≈ ${(bladeCount / (P.area * P.area)).toFixed(1)}/u²) · ${Math.round(triCount).toLocaleString()} tris total`;
@@ -333,6 +336,7 @@ bindRange('hmin', 'hmin', 2); bindRange('hmax', 'hmax', 2); bindRange('width', '
 el.wamp.oninput = e => { uni.uWindAmp.value = +e.target.value; document.getElementById('v_wamp').textContent = (+e.target.value).toFixed(3); updateStats(); };
 el.wspeed.oninput = e => { uni.uWindSpeed.value = +e.target.value; document.getElementById('v_wspeed').textContent = (+e.target.value).toFixed(2); updateStats(); };
 el.wfreq.oninput = e => { uni.uWindFreq.value = +e.target.value; document.getElementById('v_wfreq').textContent = (+e.target.value).toFixed(2); updateStats(); };
+el.sink.oninput = e => { P.sink = +e.target.value; document.getElementById('v_sink').textContent = P.sink.toFixed(2); if (grassMesh) grassMesh.position.y = -P.sink; updateStats(); };   // live: just move the mesh
 document.getElementById('rootband').oninput = e => { uni.uRootBand.value = +e.target.value; document.getElementById('v_rootband').textContent = (+e.target.value).toFixed(2); updateStats(); };
 rootEl.oninput = e => { uni.uRoot.value.set(e.target.value); updateStats(); };
 tipEl.oninput = e => { uni.uTip.value.set(e.target.value); updateStats(); };
