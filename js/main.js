@@ -9787,6 +9787,7 @@ window.RR = {
       updateGadgets(dt);
       updateRepairs(dt);
       updateSubmarines(dt);
+      decaySoundPings(dt);   // AI hearing reads these; render-only decay left them stuck in headless
     }
   },
   blockedAt: (x, z) => blockedAt(x, z),
@@ -10179,6 +10180,18 @@ function emitSoundPing(x, y, z, idx, team, colorIndex) {
   soundPings.push({ x, y, z, idx, team, colorIndex, life: 1 });
   if (soundPings.length > 48) soundPings.shift();
 }
+// Fade out gun reports (~<1s). MUST run in the sim step, not just the render loop — the AI's
+// hearing reads soundPings, so if they never decay a unit "hears" gunfire from a shot fired
+// minutes ago and camps on the ghost forever. This lived only in updateSoundHud() (render-only),
+// so headless stepField runs piled up 48 stale pings and froze units on phantom fire — a rig
+// artifact that polluted every AI-vs-AI tournament. Ticked in BOTH stepField and updateSoundHud
+// (the two are parallel loops; the real game runs animate→updateSoundHud, headless runs stepField).
+function decaySoundPings(dt) {
+  for (let i = soundPings.length - 1; i >= 0; i--) {
+    soundPings[i].life -= dt * SND.gunDecay;
+    if (soundPings[i].life <= 0) soundPings.splice(i, 1);
+  }
+}
 function acFall(dist, ref, max) {
   if (dist <= ref) return 1;
   if (dist >= max) return 0;
@@ -10293,10 +10306,7 @@ function drawSonarArcs(g, W, H, s) {
   return true;
 }
 function updateSoundHud(dt) {
-  for (let i = soundPings.length - 1; i >= 0; i--) {          // decay gun reports (always, so they don't pile up)
-    soundPings[i].life -= dt * SND.gunDecay;
-    if (soundPings[i].life <= 0) soundPings.splice(i, 1);
-  }
+  decaySoundPings(dt);       // gun-report fade (also ticked in stepField for headless faithfulness)
   if (_sonarDebug) return;   // a debug frame is up (RR.drawSonar) — don't hide or clear it
   const listener = soundListener();
   if (!listener) { if (soundHudCanvas) soundHudCanvas.style.display = 'none'; return; }
