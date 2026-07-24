@@ -74,6 +74,7 @@
       <div class="row"><label>Root</label><input type="color" id="root"></div>
       <div class="row"><label>Tip</label><input type="color" id="tip"></div>
     </div>
+    <div class="row"><label>Root band <b id="v_rootband"></b></label><input type="range" id="rootband" min="0" max="0.6" step="0.02"></div>
   </div>
 
   <div class="grp"><div class="lbl">Wind (live)</div>
@@ -140,6 +141,7 @@ const uni = {
   uBillboard: { value: 0 },
   uRoot:      { value: new THREE.Color('#7d9a44') },
   uTip:       { value: new THREE.Color('#31501d') },
+  uRootBand:  { value: 0.25 },     // bottom fraction held at solid root colour before the gradient starts
   uSun:       { value: SUN_DIR },
 };
 const grassMat = new THREE.ShaderMaterial({
@@ -172,9 +174,11 @@ const grassMat = new THREE.ShaderMaterial({
     }`,
   fragmentShader: `
     uniform vec3 uRoot, uTip, uSun;
+    uniform float uRootBand;
     varying float vH; varying vec3 vN;
     void main() {
-      vec3 col = mix(uRoot, uTip, vH);
+      float g = clamp((vH - uRootBand) / max(0.001, 1.0 - uRootBand), 0.0, 1.0);   // hold the bottom band at root, then gradient
+      vec3 col = mix(uRoot, uTip, g);
       float d = abs(dot(normalize(vN), normalize(uSun)));   // abs → double-sided flat blades stay lit
       gl_FragColor = vec4(col * (0.62 + 0.42 * d), 1.0);
     }`,
@@ -295,6 +299,7 @@ function syncLabels() {
   el.wspeed.value = uni.uWindSpeed.value; document.getElementById('v_wspeed').textContent = uni.uWindSpeed.value.toFixed(2);
   el.wfreq.value = uni.uWindFreq.value; document.getElementById('v_wfreq').textContent = uni.uWindFreq.value.toFixed(2);
   rootEl.value = hex(uni.uRoot.value); tipEl.value = hex(uni.uTip.value);
+  document.getElementById('rootband').value = uni.uRootBand.value; document.getElementById('v_rootband').textContent = uni.uRootBand.value.toFixed(2);
   document.getElementById('styleHint').textContent = STYLE_HINT[P.style];
 }
 function updateStats() {
@@ -303,7 +308,7 @@ function updateStats() {
   document.getElementById('out').value =
 `blade style: ${P.style}  (${triPer} tri/blade)
 blades/tuft: ${P.blades}   height: ${P.hmin.toFixed(2)}–${P.hmax.toFixed(2)}   width: ${P.width.toFixed(3)}   spread: ${P.spread.toFixed(2)}   lean: ${P.lean.toFixed(2)}
-root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}
+root: ${hex(uni.uRoot.value)}   tip: ${hex(uni.uTip.value)}   root band: ${uni.uRootBand.value.toFixed(2)}
 wind: amp ${uni.uWindAmp.value.toFixed(3)}  freq ${uni.uWindFreq.value.toFixed(2)}  speed ${uni.uWindSpeed.value.toFixed(2)}
 ${bladeCount.toLocaleString()} blades over ${P.area}×${P.area}  (≈ ${(bladeCount / (P.area * P.area)).toFixed(1)}/u²) · ${Math.round(triCount).toLocaleString()} tris total`;
 }
@@ -316,6 +321,7 @@ bindRange('hmin', 'hmin', 2); bindRange('hmax', 'hmax', 2); bindRange('width', '
 el.wamp.oninput = e => { uni.uWindAmp.value = +e.target.value; document.getElementById('v_wamp').textContent = (+e.target.value).toFixed(3); updateStats(); };
 el.wspeed.oninput = e => { uni.uWindSpeed.value = +e.target.value; document.getElementById('v_wspeed').textContent = (+e.target.value).toFixed(2); updateStats(); };
 el.wfreq.oninput = e => { uni.uWindFreq.value = +e.target.value; document.getElementById('v_wfreq').textContent = (+e.target.value).toFixed(2); updateStats(); };
+document.getElementById('rootband').oninput = e => { uni.uRootBand.value = +e.target.value; document.getElementById('v_rootband').textContent = (+e.target.value).toFixed(2); updateStats(); };
 rootEl.oninput = e => { uni.uRoot.value.set(e.target.value); updateStats(); };
 tipEl.oninput = e => { uni.uTip.value.set(e.target.value); updateStats(); };
 document.getElementById('regen').onclick = () => buildField(P);
