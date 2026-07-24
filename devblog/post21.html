@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the pecking order</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  a { color:var(--blue); }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); } td b.warn { color:var(--warn); }
+  .matrix td, .matrix th { text-align:center; }
+  .matrix td:first-child, .matrix th:first-child { text-align:left; color:var(--dim); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+  .bar { display:inline-block; height:9px; border-radius:2px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<a class="navbtn" style="left:10px" href="post20.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 21 · the pecking order</div>
+</header>
+<main>
+
+<article>
+  <h2>The pecking order</h2>
+  <div class="date">2026-07-23 · four personalities, 320 matches, and the tax on getting stuck</div>
+
+  <p>The commander runs one of four doctrines &mdash; <b>Turtle</b>, <b>Warrior</b>,
+  <b>Hunter</b>, <b>Rogue</b> &mdash; dealt at random each match. They&rsquo;ve fought thousands
+  of games, but never in a fair bracket: a random draw tangles a persona&rsquo;s record up with
+  whatever maps and matchups it happened to catch. So we ran the bracket properly. Every ordered
+  pairing, both sides of every map so side/spawn luck cancels, 20 seeds each &mdash; <b>320
+  deterministic matches</b> &mdash; tracking three things per persona: who wins, how long it
+  takes, and how often its units get <i>stuck</i> (driver nav alarms).</p>
+
+  <h3>The standings</h3>
+  <table>
+    <tr><th>rank</th><th>doctrine</th><th>win %</th><th>avg game</th><th>alarms / game</th></tr>
+    <tr><td>1</td><td><b>rogue</b></td><td><b class="good">60.6%</b></td><td>433s</td><td>0.10</td></tr>
+    <tr><td>2</td><td>hunter</td><td>51.3%</td><td>462s</td><td>0.14</td></tr>
+    <tr><td>3</td><td>turtle</td><td>44.4%</td><td>537s</td><td>0.17</td></tr>
+    <tr><td>4</td><td>warrior</td><td><b class="bad">42.5%</b></td><td>537s</td><td>0.23</td></tr>
+  </table>
+  <p>Rogue runs away with it &mdash; and not as the top of a rock-paper-scissors wheel where
+  everyone has a counter. Rogue beats <i>all three</i>. Here&rsquo;s the full grid, each cell the
+  row&rsquo;s win rate against the column, pooled over both side arrangements:</p>
+
+  <table class="matrix">
+    <tr><th></th><th>vs warrior</th><th>vs turtle</th><th>vs rogue</th><th>vs hunter</th></tr>
+    <tr><td>rogue</td>  <td><b class="good">60%</b></td><td><b class="good">65%</b></td><td>&mdash;</td><td><b class="good">68%</b></td></tr>
+    <tr><td>hunter</td> <td><b class="good">70%</b></td><td>53%</td><td><b class="bad">33%</b></td><td>&mdash;</td></tr>
+    <tr><td>turtle</td> <td>48%</td><td>&mdash;</td><td><b class="bad">35%</b></td><td>48%</td></tr>
+    <tr><td>warrior</td><td>&mdash;</td><td>53%</td><td><b class="bad">40%</b></td><td><b class="bad">30%</b></td></tr>
+  </table>
+  <p>There <i>is</i> a little wheel among the other three &mdash; hunter owns warrior (70%),
+  warrior edges turtle, turtle and hunter split down the middle. But rogue sits on top of the
+  whole thing at 60&ndash;68%. The rear-siege, flank-and-sneak playstyle is simply the strongest
+  thing in the game right now.</p>
+
+  <h3>The surprise is in the last column</h3>
+  <p>The ranking is one thing. The real find is the <b>alarms</b> column. Line the four up by win
+  rate and their stuck-rate falls into a clean ladder &mdash; every step down in wins is a step up
+  in alarms:</p>
+
+  <div class="k">
+    rogue &nbsp;&nbsp;<b class="good">60.6%</b> &nbsp; <span class="bar" style="width:20px;background:var(--good)"></span> 0.10 stuck<br>
+    hunter &nbsp;51.3% &nbsp;&nbsp;&nbsp; <span class="bar" style="width:28px;background:var(--warn)"></span> 0.14 stuck<br>
+    turtle &nbsp;&nbsp;44.4% &nbsp;&nbsp;&nbsp; <span class="bar" style="width:34px;background:#e0894a"></span> 0.17 stuck<br>
+    warrior <b class="bad">42.5%</b> &nbsp; <span class="bar" style="width:46px;background:var(--bad)"></span> 0.23 stuck
+  </div>
+
+  <p>The doctrines that drive units into walls lose; the ones that flank <i>around</i> trouble
+  win. Warrior &mdash; the &ldquo;charge the front&rdquo; doctrine &mdash; gets stuck more than
+  <b>twice as often</b> as rogue and finishes dead last <i>despite</i> being the aggressive one.
+  Its win rate isn&rsquo;t losing to better tactics so much as to navigation: a unit that alarms
+  out mid-siege isn&rsquo;t fighting. Rogue&rsquo;s edge is partly that its rear approaches just
+  don&rsquo;t pile units into the same choke.</p>
+
+  <p>That lines up with a thread we&rsquo;ve been pulling all week &mdash; the stuck-unit hunt, and
+  the release valve for siegers parked outside their own gun&rsquo;s range. This bracket says that
+  work isn&rsquo;t just tidiness; it&rsquo;s <i>win rate</i>, and the most navigation-heavy
+  doctrine has the most to gain from it.</p>
+
+  <h3>The honest catch</h3>
+  <p>Rogue at 60.6% across the board is over-tuned. A healthy roster wants every doctrine to have a
+  real shot; right now picking rogue is close to picking &ldquo;win.&rdquo; That&rsquo;s a balance
+  lever for another day &mdash; probably reining in the rear-siege / stealth-capture edge, then
+  re-running this exact bracket to check the wheel evens out.</p>
+
+  <h3>Meanwhile, above ground</h3>
+  <p>A lighter note from the same week: the island&rsquo;s grass got a few cheap upgrades aimed at
+  making the field feel <i>alive</i>. Blades now fade from a grass-green root into a darker tip, so
+  a patch reads as a continuous field instead of scattered clumps. The whole canopy &mdash; grass,
+  bushes, trees, palm fronds &mdash; sways in a wind that travels across the map as a <i>wave</i>
+  rather than shifting in lockstep (one uniform per frame; the GPU does the rest). And the blades
+  only grow where the grass <i>texture</i> actually shows, not on the sandy patches inside a grass
+  tile.</p>
+
+  <p>The rabbit hole, as always, was performance. A grass blade was a 12-triangle cone &mdash; but
+  it turns out a single flat triangle reads just as grassy at field density, a <b>12&times;</b>
+  cut. Rather than argue about it, there&rsquo;s now a live tuning tool:
+  <a href="/lab/grass.html"><b>the Grass Lab</b></a> &mdash; sliders for density, blade shape
+  (cone / spike / tapered quad / camera-facing billboard), height, colour, and wind, with a running
+  triangle-and-fps count so the performance cost is never a guess.</p>
+
+  <p class="fine">320-match round-robin &middot; rig <code>personarr.cjs</code> &middot; the
+  <code>?arch=a,b</code> knob forces a doctrine per side &middot; per-team stuck counts via
+  <code>RR.navAlarmsByTeam()</code> &middot; tuning tool: <a href="/lab/grass.html">/lab/grass.html</a>
+  &middot; next: rein in rogue and re-run the bracket &mdash; a roster where every personality can win.</p>
+</article>
+
+</main>
+</body>
+</html>
