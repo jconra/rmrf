@@ -5167,12 +5167,11 @@ function driveChassis(v, out, dt, omniTravel) {
   }
 }
 
-// Rotating siege-stand search: candidate bearings AROUND the ideal radial (the one-gun-at-
-// a-time spot), nearest first, alternating sides, capped at ±1.3 rad so the search can never
-// carry a sieger into the far corners' crossfire arcs.
-const STAND_ROT_STEPS = [0.5, -0.5, 0.9, -0.9, 1.3, -1.3];
+// (The rotating siege-stand search lived here — bearings walked around the ideal radial whenever
+// the driver refused a spot. It was a search implemented as one full-grid A* per bearing, with the
+// goal jumping tens of units per step. Replaced by the siege plan, which vets reachability BEFORE
+// committing and relaxes the range band instead of rotating: see _buildSiegePlan/_standoffFor.)
 let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverseCap toggles for A/B bisection)
-let aiStandRotOn = true;    // rotating stand search on/off (RR.setStandRot)
 let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab in nav (RR.setGateBand) — stops the gate-band hug
 let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
@@ -5273,7 +5272,6 @@ function freshSlot() {
     _lootPile: null, _lootUntil: 0,                    // fresh-kill wreck grab
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
     _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
-    _standRot: 0, _standRotN: 0,                       // siege-stand rotation: driver said the standoff is unreachable → try the next bearing
     _stand2: null,                                     // standoff v2 commitment — PER SLOT (left off the record once: two siege slots shared one commit and ping-ponged goals every tick — the DIRECT(suppress) pin class)
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
@@ -5385,6 +5383,18 @@ class AICommander {
     this._scrapTargetPile = null;                       // the pile the current salvage detour is committed to (for the unreachable-bail check)
     this.knownElev = false;                           // scouted the enemy FOB/elevator yet?
     this.knownFlag = false;                           // scouted the enemy flag HQ yet?
+    // FOG-OF-WAR for enemy TOWERS. A unit rises into an unknown world: it knows a flag exists and
+    // that a rival is out there, nothing more. Towers are DISCOVERED by being seen, and once seen
+    // the team keeps the intel (it lives here, not on the unit, so it survives the unit dying).
+    // Everything else already worked this way (knownSupplies/knownScrap/knownElev/knownFlag);
+    // tower TARGETING was the one thing still re-perceiving the world every tick by raw distance,
+    // which is what made a sieger's target — and therefore its goal — flip as it drove.
+    // Map: wall -> { camp, wall, x, z, seenT, armed } as of the last time we actually LOOKED.
+    this.knownTowers = new Map();
+    // The standing siege plan (kill order + firing spots), drawn up ONCE per siege from the intel
+    // above. Commander-level on purpose: every sieging slot works the same list, so they focus
+    // fire instead of each picking whatever tower is nearest to itself. See _buildSiegePlan.
+    this._siegePlan = null;
     this._knownSig = '';                              // last logged known-POI signature (log only on change)
     this.explore = new ExploreMemory(map.worldW, map.worldH, 30, (x, z) => map.isLand(x, z));   // coarse "where have we looked" grid (land-only)
     this._exploreWp = null;                           // current recon waypoint (held until reached)
@@ -5535,6 +5545,16 @@ class AICommander {
   // a scout that reaches the enemy FOB but never happens to spot a unit used to count as still-
   // searching, so a Hunter sat in 'scout' forever with its Valkyrie parked at the enemy elevator.
   knowsEnemy() { return Object.keys(this.seenTypes).length > 0 || this.knownElev || this.knownFlag; }
+  // The towers this team can actually PLAN against: ones we've seen, that still had a gun the last
+  // time we looked. A destroyed tower stays remembered (we know the rubble is there) but is not a
+  // threat and not a target — it only re-enters the plan when a crew mounts a new gun and we
+  // re-observe it. Intel is as of last sighting, never live-polled: that is what keeps a siege
+  // target stable instead of re-electing itself every tick.
+  plannableTowers() {
+    const out = [];
+    for (const k of this.knownTowers.values()) if (k.armed) out.push(k);
+    return out;
+  }
   // The enemy's last-known position, if seen recently (else null → fall back to the
   // elevator). Lets the Attack mission "recall the last known location" (ai_behavior).
   lastEnemyPos() {
@@ -6597,11 +6617,17 @@ class AICommander {
       } else { v._oorT = 0; v._oorRefD = tD; }
       if (v._oorT > STAND_RELEASE_S) {
         v._oorT = 0;
-        this._stand2 = null;                 // drop the committed spot so the picker runs again
+        this._stand2 = null;
         this._nav.path = null;
-        if (aiStandRotOn && this._standRotN < STAND_ROT_STEPS.length) {
-          this._standRot = STAND_ROT_STEPS[this._standRotN]; this._standRotN++;
-        } else { this._standRot = 0; this._standRotN = 0; }   // cone exhausted — fresh geometry
+        // Held a position outside our own weapon reach: the spot is wrong for this chassis. Drop
+        // the plan's cached spot for THIS tower and re-solve it once (the ladder will try a closer
+        // radius); if nothing works, the kill order moves on. No bearing-walk, no per-tick search.
+        const k = this._siegePlan ? this._planTarget() : null;
+        if (k) {
+          const again = this._standoffFor(v, k);
+          this._siegePlan.spots.set(k.wall, again);
+          if (!again) this._siegePlan.idx++;
+        }
         aiLog(this.team, `${this.cname}: Been sat outside my own range of that target — picking a new firing position.`);
       }
     } else if (v._oorT) v._oorT = 0;
@@ -6700,16 +6726,22 @@ class AICommander {
         aiLog(this.team, `${this.cname}: Can't reach that last contact — writing it off, back to the plan.`);
         return;
       }
-      if (isStand && aiStandRotOn && this._standRotN < STAND_ROT_STEPS.length) {
-        // Siege standoff refused (water / unbroken ring): try the next bearing — but stay NEAR
-        // the ideal radial, alternating sides in small steps. The radial is the one-gun-at-a-
-        // time spot; the first version of this search marched 0.7 rad one direction and walked
-        // siegers straight into the OTHER corners' crossfire (fresh-seed tournament: dead
-        // siegers, towers standing, resolution -2). Bounded cone; past it, the walk-partial +
-        // plant/demolish fallback owns the approach like before.
-        this._standRot = STAND_ROT_STEPS[this._standRotN]; this._standRotN++;
-        this._nav.path = null;
-        aiLog(this.team, `${this.cname}: Can't REACH that firing position — trying ${this._standRot > 0 ? 'right' : 'left'} of the line (${this._standRotN}/${STAND_ROT_STEPS.length}).`);
+      if (isStand && this._siegePlan) {
+        // The driver refused the planned firing spot. The plan vetted it with a real path check,
+        // so this means the world changed under us (a wall went up, a route closed). Don't walk
+        // the bearing and re-plan per tick like the old _standRot search — drop THIS tower's
+        // cached spot, re-solve it once through the relaxation ladder, and if it still can't be
+        // reached, move down the kill order.
+        const k = this._planTarget();
+        if (k) {
+          const again = this._standoffFor(v, k);
+          this._siegePlan.spots.set(k.wall, again);
+          if (!again) {
+            aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — moving to the next one.`);
+            this._siegePlan.idx++;
+          }
+          this._nav.path = null;
+        }
       }
     }
     if (!s) return;                                 // no route — keep the brain's command
@@ -7146,94 +7178,92 @@ class AICommander {
   // in any OTHER tower's range (no crossfire). Nearest live tower first; first tower with a valid
   // reachable spot wins. Commits lightly (holds while the tower lives + the spot stays valid) so
   // it isn't an A* every tick. Returns { threat, threatCamp, stand, w } or null (→ old keep/breach).
-  _pickStandoff(v, rearPred) {
+  // ── SIEGE PLAN ────────────────────────────────────────────────────────────────────────
+  // Built ONCE when the siege mission is picked, from what the team KNOWS (knownTowers), not from
+  // what a unit can see right now. A commander thinks: do I send a flyer around the back, or go in
+  // the front? If frontal, which tower first? Then it plots the kill order and the firing spots.
+  // Everything downstream reads this plan, so a sieger's target — and therefore its A* goal —
+  // stays put instead of being re-elected every tick by whoever happens to be nearest (which is
+  // what made the goal jump tens of units and burn a full-grid A* on every jump).
+  //
+  // Target choice (Jacob's doctrine): attack the front tower FURTHEST FROM THE ENEMY FOB. The FOB
+  // is where their units spawn, so the far tower keeps us out of the crossfire between tower and
+  // reinforcements, and gives us the longest look at anyone driving out to meet us.
+  _buildSiegePlan() {
+    const towers = this.plannableTowers();
+    if (!towers.length) return null;                       // nothing discovered yet — scout first
+    const b = this._dirBasis(), fob = this.enemyFobPos();
+    const side = k => (k.x - b.base.x) * b.fx + (k.z - b.base.z) * b.fz;   // >0 = rear, <0 = front
+    const dFob = k => Math.hypot(k.x - fob.x, k.z - fob.z);
+    const front = towers.filter(k => side(k) <= 2), rear = towers.filter(k => side(k) > 2);
+    // Is the FOB sitting on our frontal approach? If it is, a front assault drives through their
+    // spawn — that's a reason to favour the rear plan (the Valkyrie flank the deck already runs).
+    const fobOnApproach = (fob.x - b.base.x) * b.fx + (fob.z - b.base.z) * b.fz < 0
+      && Math.abs((fob.x - b.base.x) * b.lx + (fob.z - b.base.z) * b.lz) < 45;
+    const mode = (this._siegeBack || (fobOnApproach && rear.length)) ? 'rear' : 'front';
+    // Kill order: within the chosen face, furthest-from-FOB first; the other face follows so a
+    // finished plan keeps going instead of stalling once its preferred side is flat.
+    const pref = mode === 'rear' ? rear : front, rest = mode === 'rear' ? front : rear;
+    const order = [...pref.sort((A, C) => dFob(C) - dFob(A)), ...rest.sort((A, C) => dFob(C) - dFob(A))];
+    this._siegePlan = { order, idx: 0, mode, fobOnApproach, builtT: this._matchT, spots: new Map() };
+    aiLog(this.team, `${this.cname}: Siege plan — ${mode === 'rear' ? 'flank and take the BACK towers' : 'frontal assault'}, ${order.length} tower(s) on the list${fobOnApproach ? ' (their FOB is on the front approach)' : ''}.`);
+    return this._siegePlan;
+  }
+  // The tower this team is currently sieging, per the plan. Advances past towers we now know are
+  // down. Rebuilds if the plan is empty//exhausted or new intel has arrived since it was drawn up.
+  _planTarget() {
+    let p = this._siegePlan;
+    const stale = p && this._matchT - p.builtT > 30 && p.order.length < this.plannableTowers().length;
+    if (!p || p.idx >= p.order.length || stale) p = this._buildSiegePlan();
+    if (!p) return null;
+    while (p.idx < p.order.length) {
+      const k = p.order[p.idx];
+      const known = this.knownTowers.get(k.wall);
+      if (known && known.armed) return known;              // still a live gun as far as we know
+      p.idx++;                                             // we've seen it die — next on the list
+    }
+    return null;
+  }
+  // A firing spot for ONE specific tower, with Jacob's relaxation ladder: try the ideal band, then
+  // accept a longer shot (damage falloff, still inside shotReach), then a closer one (eat more
+  // tower fire). CROSSFIRE IS NEVER RELAXED — standing where two guns reach you defeats the whole
+  // point of a standoff. Returns {x,z} or null (and null is worth logging: see the caller).
+  _standoffFor(v, k, budget = 40) {
     const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
-    // HYSTERETIC sense cap (mirrors the engage/brawlR hold): a siege STARTS only on a tower
-    // within TURRET_SENSE (the night fix — a map-distant tower is not this unit's fight), but a
-    // COMMITTED stand HOLDS out to a wider ring. Without the hold, a tower sitting right at the
-    // 96u boundary dropped out of `live` on the unit's own ±1u jitter → the commitment was
-    // dropped → threat vanished → the brain flipped suppress→advance→back every tick (the two
-    // pull different directions and the hull lurched in place: the suppress/advance strobe that
-    // led the residual violation issuers). A far tower can only be HELD if it was first
-    // committed while inside the enter ring, so the night fix's protection is untouched.
-    // 1.15× hold: wide enough to swallow the unit's own jitter at the enter ring (the strobe),
-    // tight enough not to cling to a far tower it should let go (1.35× clung and cost alarms).
-    const ENTER2 = TURRET_SENSE * TURRET_SENSE, HOLD2 = aiStandHold ? (TURRET_SENSE * 1.15) ** 2 : ENTER2;
-    const live = [];
-    for (const cc of camps) {
-      if (cc.team === this.team) continue;
-      for (const w of cc.walls) {
-        const t = w.turret;
-        if (!t || t.dead || t.falling) continue;
-        if (rearPred && !rearPred(cc, w)) continue;
-        t.group.updateWorldMatrix(true, false); t.head.getWorldPosition(_threatV);
-        const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
-        if (d > HOLD2) continue;
-        live.push({ w, camp: cc, x: _threatV.x, y: _threatV.y, z: _threatV.z, range: towerStats(t.upg).range, d, enter: d <= ENTER2 });
-      }
-    }
-    if (!live.length) {
-      // Coarse position bucket (nearest 40u), not the exact drifting coordinate — while
-      // travelling, exact px/pz changes every tick and would re-trigger the "on change" log
-      // every single frame, defeating the point of the throttle. This still re-logs if the
-      // unit moves to a meaningfully different area, and always heartbeats every ~3s regardless.
-      dlog(`pickStandoff:${this.team}`, { unit: v.type, areaX: Math.round(px / 40) * 40, areaZ: Math.round(pz / 40) * 40 },
-        `${this.cname} ${v.type}: no towers within sensing range (HOLD2) — _pickStandoff bails to the old radial/HQ fallback. (at ${Math.round(px)},${Math.round(pz)})`);
-      return null;
-    }
-    const crossfire = (x, z, self) => { for (const O of live) { if (O.w === self.w) continue; if ((O.x - x) ** 2 + (O.z - z) ** 2 < O.range * O.range) return true; } return false; };
-    const spotOK = (x, z, T) => flyer || (!v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z, T));
-    // Hold the committed stand while its tower lives and the spot is still valid (cheap check).
-    const cm = this._stand2;
-    if (cm) {
-      const T = live.find(o => o.w === cm.w);
-      if (T && spotOK(cm.x, cm.z, T)) {
-        dlog(`pickStandoff:${this.team}`, { unit: v.type, holding: { x: +cm.x.toFixed(0), z: +cm.z.toFixed(0) }, towerX: +T.x.toFixed(0), towerZ: +T.z.toFixed(0) },
-          `${this.cname} ${v.type}: holding committed stand (tower still live, spot still valid).`);
-        return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cm.x, z: cm.z }, w: T.w };
-      }
-      dlog(`pickStandoff:${this.team}`, { unit: v.type, was: { x: +cm.x.toFixed(0), z: +cm.z.toFixed(0) }, towerStillLive: !!T },
-        `${this.cname} ${v.type}: committed stand invalidated (${T ? 'spot no longer OK — blocked/no LOS/crossfire' : 'tower no longer live'}) — re-picking.`);
-      this._stand2 = null;
-    }
-    // A FRESH siege only starts on a tower inside the enter ring (hold-only far towers can't seed one).
-    const fresh = live.filter(o => o.enter);
-    if (!fresh.length) {
-      dlog(`pickStandoff:${this.team}`, { unit: v.type, liveCount: live.length },
-        `${this.cname} ${v.type}: ${live.length} tower(s) live but none inside the ENTER ring — can't seed a fresh stand, falling back.`);
-      return null;
-    }
-    fresh.sort((a, b) => a.d - b.d);   // nearest tower first
-    const c = grid.cell, unitR = TURRET_HOLD[v.type] || 40, minR = Math.max(24, unitR * STAND.band);
-    const reaches = (x, z) => { const p = planPath(v, { x, z }); if (!p || !p.length) return false; const e = p[p.length - 1]; return (e.x - x) ** 2 + (e.z - z) ** 2 <= (c * 2) ** 2; };
-    let budget = 8;   // A* checks this (rare) re-pick
-    let triedCands = 0, triedTowers = 0;
-    for (const T of fresh) {
-      triedTowers++;
+    const T = { x: k.x, z: k.z };
+    const reach = SHOT_REACH[v.type] || 42, unitR = TURRET_HOLD[v.type] || 40;
+    const minR = Math.max(24, unitR * STAND.band);
+    // Other KNOWN live towers whose arcs we must stay out of (fog-honest: planned from intel).
+    const others = this.plannableTowers().filter(o => o.wall !== k.wall)
+      .map(o => ({ x: o.x, z: o.z, r: towerStats((o.wall.turret && o.wall.turret.upg) || 0).range }));
+    const crossfire = (x, z) => others.some(o => (o.x - x) ** 2 + (o.z - z) ** 2 < o.r * o.r);
+    const spotOK = (x, z) => flyer || (!v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z));
+    const reaches = (x, z) => { const p = planPath(v, { x, z }); if (!p || !p.length) return false;
+      const e = p[p.length - 1]; return (e.x - x) ** 2 + (e.z - z) ** 2 <= (grid.cell * 2) ** 2; };
+    // Radius ladder: ideal band first, then RELAXED — further out (falloff) then closer in (pain).
+    const ideal = [unitR, (minR + unitR) / 2, minR];
+    const relaxed = [Math.min(reach * 0.95, unitR * 1.25), Math.min(reach * 0.99, unitR * 1.5), Math.max(14, minR * 0.75), Math.max(12, minR * 0.55)];
+    for (const [tier, radii] of [['ideal', ideal], ['relaxed', relaxed]]) {
       const cands = [];
-      for (const r of [unitR, (minR + unitR) / 2, minR]) for (let b = 0; b < 24; b++) {
-        const th = b / 24 * Math.PI * 2, x = T.x + Math.sin(th) * r, z = T.z + Math.cos(th) * r;
-        if (spotOK(x, z, T)) cands.push({ x, z, d: (x - px) ** 2 + (z - pz) ** 2 });
+      for (const r of radii) for (let i = 0; i < 24; i++) {
+        const th = i / 24 * Math.PI * 2, x = T.x + Math.sin(th) * r, z = T.z + Math.cos(th) * r;
+        if (spotOK(x, z)) cands.push({ x, z, d: (x - px) ** 2 + (z - pz) ** 2 });
       }
-      cands.sort((a, b) => a.d - b.d);   // nearest to the unit = least travel
-      for (const cd of cands) {
-        if (budget <= 0) break;
-        budget--; triedCands++;
-        if (flyer || reaches(cd.x, cd.z)) {
-          this._stand2 = { w: T.w, x: cd.x, z: cd.z };
-          dlog(`pickStandoff:${this.team}`, { unit: v.type, towerX: +T.x.toFixed(0), towerZ: +T.z.toFixed(0), standX: +cd.x.toFixed(0), standZ: +cd.z.toFixed(0), triedCands, triedTowers },
-            `${this.cname} ${v.type}: fresh stand picked after checking ${triedCands} candidate spot(s) across ${triedTowers} tower(s).`);
-          return { threat: { x: T.x, y: T.y, z: T.z }, threatCamp: T.camp, stand: { x: cd.x, z: cd.z }, w: T.w };
+      cands.sort((A, C) => A.d - C.d);                     // nearest to the unit = least travel
+      for (const c of cands) {
+        if (budget-- <= 0) break;
+        if (flyer || reaches(c.x, c.z)) {
+          if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
+          return { x: c.x, z: c.z };
         }
       }
     }
-    // Jacob's example case: every candidate spot around every fresh tower failed (blocked/no
-    // LOS/crossfire) or wasn't actually A*-reachable — this is exactly the silent-fallback moment
-    // that stranded a lurcher across open water (seed 130): nothing here says so unless deeplog is on.
-    dlog(`pickStandoff:${this.team}`, { unit: v.type, triedCands, triedTowers, budgetLeft: budget },
-      `${this.cname} ${v.type}: checked ${triedCands} candidate spot(s) across ${triedTowers} tower(s), none reachable/clear — reverting to the old radial/HQ fallback.`);
     return null;
   }
+  // (_pickStandoff lived here: the per-tick standoff picker. Its target choice is now made once
+  // per siege by _buildSiegePlan, and its spot search by _standoffFor. It also ran its own
+  // budget of full-grid A* reachability checks OUTSIDE the frame budget, which is what turned a
+  // re-pick into a 288ms frame. Both jobs now happen once per siege, not once per tick.)
 
   _view(v, dt) {
     const px = v.holder.position.x, pz = v.holder.position.z, h = v.heading;
@@ -7330,6 +7360,22 @@ class AICommander {
       const bSight = AI_VISION * 2.0;
       if (!this.knownElev) { const e = this.enemyFobPos(); const d2 = (e.x - px) ** 2 + (e.z - pz) ** 2; if (d2 < bSight * bSight && (flyer || hasLOS(px, pz, e.x, e.z))) this.knownElev = true; }
       if (!this.knownFlag) { const e = this.enemyBasePos(); const d2 = (e.x - px) ** 2 + (e.z - pz) ** 2; if (d2 < bSight * bSight && (flyer || hasLOS(px, pz, e.x, e.z))) this.knownFlag = true; }
+      // TOWERS: same earned-intel rule, same wide sight (a tower is a tall landmark). Re-seeing a
+      // known tower REFRESHES it — that is how a rebuilt/re-gunned tower becomes news again, and
+      // how a tower we watched die is recorded as rubble. A tower we haven't looked at since is
+      // remembered exactly as we last saw it (stale intel is the point of fog-of-war).
+      for (const c of camps) {
+        if (c.team === this.team) continue;
+        for (const w of c.walls) {
+          if (w.type !== 'CORNER' || !w.turret) continue;
+          const wx = w.group.position.x, wz = w.group.position.z;
+          const d2 = (wx - px) ** 2 + (wz - pz) ** 2;
+          if (d2 >= bSight * bSight || !(flyer || hasLOS(px, pz, wx, wz))) continue;
+          const t = w.turret;
+          this.knownTowers.set(w, { camp: c, wall: w, x: wx, z: wz, seenT: this._matchT,
+            armed: !t.dead && !t.falling });   // "armed" = has a live gun; rubble/gunless is remembered but not planned against
+        }
+      }
     }
     // The set of points this team is aware of is read live into the log's per-team box
     // (a persistent status line), so it's no longer logged as a rolling event.
@@ -7501,42 +7547,47 @@ class AICommander {
     // it picks the tower it can see (a near/flank corner), and as that one dies the
     // line to the next opens up. `flankSide` nudges the approach around to the side
     // instead of charging straight into the gap between two towers (see AI.js).
-    let threat = null, threatD = TURRET_SENSE * TURRET_SENSE, threatCamp = null;
-    // SIEGE-BACK (MissionScore): this siege was scored to open the REAR lane — restrict the
-    // tower hunt to the enemy main base's rear-side turrets while any stand (fall back to the
-    // normal nearest-turret scan once the rear is silenced).
-    const backBias = this._siegeBack ? this._dirBasis() : null;
-    const rearOnly = backBias && (() => {
-      const tt = this.targetTeam();
-      for (const c of camps) { if (c.team !== tt || c.role !== 'main') continue;
-        for (const w of c.walls) { const t = w.turret;
-          if (t && !t.dead && !t.falling && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2) return true; } }
-      return false;
-    })();
-    // NEW STANDOFF (lab logic): pick the target tower AND a reachable, in-range, crossfire-free,
-    // LOS firing spot in one shot. stand2 pins the spot so the threatStand math below uses it and
-    // skips the radial + _standRot walk. A later retarget (shoot-back/keep) drops it via identity.
+    let threat = null, threatCamp = null;
+    // The SIEGE PLAN picks the target tower and its firing spot (see _buildSiegePlan): drawn up
+    // once from the team's own intel, ordered furthest-from-their-FOB first, rear-face first when
+    // the plan is a flank. SIEGE-BACK is folded into the plan's `mode`, so the old per-tick
+    // rear-only filter is gone along with the raw nearest-turret scan it used to feed.
     let stand2 = null, stand2Ref = null;
-    if (aiStand2 && this.strategy.step === 'siege') {
-      const rearPred = rearOnly ? (cc, w) => cc.role === 'main' && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2 : null;
-      const so = this._pickStandoff(v, rearPred);
-      if (so) { threat = so.threat; threatCamp = so.threatCamp; stand2 = so.stand; stand2Ref = so.threat; }
-    }
-    if (!threat) {
-      for (const c of camps) {   // fallback nearest-turret scan (stand2 off / found nothing) — RAW distance, no reachability/LOS check at all
-        if (c.team === this.team) continue;
-        for (const w of c.walls) {
-          const t = w.turret;
-          if (!t || t.dead || t.falling) continue;
-          if (rearOnly && !(c.role === 'main' && (w.group.position.x - backBias.base.x) * backBias.fx + (w.group.position.z - backBias.base.z) * backBias.fz > 2)) continue;
-          t.group.updateWorldMatrix(true, false);
-          t.head.getWorldPosition(_threatV);
-          const d = (_threatV.x - px) ** 2 + (_threatV.z - pz) ** 2;
-          if (d < threatD) { threatD = d; threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; threatCamp = c; }
+    if (aiStand2) {
+      // THE PLAN owns the target. Not gated on the siege mission any more: `suppress` is entered
+      // from ANY mission (the threatened transition — a tower is shelling us), and the old gate
+      // meant every non-siege case fell through to a raw global nearest-turret scan with no
+      // hysteresis, so the target flipped as the unit drove and the goal jumped with it.
+      const k = this._planTarget();
+      // PROXIMITY GATE (do not remove): the plan says WHICH tower we intend to kill — it does NOT
+      // say we are currently under threat. `threat` feeds AI.js's `threatened` transition, which
+      // has no distance test of its own, so an ungated plan target put units into `suppress` over
+      // towers on the far side of the map: a first cut of this change dropped resolution 20/20 →
+      // 18/20 and TRIPLED suppress transit-stuck (units on intercept missions driving at a goal
+      // 279u away). A tower can only threaten us from within sensing range; approach is the
+      // mission's job, not suppression's. Hysteretic (1.15x hold) so a unit sitting near the ring
+      // boundary doesn't strobe suppress/advance on its own jitter.
+      const senseR = TURRET_SENSE * (this._suppressing ? 1.15 : 1);
+      const inSense = k && (k.x - px) ** 2 + (k.z - pz) ** 2 <= senseR * senseR;
+      this._suppressing = !!inSense;
+      if (k && inSense) {
+        // The firing spot is computed ONCE per tower and cached on the plan — the expensive part
+        // (A* reachability over candidate spots) now happens per SIEGE, not per tick. That is what
+        // makes the relaxation ladder affordable and kills the replan storm at the same time.
+        let spot = this._siegePlan.spots.get(k.wall);
+        if (spot === undefined) {
+          spot = this._standoffFor(v, k);
+          this._siegePlan.spots.set(k.wall, spot);   // null is cached too: don't re-search a hopeless tower every tick
+          if (!spot) {
+            aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — moving to the next one.`);
+            this._siegePlan.idx++;                   // crossfire/terrain ruled it out — try another tower
+          }
+        }
+        if (spot) {
+          const ty = map.heightAt(k.x, k.z) + 5;
+          threat = { x: k.x, y: ty, z: k.z }; threatCamp = k.camp; stand2 = spot; stand2Ref = threat;
         }
       }
-      if (threat) dlog(`nearestTurretFallback:${this.team}`, { unit: v.type, threatX: +threat.x.toFixed(0), threatZ: +threat.z.toFixed(0), distU: +Math.sqrt(threatD).toFixed(0) },
-        `${this.cname} ${v.type}: _pickStandoff found nothing usable — fell back to the RAW nearest turret by distance (no reachability/LOS check).`);
     }
     // KILL THE KEEP: the flag HQ is a first-class siege target, not a last resort. The flag only
     // exposes when the HQ building falls, so hoarding it until all four turrets are dead is what
@@ -7690,16 +7741,12 @@ class AICommander {
         const om = Math.hypot(bx, bz) || 1;
         threatStand = { x: threat.x + (bx / om) * hold, z: threat.z + (bz / om) * hold };
       }
-      // HANDLE "NO" (driver contract): the geometric standoff can land in water / behind an
-      // unbroken ring for a ground unit — the driver refuses it (unreachable) and _navOverride
-      // answers by advancing this rotation, so the stand walks around the tower until a
-      // bearing the chassis can actually REACH comes up. Capped at one full circle.
-      if (threatStand && this._standRot && !(stand2 && threat === stand2Ref)) {   // stand2 owns its spot — don't walk it
-        const cs = Math.cos(this._standRot), sn = Math.sin(this._standRot);
-        const rx = threatStand.x - threat.x, rz = threatStand.z - threat.z;
-        threatStand = { x: threat.x + rx * cs - rz * sn, z: threat.z + rx * sn + rz * cs };
-      }
-    } else { this._standRot = 0; this._standRotN = 0; }   // threat gone — fresh geometry next siege
+      // (The old _standRot bearing-walk lived here: when the driver refused a geometric standoff
+      // as unreachable, the stand was rotated around the tower and re-planned, one bearing at a
+      // time. That was a SEARCH implemented as repeated full-grid A*, with the goal jumping tens
+      // of units per step. The plan now vets reachability before committing, so there is nothing
+      // to walk away from — see _standoffFor's relaxation ladder.)
+    }
     // SIEGE FLATTEN: with no clean line on the tower, shell the latched breach wall (a real,
     // solidly-hittable target at its true position) to blow a path through — aimed shots at the
     // hidden turret just arc over. Falls back to the nearest wall if no breach wall is latched.
@@ -9706,7 +9753,6 @@ window.RR = {
   missionScores: () => commanders.map(c => ({ team: c.team, arch: c.archetype, step: c.strategy && c.strategy.step, scores: c._missionScores || [] })),   // live weight breakdown per team
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
-  setStandRot: on => { aiStandRotOn = !!on; return aiStandRotOn; },     // rotating siege-stand search (bisection knob)
   setGateBand: on => { aiGateBand = !!on; return aiGateBand; },         // nav mirrors the shut-gate physics slab (A/B the gate-band-hug fix)
   setStandHold: on => { aiStandHold = !!on; return aiStandHold; },      // hysteretic siege sense — hold a committed stand past the enter ring (A/B the suppress/advance strobe fix)
   setSightCone: on => { sightCone = !!on; return sightCone; },          // forward vision cone on/off (stealth A/B tournament)
@@ -9899,6 +9945,11 @@ window.RR = {
   get spectateFocus() { return spectateTarget; },
   aiView: (i = 0) => { const c = commanders[i]; return c && c.unit ? c._view(c.unit, 0.1) : null; },
   aiKnownSupplyCount: (i = 0) => { const c = commanders[i]; return c ? c.knownSupplies.size : null; },
+  aiKnownTowers: (i = 0) => {   // debug: this team's DISCOVERED towers (fog-of-war intel, as last seen)
+    const c = commanders[i]; if (!c) return null;
+    return { known: c.knownTowers.size, plannable: c.plannableTowers().length,
+      towers: [...c.knownTowers.values()].map(k => ({ x: Math.round(k.x), z: Math.round(k.z), armed: k.armed, seenT: Math.round(k.seenT) })) };
+  },
   // Headless targeting hook: where would the AI aim to lead this moving enemy? (jitter 0 → deterministic)
   leadAim: (sx, sy, sz, ex, ez, vx, vz, soundIndex) => { const p = leadAim({ x: sx, y: sy, z: sz }, { x: ex, y: 0, z: ez, vx, vz }, soundIndex, 0); return { x: p.x, y: p.y, z: p.z }; },
   returnToGarage: () => returnToGarage(),
