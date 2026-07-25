@@ -45,7 +45,11 @@ import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
 import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=8';
 
 // --- Renderer ----------------------------------------------------------
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// powerPreference: on a hybrid-graphics laptop (Optimus: integrated Intel + discrete NVIDIA)
+// the browser defaults to the LOW-POWER GPU, so the game renders on the iGPU while the discrete
+// card idles — fill-rate bound at ~40fps with trivial draw counts. This asks for the fast one.
+// It is a HINT: the OS/browser per-app graphics preference can still override it.
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 // Skip the post-link getProgramInfoLog/getShaderInfoLog check — that call synchronously stalls
 // until each shader finishes compiling (a big chunk of the shader-compile jank). Shaders are
 // stable in this build; re-enable with ?shaderdebug if you're debugging a broken material.
@@ -10376,7 +10380,11 @@ function drawSensorContacts(g, W, H) {
 let _splashHidden = false;
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(0.05, clock.getDelta());
+  // Physics dt is CLAMPED (a long stall must not tunnel vehicles through walls), but the FPS
+  // readout must not inherit that clamp — reading 1/dt off it floors the display at 20fps and
+  // over-reports exactly when the frame rate is worst. Keep the raw delta for the meter.
+  const rawDt = clock.getDelta();
+  const dt = Math.min(0.05, rawDt);
   updateAerialPan(dt);   // WASD pans the build/upgrade aerial across the map (fixed angle/height)
   const _pfStart = PERF ? performance.now() : 0;
   const fade = document.getElementById('deployfade');
@@ -10475,11 +10483,11 @@ function animate() {
 
   if (PERF) { _pfWork += performance.now() - _pfStart; _pfFrames++; _pfRender(); }
   perfTick++;
-  fpsEma += (1 / Math.max(dt, 0.0001) - fpsEma) * 0.08;
+  fpsEma += (1 / Math.max(rawDt, 0.0001) - fpsEma) * 0.08;   // RAW delta: the clamped dt floors this at 20
   if (perfEl && perfTick % 20 === 0) {
     perfEl.innerHTML =
       `FPS: ${Math.round(fpsEma)}<br>` +
-      `MS: ${(dt * 1000).toFixed(1)}<br>` +
+      `MS: ${(rawDt * 1000).toFixed(1)}<br>` +
       `DRAW: ${renderer.info.render.calls}<br>` +
       `TRIS: ${(renderer.info.render.triangles / 1000).toFixed(1)}K`;
   }
