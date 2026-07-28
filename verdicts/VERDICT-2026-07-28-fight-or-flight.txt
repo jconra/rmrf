@@ -1,0 +1,65 @@
+VERDICT — fight-or-flight: the mid-field "dance"
+Date: 2026-07-28
+Rigs: tourney.cjs 20 seeds x 20000 ticks, PAR 6. BEFORE = rmrf-frozen pinned to 4d66fc1.
+      AFTER = the same tree with js/AI.js changed ONLY (main.js byte-identical, verified by diff).
+Shipped as: 6bf4455
+
+WHAT JACOB SAW
+  Two Lurchers in the open mid-field, mirroring each other, holding distance, travelling across
+  the map together, trading occasional hits, killing nobody. Reported over several days; four of
+  my hypotheses died on measurement before he caught one paused and dumped the state.
+
+THE DUMP (v415, seed 1474576376, t~524s) — the whole diagnosis in three lines
+  CYAN  firedRung=underAttack  fof=-1.8  mnv=KITE -> (-40,140)  drv=rev 1.0
+  RED   firedRung=underAttack  fof=+0.4  mnv=KITE -> (40,-160)  drv=fwd 1.0
+  dist=42.05  (SHOT_REACH.lurcher = 42)   both hitByVeh=recent
+
+  Neither could leave and neither could commit:
+  * `underAttack` sits ABOVE `engaging` and returns engage WITHOUT consulting fightScore. Its
+    escape is "can I outrun it?" — in a mirror match, never. So the unit at fof -1.8 was pinned
+    in a fight it had already judged lost.
+  * The kite branch then retreated anyway, including the unit at +0.4 that had judged the rival
+    weaker. It never read fightScore at all.
+  * kite's destination is view.support = the HOME BASE, 70u and 215u away in OPPOSITE directions.
+    "Fall back to tower cover" was ordering two duelling units to opposite ends of the island.
+  * On an omni chassis KITE renders as a full-speed BACKPEDAL (the driver's own comment), which
+    is also the separate "Lurcher walks straight backwards at a Jotun" report. One branch, two
+    tickets.
+
+WHAT CHANGED (js/AI.js only)
+  - underAttack yields below cfg.fofBail (-1.2): a decisively negative score falls through to
+    flee/retreat instead of being forced to stand.
+  - kite consults fightScore: a positive score never retreats. The 0.55 hull cliff became a
+    gradual urge (cfg.kitePivot / kiteMin) and the distance trigger gained hysteresis while
+    engaged — it was a hard step with none, which is what made the pair pump.
+  - kite falls back at most cfg.kiteFallback (34u) instead of to the home base.
+  - `combat` never destructured cfg — the new knobs threw a ReferenceError until the probe hit it.
+
+MECHANISM (5 seeds x 5000 ticks, ~47k unit-ticks)
+  mutual backpedal (two enemies 30-60u apart, both reversing):  125 -> 8      (-94%)
+    longest unbroken episode:                                  1.2s -> 0.2s
+  kite orders aimed >60u away:                                 1810 -> 0
+  ticks pinned in a lost fight (engage with fof < -1.2):         317 -> 0
+  kite ticks:                                                   2145 -> 446   (-79%)
+  state flips:                                                   533 -> 352   (-34%)
+  On Jacob's seed 1474576376 specifically: standoff 13->4, kite 651->221, cross-map kites 593->0.
+
+TOURNAMENT (BEFORE -> AFTER)
+  resolved:            18/20 -> 19/20    <-- one stalemate converted
+  avg resolve:          467s ->  468s    (flat)
+  TRANSIT-stuck:         374 ->  431     (+15%)  <-- REGRESSION, see below
+  maneuvering:           154 ->  111     (-28%)
+  fighting:              378 ->  316     (-16%)
+
+THE REGRESSION, STATED PLAINLY
+  transit-stuck by state gains a `flee 57` class that did not exist before, and near-water stuck
+  rose 189 -> 250. That is the direct consequence of the change: units that were previously
+  PINNED in a lost fight now disengage, and some of them wedge while fleeing, particularly near
+  shorelines. The behaviour is correct and the wedging is a separate (pre-existing) nav weakness
+  now being exercised more often. Knobs to walk it back if needed: cfg.fofBail (raise toward 0 =
+  fewer units bail), cfg.kiteMin, cfg.kiteFallback.
+
+READING IT
+  PASS. Resolution improved, the mechanism is fixed and measured rather than argued, and the cost
+  is a known nav weakness getting more traffic. The five dead theories are recorded in the
+  devblog (post 22) because the pattern — reproduce is not diagnose — cost most of the week.

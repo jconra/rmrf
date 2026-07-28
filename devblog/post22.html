@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the dance</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  a { color:var(--blue); }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); } td b.warn { color:var(--warn); }
+  .matrix td, .matrix th { text-align:center; }
+  .matrix td:first-child, .matrix th:first-child { text-align:left; color:var(--dim); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+  .bar { display:inline-block; height:9px; border-radius:2px; vertical-align:middle; }
+</style>
+</head><body>
+<a class="navbtn" style="left:10px" href="post21.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 22 · the dance</div>
+</header>
+<main>
+
+<article>
+  <h2>№22 — THE DANCE</h2>
+  <div class="date">2026-07-28 · five wrong theories, one screenshot, and the bug that was two bugs</div>
+
+  <p>Two Lurchers meet in the middle of the map. They do not fight, exactly. They hold their
+  distance, mirror each other's movements, drift across the island together, and occasionally
+  trade a shot that kills nobody. It looks — the word came up every time — like a
+  <em>dance</em>.</p>
+
+  <p>It took five days and five wrong answers to work out why. This is the write-up, including
+  the wrong answers, because the wrong answers are most of the story.</p>
+
+  <h3>THE THEORIES THAT DIED</h3>
+
+  <p>The first four went the same way. Form a hypothesis, build a probe, watch the probe disagree.</p>
+
+  <table>
+    <tr><th>theory</th><th>how it died</th></tr>
+    <tr><td>The duel fire-gate keys off hull instead of turret, so they can't shoot</td>
+        <td>Measured 1.77 shots per pair-second, with kills. They shoot fine.</td></tr>
+    <tr><td>The <code>attack</code> mission is holding an empty point</td>
+        <td>Probe showed the "enemy position" was the unit's own position, flagged heard. Built the fix, reverted it.</td></tr>
+    <tr><td>The standoff spot is being placed in water</td>
+        <td>Legal shallows. <code>isLand:false</code> but <code>blocked:false</code> — and firing from the shallows is intended.</td></tr>
+    <tr><td>The <code>_standRot</code> bearing walk is rotating them</td>
+        <td>8 rotations against 382 goal jumps. Not the cause; deleted it anyway.</td></tr>
+  </table>
+
+  <p>The fifth was the interesting failure. A headless probe DID reproduce a freeze — two units
+  locked, not shooting, holding distance. The cause was real: gun-report pings never decayed in
+  the sim, so units "heard" gunfire from minutes earlier and froze on ghosts. It was a genuine
+  bug and it meant <span class="bad">every AI-vs-AI tournament ever run had broken hearing</span>.</p>
+
+  <p>It was also not the dance. It could not be — the decay ran correctly in the render loop, so
+  it could never happen in a game anyone was watching. Fixed it, banked it, started over.</p>
+
+  <div class="radio">The lesson that kept repeating: a reproduction is not a diagnosis. Four
+  hypotheses died on contact with a probe, and the one that survived contact turned out to be a
+  different bug wearing the same symptoms.</div>
+
+  <h3>THE SCREENSHOT</h3>
+
+  <p>What broke it open was not a probe. It was a paused game and a console dump.</p>
+
+  <pre style="background:#0a0f16;border-radius:6px;padding:10px;font-size:11.5px;overflow-x:auto">CYAN  firedRung=underAttack   fof=-1.8   mnv=KITE &rarr; (-40,140)   drv=rev 1.0
+RED   firedRung=underAttack   fof=+0.4   mnv=KITE &rarr; (40,-160)   drv=fwd 1.0
+dist=42                                  both hitByVeh=recent</pre>
+
+  <p>Three numbers, and the whole thing falls out.</p>
+
+  <p><span class="k">42.</span> The gap between them was 42.05 units. A Lurcher's
+  <code>SHOT_REACH</code> is 42 — the range at which its slug physically expires. They were
+  balanced precisely on the edge of their own weapon, which is why they traded the odd hit and
+  never landed enough to finish.</p>
+
+  <p><span class="k">Both fleeing.</span> Both maneuver orders read KITE, and both were driving
+  away — to points 70 and 215 units off, in opposite directions.</p>
+
+  <p><span class="k">−1.8 and +0.4.</span> Their fight-or-flight scores. One had judged the fight
+  lost. The other had judged it winnable. <em>They did the same thing anyway.</em></p>
+
+  <h3>NEITHER ALLOWED TO LEAVE, NOR TO FIGHT</h3>
+
+  <p>The priority ladder puts <code>underAttack</code> above <code>engaging</code>. Its job is
+  "an inescapable rival is on top of us — answer it," and it decides that by asking whether we
+  can outrun the enemy:</p>
+
+  <pre style="background:#0a0f16;border-radius:6px;padding:10px;font-size:11.5px;overflow-x:auto">if (v.flyer || (SPEED[s.type] || 2) &gt; (SPEED[et] || 2)) return false;   // can outrun it
+if (v.underFire) return true;</pre>
+
+  <p>In a mirror match that test can never pass. <span class="bad">A Lurcher can never outrun a
+  Lurcher.</span> So <code>underAttack</code> fired for both, and because it sits above
+  <code>engaging</code>, it forced engage <em>without ever consulting the fight score</em>. The
+  unit at −1.8 was pinned in a fight it had already decided to leave.</p>
+
+  <p>Then, inside engage, the kite branch retreated — including for the unit at +0.4, which had
+  correctly judged its rival weaker. That branch never looked at the score either.</p>
+
+  <p>So each unit was held in a state it could not act on. <code>underAttack</code> blocked
+  disengaging; kite blocked committing. What we had been calling a dance was two units
+  simultaneously trying to leave a fight neither was permitted to leave.</p>
+
+  <h3>AND KITE WAS WALKING THEM OFF THE MAP</h3>
+
+  <p>Kite falls back toward <code>view.support</code> — friendly tower cover — which resolves to
+  the <em>home base</em>. For RED that was 215 units away. "Retreat to cover" was ordering two
+  duelling units to march to opposite corners of the island while facing each other.</p>
+
+  <p>That is the travelling. In the baseline, <span class="bad">1810 of 2145 kite orders were
+  aimed more than 60 units away</span> — 84%. Not an edge case. The normal case.</p>
+
+  <p>One more thing fell out of the same branch. On an omni chassis — the Lurcher's six legs —
+  KITE renders as a full-speed <em>backpedal</em>; the driver's own comment says so. Which means
+  the separate report from a week earlier, "the Lurcher walks straight backwards at a Jotun and
+  dies," was <span class="good">the same bug</span>. One branch, two symptoms, filed as two
+  tickets.</p>
+
+  <h3>THE FIX, AND WHAT IT COST</h3>
+
+  <p>Three changes, all in the same place: <code>underAttack</code> stops forcing engage below
+  <code>cfg.fofBail</code>; kite consults the fight score before retreating and its 0.55 hull
+  cliff becomes a gradual urge with hysteresis; and the fallback is capped at 34 units — a
+  reposition, not an evacuation.</p>
+
+  <table>
+    <tr><th>measured over 5 seeds</th><th>before</th><th>after</th></tr>
+    <tr><td>mutual backpedal (the dance itself)</td><td>125 ticks</td><td class="good">8</td></tr>
+    <tr><td>longest unbroken</td><td>1.2s</td><td class="good">0.2s</td></tr>
+    <tr><td>kite orders aimed &gt;60u away</td><td>1810</td><td class="good">0</td></tr>
+    <tr><td>pinned in a lost fight (fof &lt; −1.2)</td><td>317</td><td class="good">0</td></tr>
+    <tr><td>kite ticks</td><td>2145</td><td class="good">446</td></tr>
+    <tr><td>state flips</td><td>533</td><td class="good">352</td></tr>
+  </table>
+
+  <p>Tournament, 20 seeds: <span class="good">resolved 18/20 &rarr; 19/20</span>, average resolve
+  flat at 468s, fighting −16%. The honest cost: transit-stuck rose 374 &rarr; 431, and a new
+  <code>flee 57</code> class appeared. Units that used to be pinned now disengage — and some of
+  them get stuck doing it near water. That is a real regression and it is on the list.</p>
+</article>
+
+<article>
+  <h2>THE SECOND STORM</h2>
+  <div class="date">40 pathfinding searches a frame, and the arithmetic that caught it</div>
+
+  <p>Same night, different symptom: 60 replans a second, 16fps, and this on the perf panel —</p>
+
+  <pre style="background:#0a0f16;border-radius:6px;padding:10px;font-size:11.5px;overflow-x:auto">fps 16   work 61.5ms      units 2
+ai        58.1ms          &larr; 94% of the frame, for TWO units
+render     3.2ms
+replans/s 40
+replan cause
+  goal_moved/suppress   3  &larr; only THREE tagged</pre>
+
+  <p><span class="k">40 replans, 3 accounted for.</span> Those two counters are incremented in
+  different places — the cause tag inside the nav layer, the rate counter inside the pathfinder
+  itself. The gap meant something was calling A* that <em>wasn't the nav layer</em>.</p>
+
+  <p>It was the siege standoff solver, run through an escape hatch. When a unit sits outside its
+  own weapon reach for 12 seconds without closing, it re-solves its firing position — up to
+  <span class="bad">40 full-grid searches, called directly, outside the frame budget</span>.</p>
+
+  <p>And it looped, for a reason worth writing down. The solver ranks candidate spots by distance
+  from the unit, and the unit is moving — so every re-solve returns a <em>slightly different</em>
+  spot. The driver treats a GOTO more than 2 units from the standing one as a brand-new order,
+  which resets the once-per-order guard that was supposed to stop the re-solving. Each solve
+  therefore licensed the next one. Both escape hatches carried a comment saying "re-solve it
+  once". Neither counted anything.</p>
+
+  <h3>THE ASYMMETRY UNDERNEATH</h3>
+
+  <p>Why did the driver keep rejecting spots the solver had just verified? Because they applied
+  different standards, and the driver's was right:</p>
+
+  <pre style="background:#0a0f16;border-radius:6px;padding:10px;font-size:11.5px;overflow-x:auto">if (path.budgetHit) return;   // a truncated search proves NOTHING about reachability</pre>
+
+  <p>A* has a node cap. Hit it, and you get a partial route flagged <code>budgetHit</code>,
+  meaning "ran out of budget, the goal might be fine, just far". Empty the open set instead and
+  the answer is real. The driver checks that flag; its comment records that ignoring it once cost
+  4 points of resolution. <span class="bad">The solver never checked it at all</span> — so it
+  accepted spots off truncated searches that the driver then correctly refused, and the refusal
+  re-ran the solver.</p>
+
+  <p>The fix follows the standing instruction: <em>one good search beats hundreds of poor ones.</em>
+  Candidate count dropped from 40 to 5, each with 2.5&times; the node budget, and
+  <code>budgetHit</code> is now honoured with a third answer — <code>unsure</code> — so
+  far-but-unproven is no longer confused with unreachable. Re-solves are counted per tower; the
+  second failure moves down the kill order instead of trying again forever.</p>
+
+  <p>Standoff searches now run at <span class="good">17 out of 4923</span> total A* calls — 0.3%.
+  And every call is attributed by caller, so the arithmetic that caught this is now just a line
+  on the panel.</p>
+</article>
+
+<article>
+  <h2>BLAME THE CHASSIS, NOT THE PLAN</h2>
+  <div class="date">a new weight, from watching a Lurcher scuttle for 80 minutes</div>
+
+  <p>Observed in a 4907-second match: a Lurcher takes the siege mission, dies with nothing to
+  show, gets replaced by another Lurcher, dies, and repeats. Eventually the commander fields a
+  Jotun and it clears the towers <em>in one tour</em>.</p>
+
+  <p>The failure memory keyed on the mission alone. So a plan that was <em>correct</em> — siege
+  those towers — but attempted with the wrong tool got benched wholesale. The commander threw away
+  a good plan when it should have changed vehicle.</p>
+
+  <p>Failures are now recorded against the <em>pairing</em>: <code>siege|lurcher</code>, not
+  <code>siege</code>. When a mission carries a negative score AND one chassis is the one failing
+  it, the commander fields a different one that hasn't:</p>
+
+  <div class="radio">GREY: 1 lurcher lost on this siege plan with nothing to show — the plan's
+  fine, the vehicle isn't. Sending a jotun.</div>
+
+  <p>One subtlety cost an hour. Failures are recorded against the vehicle that actually
+  <em>died</em>, which is the type after roster substitution — but the check was asking about the
+  raw role want. If the role table wanted a Jotun and the roster forced a Lurcher, the counts
+  could never match the query, and the swap fired exactly zero times. Ask about the vehicle you
+  are actually going to field.</p>
+</article>
+
+<article>
+  <h2>ALARMS, ON PURPOSE</h2>
+  <div class="date">every bug this week was found by something repeating</div>
+
+  <p>Worth noticing how each of these was actually caught. The write-off storm: a log line
+  repeating 80 times in two seconds. The re-solve storm: two counters disagreeing. The dance: a
+  console dump from a paused game. <span class="k">None of them were found by reasoning about the
+  code.</span> They were found because something got loud.</p>
+
+  <p>So that is now deliberate rather than lucky. Four new alarm classes, each printing plain
+  language with the numbers, and each counted in the tournament summary so a regression turns up
+  in the gate instead of in a playtest:</p>
+
+  <ul>
+    <li><code>[A* ALARM]</code> — more than 12 pathfinding searches in one frame, naming the
+    callers. This one would have caught the re-solve storm on the first frame it happened.</li>
+    <li><code>[SIEGE ALARM]</code> — firing positions re-solved 6+ times in a match: the plan is
+    thrashing, not adapting.</li>
+    <li><code>[LOSS ALARM]</code> — 4 units lost in a row on one mission. The 80-minute Lurcher
+    would have announced itself four deaths in.</li>
+    <li>Vehicle swaps, logged as the good news they are.</li>
+  </ul>
+
+  <p>The principle, stated plainly: <em>a loud alarm you can act on beats a rare bug you have to
+  reconstruct.</em> Five dead theories is what the alternative costs.</p>
+</article>
+
+<article>
+  <h2>AND THE SEA</h2>
+  <div class="date">because not everything is a decision loop</div>
+
+  <p>The surf got a lab. Every shoreline constant — band width, wave roll-in, crest shape, froth,
+  and the water's surface ripple — is now a live uniform driven from
+  <a href="/lab/surf.html">/lab/surf.html</a>, which renders the <em>real</em> island through the
+  <em>real</em> terrain material. Whatever gets dialled in there is what the game does; there is
+  no porting step and no lab-versus-game drift.</p>
+
+  <p>Three things it fixed. The foam band was measured in <em>height</em>, so its width on the
+  ground scaled inversely with beach slope and flat shelves — inland seas especially — whited out
+  completely; it can now be normalised by slope and capped so the wash stays off the grass. The
+  crests all broke in unison because the along-coast phase spread was 3.0 against a full cycle of
+  6.28. And the sea looked linear and repetitive because the chop was summed cosines, which are
+  periodic and axis-aligned by construction — the mid and fine chop are now sampled from noise and
+  differenced for a slope, with large slow wind patches leaving some water glassy and ruffling the
+  rest.</p>
+
+  <p>One trap worth recording: the first version used <code>fwidth()</code> to measure beach slope.
+  Derivatives are core in GLSL ES 3.00 but an <em>extension</em> in 1.00, and three.js only emits
+  the pragma on WebGL1 — so it compiled perfectly under the headless SwiftShader rig and failed on
+  a real GPU. The slope now comes from the terrain's vertex normal, which carries the same
+  information and needs no extension anywhere. <span class="fine">A test rig that can't fail the
+  way production fails is not testing production.</span></p>
+</article>
+
+<article>
+  <h2>THE LEDGER</h2>
+  <div class="date">what shipped, what's measured, what's still open</div>
+
+  <h3>SHIPPED</h3>
+  <ul>
+    <li>Shot-awareness — a hit from outside the sight cone now records <em>where it came from</em>.
+    Previously a turret hit stored a position and a vehicle hit stored only a timestamp, and
+    <code>underFire</code> was only ever read <em>after</em> a sighting had already passed. 73% /
+    15% / 44% of under-fire ticks across three seeds came from an attacker the unit could not see.</li>
+    <li><code>noReach</code> — a contact the driver cannot route to is remembered as such.
+    Clearing the sighting alone was futile: sight rewrote it the next tick, and the unit spent
+    <em>every tick</em> writing off the same contact. 90 write-offs per match &rarr; 1.</li>
+    <li>Fight-or-flight: the dance fix above.</li>
+    <li>Surf, the lab, and the water look.</li>
+    <li>The AI Lab's doctrine layer now charts MissionScore — it had been drawing the cascade that
+    MissionScore replaced back in July, with seven of its ten rungs unreachable.</li>
+  </ul>
+
+  <h3>STILL OPEN</h3>
+  <ul>
+    <li><span class="warn">Endgame conversion.</span> Every stalemate in every run this week is the
+    same shape: a winner with the enemy flattened and no runner left to capture with.</li>
+    <li><span class="warn">Flee-stuck.</span> The cost of the dance fix — units now disengage, and
+    some wedge near water while doing it.</li>
+    <li><span class="warn">Deploy-then-swap churn.</span> A unit rolled out, then recalled four
+    seconds later because the mission re-scored.</li>
+    <li><span class="warn">The elevator shield.</span> A unit tops out with five seconds of total
+    invulnerability and immediately drives out of it, because <code>mustGo</code> outranks every
+    combat rung. Designed, not yet built.</li>
+  </ul>
+
+  <p class="fine">Tooling: <code>?perf</code> now carries a hitch log (worst frames this session,
+  with their section split), replan causes tagged by AI state, and A* attributed by caller
+  &middot; surf tuning at <a href="/lab/surf.html">/lab/surf.html</a> &middot; decision spine at
+  <a href="/ai-lab/">/ai-lab/</a> &middot; five dead theories, two real bugs, one of them wearing
+  the other's clothes.</p>
+</article>
+
+</main>
+</body>
+</html>
