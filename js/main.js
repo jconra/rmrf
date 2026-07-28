@@ -4,6 +4,9 @@
 
 import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=75';
+// Same specifier IslandMap uses — a different one would load a second copy of the module and
+// RR.setSurf would then be tuning a material nobody is rendering.
+import { SURF, setSurf } from './TerrainMaterial.js?v=20';   // shoreline surf tunables (lab/surf.html)
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
@@ -17,7 +20,7 @@ import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map p
 import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?v=1';
 import { RoadNetwork } from './Roads.js?v=85';
 import { Foliage } from './Foliage.js?v=5';
-import { setWindTime, setGrassRoot, setGrassTip, setGrassRootBand, getGrassColors } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock + grass colour tuning
+import { setWindTime } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=69';
 import { Elevator } from './Elevator.js?v=3';
@@ -480,8 +483,31 @@ const doctrineRng = QS.has('dseed') ? mulberry32((+QS.get('dseed') >>> 0) || 1) 
 // Accepts common spellings/typos (perf / pref / performance / preformance) so it just works.
 const PERF = ['perf', 'pref', 'performance', 'preformance'].some(k => QS.has(k));
 const _pfAcc = {};                                     // section → ms accumulated over the window
+const _pfFrameAcc = {};                                // section → ms for THIS frame alone (feeds the hitch log)
 let _pfFrames = 0, _pfWork = 0, _planCount = 0, _pfShownAt = 0;
-function _pfT(k, fn) { if (!PERF) return fn(); const t = performance.now(); fn(); _pfAcc[k] = (_pfAcc[k] || 0) + (performance.now() - t); }
+function _pfT(k, fn) {
+  if (!PERF) return fn();
+  const t = performance.now(); fn(); const d = performance.now() - t;
+  _pfAcc[k] = (_pfAcc[k] || 0) + d;
+  _pfFrameAcc[k] = (_pfFrameAcc[k] || 0) + d;
+}
+// ── HITCH LOG (?perf) ─────────────────────────────────────────────────────────
+// A stutter is over before you can open DevTools, and on a phone there IS no DevTools — so the
+// game keeps its own evidence. Any frame that overruns PF_HITCH_MS is recorded with what it was
+// doing (its section split), how many paths it planned and why, and how much was on the field.
+// The worst few survive, so you can play, feel a hitch, and read the cause off the panel after.
+const _pfWhy = {};                                     // "trigger/state" → replans over the window
+const _pfHitch = [];                                   // worst frames seen this session
+const PF_HITCH_MS = 25;                                // ~1.5 frames at 60Hz: by here a frame was certainly dropped
+const PF_HITCH_KEEP = 5;
+let _planFrame = 0;                                    // A* plans issued in THIS frame
+function _pfNoteHitch(ms, whenS) {
+  const secs = Object.entries(_pfFrameAcc).filter(([, v]) => v >= 0.5).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  _pfHitch.push({ ms, at: whenS, plans: _planFrame, units: combatants.length, fx: fx.length,
+    secs: secs.map(([k, v]) => `${k} ${v.toFixed(0)}`).join(' ') });
+  _pfHitch.sort((a, b) => b.ms - a.ms);
+  if (_pfHitch.length > PF_HITCH_KEEP) _pfHitch.length = PF_HITCH_KEEP;
+}
 // ── DRAW-CALL BREAKDOWN (?perf) ───────────────────────────────────────────────
 // `renderer.info.render.calls` is the TRUE per-frame total (it includes the shadow
 // pass). The per-category lines are an ESTIMATE of the main pass: visible, frustum-
@@ -546,9 +572,19 @@ function _pfRender() {
   if (!el) { el = document.createElement('div'); el.id = 'perfhud'; el.style.cssText = 'position:fixed;top:46px;right:8px;z-index:99;font:11px/1.35 monospace;color:#7fffb8;background:rgba(0,0,0,0.72);padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none'; document.body.appendChild(el); }
   const secs = Object.entries(_pfAcc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k.padEnd(11)}${(v / _pfFrames).toFixed(1)}ms`);
   if (now - _dcAt > 1000) { _dcAt = now; try { _dcBreakdown(); } catch (e) { _dcLines = ''; } }
+  // WHY those replans happened — the aggregate count alone never said which subsystem was moving
+  // a goal. Top triggers, each tagged with the AI state that asked for it.
+  const why = Object.entries(_pfWhy).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([k, v]) => ` ${k.padEnd(22)}${v}`).join('\n');
+  const hitch = _pfHitch.length
+    ? '\nworst frames (this session)\n' + _pfHitch.map(h =>
+        ` ${h.ms.toFixed(0).padStart(4)}ms @${h.at.toFixed(0)}s  plans ${h.plans} u${h.units} fx${h.fx}\n   ${h.secs || '(no section over 0.5ms)'}`).join('\n')
+    : '';
   el.textContent = `fps ${fps.toFixed(0)}  work ${work.toFixed(1)}ms\nreplans/s ${rep.toFixed(0)}  units ${combatants.length}  fx ${fx.length}\nscene ${scene.children.length}\n` + secs.join('\n')
-    + (_dcLines ? '\n' + _dcLines : '');
+    + (why ? '\nreplan cause\n' + why : '')
+    + (_dcLines ? '\n' + _dcLines : '') + hitch;
   for (const k in _pfAcc) _pfAcc[k] = 0;
+  for (const k in _pfWhy) delete _pfWhy[k];
   _pfFrames = 0; _pfWork = 0; _planCount = 0;
 }
 const SHOT_SIZE = parseInt(QS.get('size')) || 96;
@@ -1246,37 +1282,9 @@ function scatterFoliage() {
   if (!foliage.group.parent) scene.add(foliage.group);
 }
 
-// TEMP grass tuning panel (?grasstune): tune the grass colour + density against the REAL lit
-// terrain, since the playground's flat ground reads differently. Colour is live (uniforms);
-// density re-scatters on release. Not shown in normal play.
-if (QS.has('grasstune')) {
-  const gc = getGrassColors();
-  const p = document.createElement('div');
-  p.style.cssText = 'position:fixed;top:10px;right:10px;z-index:99999;background:rgba(12,17,24,.9);color:#dbe6ee;' +
-    'padding:11px 13px;border:1px solid #2b3a47;border-radius:9px;font:12px system-ui,sans-serif;width:210px';
-  p.innerHTML =
-    '<div style="font-weight:700;margin-bottom:7px;letter-spacing:.5px">🌱 grass tune</div>' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0">root ' +
-      '<input type="color" id="gtRoot" value="' + gc.root + '" style="width:70px;height:24px"></div>' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0">tip ' +
-      '<input type="color" id="gtTip" value="' + gc.tip + '" style="width:70px;height:24px"></div>' +
-    '<div style="margin:7px 0">root band <b id="gtBandV">' + gc.band.toFixed(2) + '</b><br>' +
-      '<input type="range" id="gtBand" min="0" max="0.6" step="0.02" value="' + gc.band + '" style="width:100%"></div>' +
-    '<div style="margin:7px 0">density <b id="gtDensV">1.00</b>× <span style="color:#7f95a6">(release to apply)</span><br>' +
-      '<input type="range" id="gtDens" min="0" max="4" step="0.1" value="1" style="width:100%"></div>' +
-    '<textarea id="gtOut" readonly style="width:100%;height:52px;margin-top:6px;background:#0a0f16;color:#a7e0b0;' +
-      'border:1px solid #2b3a47;border-radius:5px;font:11px monospace;padding:5px"></textarea>';
-  document.body.appendChild(p);
-  const $ = id => p.querySelector(id);
-  const out = () => { $('#gtOut').value = 'root: ' + $('#gtRoot').value + '  tip: ' + $('#gtTip').value +
-    '\nband: ' + (+$('#gtBand').value).toFixed(2) + '  density: ' + (+$('#gtDens').value).toFixed(2) + '×'; };
-  $('#gtRoot').oninput = e => { setGrassRoot(e.target.value); out(); };
-  $('#gtTip').oninput = e => { setGrassTip(e.target.value); out(); };
-  $('#gtBand').oninput = e => { setGrassRootBand(+e.target.value); $('#gtBandV').textContent = (+e.target.value).toFixed(2); out(); };
-  $('#gtDens').oninput = e => { $('#gtDensV').textContent = (+e.target.value).toFixed(2); out(); };
-  $('#gtDens').onchange = e => { grassDensityMul = +e.target.value; scatterFoliage(); };   // re-scatter on release
-  out();
-}
+// (The ?grasstune in-game colour panel lived here. The grass look it was built to find is
+// chosen and baked into Plants.js, so the panel and its live colour setters are gone. Density
+// tuning stays on RR.setGrassDensity — that's a scatter knob, not a colour one.)
 
 // --- Vehicles ----------------------------------------------------------
 // The FOB elevator deck is a solid drivable surface at the FOB's ground height,
@@ -2068,7 +2076,19 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null, srcPos = nu
   if (amount > 0) veh.hp -= amount;
   // Stamp when an ENEMY VEHICLE last hit us (shield hits count — we're still under fire). The
   // AI uses this to answer an attacker it can't outrun instead of sieging on / fleeing (underFire).
-  if (cause === 'vehicle' && shooter && shooter !== veh && shooter.team !== veh.team) veh._hitByVehT = performance.now();
+  // BEING SHOT IS A CONTACT REPORT, not just a clock. We also remember WHERE the round came
+  // from — the same courtesy a tower hit already got (_hitByTurret below). Without it a unit
+  // shot in the back knew only THAT it was being hit, never by whom or from which side, so it
+  // drove on none the wiser; since sight became a forward cone, its only other route to noticing
+  // a rear attacker is hearing, and hearing is exactly what fails here (a unit under throttle
+  // masks 60% of what it would otherwise hear — SND.selfMask — so the moving target that most
+  // needs the warning is the one least able to hear it). Intel only: this sets the last-known
+  // position so the unit TURNS AND LOOKS. Sight still has to confirm before it can shoot back.
+  if (cause === 'vehicle' && shooter && shooter !== veh && shooter.team !== veh.team) {
+    veh._hitByVehT = performance.now();
+    const sp = (shooter.holder && shooter.holder.position) || srcPos;
+    if (sp) veh._hitByVeh = { x: sp.x, z: sp.z, t: veh._hitByVehT };
+  }
   // A TURRET landed a hit — remember which gun (by head position) so the AI can SHOOT
   // BACK at the tower actually hurting it, instead of grinding whatever target its
   // mission math picked (nearest turret / a healing sponge / a wall).
@@ -5004,6 +5024,16 @@ function navWaypoint(nav, v, dest, dt) {
       // frame, so a crowd of simultaneous replans spreads across frames instead of spiking.
       nav.t = 0.03;
     } else {
+      // Tag WHY this search is happening, against the state that asked for it — an aggregate
+      // replans/s never said which subsystem was moving a goal, which is the only thing worth
+      // knowing when the number is high. ?perf only; costs nothing in normal play.
+      if (PERF) {
+        const w = !nav.path ? 'no_path' : nav.idx >= nav.path.length ? 'consumed'
+          : nav.t <= 0 ? 'timer' : nav.epoch !== _navEpoch ? 'map_changed' : 'goal_moved';
+        const k = `${w}/${(v && v._aiState) || '-'}`;
+        _pfWhy[k] = (_pfWhy[k] || 0) + 1;
+        _planFrame++;
+      }
       const _s = performance.now();
       nav.path = planPath(v, dest); nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
       nav.epoch = _navEpoch;
@@ -6722,6 +6752,10 @@ class AICommander {
       if (st === 'pursue' && v.ai && v.ai.lastSeen) {
         // The ghost is across water/walls — no route will ever get there. Write the contact
         // off; the state collapses back to the mission next think instead of chasing forever.
+        // Record WHERE we couldn't get to as well: clearing lastSeen alone is futile while we
+        // can still SEE the target, because perception rewrites it next tick and we end up
+        // re-deciding this every single frame (see `pursuing` in AI.js — the dancing lurchers).
+        v.ai.noReach = { x: v.ai.lastSeen.x, z: v.ai.lastSeen.z, t: v.ai.t };
         v.ai.lastSeen = null;
         aiLog(this.team, `${this.cname}: Can't reach that last contact — writing it off, back to the plan.`);
         return;
@@ -6875,6 +6909,9 @@ class AICommander {
       card: (this.strategy.constructor.name || 'Card').replace('Strategy', ''),
       fwd: +s.fwd.toFixed(2), turn: +s.turn.toFixed(2), blk: '···',
       hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), distFob: Math.round(d),
+      // shield + position were missing here, so a recalling unit printed "shld undefined" and
+      // "pos (undefined,undefined)" in the AI log — the one readout used to report bugs.
+      shield: Math.round(v.shield), px: Math.round(v.holder.position.x), pz: Math.round(v.holder.position.z),
       gx: Math.round(home.x), gz: Math.round(home.z), gd: Math.round(d),   // where it's headed (the log's honesty fields)
       navPath: this._nav && this._nav.path ? this._nav.path.length : 0,
       mnv: this._driver.label(), drv: this._driver.pedals(), alarms: this._driver.alarms,
@@ -7316,11 +7353,25 @@ class AICommander {
         this._noteContact(heard.x, heard.z);
       }
     }
+    // SHOT AT: the third way to notice an enemy, and the only one that works from behind.
+    // Sight is a forward cone and hearing is masked by our own engine, so a unit taking rounds
+    // in the back could stay oblivious to a fight it was losing. A hit is the hardest contact
+    // evidence there is — it outranks a heard contact (an engine drone is a guess about where
+    // someone IS; a hit is proof of where someone SHOT FROM), so this is stamped after hearing
+    // and overwrites it. Still intel, not a firing solution: seesEnemy stays false, so the unit
+    // turns to look and must actually SEE the attacker before it can return fire.
+    let shotFrom = null;
+    if (!seesEnemy && v._hitByVeh && performance.now() - v._hitByVeh.t < 2500) {
+      shotFrom = { x: v._hitByVeh.x, z: v._hitByVeh.z };
+      this._lastEnemyPos = { x: shotFrom.x, z: shotFrom.z, t: v._hitByVeh.t, shot: true };
+      this._noteContact(shotFrom.x, shotFrom.z);
+    }
     // GHOST CLEARED: we reached the last-known spot and there's nobody here to see OR hear —
     // so the intel is spent. Drop it now instead of loitering over an empty spot for the full
     // 12s stale window (the "Valkyrie hovering over where a teammate died" idle). With it gone,
     // the Attack objective falls back to the enemy base and the unit pushes on.
-    if (!seesEnemy && !heard && this._lastEnemyPos) {
+    // A live shot contact is NOT spent — rounds are still landing on us, so keep it.
+    if (!seesEnemy && !heard && !shotFrom && this._lastEnemyPos) {
       const dx = this._lastEnemyPos.x - px, dz = this._lastEnemyPos.z - pz;
       if (dx * dx + dz * dz < 12 * 12) this._lastEnemyPos = null;
     }
@@ -7818,6 +7869,11 @@ class AICommander {
       canStrafe: !!v._move.strafe,   // the driver knows his pedals — reflexes pick chassis-legal maneuvers
       worldR: islandBound || 0,   // hard travel rim (map centre radius) — flee bends along it instead of pinning
       underFire: (performance.now() - (v._hitByVehT || -1e9)) < 1600,   // an enemy vehicle shot us in the last ~1.6s
+      // WHERE those rounds came from (last ~2.5s) — the vehicle twin of towerFire below. underFire
+      // says we're being shot; this says by whom, so a unit hit from outside its sight cone can
+      // turn toward the shooter instead of only knowing it is losing hull.
+      incomingFire: v._hitByVeh && performance.now() - v._hitByVeh.t < 2500
+        ? { x: v._hitByVeh.x, z: v._hitByVeh.z } : null,
 
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
       // the enemy → the firing lane is blocked; the combat brain sidesteps to clear it.
@@ -8044,7 +8100,14 @@ function publishAILive(dt) {
       const comp = [['firebrat', 'F'], ['lurcher', 'L'], ['valkyrie', 'V'], ['jotun', 'J']]
         .map(([k, c]) => (cmd.roster && cmd.roster[k] > 0) ? c + cmd.roster[k] : '')
         .filter(Boolean).join(' ');
-      teams[label] = { archetype: cmd.archetype, mission: s.step, rung: s._firedRung || '', sub, why: s._lastWhy || '',
+      // MISSIONSCORE BREAKDOWN — every candidate mission with its score and the terms behind it,
+      // already sorted best-first. This is what the doctrine layer actually decides on now, so the
+      // lab charts THIS rather than the old rung cascade (MissionScore gates most of those rungs
+      // off, which is why the spine had nothing lit). Absent = weights off = the old ladder still
+      // applies. ~13 entries, published on the same 2.5Hz throttle as everything else here.
+      const scores = cmd._missionScores
+        ? cmd._missionScores.map(([k, v, terms]) => [k, v, (terms || []).slice(0, 5)]) : null;
+      teams[label] = { archetype: cmd.archetype, mission: s.step, rung: s._firedRung || '', sub, why: s._lastWhy || '', scores,
         fleet: mine, comp, color: teamColor(cmd.team),   // the ACTUAL in-game colour (the commander's pick), not a team-slot guess
         known: cmd._knownSummary ? cmd._knownSummary() : '', metrics: M, dbg, units };
     }
@@ -9712,11 +9775,9 @@ window.RR = {
   look: (x, z, dist, pitch, yaw) => { orbit.target.set(x, 0, z); orbit.dist = dist; if (pitch != null) orbit.pitch = pitch; if (yaw != null) orbit.yaw = yaw; updateCamera(); },
   freeCam: () => { spectateFree = true; },   // debug/shot: stop the spectate follow so a rig can pin the camera
   scatterFoliage: () => scatterFoliage(),    // debug/shot: re-scatter foliage on demand
-  setGrassRoot: (h) => setGrassRoot(h),      // live grass colour tuning (uniforms — no re-scatter)
-  setGrassTip: (h) => setGrassTip(h),
-  setGrassRootBand: (v) => setGrassRootBand(v),
   setGrassDensity: (m) => { grassDensityMul = Math.max(0, +m); scatterFoliage(); return grassDensityMul; },   // re-scatters
-  getGrassColors: () => getGrassColors(),
+  setSurf: (patch) => setSurf(patch),   // shoreline surf/wave tuning, live — the knobs lab/surf.html drives
+  get surf() { return SURF; },
   get foliage() { return foliage; },
   get camera() { return camera; },   // debug: headless shot rigs position the camera for close-ups
   get roadNet() { return roadNet; },
@@ -10532,7 +10593,14 @@ function animate() {
     if (window.__rmrfHideSplash) window.__rmrfHideSplash();
   }
 
-  if (PERF) { _pfWork += performance.now() - _pfStart; _pfFrames++; _pfRender(); }
+  if (PERF) {
+    const _fms = performance.now() - _pfStart;
+    _pfWork += _fms; _pfFrames++;
+    if (_fms >= PF_HITCH_MS) _pfNoteHitch(_fms, clock.elapsedTime);
+    for (const k in _pfFrameAcc) delete _pfFrameAcc[k];
+    _planFrame = 0;
+    _pfRender();
+  }
   perfTick++;
   fpsEma += (1 / Math.max(rawDt, 0.0001) - fpsEma) * 0.08;   // RAW delta: the clamped dt floors this at 20
   if (perfEl && perfTick % 20 === 0) {
