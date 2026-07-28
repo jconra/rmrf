@@ -67,6 +67,8 @@ export const SURF = {
   landScale: 0.055,   // detail feature size (bigger = smaller features). Above ~0.12 the mask's
                       // own repeat starts to read as a lattice — see the rotation in the shader.
   landSharp: 0.45,    // 0 = smooth wash, 1 = discrete blotches with hard edges
+  landWarp: 0.9,      // domain-warp strength — displaces the detail lookup by other noise so its
+                      // own tiling never lines up. FREE: reuses samples the shader already takes.
   landMacro: 0.26,    // the EXISTING large-scale (~50u) light/dark field — was hardcoded at 0.26
 };
 const _surfShaders = new Set();   // every live terrain shader, so a change reaches all of them
@@ -83,6 +85,7 @@ function _pushSurf(sh) {
   u.uOct1.value.set(...SURF.o1); u.uOct2.value.set(...SURF.o2); u.uOct3.value.set(...SURF.o3);
   u.uLand.value.set(SURF.landSand, SURF.landGrass, SURF.landScale, SURF.landSharp);
   u.uLandMacro.value = SURF.landMacro;
+  u.uLandWarp.value = SURF.landWarp;
 }
 export function setSurf(patch) { Object.assign(SURF, patch); for (const sh of _surfShaders) _pushSurf(sh); return SURF; }
 
@@ -171,6 +174,7 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
     shader.uniforms.uOct3 = { value: new THREE.Vector3() };
     shader.uniforms.uLand = { value: new THREE.Vector4() };
     shader.uniforms.uLandMacro = { value: 0.26 };
+    shader.uniforms.uLandWarp = { value: 0.9 };
     _surfShaders.add(shader); _pushSurf(shader);
     mat.userData.shader = shader;   // so the map can drive uTime each frame (wave animation)
 
@@ -186,7 +190,7 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nuniform float uFoamW;\nuniform float uFoamSlope;\nuniform float uFoamStr;\nuniform float uWaveLen;\nuniform float uWaveSpd;\nuniform float uSpread;\nuniform float uCoast;\nuniform float uFroth;\nuniform float uWAmp;\nuniform float uInland;\nuniform float uInlandR;\nuniform float uFoamUp;\nuniform vec2 uCrest;\nuniform vec2 uBlotch;\nuniform vec3 uOct1;\nuniform vec3 uOct2;\nuniform vec3 uOct3;\nuniform vec4 uLand;\nuniform float uLandMacro;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
+        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nuniform float uFoamW;\nuniform float uFoamSlope;\nuniform float uFoamStr;\nuniform float uWaveLen;\nuniform float uWaveSpd;\nuniform float uSpread;\nuniform float uCoast;\nuniform float uFroth;\nuniform float uWAmp;\nuniform float uInland;\nuniform float uInlandR;\nuniform float uFoamUp;\nuniform vec2 uCrest;\nuniform vec2 uBlotch;\nuniform vec3 uOct1;\nuniform vec3 uOct2;\nuniform vec3 uOct3;\nuniform vec4 uLand;\nuniform float uLandMacro;\nuniform float uLandWarp;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
       // color_fragment runs first: build the whole surface colour per-pixel and stash the
       // depth / water-mask / gloss terms for the roughness + normal stages below.
       .replace('#include <color_fragment>', `#include <color_fragment>
@@ -217,6 +221,15 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
           // with one texture tap. (NB: no backticks in here — this whole block is a JS template
           // literal, and a stray one silently ends the string.)
           vec2 dUV = mat2(0.8607, -0.5090, 0.5090, 0.8607) * vTerrUV * uLand.z;
+          // DOMAIN WARP — the real cure for the repeat. Rotating only hides the lattice; warping
+          // destroys it, by DISPLACING the lookup with another noise field so the tile is never
+          // sampled the same way twice. nmask (~15u features) and macro (~50u) are already
+          // fetched above for the grass mask and the large-scale light field, so reusing them as
+          // the x/y offsets costs NOTHING — no extra tap. They are decorrelated from each other
+          // and from this lookup, so the periodicity smears out instead of lining up.
+          // (Note: genuinely RANDOM per-pixel sampling would be wrong here — it cannot mip, so it
+          // shimmers as the camera moves. Aperiodic is the goal, not random.)
+          dUV += (vec2(nmask, macro) - 0.5) * uLandWarp;
           float det = texture2D(uMask, dUV + 7.3).r;
           det = mix(det, smoothstep(0.42, 0.58, det), uLand.w);
           landC *= 1.0 + (det - 0.5) * 2.0 * mix(uLand.x, uLand.y, gmask);
