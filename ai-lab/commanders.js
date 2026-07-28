@@ -136,6 +136,8 @@ function sidePanel(archetype) {
     <div class="panel-title">Vehicle role table</div>${roles}
     <div class="panel-title">Live</div>
     <div class="card" id="live-card"><div class="row" id="live-row">no live game detected — open a match to follow decisions.</div></div>
+    <div class="panel-title">Mission weights</div>
+    <div class="card" id="weights-card"><div class="row" id="weights-row">no live game detected.</div></div>
     <div class="legend"><i style="background:#5a7fa0"></i>persona rungs (this archetype)&nbsp;
       <i style="background:#3d566e"></i>shared rungs (every commander)</div>`;
 }
@@ -164,6 +166,48 @@ function applyLive() {
   document.querySelectorAll('#chart rect[data-mission]').forEach(el => {
     if (on.has(el.dataset.mission)) el.style.filter = 'drop-shadow(0 0 7px #fff) brightness(1.5)';
   });
+  renderWeights(mine);
+}
+
+// ---- MISSION WEIGHTS -------------------------------------------------------
+// Since MissionScore became the default brain (2026-07-18) the ladder above is mostly INERT:
+// seven of the ten shared rungs sit behind `!missionWeightsOn(cmd)` and every persona choose()
+// only runs when weights are off. The commander no longer walks a cascade — it SCORES every
+// candidate mission and takes the best. So the honest doctrine view is this: the full ranked
+// board, top-down, winner first, each with the terms that earned it.
+function renderWeights(mine) {
+  const row = document.getElementById('weights-row');
+  if (!row) return;
+  const scored = mine.filter(([, v]) => v.scores && v.scores.length);
+  if (!scored.length) {
+    row.innerHTML = mine.length
+      ? '<span style="opacity:.7">weights off for this commander — the ladder on the left is live.</span>'
+      : 'no live game detected.';
+    return;
+  }
+  row.innerHTML = scored.map(([team, v]) => {
+    const top = v.scores[0][1], lo = v.scores[v.scores.length - 1][1];
+    const span = Math.max(0.001, top - lo);
+    const rows = v.scores.map(([k, val, terms], i) => {
+      const running = k === v.mission || k.split('-')[0] === v.mission;
+      const w = Math.max(2, Math.round(100 * (val - lo) / span));
+      const c = MCOLOR[k.split('-')[0]] || '#667';
+      const gap = i === 1 ? ` <span style="opacity:.5">(gap ${(top - val).toFixed(1)})</span>` : '';
+      return `<div style="margin:3px 0;${running ? '' : 'opacity:.72'}">
+        <div style="display:flex;justify-content:space-between;font-size:11px">
+          <span style="color:${running ? '#fff' : '#cfe0ee'};font-weight:${running ? 700 : 400}">
+            ${running ? '▶ ' : ''}${esc(k)}</span>
+          <span style="color:#7fe0b8;font-variant-numeric:tabular-nums">${val >= 0 ? '+' : ''}${val}${gap}</span>
+        </div>
+        <div style="height:4px;background:#0d141c;border-radius:2px;overflow:hidden;margin:2px 0">
+          <div style="height:100%;width:${w}%;background:${c}"></div></div>
+        ${terms.length ? `<div style="font-size:9.5px;opacity:.62;line-height:1.35">${
+          terms.map(([l, x]) => `${esc(l)} ${x >= 0 ? '+' : ''}${x}`).join(', ')}</div>` : ''}
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:8px"><b style="color:#7dd3fc">${esc(team)}</b>
+      <span style="opacity:.6;font-size:10px">— scored every tick, best wins</span>${rows}</div>`;
+  }).join('<hr style="border:none;border-top:1px dashed rgba(255,255,255,.12);margin:6px 0">');
 }
 function pollLive() {
   try {

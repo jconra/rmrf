@@ -76,6 +76,23 @@
   .card .metric { display: block; margin-top: 4px; font-size: 9px; color: #9fe6b0; opacity: 0.9; }
   .card .big { font-size: 15px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
   .card.on .badge { box-shadow: 0 0 8px currentColor; }
+  /* MissionScore board, carried inside the weights doctrine card */
+  .card.weights-card { min-width: 250px; }
+  .card.weights-card.on { min-width: 290px; }
+  .card .wboard { display: none; margin-top: 6px; border-top: 1px solid rgba(255,255,255,0.12); padding-top: 5px; }
+  .card.on .wboard { display: block; max-height: 250px; overflow-y: auto; }
+  .card .wnone { font-size: 9px; opacity: 0.6; }
+  .card .wrow { margin: 3px 0; opacity: 0.62; }
+  .card .wrow.on { opacity: 1; }
+  .card .whead { display: flex; justify-content: space-between; gap: 6px; font-size: 9.5px; line-height: 1.3; }
+  .card .wrow.on .whead { font-weight: 700; color: #fff; }
+  .card .wval { color: #7fe0b8; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .card .wval em { opacity: 0.55; font-style: normal; }
+  .card .wbar { height: 3px; background: rgba(0,0,0,0.45); border-radius: 2px; overflow: hidden; margin: 2px 0; }
+  .card .wbar i { display: block; height: 100%; }
+  .card .wterms { font-size: 8.5px; opacity: 0.6; line-height: 1.3; }
+  /* rungs that MissionScore has gated off — visibly unreachable, not just unlit */
+  .card.gated { opacity: 0.24; filter: grayscale(0.85); }
 
   /* chain-of-command tail: the driver's standing order + the pedals this tick */
   .coc { max-width: 320px; margin: 2px auto 0; background: #0a1017; border: 1px solid rgba(255,255,255,0.12);

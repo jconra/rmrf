@@ -88,6 +88,12 @@ const UNIVERSAL = [
   { key:'flag_loose',      cond:'Our flag dropped\nin the field?', mission:'intercept', why:'touch it to snap it home' },
   { key:'losing_attrition',cond:'Losing the attrition war?', mission:'defend', why:'preserve what we have left' },
   { key:'home_under_fire', cond:'Home under fire?\n(persona dice)', mission:'defend', why:'get back and stop them' },
+  // THE DEFAULT BRAIN since 2026-07-18. Everything below this line is gated off behind
+  // `!missionWeightsOn(cmd)` in AIStrategies.js, and so is every persona choose() — with weights
+  // on, the commander does NOT walk the rest of this cascade. It scores all 13 candidates and
+  // takes the best. That is why the doctrine layer used to sit empty: the game reports the rung
+  // `weights`, and there was no card with that key for it to light.
+  { key:'weights', cond:'MISSIONSCORE\nscore every mission,\ntake the best', mission:'weights', why:'the live board is below', weights:true },
   { key:'need_parts',      cond:'Can win by capture but\nno runner + no parts?', mission:'scavenge', why:'collect salvage to build one' },
   { key:'towers_down',     cond:'Their towers down,\nflag not exposed?', mission:'siege', why:'crack the HQ while it’s open' },
   { key:'gambit',          cond:'Stalemate gambit armed?', mission:'siege', why:'the rear-door Valkyrie gambit' },
@@ -161,10 +167,36 @@ function personaCard(c) {
     <span class="rwhy">${esc(c.blurb)}</span></div>`;
 }
 function doctrineCard(r, dkey) {
-  const c = mcol(r.mission);
-  return `<div class="card" data-dkey="${dkey}"><div class="cond">${esc(r.cond)}</div>
+  const c = r.weights ? '#7fe0b8' : mcol(r.mission);
+  // The weights card carries the live scored board in its metric slot (filled by fillWeights),
+  // so the layer shows WHY the pick won, not just that it won.
+  const extra = r.weights ? ' weights-card' : '';
+  return `<div class="card${extra}" data-dkey="${dkey}"><div class="cond">${esc(r.cond)}</div>
     <div class="arrow"></div><span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}">${esc(r.mission)}</span>
-    <span class="rwhy">${esc(r.why)}</span><span class="metric"></span></div>`;
+    <span class="rwhy">${esc(r.why)}</span><span class="metric"></span>
+    ${r.weights ? '<div class="wboard"></div>' : ''}</div>`;
+}
+
+// Render the live MissionScore board into the weights card: every candidate, best first, with a
+// bar for its score and the terms that earned it. `scores` is [key, total, terms][] straight from
+// cmd._missionScores (already sorted) — published by main.js on the same 2.5Hz throttle.
+function fillWeights(col, data) {
+  const el = col.querySelector('.weights-card .wboard');
+  if (!el) return;
+  const S = data.scores;
+  if (!S || !S.length) { el.innerHTML = '<div class="wnone">weights off — the rungs below are live</div>'; return; }
+  const top = S[0][1], lo = S[S.length - 1][1], span = Math.max(0.001, top - lo);
+  el.innerHTML = S.map(([k, v, terms], i) => {
+    const live = k === data.mission || k.split('-')[0] === data.mission;
+    const w = Math.max(2, Math.round(100 * (v - lo) / span));
+    const c = mcol(k.split('-')[0]);
+    return `<div class="wrow${live ? ' on' : ''}">
+      <div class="whead"><span>${live ? '▶ ' : ''}${esc(k)}</span>
+        <span class="wval">${v >= 0 ? '+' : ''}${v}${i === 1 ? ` <em>gap ${(top - v).toFixed(1)}</em>` : ''}</span></div>
+      <div class="wbar"><i style="width:${w}%;background:${c}"></i></div>
+      ${terms && terms.length ? `<div class="wterms">${terms.map(([l, x]) => `${esc(l)} ${x >= 0 ? '+' : ''}${x}`).join(', ')}</div>` : ''}
+    </div>`;
+  }).join('');
 }
 function subCard(s, i) {
   return `<div class="card" data-sub="${i}"><div class="big" style="font-size:12px">${esc(s.label)}</div>
@@ -269,6 +301,17 @@ function updateColumn(i, label, data, log) {
     sub: `[data-sub="${activeSubIndex(data.mission, data.sub)}"]`,
     brain: (primary && !recalled && primary.when) ? `[data-when="${primary.when}"]` : null,
   };
+  fillWeights(col, data);
+  // With weights on, the rungs BELOW the MissionScore card cannot fire at all (AIStrategies gates
+  // them behind !missionWeightsOn). Grey them out rather than leaving them looking live — a chart
+  // that shows unreachable branches as reachable is worse than no chart.
+  const gated = ['need_parts', 'towers_down', 'gambit', 'clear_path', 'soften', 'sapper', 'trap'];
+  const weightsOn = !!(data.scores && data.scores.length);
+  tracks[1].querySelectorAll('.card[data-dkey]').forEach(c => {
+    const k = c.dataset.dkey;
+    const off = weightsOn && (gated.includes(k) || k.startsWith('choose:'));
+    c.classList.toggle('gated', off);
+  });
   const keys = ['persona', 'doctrine', 'sub', 'brain'];
   keys.forEach((k, li) => {
     const track = tracks[li];
