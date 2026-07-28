@@ -229,6 +229,15 @@ const CONDITIONS = {
     if (!cfg.mustFight || !v.seesEnemy || !v.enemy || !ammoBurst(v, m)) return false;
     const s = v.self, et = v.enemy.type;
     if (v.flyer || (SPEED[s.type] || 2) > (SPEED[et] || 2)) return false;   // can outrun it → let normal fof/flee decide
+    // A FIGHT WE HAVE ALREADY JUDGED LOST. This rung sits above `engaging`, so it forces engage
+    // WITHOUT consulting fightScore — which is right for "an inescapable rival is on us, answer
+    // it" but wrong once the score is decisively against us. A mirror match (identical speed, so
+    // the outrun test above can never save us) pinned two hurt Lurchers in engage at -1.8 and
+    // +0.4 for minutes: neither could disengage, because this rung kept re-forcing engage, and
+    // neither could commit, because the kite footwork below kept retreating. Let a decisively
+    // negative score fall through to flee/retreat, which is what it is asking for.
+    const fof = m._fof != null ? m._fof : fightScore(v, p);
+    if (fof < (cfg.fofBail ?? -1.2)) return false;
     // Trigger on an ACTUAL immediate threat, not mere nearness: either the rival is shooting us
     // (underFire) or it's already inside our own weapon range (adjacent → we'd trade anyway). A
     // rival merely loitering at mid-range does NOT pull us off a siege — we fight it once it
@@ -366,7 +375,7 @@ const BEHAVIORS = {
   // 'engage' (mobile duel — aggressive brains press closer) and 'suppress' (keep a
   // wall-turret at arm's length and arc around its flank to find a clean line).
   combat(ctx) {
-    const { view, mem, p, err, dist, mode, self } = ctx;
+    const { view, mem, p, err, dist, mode, self, cfg } = ctx;
     const aimGate = 0.18 + p.aggression * 0.12;
     const want = view.engageRange || 36;
     const range = mode === 'suppress' ? want : want * (1 - p.aggression * 0.45);
@@ -507,21 +516,40 @@ const BEHAVIORS = {
             mnv: { type: 'KITE', tx: view.enemy.x, tz: view.enemy.z, toward: away, arrive: 2 } };
         }
       } else mem._breakoffT = null;   // guns quiet — re-arm for the next crossfire
-      const pressured = self.hpFrac < 0.55 || dist < range * 0.6;
-      // KITE — out-matched or pressed: fall back toward our own TOWER COVER while the turret
-      // keeps bearing on the enemy. Steer the HULL at support; fire whenever the gun bears.
-      if (tac.kite > 0.3 && view.support && pressured) {
+      // KITE URGE — GRADUAL, not a cliff. `hpFrac < 0.55` was a hard step, so a unit hovering at
+      // the pivot flipped kite on and off, and the distance half (dist < range*0.6) had no
+      // hysteresis at all, so the pair pumped as the gap breathed. Both now scale with how true
+      // they are, and the engage state widens the distance trigger so it latches instead of
+      // chattering (measured: siege<->engage flipping ~10x/second in a mirror match).
+      const kitePivot = cfg.kitePivot ?? 0.55;
+      const hurtUrge = Math.max(0, (kitePivot - self.hpFrac) / Math.max(0.05, kitePivot));
+      const closeR = range * 0.6 * (mem.state === 'engage' ? 1.15 : 1);
+      const crowdUrge = Math.max(0, (closeR - dist) / Math.max(1, closeR)) * 0.8;
+      // DON'T RETREAT FROM A FIGHT WE ARE WINNING. This branch never consulted fightScore, so it
+      // overrode a positive score: a Lurcher at +0.4 against a weaker rival still backed away,
+      // and since the doctrine is symmetric BOTH did it — the mid-field "dance". fightScore
+      // already weighs the enemy's relative hp (the `weaker` term), so trust it here.
+      const fofNow = mem._fof;
+      const kiteUrge = (fofNow != null && fofNow > 0) ? 0 : tac.kite * Math.max(hurtUrge, crowdUrge);
+      if (kiteUrge > (cfg.kiteMin ?? 0.18) && view.support) {
         // KITE order: retreat INTO our tower cover with the nose (and the gun) held on the
         // chaser — the driver reverses a tank at the doctrine cap, backpedals an omni hull.
         // (The old inline version drove nose-first at the support point: it out-ran the
         // chaser but gave it our BACK the whole way.)
-        const sx = view.support.x - self.x, sz = view.support.z - self.z;
+        // FALL BACK A SHORT WAY, NOT ACROSS THE MAP. `view.support` is the home base, which can
+        // be 200u+ off — kiting to it literally ordered two duelling units to march to opposite
+        // corners of the island while facing each other. Cap the fallback so this is a
+        // reposition into cover, not an evacuation.
+        let sx = view.support.x - self.x, sz = view.support.z - self.z;
+        const sLen = Math.hypot(sx, sz) || 1, cap = Math.min(sLen, cfg.kiteFallback ?? 34);
+        const back = { x: self.x + (sx / sLen) * cap, z: self.z + (sz / sLen) * cap };
+        sx = back.x - self.x; sz = back.z - self.z;
         turn = clamp(wrapPi(Math.atan2(-sx, -sz) - self.heading) * 2.0, -1, 1);
         fwd = 1;
         fire = (Math.abs(err) < arc && dist < Math.min(range * 1.4, fireCap)) ? mem.rng() < 0.6 * AI_HANDICAP.fireProb : false;
         mem._wantMove = true;
         return { fwd, turn, fire, strafe: 0, state: mode,
-          mnv: { type: 'KITE', tx: view.enemy.x, tz: view.enemy.z, toward: { x: view.support.x, z: view.support.z }, arrive: 6 } };
+          mnv: { type: 'KITE', tx: view.enemy.x, tz: view.enemy.z, toward: back, arrive: 6 } };
       }
       // BLOCKED LINE (shot-feedback): our last rounds kept detonating on the terrain/cover
       // between us and the target instead of on the enemy. Grinding the same shot is the
@@ -819,6 +847,11 @@ export const DEFAULT_BRAIN = {
     engageGlow: 0.9,     // seconds a lost duel target stays "visible" (anti engage↔pursue flap)
     threatGlow: 2.5,     // seconds a lost TURRET target is held — turrets don't move, so a blink isn't a disappearance (anti suppress↔assault flap)
     fofStick: 0.25,      // fight-or-flight commitment bias while already engaging (anti boundary-strobe)
+    // --- KITE (falling back to tower cover mid-duel) ---
+    fofBail: -1.2,       // fight score at/below which `underAttack` stops FORCING engage on an inescapable rival — it has judged this lost, let it flee (0 = old behaviour: always pinned)
+    kitePivot: 0.55,     // hull fraction the kite urge scales from (was a hard `hpFrac < 0.55` step)
+    kiteMin: 0.18,       // kite urge needed to actually fall back — below this, hold and fight
+    kiteFallback: 34,    // MAX world units to fall back per kite order. view.support is the home base, which can be 200u+ away; uncapped it marched duelling units off the map
     stillLimit: 1.8,     // seconds wedged before the unstick jolt fires
     wedgeLimit: 1.6,     // seconds PRESSED on an obstacle with no gain on the goal before the jolt (a unit sliding along a wall/turret is "moving" but going nowhere)
     wedgeGain: 0.4,      // goal distance must shrink by at least this to count as progress
