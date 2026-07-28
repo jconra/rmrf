@@ -1,0 +1,69 @@
+VERDICT — shot-awareness + the dancing-lurcher noReach fix
+Date: 2026-07-27
+Rigs: tourney.cjs 20 seeds x 20000 ticks, PAR 6. BEFORE = /home/bitwizard/rmrf-frozen pinned to
+      shipped v415 (5dd1cd6). AFTER = the live tree with both changes. 0 load-failed in both runs.
+
+TWO CHANGES, GATED TOGETHER
+  1. SHOT-AWARENESS. damageVehicle stored only a TIMESTAMP when an enemy vehicle hit us
+     (_hitByVehT) while a TURRET hit already stored a position (_hitByTurret). Worse, every
+     combat trigger in AI.js keys off view.seesEnemy FIRST — `underFire` is only consulted after
+     a sighting already passed — so a unit hit from outside its forward sight cone fell through
+     the entire ladder to advance/assault and drove on oblivious. Since sight became a cone this
+     is common: measured 73% / 15% / 44% of under-fire ticks (seeds 18/25/39) came from an
+     attacker the unit could not see.
+     Fix: record _hitByVeh {x,z,t}; stamp _lastEnemyPos (shot:true) so the commander learns the
+     position; new `ambushed` trigger -> pursue toward the shot origin, below engage/suppress/
+     retreat and above the mission goal. Intel only — seesEnemy stays false, so the unit must
+     SEE the attacker before it can fire back. A/B knob: cfg.shotAware.
+  2. noReach — THE DANCING LURCHERS. Reproduced on Jacob's seed 1851068760. When the driver
+     refused a `pursue` goal the issuer cleared v.ai.lastSeen — futile, because if the unit could
+     still SEE the target perception rewrote lastSeen the next tick, pursue re-triggered, the
+     driver refused again. That branch RETURNS before firing or moving, so the unit burned every
+     tick writing off the same contact. Measured 20 write-offs/sec = one per tick.
+     Fix: record v.ai.noReach {x,z,t} at the refusal; `pursuing` declines the same contact for
+     12s within 20u.
+
+MECHANISM MEASUREMENTS (direct, before shipping)
+  write-offs per match (seed 1851068760):        90  ->  1
+  pursue ticks (same seed):                     624  -> 253
+  pursue-from-ambush in the state mix:            0  ->  29 ticks / 2 entries  (was flatly absent)
+
+RESULTS (BEFORE -> AFTER)
+  resolved:            18/20  -> 18/20     <-- no change
+  avg resolve:          493s  ->  467s     (-5%, faster when it resolves)
+  TRANSIT-stuck:         374  ->  379      (+1%, flat)
+    ...of which suppress:253  ->  257      (+2%, flat)
+  idle-at-goal:          278  ->  305
+  maneuvering:           154  ->  148
+  fighting:              378  ->  330      (-13%)
+  longest stall:         26s  ->  see file (no regression in the top episodes)
+
+THE STALEMATES MOVED, THE COUNT DIDN'T
+  BEFORE stale: seeds 25, 74.   AFTER stale: seeds 81, 88.
+  Both of the OLD stalemates now RESOLVE — seed 25 and seed 74 have been stuck for days and both
+  converted this run. Two different seeds went stale instead:
+    seed 81: red 1 lurcher left, blue's HQ DEAD, blue wiped to 0 alive with 3 firebrats in reserve.
+    seed 88: BOTH HQs dead, red 1 firebrat left, blue wiped with an empty garage.
+  Same failure class as always: endgame CONVERSION with a near-exhausted fleet, not target
+  selection and not the changes here. With n=20 and trajectories that diverge from tick 0, two
+  stalemates in, two out is noise around an unchanged 18/20.
+
+READING IT
+  PASS. Resolution held, resolves got 5% faster, stuck metrics are flat, and the two mechanisms
+  this change targeted are fixed and measured rather than argued. `fighting` down 13% is
+  consistent with units no longer burning ticks in futile pursue loops.
+  The honest caveat: the balance numbers are neutral, not positive. The case for shipping rests
+  on the mechanism measurements (90->1 write-offs; a contact position that was previously thrown
+  away), not on the tournament, which mainly shows the changes did no harm.
+
+NOT YET DONE
+  - Endgame conversion is STILL the open subsystem: every stalemate this project has, in both
+    runs, is a winner with a flattened enemy and no runner left to capture with.
+  - Jacob's original dancing-lurcher sighting is NOT confirmed as this bug — he later described
+    the pair in open mid-field with nothing between them, which the noReach loop does not
+    require. Measured on v415 for his seed: the two lurchers are in DIFFERENT states 86% of the
+    shared ticks, one in `suppress` (shelling a tower) ~88% of the time while the other transits.
+    That may be the real answer: not a duel at all, two units on unrelated errands moving along
+    similar routes. Needs him to read both state lines off the AI LOG next time he sees it.
+  - The ai-lab doctrine spine is stale: MissionScore gates off 7 of its 10 shared rungs and every
+    persona ladder, so it charts the pre-2026-07-18 brain.
