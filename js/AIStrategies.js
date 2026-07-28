@@ -643,6 +643,13 @@ export function missionScore(cmd, key) {
         if (rearUp > 0 && exposed) add('opens rear capture', 1);
       } else {
         add('towers standing', towers * 1); if (!exposed) add('flag sealed', 2);
+        // OUR RUNNERS ARE DYING TO TOWERS → silence them before spending another one. The mirror
+        // of `clear interceptors` on the attack side. A longer window than that one (60s vs 30s)
+        // because knocking a tower down takes longer than killing a single interceptor, so the
+        // incentive has to outlive the job it is asking for.
+        const rTwr = (cmd._runnerTowerT != null && matchT - cmd._runnerTowerT < 60)
+          ? Math.min(8, 3 * (cmd._runnerTowerN || 0)) : 0;
+        if (rTwr) add('runners dying to towers', rTwr);
         // CRACK THE KEEP: towers down but the HQ still seals the flag → siege is the ONLY
         // way to open the win. The old cascade had a dedicated rung for this; without this
         // term a dominant turtle sat home forever with the enemy base defenceless (seed 88:
@@ -916,14 +923,27 @@ class Doctrine {
       const pen = -Math.min(16, 4 + 5 * n);   // −9, −14, −16… escalating (enough to unseat an OPEN-flag capture at +13.9)
       const failedKey = (cmd._msnKey && cmd._msnKey.startsWith('capture-')) ? cmd._msnKey : 'capture-front';
       if (enemyHasUnits) {
-        // DEFENDERS are the problem, not the lane — bench ALL capture directions and flag a window
-        // that boosts ATTACK (go clear the interceptors), then resume the grab once they're gone.
-        for (const k of ['capture', 'capture-front', 'capture-left', 'capture-right', 'capture-rear']) cmd._missionSuccess[k] = pen;
+        // A DEFENDER killed the runner on THIS lane. Bench only this lane and raise ATTACK, so the
+        // follow-up is a revenge sweep and the next grab can come straight down a different
+        // approach. (Was: bench ALL FOUR lanes until "they're gone" — but the resume clause was
+        // never written, so one death benched every approach for ~8 minutes of a 16-minute match.
+        // It was also OMNISCIENT: "are their defenders dead" is not something a commander can
+        // know — their reserves and scrap are fog, exactly like tower positions before
+        // knownTowers. Judging the lane we actually lost a runner on needs no such knowledge.)
+        cmd._missionSuccess[failedKey] = pen;
         cmd._runnerInterceptT = cmd._matchT;
       } else {
         // Pure tower gauntlet → bench just THIS lane so the next runner tries a different route
         // (the wide/rear arc), the other lanes keep their own records.
         cmd._missionSuccess[failedKey] = pen;
+        // …and say WHY siege is now worth more, rather than leaving it to be inferred from
+        // capture getting worse. Towers killed our runner, so silencing towers is the thing that
+        // makes the next attempt survivable — the mirror of the `clear interceptors` term that
+        // already boosts ATTACK when a VEHICLE does the killing (Jacob: "if it gets killed by a
+        // tower that should incentivize siege"). Explicit beats implicit: it also shows up as a
+        // named term in the AI Lab's weights board instead of being invisible.
+        cmd._runnerTowerT = cmd._matchT;
+        cmd._runnerTowerN = (cmd._runnerTowerN || 0) + 1;
       }
       // VISIBILITY (Jacob): show the re-evaluation after EVERY runner death — the switch-log only
       // fires on a mission CHANGE, so a commander re-deciding "capture again" was silent. Now the
