@@ -129,6 +129,25 @@
     <button id="viewLow">Beach level</button>
   </div>
 
+  <h2>Land detail</h2>
+  <div class="note">Varies tone INSIDE the sand and grass. The boundary between them — its shape
+    and proportions — is untouched.</div>
+  <div class="row"><label>Sand — footprints <b id="v_landSand"></b></label>
+    <input type="range" id="landSand" min="0" max="0.6" step="0.01"></div>
+  <div class="row"><label>Grass — patches <b id="v_landGrass"></b></label>
+    <input type="range" id="landGrass" min="0" max="0.6" step="0.01"></div>
+  <div class="row"><label>Feature size <b id="v_landScale"></b></label>
+    <input type="range" id="landScale" min="0.02" max="0.8" step="0.01"></div>
+  <div class="note">Bigger number = smaller spots. The gap in the existing noise is around
+    3–10 world units, which is roughly 0.10–0.30 here.</div>
+  <div class="row"><label>Softness → blotches <b id="v_landSharp"></b></label>
+    <input type="range" id="landSharp" min="0" max="1" step="0.02"></div>
+  <div class="note">0 = a smooth wash, 1 = discrete patches with defined edges.</div>
+  <div class="row"><label>Large-scale patchiness <b id="v_landMacro"></b></label>
+    <input type="range" id="landMacro" min="0" max="0.8" step="0.02"></div>
+  <div class="note">The ~50-unit light/dark field that was already there at 0.26. Free — it reuses
+    a sample the shader already takes, so this one costs nothing at all.</div>
+
   <h2>GPU cost</h2>
   <div class="seg">
     <button id="measOff" class="on">Off (vsync)</button>
@@ -245,7 +264,8 @@ canvas.addEventListener('wheel', e => { orbit.dist = Math.max(12, Math.min(1400,
 
 // ── Controls → the game's own uniforms ───────────────────────────────────────────────────────
 // Flat slider ids map onto SURF; the three octaves are arrays, hence the o1f/o1a/o1s split.
-const FLAT = ['foamWidth','foamSlope','foamStrength','foamMaxUp','foamInland','foamInlandR','waveLen','waveSpeed','phaseSpread','coastScale',
+const FLAT = ['landSand','landGrass','landScale','landSharp','landMacro',
+  'foamWidth','foamSlope','foamStrength','foamMaxUp','foamInland','foamInlandR','waveLen','waveSpeed','phaseSpread','coastScale',
   'crestLo','crestHi','blotchLo','blotchHi','frothScale','waveAmp'];
 const OCT = { o1f: ['o1',0], o1a: ['o1',1], o1s: ['o1',2],
               o2f: ['o2',0], o2a: ['o2',1], o2s: ['o2',2],
@@ -276,6 +296,8 @@ function report() {
   o1: [${f(SURF.o1[0])}, ${f(SURF.o1[1])}, ${f(SURF.o1[2])}],
   o2: [${f(SURF.o2[0])}, ${f(SURF.o2[1])}, ${f(SURF.o2[2])}],
   o3: [${f(SURF.o3[0])}, ${f(SURF.o3[1], 3)}, ${f(SURF.o3[2])}],
+  landSand: ${f(SURF.landSand)}, landGrass: ${f(SURF.landGrass)}, landScale: ${f(SURF.landScale)},
+  landSharp: ${f(SURF.landSharp)}, landMacro: ${f(SURF.landMacro)},
 };`;
 }
 for (const k of FLAT) {

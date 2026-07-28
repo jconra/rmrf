@@ -55,6 +55,19 @@ export const SURF = {
   o1: [0.34, 0.14, 1.40],
   o2: [0.52, 0.43, 1.90],
   o3: [1.60, 0.28, 3.20],
+  // ── LAND DETAIL ────────────────────────────────────────────────────────────────────────────
+  // Variation WITHIN the sand and grass, not a change to where they meet — the grass/sand
+  // boundary (nmask/hgate/gmask) is deliberately untouched. The land already had noise at ~3cm
+  // (baked speckle), ~1u (baked mottle), ~15u (nmask) and ~50u (macro); the gap was 3-10u, which
+  // is the scale the eye reads as surface texture at normal camera height. One extra mask tap
+  // fills it, weighted separately for sand and grass so the same sample gives footprint-ish
+  // pocking on sand and broader patchiness on grass.
+  landSand: 0.16,     // detail strength on sand
+  landGrass: 0.13,    // detail strength on grass
+  landScale: 0.055,   // detail feature size (bigger = smaller features). Above ~0.12 the mask's
+                      // own repeat starts to read as a lattice — see the rotation in the shader.
+  landSharp: 0.45,    // 0 = smooth wash, 1 = discrete blotches with hard edges
+  landMacro: 0.26,    // the EXISTING large-scale (~50u) light/dark field — was hardcoded at 0.26
 };
 const _surfShaders = new Set();   // every live terrain shader, so a change reaches all of them
 function _pushSurf(sh) {
@@ -68,6 +81,8 @@ function _pushSurf(sh) {
   u.uBlotch.value.set(SURF.blotchLo, SURF.blotchHi);
   u.uFroth.value = SURF.frothScale; u.uWAmp.value = SURF.waveAmp;
   u.uOct1.value.set(...SURF.o1); u.uOct2.value.set(...SURF.o2); u.uOct3.value.set(...SURF.o3);
+  u.uLand.value.set(SURF.landSand, SURF.landGrass, SURF.landScale, SURF.landSharp);
+  u.uLandMacro.value = SURF.landMacro;
 }
 export function setSurf(patch) { Object.assign(SURF, patch); for (const sh of _surfShaders) _pushSurf(sh); return SURF; }
 
@@ -154,6 +169,8 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
     shader.uniforms.uOct1 = { value: new THREE.Vector3() };
     shader.uniforms.uOct2 = { value: new THREE.Vector3() };
     shader.uniforms.uOct3 = { value: new THREE.Vector3() };
+    shader.uniforms.uLand = { value: new THREE.Vector4() };
+    shader.uniforms.uLandMacro = { value: 0.26 };
     _surfShaders.add(shader); _pushSurf(shader);
     mat.userData.shader = shader;   // so the map can drive uTime each frame (wave animation)
 
@@ -169,7 +186,7 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nuniform float uFoamW;\nuniform float uFoamSlope;\nuniform float uFoamStr;\nuniform float uWaveLen;\nuniform float uWaveSpd;\nuniform float uSpread;\nuniform float uCoast;\nuniform float uFroth;\nuniform float uWAmp;\nuniform float uInland;\nuniform float uInlandR;\nuniform float uFoamUp;\nuniform vec2 uCrest;\nuniform vec2 uBlotch;\nuniform vec3 uOct1;\nuniform vec3 uOct2;\nuniform vec3 uOct3;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
+        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nuniform float uFoamW;\nuniform float uFoamSlope;\nuniform float uFoamStr;\nuniform float uWaveLen;\nuniform float uWaveSpd;\nuniform float uSpread;\nuniform float uCoast;\nuniform float uFroth;\nuniform float uWAmp;\nuniform float uInland;\nuniform float uInlandR;\nuniform float uFoamUp;\nuniform vec2 uCrest;\nuniform vec2 uBlotch;\nuniform vec3 uOct1;\nuniform vec3 uOct2;\nuniform vec3 uOct3;\nuniform vec4 uLand;\nuniform float uLandMacro;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
       // color_fragment runs first: build the whole surface colour per-pixel and stash the
       // depth / water-mask / gloss terms for the roughness + normal stages below.
       .replace('#include <color_fragment>', `#include <color_fragment>
@@ -185,7 +202,24 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
           float thr = 1.0 - uGrassAmount;
           float gmask = smoothstep(thr - 0.05, thr + 0.05, field);
           float macro = texture2D(uMask, vTerrUV * uTexScale * 0.035 + 2.0).r;
-          vec3 landC = mix(sandC, grassC, gmask) * (0.88 + macro * 0.26);
+          vec3 landC = mix(sandC, grassC, gmask) * ((1.0 - uLandMacro * 0.5) + macro * uLandMacro);
+          // MID-SCALE LAND DETAIL — the missing octave. gmask (where sand meets grass) is already
+          // decided above and is NOT touched here; this only varies TONE inside each surface, so
+          // the boundary shapes and proportions stay exactly as they were. One tap serves both:
+          // uLand.x weights it on sand (small, pocked — footprints), uLand.y on grass (broader
+          // patches), and uLand.w sharpens smooth noise into discrete blotches. Centred on 0.5 so
+          // it darkens AND lightens rather than only muddying.
+          // ROTATE the lookup off the world axes. The mask is 256px on MirroredRepeat wrapping, so
+          // sampled axis-aligned at this scale it lays down a symmetric diamond lattice that reads
+          // as a grid rather than as ground. A rotation costs nothing (it is two multiplies) and
+          // misaligns the repeat from the terrain and the camera. The repeat is still THERE — push
+          // the feature size high enough and it will show, which is the honest limit of doing this
+          // with one texture tap. (NB: no backticks in here — this whole block is a JS template
+          // literal, and a stray one silently ends the string.)
+          vec2 dUV = mat2(0.8607, -0.5090, 0.5090, 0.8607) * vTerrUV * uLand.z;
+          float det = texture2D(uMask, dUV + 7.3).r;
+          det = mix(det, smoothstep(0.42, 0.58, det), uLand.w);
+          landC *= 1.0 + (det - 0.5) * 2.0 * mix(uLand.x, uLand.y, gmask);
           float wet = 1.0 - smoothstep(0.0, 1.2, vHeight);          // dark wet sand at the waterline
           landC = mix(landC, landC * vec3(0.34, 0.32, 0.29), wet);  // darker than before — the sky env map was lifting the wet band
           // Per-pixel water depth gradient: dark wet sand → turquoise → deep blue.
