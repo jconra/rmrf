@@ -7051,9 +7051,34 @@ class AICommander {
     };
   }
 
+  // WON EVERYTHING EXCEPT THE FLAG. The Firebrat is the only unit that can carry a flag, so a
+  // team can flatten the enemy keep, level every tower, and still have no way to end the match —
+  // it holds no runner, cannot afford one, and there is no salvage left to go and collect. Two of
+  // the three stalemates in the keep-first experiment looked exactly like this (seed 25: a fully
+  // wiped enemy and a motor pool of two Lurchers; seed 1060: L1 V2 J1 and an open flag).
+  // needsPartsRun() already spots the shortage but only acts while there is known scrap or map
+  // left to explore — late on there is usually neither, so it quietly returns false and no
+  // mission on the board leads to a win. Instrumentation only for now: name the state and count
+  // how long a team sits in it, so the size of the problem is measured rather than assumed.
+  _runnerlessWatch(dt) {
+    const open = this.fortDown() || this.flagExposed();          // their base is cracked
+    const runners = (this.roster.firebrat || 0) + (this.unit && !this.unit.dead && this.unit.type === 'firebrat' ? 1 : 0);
+    const stuck = open && runners === 0 && !this.canAfford('firebrat')
+      && !this.nearestKnownScrap(0, 0) && this.explore.fraction() >= 0.8;
+    if (!stuck) { this._runnerlessT = 0; return; }
+    this._runnerlessT = (this._runnerlessT || 0) + dt;
+    if (this._runnerlessT > 45 && !this._runnerlessAlarmed) {
+      this._runnerlessAlarmed = true;
+      aiLog(this.team, `[NO-RUNNER ALARM] ${this.cname}: their base is open and we have no Firebrat, `
+        + `${this.scrap()} scrap (need ${BUILD_COST.firebrat}), no salvage in sight. `
+        + `Nothing we can do can win this match.`);
+    }
+  }
+
   update(dt) {
     this._matchT += dt;
     this._sampleHistory();
+    this._runnerlessWatch(dt);
     // Notify once the moment the enemy fleet is wiped — instead of a unit silently
     // wandering off to "chase the last seen enemy" that no longer exists.
     if (!this._enemyGoneAnnounced && this.enemyEliminated()) {
