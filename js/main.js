@@ -6495,14 +6495,26 @@ class AICommander {
         this.strategy = this._makeCard(role);
       }
     }
+    // What the PLAN asks for, before any substitution — the doctrine's intent. Kept separate
+    // because `want` below has already been through _pickAvailableType, which answers "what can
+    // we field from stock" and therefore can never name a type we have none of. Any rescue that
+    // asks "the plan needs X and we have no X" has to read this one; see the runner rebuild.
+    const rawWant = this.strategy.wantVehicle(this);
     const want = this._vehicleForMission(this.strategy.step,
-      this._pickAvailableType(this.strategy.wantVehicle(this)) || this.strategy.wantVehicle(this));
+      this._pickAvailableType(rawWant) || rawWant);
     // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
     // plus running LOW on the wanted type builds a fresh one before picking — not just at
     // zero. A commander sat on 15 scrap feeding lone runners into a defended base; a rich
-    // team converts parts into pressure. Keeps a small float (+3) so it can't bankrupt
-    // itself on one build; buildUnit still respects the garage cap.
-    if (aiScrapBuild && (this.roster[want] || 0) <= 1 && this.scrap() >= (BUILD_COST[want] || 99) + 3) this.buildUnit(want);
+    // team converts parts into pressure. buildUnit still respects the garage cap.
+    // THE FLOAT IS THERE TO PROTECT THE RUNNER, so it only applies when the runner is at risk.
+    // A Firebrat costs 2, and the float exists so a build can't leave the team unable to field
+    // one. With two or more already in the pool that worry is answered and the float is pure
+    // drag — measured on seed 1151: red held 7 scrap for 650 seconds needing 8 to build the
+    // Jotun that would have ended the match, while sitting on SIX Firebrats. It ground two
+    // towers with a Lurcher and stalemated. (Jacob: "+3 or >1 FB — if they have 2 FB then they
+    // don't need reserve scrap.")
+    const float = (this.roster.firebrat || 0) > 1 ? 0 : 3;
+    if (aiScrapBuild && (this.roster[want] || 0) <= 1 && this.scrap() >= (BUILD_COST[want] || 99) + float) this.buildUnit(want);
     let type = this._pickAvailableType(want);
     // SALVAGE REINFORCEMENT: build the flag RUNNER when the plan needs one and we're out. The
     // firebrat has no substitute, so a commander that's lost them all can't win by capture — so
@@ -6510,7 +6522,14 @@ class AICommander {
     // wholly-wiped team (type === null) still gets eliminated, or matches would never end (a
     // resurrecting team can't be beaten by elimination — measured -3/16 resolved). The build
     // only applies while the team is otherwise still alive.
-    if (aiScrapBuild && want === 'firebrat' && (this.roster.firebrat || 0) === 0 && type !== null && type !== 'firebrat' && this.buildUnit('firebrat')) {
+    // THIS TESTED `want`, WHICH MADE IT UNREACHABLE. `want` comes out of _pickAvailableType,
+    // which substitutes to something we actually own — so it can only equal 'firebrat' when we
+    // HAVE a firebrat, while the next clause demands we have none. The two could never both
+    // hold, and this rescue had never run once. Seed 116 is what it looks like: red cracked the
+    // keep, exposed the flag, spent all six runners, then sat on 3 scrap (a firebrat costs 2)
+    // running capture after capture with a LURCHER, which cannot carry a flag. Read the plan's
+    // intent instead.
+    if (aiScrapBuild && rawWant === 'firebrat' && (this.roster.firebrat || 0) === 0 && type !== null && type !== 'firebrat' && this.buildUnit('firebrat')) {
       type = 'firebrat';
     }
     // SALVAGE REINFORCEMENT (heavy): the plan wants a SIEGER but we're down to only runners
