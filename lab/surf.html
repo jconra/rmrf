@@ -190,11 +190,11 @@
 <script type="module">
 import * as THREE from 'three';
 // NOTE the version suffixes: these must match the specifiers the game uses byte for byte
-// (main.js imports IslandMap.js?v=75, IslandMap imports TerrainMaterial.js?v=20). A different
+// (main.js imports IslandMap.js?v=75, IslandMap imports TerrainMaterial.js?v=21). A different
 // specifier would load a SECOND copy of the module, and setSurf() would then be poking the
 // uniforms of a material nobody is rendering.
 import { IslandMap } from '../js/IslandMap.js?v=75';
-import { SURF, setSurf } from '../js/TerrainMaterial.js?v=20';
+import { SURF, setSurf } from '../js/TerrainMaterial.js?v=21';
 
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });

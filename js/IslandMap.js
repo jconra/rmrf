@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { Noise2D } from './noise.js';
-import { makeTerrainMaterial } from './TerrainMaterial.js?v=20';
+import { makeTerrainMaterial } from './TerrainMaterial.js?v=21';
 
 const CHUNK = 48;   // cells per chunk edge
 const EDGE_APRON = 8;   // outer cells deepened to open sea so the map border reads as deep blue (no shallow water at the boundary) and the mesh edge blends into the ocean plane

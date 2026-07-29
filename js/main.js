@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=75';
 // Same specifier IslandMap uses — a different one would load a second copy of the module and
 // RR.setSurf would then be tuning a material nobody is rendering.
-import { SURF, setSurf } from './TerrainMaterial.js?v=20';   // shoreline surf tunables (lab/surf.html)
+import { SURF, setSurf } from './TerrainMaterial.js?v=21';   // shoreline surf tunables (lab/surf.html)
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';

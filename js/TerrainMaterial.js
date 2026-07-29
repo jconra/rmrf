@@ -62,14 +62,19 @@ export const SURF = {
   // is the scale the eye reads as surface texture at normal camera height. One extra mask tap
   // fills it, weighted separately for sand and grass so the same sample gives footprint-ish
   // pocking on sand and broader patchiness on grass.
-  landSand: 0.16,     // detail strength on sand
-  landGrass: 0.13,    // detail strength on grass
-  landScale: 0.055,   // detail feature size (bigger = smaller features). Above ~0.12 the mask's
+  // Values below are Jacob's, dialled in on a real screen in lab/surf.html. The look he landed on
+  // is BROAD and SOFT rather than fine and crisp: strong detail (0.37) at a large feature size,
+  // no hard edges, and a heavy macro field carrying most of the variation.
+  landSand: 0.37,     // detail strength on sand
+  landGrass: 0.37,    // detail strength on grass
+  landScale: 0.02,    // detail feature size (bigger = smaller features). Above ~0.12 the mask's
                       // own repeat starts to read as a lattice — see the rotation in the shader.
-  landSharp: 0.45,    // 0 = smooth wash, 1 = discrete blotches with hard edges
-  landWarp: 0.9,      // domain-warp strength — displaces the detail lookup by other noise so its
+  landSharp: 0.00,    // 0 = smooth wash, 1 = discrete blotches with hard edges
+  landWarp: 0.10,     // domain-warp strength — displaces the detail lookup by other noise so its
                       // own tiling never lines up. FREE: reuses samples the shader already takes.
-  landMacro: 0.26,    // the EXISTING large-scale (~50u) light/dark field — was hardcoded at 0.26
+                      // Low is safe HERE only because landScale is 0.02: the mask's repeat is far
+                      // enough out to be off-map. Raise this again if landScale ever goes up.
+  landMacro: 0.80,    // the EXISTING large-scale (~50u) light/dark field — was hardcoded at 0.26
 };
 const _surfShaders = new Set();   // every live terrain shader, so a change reaches all of them
 function _pushSurf(sh) {
