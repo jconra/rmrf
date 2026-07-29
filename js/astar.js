@@ -70,7 +70,7 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
       pth.reverse();
       onStep({ cur: { i: cur.i, j: cur.j }, open: heap.map(n => ({ i: n.i, j: n.j })), path: pth });
     }
-    if (cur.i === goal.i && cur.j === goal.j) return buildPath(cur);
+    if (cur.i === goal.i && cur.j === goal.j) { const p = buildPath(cur); p.nodes = popped; return p; }
     for (let di = 0; di < DIRS.length; di++) {
       const ddi = DIRS[di][0], ddj = DIRS[di][1];
       const ni = cur.i + ddi, nj = cur.j + ddj;
@@ -91,12 +91,17 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
       }
     }
   }
+  // NODES EXPANDED is reported on every path so the caller can budget a FRAME by node count.
+  // A wall-clock budget cannot do that job: it can only be checked BEFORE a search starts, so one
+  // expensive search still blows the frame, and under a stubbed clock (the deterministic test rig)
+  // it measures zero and never engages at all. A node count is exact, reproducible, and can cap
+  // the search itself via maxNodes.
   // Goal unreachable (or past the node bound): hand back the closest partial route, but only if it
   // actually gets NEARER the goal than the start — otherwise there's no progress to be had (null).
   // The path carries WHY it's partial: budgetHit=true means the search ran out of NODES (the goal
   // may be perfectly reachable, just far — a long trek on a big map); budgetHit=false means the
   // open set EMPTIED — every reachable cell was settled and the goal wasn't among them: genuinely
   // unreachable. Callers judging a "contract violation" must only trust the second kind.
-  if (partial && best && bestH < h(start.i, start.j) - 0.5) { const p = buildPath(best); p.budgetHit = budgetHit; return p; }
+  if (partial && best && bestH < h(start.i, start.j) - 0.5) { const p = buildPath(best); p.budgetHit = budgetHit; p.nodes = popped; return p; }
   return null;
 }

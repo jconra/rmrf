@@ -497,10 +497,12 @@ function _pfT(k, fn) {
 // doing (its section split), how many paths it planned and why, and how much was on the field.
 // The worst few survive, so you can play, feel a hitch, and read the cause off the panel after.
 const _pfWhy = {};                                     // "trigger/state" → replans over the window
+const _pfWhyAll = {};                                  // same, but for the WHOLE match — RR.replanWhy()
 // WHO is calling A*. The replans/s counter counts every planPath; the cause tags only cover the
 // nav layer — and that DISCREPANCY is what exposed the siege re-solve storm (40 replans/s with 3
 // tagged). Attributing by caller makes it visible directly instead of by arithmetic.
 const _planBy = {};
+const _planByAll = {};   // cumulative for the whole match (the panel's copy is cleared each window) — RR.planByAll()
 const _pfHitch = [];                                   // worst frames seen this session
 const PF_HITCH_MS = 25;                                // ~1.5 frames at 60Hz: by here a frame was certainly dropped
 const PF_HITCH_KEEP = 5;
@@ -4167,7 +4169,7 @@ function makeJeepNav(team) {
   return {
     plan: (fx, fz, tx, tz) => {
       stub.holder.position.x = fx; stub.holder.position.z = fz;
-      return planPath(stub, { x: tx, z: tz });
+      return planPath(stub, { x: tx, z: tz }, { by: 'stub' });
     },
   };
 }
@@ -4803,10 +4805,11 @@ function updateScrap(dt) {
 //   2. all 80 obstacles were scanned linearly for every cell tested
 function cellBlocked(v, i, j) {
   const c = grid.cell, x = i * c, z = j * c;
-  const halfW = map.worldW / 2 + 24, halfH = map.worldH / 2 + 24;
-  if (x < -halfW || x > halfW || z < -halfH || z > halfH) return true;
-  if (islandBound && x * x + z * z > islandBound * islandBound) return true;
-  const key = i + ',' + j;                              // built ONCE, reused by all four lookups
+  if (!navStatic) buildNavStatic();                     // lazy: roads/gates/pads must exist first
+  const si = navIdx(i, j);
+  const f = si < 0 ? NAVF.OOB : navStatic[si];          // off the baked grid is further out than the bounds test
+  if (f & NAVF.OOB) return true;                        // world edge + island ring, precomputed
+  const key = i + ',' + j;                              // built ONCE, reused by every live lookup
   const m = v._move;
   const gw = gateCells.get(key);
   if (gw) return m.ignoreWalls ? false : gateBlocks(gw, v.team);
@@ -4817,19 +4820,21 @@ function cellBlocked(v, i, j) {
     if (Math.abs(ax * g.nx + az * g.nz) < g.halfNorm + VEH_R + VEH_R * 0.9 &&
         Math.abs(ax * g.px + az * g.pz) < g.halfRun + VEH_R * 0.9) return true;
   }
-  if (roadNet.cells && roadNet.cells.has(key)) return false;
+  if (f & NAVF.ROAD) return false;
+  // NOT baked: an elevator pad is only a surface while its deck is flush at the top
+  // (elevatorPadAt: `if (e.phase !== 'top') continue`), and the phase changes as it rides up and
+  // down. Baking it passed a cell-by-cell equivalence check — which samples ONE instant — and
+  // still diverged four seeds in the tournament, two of them wildly. Anything that moves stays
+  // live; the bitmap is only for things the map fixes forever.
   if (elevatorPadAt(x, z)) return false;
-  if (gateSideCells.has(key)) return true;
+  if (f & NAVF.FLANK) return true;
   if (navAvoid.size) {
     const e = navAvoid.get(key);
     if (e !== undefined) { if (e > performance.now()) return true; navAvoid.delete(key); }
   }
-  if (m.water === 'sink' && !map.isLand(x, z)) {
-    if (map.isDeepWater(x, z)) return true;
-    const r = aiSoftFord ? VEH_R * 0.85 : VEH_R;
-    if (map.isDeepWater(x + r, z) || map.isDeepWater(x - r, z) || map.isDeepWater(x, z + r) || map.isDeepWater(x, z - r)) return true;
-    if (!aiSoftFord && (map.isDeepWater(x + r, z + r) || map.isDeepWater(x + r, z - r) || map.isDeepWater(x - r, z + r) || map.isDeepWater(x - r, z - r))) return true;
-  }
+  // Nine isDeepWater calls became one bit test. Both ford settings are baked because neither
+  // implies the other, so the knob still works without touching the terrain at run time.
+  if (m.water === 'sink' && (f & (aiSoftFord ? NAVF.SINKSOFT : NAVF.SINKHARD))) return true;
   if (!m.ignoreWalls) {
     const near = obsBuckets.get(key);                   // only obstacles that can reach this cell
     if (near) {
@@ -4961,13 +4966,19 @@ function detourMines(v, pts) {
 let NAV_HSCALE = 1.5;
 let NAV_FRAME_BUDGET_MS = 3;
 let _astarFrameMs = 0;            // ms spent in planPath this AI pass; reset in updateCommanders
+// A* nodes expanded during ONE AI pass. Reported by astarGrid, accumulated here, surfaced on the
+// ?perf panel — the honest measure of how much work nav is doing, where the ms figure beside it
+// reads zero under the test rig's stubbed clock.
+let _astarFrameNodes = 0;
 
 // opts.nodeMul scales the node budget for callers that would rather spend ONE thorough search
 // than several cheap inconclusive ones (the siege standoff solver — see _standoffFor). A search
 // that runs out of nodes proves nothing either way, so a caller that must get a real answer is
 // better off paying for it once.
 function planPath(v, dest, opts = {}) {
-  _planFrame++; _planBy[opts.by || 'nav'] = (_planBy[opts.by || 'nav'] || 0) + 1;
+  _planFrame++; const _byK = opts.by || 'nav';
+  _planBy[_byK] = (_planBy[_byK] || 0) + 1;
+  _planByAll[_byK] = (_planByAll[_byK] || 0) + 1;   // unconditional: the panel's copy resets, this one does not
   if (PERF) _planCount++;
   const c = grid.cell;
   const start = { i: Math.round(v.holder.position.x / c), j: Math.round(v.holder.position.z / c) };
@@ -4981,8 +4992,14 @@ function planPath(v, dest, opts = {}) {
   // Capped so a genuinely-unreachable search still bails cheaply. partial:true → on failure A*
   // returns a valid route to the closest reachable cell, so the unit still makes real progress.
   const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
-  const maxNodes = Math.round(Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4))) * (opts.nodeMul || 1));
+  let maxNodes = Math.round(Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4))) * (opts.nodeMul || 1));
+  // NOTE: a per-frame NODE budget was tried here and backed out. Measured over 4 seeds, a pass
+  // expands 9001 nodes at the median — searches already run to their own maxNodes cap half the
+  // time — so a 12000 budget clipped only 0.7% of passes yet cost the standoff solver (which asks
+  // for 22500) enough to push unreachable-GOTO violations up 56%. Capping a cost that is already
+  // capped buys nothing; making each cell cheaper is what pays. See the static nav bitmap.
   const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
+  if (path) _astarFrameNodes += path.nodes || 0;
   if (!path || path.length < 2) {
     // BOXED-IN START: parked hard against a wall/shoreline, every neighbouring cell can be
     // blocked, so the search dies on the spot and the unit used to drop to a DIRECT beeline
@@ -4991,7 +5008,7 @@ function planPath(v, dest, opts = {}) {
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
       const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
-      if (p2 && p2.length >= 1) { const o2 = detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c }))); o2.budgetHit = !!p2.budgetHit; return o2; }
+      if (p2 && p2.length >= 1) { _astarFrameNodes += p2.nodes || 0; const o2 = detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c }))); o2.budgetHit = !!p2.budgetHit; return o2; }
     }
     return null;
   }
@@ -4999,6 +5016,7 @@ function planPath(v, dest, opts = {}) {
   out.budgetHit = !!path.budgetHit;   // carried through the transforms: "partial because FAR" ≠ "partial because UNREACHABLE"
   return out;
 }
+
 
 // --- A* search visualizer (debug overlay) ------------------------------------
 // Toggle with the `v` key (or RR.astar()). It records the real A* search and lets
@@ -5068,6 +5086,11 @@ function avoidCell(x, z) {
 // re-ran a full A* search ~once a second for the whole trip, "just in case". A long
 // TTL remains as a safety net for anything unmodeled.
 const NAV_TTL = 7;   // s — safety-net expiry (was the 1.1s "just in case" cadence)
+// How long a cached "can I still reach my stand?" answer is trusted. 2s cuts that test from ~20
+// searches/sec per sieging unit to at most one every two seconds — a ~40x reduction — while
+// keeping the staleness window short enough that a unit which has just been boxed in finds out
+// quickly. Deliberately not longer: the call exists BECAUSE a wrong "no path" stranded a unit.
+const REACH_TTL = 2;
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
 Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → routes opened/closed
@@ -5090,13 +5113,19 @@ function navWaypoint(nav, v, dest, dt) {
     } else {
       // Tag WHY this search is happening, against the state that asked for it — an aggregate
       // replans/s never said which subsystem was moving a goal, which is the only thing worth
-      // knowing when the number is high. ?perf only; costs nothing in normal play.
-      if (PERF) {
-        const w = !nav.path ? 'no_path' : nav.idx >= nav.path.length ? 'consumed'
-          : nav.t <= 0 ? 'timer' : nav.epoch !== _navEpoch ? 'map_changed' : 'goal_moved';
-        const k = `${w}/${(v && v._aiState) || '-'}`;
-        _pfWhy[k] = (_pfWhy[k] || 0) + 1;
-      }
+      // knowing when the number is high.
+      // The cause tally is now UNCONDITIONAL (two integer bumps per replan). It used to be ?perf
+      // only, which meant the headless rig could not see it and the question "why does nav replan
+      // so often" could only be answered from a hand-held recording — and the recording we had
+      // turned out to carry no call tree, so it could not answer it either. _pfWhy still feeds the
+      // on-screen panel and is cleared each window; _pfWhyAll accumulates for the whole match and
+      // is what RR.replanWhy() reports.
+      const w = !nav.path ? 'no_path' : nav.idx >= nav.path.length ? 'consumed'
+        : nav.t <= 0 ? 'timer' : nav.epoch !== _navEpoch ? 'map_changed' : 'goal_moved';
+      const k = `${w}/${(v && v._aiState) || '-'}`;
+      if (PERF) _pfWhy[k] = (_pfWhy[k] || 0) + 1;
+      _pfWhyAll[w] = (_pfWhyAll[w] || 0) + 1;
+      _pfWhyAll[k] = (_pfWhyAll[k] || 0) + 1;
       const _s = performance.now();
       nav.path = planPath(v, dest); nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
       nav.epoch = _navEpoch;
@@ -8033,12 +8062,36 @@ class AICommander {
         // a lurcher across open water for 164s (seed 130) — _pickStandoff had a good, reachable
         // stand every tick, and the old !turretLOS check discarded it anyway.
         const navTarget = stand2 || threat;
-        const hasPathNow = threat && navTarget && (flyer || (() => {
-          const p = planPath(v, { x: navTarget.x, z: navTarget.z });
-          if (!p || !p.length) return false;
-          const e = p[p.length - 1];
-          return (e.x - navTarget.x) ** 2 + (e.z - navTarget.z) ** 2 <= (grid.cell * 2) ** 2;
-        })());
+        // CACHED. This test — "can I still get to the stand I'm walking toward?" — ran a full-grid
+        // A* per sieging unit per TICK and threw the path away. Measured over 12 matches it was
+        // 11670 of 14383 searches (81%), against 2150 for actual navigation. It also carried no
+        // caller tag, so it counted as 'nav' and the ?perf panel read "by caller: nav" — which is
+        // what pointed the whole investigation at navWaypoint, where only 15% of the work was.
+        // The ANSWER barely changes: it depends on the map (hence _navEpoch) and on which stand we
+        // are heading for (hence the target cell). A short TTL on top bounds staleness, because
+        // reachability also depends on where the unit is standing, and a boxed-in unit must not be
+        // told "still fine" for long — that is the failure this call was added to prevent.
+        // Timed on _matchT, not performance.now(), so it stays deterministic in the test rig.
+        let hasPathNow = false;
+        if (threat && navTarget) {
+          if (flyer) hasPathNow = true;
+          else {
+            const gc = grid.cell;
+            const rk = `${Math.round(navTarget.x / gc)},${Math.round(navTarget.z / gc)}|${_navEpoch}`;
+            const rc = v._reachC;
+            if (rc && rc.k === rk && this._matchT - rc.t < REACH_TTL) hasPathNow = rc.ok;
+            else {
+              const p = planPath(v, { x: navTarget.x, z: navTarget.z }, { by: 'hqreach' });
+              let ok = false;
+              if (p && p.length) {
+                const e = p[p.length - 1];
+                ok = (e.x - navTarget.x) ** 2 + (e.z - navTarget.z) ** 2 <= (gc * 2) ** 2;
+              }
+              v._reachC = { k: rk, t: this._matchT, ok };
+              hasPathNow = ok;
+            }
+          }
+        }
         // The stalemate GAMBIT goes straight for the KEEP (that's the whole point — crack the HQ,
         // expose the flag, win — not trade tower-for-tower while the enemy's tied up mid-field).
         // SCORE THE TARGETS INSTEAD OF QUEUEING THEM (Jacob). The keep is the win condition, so it
@@ -8396,7 +8449,7 @@ function stateDetail(d, st) {
   }
 }
 function updateCommanders(dt) {
-  _astarFrameMs = 0; _planFrame = 0;
+  _astarFrameMs = 0; _astarFrameNodes = 0; _planFrame = 0;
   updateReservations();
   for (const cmd of commanders) cmd.update(dt);
   // Run the no-move watch ONCE per unit per tick, here rather than at the drive boundary, so it
@@ -9069,6 +9122,50 @@ function buildObstacles() {
 // register it into those cells once and the per-cell check reads a list that is almost always
 // empty. Rebuilt with the obstacle array; the body-dead test stays per-query so a destroyed wall
 // opens its gap immediately without a rebuild.
+// STATIC NAV BITMAP — everything cellBlocked asks that cannot change during a match, answered
+// once when the map is built instead of on every cell of every search (Jacob: "can we just do it
+// before the game starts?"). The terrain never moves, so the deep-water footprint test — up to
+// EIGHT map.isDeepWater calls per cell for a sinking hull — is pure repeated work. Roads, gate
+// flanks, pads and the world/island bounds are laid down at build time and equally fixed.
+// What stays live: gates (open per team), navAvoid (expiring), and obstacles (walls die).
+// One byte per cell over a 96×96 grid is ~9KB.
+const NAVF = { OOB: 1, ROAD: 2, FLANK: 4, SINKSOFT: 16, SINKHARD: 32 };   // NO PAD — see cellBlocked
+let navStatic = null, navStaticN = 0, navStaticHalf = 0;
+const navIdx = (i, j) => {
+  const a = i + navStaticHalf, b = j + navStaticHalf;
+  return (a < 0 || b < 0 || a >= navStaticN || b >= navStaticN) ? -1 : b * navStaticN + a;
+};
+function buildNavStatic() {
+  const c = grid.cell;
+  const iMax = Math.ceil(map.worldW / 2 / c) + 12;
+  navStaticHalf = iMax; navStaticN = iMax * 2 + 1;
+  navStatic = new Uint8Array(navStaticN * navStaticN);
+  const halfW = map.worldW / 2 + 24, halfH = map.worldH / 2 + 24;
+  const rSoft = VEH_R * 0.85, rHard = VEH_R;
+  for (let i = -iMax; i <= iMax; i++) for (let j = -iMax; j <= iMax; j++) {
+    const x = i * c, z = j * c;
+    let f = 0;
+    if (x < -halfW || x > halfW || z < -halfH || z > halfH) f |= NAVF.OOB;
+    else if (islandBound && x * x + z * z > islandBound * islandBound) f |= NAVF.OOB;
+    if (roadNet.cells && roadNet.cells.has(i + ',' + j)) f |= NAVF.ROAD;
+    if (gateSideCells.has(i + ',' + j)) f |= NAVF.FLANK;
+    // The sinker footprint, baked for BOTH ford settings. Neither implies the other — the soft
+    // test uses a smaller radius and skips the diagonals — so they get a bit each and the live
+    // path just picks one. aiSoftFord defaults OFF, so HARD is the hot one: nine isDeepWater
+    // calls per cell, on every cell of every search, for terrain that never changes.
+    if (!map.isLand(x, z)) {
+      const deep = map.isDeepWater.bind(map);
+      if (deep(x, z)) { f |= NAVF.SINKSOFT | NAVF.SINKHARD; }
+      else {
+        if (deep(x + rSoft, z) || deep(x - rSoft, z) || deep(x, z + rSoft) || deep(x, z - rSoft)) f |= NAVF.SINKSOFT;
+        if (deep(x + rHard, z) || deep(x - rHard, z) || deep(x, z + rHard) || deep(x, z - rHard)
+          || deep(x + rHard, z + rHard) || deep(x + rHard, z - rHard)
+          || deep(x - rHard, z + rHard) || deep(x - rHard, z - rHard)) f |= NAVF.SINKHARD;
+      }
+    }
+    const k = navIdx(i, j); if (k >= 0) navStatic[k] = f;
+  }
+}
 const obsBuckets = new Map();   // cell key "i,j" → obstacles overlapping that cell
 function buildObsBuckets() {
   obsBuckets.clear();
@@ -10113,7 +10210,7 @@ const ray = new THREE.Raycaster();
 window.RR = {
   THREE, scene, camera, map,
   planPath: (v, dest, opts) => planPath(v, dest, opts),          // nav benchmark / path probes
-  cellBlocked: (v, i, j) => cellBlocked(v, i, j),                // nav benchmark: equivalence checking
+  cellBlocked: (v, i, j) => cellBlocked(v, i, j),
   vehCellCost: (v, i, j) => vehCellCost(v, i, j),                // nav benchmark: equivalence checking
   navStats: () => ({ obstacles: obstacles.length, gates: gates.length, cell: grid.cell,
     cells: Math.ceil(map.worldW / grid.cell) * Math.ceil(map.worldH / grid.cell) }),
@@ -10212,6 +10309,8 @@ window.RR = {
   get player() { return player; },
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
+  navNodes: () => _astarFrameNodes,
+  resetNavNodes: () => { _astarFrameNodes = 0; },   // benchmark hook: start a fresh 'frame'
   spawnPlayer: (type = 'firebrat', colorIndex = 4, rise = false) => deployToFOB(type, colorIndex, rise),
   get garage() { return garage; },
   winDemo: (type = 'firebrat', hex = '#46d6ff') => { ensureGarage(); garage.playWin(type, hex); },   // headless: stage the victory cinematic
@@ -10266,6 +10365,8 @@ window.RR = {
   get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
   get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
   planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
+  planByAll: () => ({ ..._planByAll }),                        // whole-match planPath calls by CALLER
+  replanWhy: () => ({ ..._pfWhyAll }),                         // whole-match replan causes: trigger, and trigger/state
   planBy: () => ({ ..._planBy }),                              // debug: those calls attributed to their CALLER (nav vs standoff) — needs ?perf
   setVision: (v) => { AI_VISION = v; return AI_VISION; },      // base sight range (A/B the "less distraction" idea)
   getVision: () => AI_VISION,
