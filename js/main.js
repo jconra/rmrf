@@ -1422,6 +1422,29 @@ const VEH_HIT_R = { lurcher: 3.2, firebrat: 2.0, valkyrie: 3.0, jotun: 3.6 };
 // combat). Firebrat = 40u hitscan laser; Jotun slug 115·0.7 ≈ 80; the Valkyrie's homing missile
 // curves in so distance isn't its limiter (kept generous).
 const SHOT_REACH = { lurcher: 42, firebrat: 40, valkyrie: 80, jotun: 80 };
+// SIEGE TARGET PRIORITY (Jacob's design). Every enemy structure is a valid target and carries a
+// score; the keep is the win condition so it sits highest by DEFAULT, and a tower that is
+// actually shooting at us outranks it for as long as that is true. The old rule was a queue with
+// the keep as a fallback — it could only ever be reached by running out of towers, which is how a
+// Lurcher spent 650s grinding two turrets while an untouched 600hp HQ decided the match.
+const PRIO = {
+  hq: 10,        // the win condition: crack it and the flag is exposed
+  tower: 6,      // dangerous, but only worth it when it is the thing hurting us
+  wall: 2,       // low on its own — rises when it stands between us and something better
+  shooting: 10,  // this structure is hitting us RIGHT NOW → jumps above the keep (6+10 > 10)
+  recent: 6,     // …and fades over THREAT_FADE rather than switching off (gradual weights)
+};
+const THREAT_FADE = 15;   // seconds for "it shot at me" to decay from PRIO.recent to nothing
+// How much extra a structure at (x,z) is worth because it has been shooting at us. Reads the
+// turret hit-marker damageVehicle already records, so this needs no new plumbing.
+function turretThreatBonus(v, x, z) {
+  const h = v && v._hitByTurret; if (!h) return 0;
+  const age = (performance.now() - h.t) / 1000;
+  if (age > THREAT_FADE) return 0;
+  if ((h.x - x) ** 2 + (h.z - z) ** 2 > 26 * 26) return 0;   // a different tower hit us, not this one
+  const fresh = age < 2 ? 1 : 0;                              // still under fire
+  return fresh * PRIO.shooting + PRIO.recent * (1 - age / THREAT_FADE);
+}
 // Lurcher engage/hold pulled INSIDE its 42u reach (was 50/46) so it plants close enough to
 // actually connect instead of raining rounds down short of the tower.
 const ENGAGE_RANGE = { lurcher: 40, firebrat: 24, valkyrie: 50, jotun: 70 };
@@ -1436,6 +1459,7 @@ let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner m
 const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie if a ground unit is within this of our FOB — else chase with what we've got
 let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
+let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a firing tower jumps) instead of walking a queue — RR.setTargetPrio
 let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hole (A/B via RR.setBreachCommit); off = old orbit-and-spray standoff
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
@@ -8017,7 +8041,21 @@ class AICommander {
         })());
         // The stalemate GAMBIT goes straight for the KEEP (that's the whole point — crack the HQ,
         // expose the flag, win — not trade tower-for-tower while the enemy's tied up mid-field).
-        const promote = this._gambit || (aiKeepBreach ? (!threat || !hasPathNow) : !threat);
+        // SCORE THE TARGETS INSTEAD OF QUEUEING THEM (Jacob). The keep is the win condition, so it
+        // is the default pick; a tower outranks it only while it is actually shooting at us, and
+        // that bonus fades instead of switching off. Everything else here — reachability, the
+        // crossfire-free stand — is unchanged, it just now applies to whichever target scored
+        // highest rather than to whatever the queue happened to name.
+        let promote = this._gambit || !threat || !hasPathNow;
+        if (aiTargetPrio && !promote && threat) {
+          const towerScore = PRIO.tower + turretThreatBonus(v, threat.x, threat.z);
+          // Hysteresis: a target we are already committed to is worth staying on, so a near-tie
+          // cannot flip the unit back and forth mid-siege (the same reason missionPick gives the
+          // running plan +1.5).
+          const committed = this._prioTarget === 'hq' ? PRIO.hq * 0.15 : 0;
+          promote = (PRIO.hq + committed) > towerScore;
+        }
+        this._prioTarget = promote ? 'hq' : 'tower';
         if (promote) {
           // This silently THROWS AWAY whatever `threat` already was (including a validated,
           // reachable _pickStandoff pick — stand2 truthy) in favor of the HQ's raw center point,
@@ -10329,6 +10367,7 @@ window.RR = {
   setPostKillMoveOn: (v) => { aiPostKillMoveOn = !!v; return aiPostKillMoveOn; },   // A/B: drop engage-afterglow ghost on a kill (no post-kill linger)
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
+  setTargetPrio: (v) => { aiTargetPrio = !!v; return aiTargetPrio; },   // A/B: scored siege targets vs the old tower queue
   setBreachCommit: (v) => { aiBreachCommit = !!v; return aiBreachCommit; },   // A/B: siegers latch one wall + push in vs orbit-and-spray
   setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
   setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
