@@ -497,10 +497,14 @@ function _pfT(k, fn) {
 // doing (its section split), how many paths it planned and why, and how much was on the field.
 // The worst few survive, so you can play, feel a hitch, and read the cause off the panel after.
 const _pfWhy = {};                                     // "trigger/state" → replans over the window
+// WHO is calling A*. The replans/s counter counts every planPath; the cause tags only cover the
+// nav layer — and that DISCREPANCY is what exposed the siege re-solve storm (40 replans/s with 3
+// tagged). Attributing by caller makes it visible directly instead of by arithmetic.
+const _planBy = {};
 const _pfHitch = [];                                   // worst frames seen this session
 const PF_HITCH_MS = 25;                                // ~1.5 frames at 60Hz: by here a frame was certainly dropped
 const PF_HITCH_KEEP = 5;
-let _planFrame = 0;                                    // A* plans issued in THIS frame
+let _planFrame = 0;   // A* searches issued in THIS frame — feeds the hitch log and the storm alarm
 function _pfNoteHitch(ms, whenS) {
   const secs = Object.entries(_pfFrameAcc).filter(([, v]) => v >= 0.5).sort((a, b) => b[1] - a[1]).slice(0, 3);
   _pfHitch.push({ ms, at: whenS, plans: _planFrame, units: combatants.length, fx: fx.length,
@@ -576,15 +580,22 @@ function _pfRender() {
   // a goal. Top triggers, each tagged with the AI state that asked for it.
   const why = Object.entries(_pfWhy).sort((a, b) => b[1] - a[1]).slice(0, 3)
     .map(([k, v]) => ` ${k.padEnd(22)}${v}`).join('\n');
+  // WHO called A*. replans/s counts every search; the cause tags only cover the nav layer, so a
+  // gap between them means something else is searching. That gap is how the siege re-solve storm
+  // was found — 40/s with 3 tagged. Print it rather than leaving it to arithmetic.
+  const byCaller = Object.entries(_planBy).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => ` ${k.padEnd(22)}${(v / (win / 1000)).toFixed(0)}/s`).join('\n');
   const hitch = _pfHitch.length
     ? '\nworst frames (this session)\n' + _pfHitch.map(h =>
         ` ${h.ms.toFixed(0).padStart(4)}ms @${h.at.toFixed(0)}s  plans ${h.plans} u${h.units} fx${h.fx}\n   ${h.secs || '(no section over 0.5ms)'}`).join('\n')
     : '';
   el.textContent = `fps ${fps.toFixed(0)}  work ${work.toFixed(1)}ms\nreplans/s ${rep.toFixed(0)}  units ${combatants.length}  fx ${fx.length}\nscene ${scene.children.length}\n` + secs.join('\n')
+    + (byCaller ? '\nA* by caller\n' + byCaller : '')
     + (why ? '\nreplan cause\n' + why : '')
     + (_dcLines ? '\n' + _dcLines : '') + hitch;
   for (const k in _pfAcc) _pfAcc[k] = 0;
   for (const k in _pfWhy) delete _pfWhy[k];
+  for (const k in _planBy) delete _planBy[k];
   _pfFrames = 0; _pfWork = 0; _planCount = 0;
 }
 const SHOT_SIZE = parseInt(QS.get('size')) || 96;
@@ -2010,8 +2021,31 @@ function updateLock(dt) {
 // Apply blast damage at a world point to walls/buildings, trees, and vehicles.
 // Returns true if the blast actually damaged an enemy vehicle (direct or splash) — the
 // caller uses this to tell a clean hit from a shot that detonated on terrain/cover.
+// Our shot landed near a wall — if that wall's gun is now down, the team that fired KNOWS it.
+// Updates only the firing team's memory (the other side still has to observe it), so the
+// fog-of-war rule holds: you learn what you did, not what happened.
+function noteTowerKillsNear(point, blast, team) {
+  const cm = commanders.find(c => c.team === team);
+  if (!cm || !cm.knownTowers) return;
+  const r = blast + 6;
+  for (const [wall, rec] of cm.knownTowers) {
+    if (!rec.armed || !wall.turret) continue;
+    const dx = wall.group.position.x - point.x, dz = wall.group.position.z - point.z;
+    if (dx * dx + dz * dz > r * r) continue;
+    if (wall.turret.dead || wall.turret.falling) {
+      rec.armed = false; rec.seenT = cm._matchT;
+      if (cm._siegePlan) cm._siegePlan.spots.delete(wall);
+      aiLog(team, `${cm.cname}: That's its gun off — tower at (${Math.round(rec.x)}, ${Math.round(rec.z)}) is done.`);
+    }
+  }
+}
 function explodeAt(point, blast, dmg, team, shooter) {
   destructibles.damageAt(point, blast, dmg);
+  // KILL REPORT (Jacob: "shouldn't the unit that destroyed it report it as being destroyed?").
+  // A tower we shot the gun off is a thing WE know about — no sighting needed, we did it. Without
+  // this the only route to learning was a clear line of sight to a gun sitting inside its own
+  // fort, which a besieger standing at its standoff often never gets.
+  if (team) noteTowerKillsNear(point, blast, team);
   if (foliage) foliage.hitTreesAt(point, blast, dmg);
   const tagged = damageVehiclesAt(point, blast, dmg, team, shooter);
   // Area damage clears mines + sensor pods in the blast. A Valkyrie rocket that dives to a
@@ -4903,7 +4937,12 @@ let NAV_HSCALE = 1.5;
 let NAV_FRAME_BUDGET_MS = 3;
 let _astarFrameMs = 0;            // ms spent in planPath this AI pass; reset in updateCommanders
 
-function planPath(v, dest) {
+// opts.nodeMul scales the node budget for callers that would rather spend ONE thorough search
+// than several cheap inconclusive ones (the siege standoff solver — see _standoffFor). A search
+// that runs out of nodes proves nothing either way, so a caller that must get a real answer is
+// better off paying for it once.
+function planPath(v, dest, opts = {}) {
+  _planFrame++; _planBy[opts.by || 'nav'] = (_planBy[opts.by || 'nav'] || 0) + 1;
   if (PERF) _planCount++;
   const c = grid.cell;
   const start = { i: Math.round(v.holder.position.x / c), j: Math.round(v.holder.position.z / c) };
@@ -4917,7 +4956,7 @@ function planPath(v, dest) {
   // Capped so a genuinely-unreachable search still bails cheaply. partial:true → on failure A*
   // returns a valid route to the closest reachable cell, so the unit still makes real progress.
   const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
-  const maxNodes = Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4)));
+  const maxNodes = Math.round(Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4))) * (opts.nodeMul || 1));
   const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
   if (!path || path.length < 2) {
     // BOXED-IN START: parked hard against a wall/shoreline, every neighbouring cell can be
@@ -5032,7 +5071,6 @@ function navWaypoint(nav, v, dest, dt) {
           : nav.t <= 0 ? 'timer' : nav.epoch !== _navEpoch ? 'map_changed' : 'goal_moved';
         const k = `${w}/${(v && v._aiState) || '-'}`;
         _pfWhy[k] = (_pfWhy[k] || 0) + 1;
-        _planFrame++;
       }
       const _s = performance.now();
       nav.path = planPath(v, dest); nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
@@ -5175,7 +5213,60 @@ function reservationYield(v) {
   return 1;
 }
 
+// COMMANDED TO MOVE, NOT MOVING. The bluntest possible stuck detector, and the only one that
+// caught seed 74: a healthy firebrat sat motionless for 270 SECONDS at full throttle, alone on
+// clear ground with a valid 4-node route — while the driver's stall clock, the brain's
+// _stillT/_wedgeT unstick reflex and the tournament's stuck classifier ALL reported normal (it
+// was even filed as "idle-at-goal — not wedged"). Every one of those reasons about goals,
+// arrival radii or intent, and each can be laundered by order churn or by a brain that believes
+// it has arrived. This asks only: are the pedals down, and did we move? Nothing can launder that.
+// It also reports the unit's height above terrain, which is what actually explained seed 74 —
+// the runner was stranded 2.5u UP on a wall/elevator lip while the nav grid read clear below.
+const NOMOVE_ALARM_S = 12;      // seconds of "wants to move, gets nowhere" before we shout
+const NOMOVE_NET = 6;           // world units of NET progress in that window that counts as moving
+function _noMoveWatch(v, dt) {
+  // Key on the BRAIN'S INTENT (_wantMove), not the pedals that reach the chassis: the nav layer
+  // overwrites the brain's fwd/turn, so a unit whose brain is driving but whose nav yields nothing
+  // presents as "not commanded" at the drive boundary — exactly the case worth catching.
+  // And measure NET progress over a WINDOW, never per-tick displacement: the seed-74 runner was
+  // not frozen, it was VIBRATING — jittering ~0.4u every tick, which reset a per-tick check
+  // forever while covering no ground at all. Same reason the tournament measures net move over 10s.
+  const wants = !!(v.ai && v.ai._wantMove);
+  const p = v.holder.position;
+  // Intent FLICKER must not launder a wedge either. A unit bouncing between "arrived" and "not
+  // arrived" drops _wantMove for single ticks; resetting on the first false tick let seed 74's
+  // runner reset the window forever. Only forgive after a sustained idle.
+  if (!wants) {
+    v._nmIdle = (v._nmIdle || 0) + dt;
+    if (v._nmIdle > 2) { v._nmT = 0; v._nmX = p.x; v._nmZ = p.z; v._nmSaid = false; }
+    return;
+  }
+  v._nmIdle = 0;
+  if (v._nmX == null) { v._nmX = p.x; v._nmZ = p.z; v._nmT = 0; return; }
+  v._nmT = (v._nmT || 0) + dt;
+  if (v._nmT < NOMOVE_ALARM_S) return;
+  const net = Math.hypot(p.x - v._nmX, p.z - v._nmZ);
+  if (net > NOMOVE_NET) { v._nmX = p.x; v._nmZ = p.z; v._nmT = 0; v._nmSaid = false; return; }
+  if (!v._nmSaid) {
+    v._nmSaid = true;
+    const cm = commanders.find(c => c.team === v.team);
+    const air = +(p.y - map.heightAt(p.x, p.z)).toFixed(1);
+    const d = (cm && cm._slotFor && cm._slotFor(v) && cm._slotFor(v)._dbg) || {};
+    aiLog(v.team, `[STUCK ALARM] ${(cm && cm.cname) || v.team}: ${v.type} has wanted to move for `
+      + `${NOMOVE_ALARM_S}s and covered ${net.toFixed(1)}u — @(${Math.round(p.x)},${Math.round(p.z)}) `
+      + `hp ${Math.round(100 * v.hp / v.maxHp)}%, state=${d.state || v._aiState || '-'}, `
+      + `goal=(${d.gx},${d.gz}) ${d.gd}u out, path=${d.navPath}, blk=${d.blk}, mnv=${d.mnv || '-'}. `
+      + `It is being driven and going nowhere — this is a BUG, not a decision.`);
+  }
+  v._nmX = p.x; v._nmZ = p.z; v._nmT = 0;   // re-anchor so a persistent wedge can report again
+}
 function driveChassis(v, out, dt, omniTravel) {
+  // HOLD THE PAD WHILE THE SHIELD IS UP. The elevator shield blocks damage completely, but only
+  // while the unit stands on the pad — so a unit that has chosen to fight from cover must not
+  // then drive out of it. The combat behaviours press, orbit and strafe toward their target; here
+  // we keep the turn (aim) and drop the translation, so it fights from the doorway for the few
+  // seconds the shield lasts and leaves under its own power afterwards.
+  if (aiPadFight && v.ammo > 0 && elevShieldOn(v)) { out.fwd = 0; out.strafe = 0; }
   // REVERSE CAP (doctrine): every chassis backs up at HALF throttle — reverse is a
   // maneuver tool (kite, reverse-arc, backing out of a notch), never a fast way to
   // travel; a unit that wants to go the other way turns around. The omni Lurcher is
@@ -5202,12 +5293,35 @@ function driveChassis(v, out, dt, omniTravel) {
 // goal jumping tens of units per step. Replaced by the siege plan, which vets reachability BEFORE
 // committing and relaxes the range band instead of rotating: see _buildSiegePlan/_standoffFor.)
 let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverseCap toggles for A/B bisection)
+// Fight from under the elevator shield instead of driving out of it (RR.setPadFight for A/B).
+// The shield is 5s of TOTAL invulnerability and it only holds ON the pad — leaving is what wastes it.
+let aiPadFight = true;
+// Vehicle-aware mission failure: swap chassis when one keeps failing a mission (RR.setVehSwap for A/B).
+let aiVehSwap = true;
 let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab in nav (RR.setGateBand) — stops the gate-band hug
 let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
 let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
+// How many times ONE tower's firing spot may be re-solved before we stop trying and move down the
+// kill order. Without this the escape hatches re-solved forever: each solve returns a slightly
+// different spot, which is a new GOTO order, which resets the driver's once-per-order guard.
+const SIEGE_RESOLVE_MAX = 2;
+// A re-solve rate above this in one match is not a hiccup, it is a loop — shout about it.
+const SIEGE_RESOLVE_ALARM = 6;
+// Minimum world separation between two firing spots we spend a reachability search on. With few
+// searches available, diversity matters more than picking the very nearest — 5 probes around the
+// ring beat 5 probes clustered on one side of it.
+const SIEGE_SPOT_SPREAD = 26;
+// Units of ONE type lost on ONE mission with nothing to show before the commander tries a
+// different chassis for it. 2 = "fool me twice". See _vehicleForMission — the mission-level
+// success memory benches the PLAN, this benches the PAIRING, so a good plan attempted with the
+// wrong vehicle changes tool instead of being abandoned.
+const VEH_FAIL_SWAP = 2;
+const SCUTTLE_ALARM_N = 4;      // units lost in a row on one mission before we shout about it
+const ASTAR_FRAME_ALARM = 12;   // A* searches in ONE frame that mean something is looping, not working
+let _astarAlarmed = false;      // fire once per match — an alarm that repeats every frame IS the storm
 setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
 const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold out at (0.55 close/fast … 0.85 far/safe). RR.setStandBand
 
@@ -6268,6 +6382,35 @@ class AICommander {
   }
   // The type to actually field: the wanted one if any remain, else a same-class
   // substitute, else whatever we have most of, else null (roster empty → eliminated).
+  // THE PLAN MIGHT BE RIGHT AND THE VEHICLE WRONG. If this mission has already eaten
+  // VEH_FAIL_SWAP units of the wanted type with nothing to show, field a different chassis that
+  // has NOT failed here rather than sending an identical unit to die identically. This is what
+  // stops the "Lurcher scuttles on siege forever" loop; the commander swaps to the Jotun that
+  // clears the towers in one tour instead of eventually abandoning siege altogether.
+  _vehicleForMission(step, want) {
+    if (!aiVehSwap || !want || !this._msnVehFail) return want;
+    const failed = t => this._msnVehFail[`${step}|${t}`] || 0;
+    // Jacob's framing: "if the siege is getting negative points for LURCHER siege, roll out a new
+    // vehicle." So the trigger is the two facts together — the MISSION is carrying a negative
+    // score AND this CHASSIS is the one that has been failing it. A pure count of 2 also trips it
+    // on its own, but that needs a long match to accumulate (his was 4907s); the paired test
+    // catches it inside a normal one, which is where the swap is worth anything.
+    const msnNeg = (this._missionSuccess && this._missionSuccess[step]) || 0;
+    const trip = failed(want) >= VEH_FAIL_SWAP || (failed(want) >= 1 && msnNeg < 0);
+    if (!trip) return want;
+    // Same-role stand-ins only (a runner has none) — reuse the substitution pool's intent.
+    const alts = (want === 'firebrat' ? [] : ['jotun', 'lurcher', 'valkyrie'])
+      .filter(t => t !== want && (this.roster[t] || 0) > 0)
+      .sort((a, b) => failed(a) - failed(b));
+    const alt = alts[0];
+    if (!alt || failed(alt) >= failed(want)) return want;   // nothing cleaner available — carry on
+    if (this._vehSwapLogged !== `${step}|${want}`) {
+      this._vehSwapLogged = `${step}|${want}`;
+      const n = failed(want);
+      aiLog(this.team, `${this.cname}: ${n} ${want}${n === 1 ? '' : 's'} lost on this ${step} plan with nothing to show — the plan's fine, the vehicle isn't. Sending a ${alt}.`);
+    }
+    return alt;
+  }
   _pickAvailableType(want) {
     const have = t => this.roster[t] || 0;
     // Substitute by ROLE, not raw speed. The Valkyrie is a base-ATTACKER (like the
@@ -6351,7 +6494,8 @@ class AICommander {
         this.strategy = this._makeCard(role);
       }
     }
-    const want = this.strategy.wantVehicle(this);
+    const want = this._vehicleForMission(this.strategy.step,
+      this._pickAvailableType(this.strategy.wantVehicle(this)) || this.strategy.wantVehicle(this));
     // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
     // plus running LOW on the wanted type builds a fresh one before picking — not just at
     // zero. A commander sat on 15 scrap feeding lone runners into a defended base; a rich
@@ -6652,12 +6796,7 @@ class AICommander {
         // Held a position outside our own weapon reach: the spot is wrong for this chassis. Drop
         // the plan's cached spot for THIS tower and re-solve it once (the ladder will try a closer
         // radius); if nothing works, the kill order moves on. No bearing-walk, no per-tick search.
-        const k = this._siegePlan ? this._planTarget() : null;
-        if (k) {
-          const again = this._standoffFor(v, k);
-          this._siegePlan.spots.set(k.wall, again);
-          if (!again) this._siegePlan.idx++;
-        }
+        this._resolveStand(v, 'sat outside our own reach');
         aiLog(this.team, `${this.cname}: Been sat outside my own range of that target — picking a new firing position.`);
       }
     } else if (v._oorT) v._oorT = 0;
@@ -6766,16 +6905,8 @@ class AICommander {
         // the bearing and re-plan per tick like the old _standRot search — drop THIS tower's
         // cached spot, re-solve it once through the relaxation ladder, and if it still can't be
         // reached, move down the kill order.
-        const k = this._planTarget();
-        if (k) {
-          const again = this._standoffFor(v, k);
-          this._siegePlan.spots.set(k.wall, again);
-          if (!again) {
-            aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — moving to the next one.`);
-            this._siegePlan.idx++;
-          }
-          this._nav.path = null;
-        }
+        this._resolveStand(v, 'the driver refused the spot');
+        this._nav.path = null;
       }
     }
     if (!s) return;                                 // no route — keep the brain's command
@@ -6848,7 +6979,7 @@ class AICommander {
     // Compare against the type we'd ACTUALLY field (after save-last / role substitution),
     // not the raw role want — otherwise a unit that's already the best available substitute
     // gets recalled to "swap" for a wanted type we'd only re-substitute right back to it.
-    const want = this._pickAvailableType(this.strategy.wantVehicle(this));
+    const want = this._vehicleForMission(this.strategy.step, this._pickAvailableType(this.strategy.wantVehicle(this)));
     this._stepAtDeploy = this.strategy.step;                        // consume the step change either way
     if (!want || this.unit.type === want) return;                  // new beat wants the same vehicle → carry on
     // INTERCEPT (our flag was just lifted): only worth driving HOME to fetch a Valkyrie if it's a
@@ -6947,6 +7078,13 @@ class AICommander {
       if (this.unit && this.unit.dead) {
         this.deaths++;
         this.failStreak = (this.failStreak || 0) + 1;
+        // REPEATED-SCUTTLE ALARM (Jacob: "better a loud alarm than a rare bug to diagnose").
+        // Losing unit after unit on the same plan is the signature of a decision loop, and it is
+        // exactly what he sat and watched for 4907s. Say so, once, with the numbers.
+        if (this.failStreak === SCUTTLE_ALARM_N) {
+          aiLog(this.team, `[LOSS ALARM] ${this.cname}: ${SCUTTLE_ALARM_N} units lost in a row on ${this.strategy.step}`
+            + ` (latest a ${this.unit.type}). Something here is not working and the commander is repeating it.`);
+        }
         this._lostRecentT = this._matchT;            // MissionScore: recent-death boosts Attack for a bit
         const lost = this.unit.type;                 // attrition: that vehicle is gone from the roster
         if (this.roster[lost] != null) this.roster[lost] = Math.max(0, this.roster[lost] - 1);
@@ -6966,6 +7104,19 @@ class AICommander {
           // tour that made progress forgives it immediately.
           if (!this._missionSuccess) this._missionSuccess = {};
           if (!progress) this._missionSuccess[step] = -4; else delete this._missionSuccess[step];
+          // BLAME THE CHASSIS, NOT JUST THE PLAN (Jacob, watching a 4907s match: a Lurcher
+          // scuttled on siege over and over, then one Jotun cleared the towers in a single
+          // mission). The memory above keys on the MISSION alone, so a plan that is right but
+          // being attempted with the wrong vehicle gets benched wholesale — losing a good plan
+          // instead of changing the tool. Track the PAIRING as well; _vehicleForMission reads
+          // this and substitutes a different chassis before the mission itself is abandoned.
+          if (!this._msnVehFail) this._msnVehFail = {};
+          const vk = `${step}|${lost}`;
+          if (!progress) this._msnVehFail[vk] = (this._msnVehFail[vk] || 0) + 1;
+          // A tour that DID make progress earns the chassis credit back — but only one tour's
+          // worth. Deleting the whole record let a single good outing erase a run of failures,
+          // so a chassis that fails this mission four times out of five never accumulated.
+          else if (this._msnVehFail[vk]) this._msnVehFail[vk] = Math.max(0, this._msnVehFail[vk] - 1);
           if (!progress) {
             if (this._failStep === step) this._failN++; else { this._failStep = step; this._failN = 1; }
             this._failT = performance.now();
@@ -7227,6 +7378,13 @@ class AICommander {
   // is where their units spawn, so the far tower keeps us out of the crossfire between tower and
   // reinforcements, and gives us the longest look at anyone driving out to meet us.
   _buildSiegePlan() {
+    // THE KEEP IS THE WIN CONDITION — the enemy FOB is a sideshow. plannableTowers() spans EVERY
+    // enemy camp, so once the main fort's guns were down the plan simply advanced to the next
+    // tower on its list, which sat at the FOB in the opposite direction. Measured on seed 74: red
+    // flattened the main fort at t600, walked to the FOB, and shelled it until t900+ while the
+    // keep it needed to crack sat at 594hp, undefended and ignored. Restrict the kill order to
+    // the target camp; FOB guns are somebody else's problem (and `threatened` still answers one
+    // that actually shoots at us).
     const towers = this.plannableTowers();
     if (!towers.length) return null;                       // nothing discovered yet — scout first
     const b = this._dirBasis(), fob = this.enemyFobPos();
@@ -7241,14 +7399,38 @@ class AICommander {
     // Kill order: within the chosen face, furthest-from-FOB first; the other face follows so a
     // finished plan keeps going instead of stalling once its preferred side is flat.
     const pref = mode === 'rear' ? rear : front, rest = mode === 'rear' ? front : rear;
+    // Within the chosen face, take the CLOSEST first (Jacob: "just kill whatever is closest").
+    // The old order was furthest-from-FOB throughout, which is the right idea for picking WHICH
+    // face to attack — it is still what `mode` decides — but a poor reason to walk past a nearer
+    // gun once you are committed to that face.
     const order = [...pref.sort((A, C) => dFob(C) - dFob(A)), ...rest.sort((A, C) => dFob(C) - dFob(A))];
-    this._siegePlan = { order, idx: 0, mode, fobOnApproach, builtT: this._matchT, spots: new Map() };
+    // tries: how many times each tower's firing spot has been RE-SOLVED. The two escape hatches
+    // below (held-out-of-reach, driver-refused) each said "re-solve it once" in a comment but
+    // counted nothing, and a re-solve moves the answer enough to mint a fresh order, which resets
+    // the per-order guard and lets it fire again next tick. Counting per TOWER is what makes
+    // "once" true. See SIEGE_RESOLVE_MAX.
+    this._siegePlan = { order, idx: 0, mode, fobOnApproach, builtT: this._matchT, spots: new Map(), tries: new Map() };
     aiLog(this.team, `${this.cname}: Siege plan — ${mode === 'rear' ? 'flank and take the BACK towers' : 'frontal assault'}, ${order.length} tower(s) on the list${fobOnApproach ? ' (their FOB is on the front approach)' : ''}.`);
     return this._siegePlan;
   }
   // The tower this team is currently sieging, per the plan. Advances past towers we now know are
   // down. Rebuilds if the plan is empty//exhausted or new intel has arrived since it was drawn up.
   _planTarget() {
+    // ENOUGH TOWERS — GO FOR THE KEEP. A runner can take the flag with FLAG_GRAB_TURRETS still
+    // standing (Jacob: "a firebrat CAN easily grab a flag even if the two back towers are still
+    // up"), so clearing the last two buys nothing and costs the whole midgame. Once the main
+    // fort is down to that many, stop naming towers: returning null promotes the enemy KEEP to
+    // the suppress target (see hqThreat), which is the actual win condition — crack it, the flag
+    // is exposed, and the grab is on. Answering a gun that actually shoots at us still works;
+    // that is `threatened`, not the siege plan.
+    // …but the tolerance SHRINKS each time a runner dies to those guns (Jacob: "if siege goes out
+    // again because the capture failed, it should go after another tower, not turn around because
+    // two are already down"). First pass: leave two, crack the keep, send the runner. If towers
+    // killed that runner, they have earned removal — leave one. Kill another, and we clear the
+    // fort. So the shortcut is taken once on optimism and paid for in evidence, rather than being
+    // a permanent refusal to finish the job.
+    // (Once the keep IS cracked this guard lapses anyway — flagExposed() short-circuits it — so a
+    // capture that fails AFTER the breach already sends siege back to the towers.)
     let p = this._siegePlan;
     const stale = p && this._matchT - p.builtT > 30 && p.order.length < this.plannableTowers().length;
     if (!p || p.idx >= p.order.length || stale) p = this._buildSiegePlan();
@@ -7265,7 +7447,39 @@ class AICommander {
   // accept a longer shot (damage falloff, still inside shotReach), then a closer one (eat more
   // tower fire). CROSSFIRE IS NEVER RELAXED — standing where two guns reach you defeats the whole
   // point of a standoff. Returns {x,z} or null (and null is worth logging: see the caller).
-  _standoffFor(v, k, budget = 40) {
+  // ONE guarded way to re-solve a tower's firing spot, shared by both escape hatches (held out of
+  // our own reach; driver refused the spot). Escalates instead of repeating: re-solve at most
+  // SIEGE_RESOLVE_MAX times for a given tower, then move down the kill order. `why` names the
+  // hatch so the alarm can say which one is looping.
+  _resolveStand(v, why) {
+    const plan = this._siegePlan; if (!plan) return;
+    const k = this._planTarget(); if (!k) return;
+    const n = (plan.tries.get(k.wall) || 0) + 1;
+    plan.tries.set(k.wall, n);
+    this._resolveN = (this._resolveN || 0) + 1;
+    if (this._resolveN === SIEGE_RESOLVE_ALARM) {
+      aiLog(this.team, `[SIEGE ALARM] ${this.cname}: firing positions re-solved ${SIEGE_RESOLVE_ALARM}x this match `
+        + `(latest: tower at ${Math.round(k.x)},${Math.round(k.z)} — ${why}). The plan is thrashing, not adapting.`);
+    }
+    if (n > SIEGE_RESOLVE_MAX) {
+      aiLog(this.team, `${this.cname}: That tower at (${Math.round(k.x)}, ${Math.round(k.z)}) has beaten ${SIEGE_RESOLVE_MAX} firing positions — leaving it and moving down the list.`);
+      plan.idx++;
+      return;
+    }
+    const again = this._standoffFor(v, k);
+    plan.spots.set(k.wall, again);
+    // A failed SOLVE is not the same as a failed TOWER. Advancing the kill order on the first
+    // null threw away towers whose far side was reachable, and a siege that skips its list stops
+    // being a siege (measured: resolution 19/20 -> 16/20). Let the attempt counter above decide
+    // when to give up; a null just means "no spot yet" and the next attempt probes elsewhere.
+    if (!again && n >= SIEGE_RESOLVE_MAX) {
+      aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — moving to the next one.`);
+      plan.idx++;
+    }
+  }
+  // budget = how many REAL reachability searches this solve may run (was 40 cheap ones; now a
+  // handful of thorough ones — see `reaches` below).
+  _standoffFor(v, k, budget = 5) {
     const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
     const T = { x: k.x, z: k.z };
     const reach = SHOT_REACH[v.type] || 42, unitR = TURRET_HOLD[v.type] || 40;
@@ -7275,8 +7489,25 @@ class AICommander {
       .map(o => ({ x: o.x, z: o.z, r: towerStats((o.wall.turret && o.wall.turret.upg) || 0).range }));
     const crossfire = (x, z) => others.some(o => (o.x - x) ** 2 + (o.z - z) ** 2 < o.r * o.r);
     const spotOK = (x, z) => flyer || (!v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z));
-    const reaches = (x, z) => { const p = planPath(v, { x, z }); if (!p || !p.length) return false;
-      const e = p[p.length - 1]; return (e.x - x) ** 2 + (e.z - z) ** 2 <= (grid.cell * 2) ** 2; };
+    // REACHABILITY, done properly ONCE rather than cheaply forty times (Jacob's rule: one good
+    // A* beats hundreds of poor ones). Two things were wrong here:
+    //   * it ran up to `budget` full-grid searches per call, DIRECTLY — outside
+    //     NAV_FRAME_BUDGET_MS — so nothing capped them. With two units alive that was 58ms of a
+    //     61.5ms frame.
+    //   * it ignored path.budgetHit. Driver.js:275 deliberately does not: "a budget-truncated
+    //     search proves NOTHING about reachability". So this accepted spots off truncated
+    //     searches that the driver then correctly refused — and the refusal re-ran the solver,
+    //     which is the loop.
+    // Now: a bigger node budget (so the answer is real), and `unsure` reported separately from
+    // `no` so a far-but-fine spot is not confused with an unreachable one.
+    const reaches = (x, z) => {
+      const p = planPath(v, { x, z }, { nodeMul: 2.5, by: 'standoff' });
+      if (!p || !p.length) return 'no';
+      const e = p[p.length - 1];
+      const near = (e.x - x) ** 2 + (e.z - z) ** 2 <= (grid.cell * 2) ** 2;
+      if (near) return 'yes';
+      return p.budgetHit ? 'unsure' : 'no';   // ran out of nodes = unproven, not disproven
+    };
     // Radius ladder: ideal band first, then RELAXED — further out (falloff) then closer in (pain).
     const ideal = [unitR, (minR + unitR) / 2, minR];
     const relaxed = [Math.min(reach * 0.95, unitR * 1.25), Math.min(reach * 0.99, unitR * 1.5), Math.max(14, minR * 0.75), Math.max(12, minR * 0.55)];
@@ -7287,12 +7518,30 @@ class AICommander {
         if (spotOK(x, z)) cands.push({ x, z, d: (x - px) ** 2 + (z - pz) ** 2 });
       }
       cands.sort((A, C) => A.d - C.d);                     // nearest to the unit = least travel
+      // SPREAD the few searches we can afford. Ranking purely by travel puts the cheapest
+      // candidates shoulder to shoulder on one side of the tower, so a handful of tries all probe
+      // the SAME approach — and if that side is blocked the tower gets abandoned even though the
+      // far side was open. Skip candidates that sit near one already tried, so ~5 searches cover
+      // the ring instead of one arc of it. (Trying 40 hid this: brute force bought diversity.)
+      const tried = [];
+      const spread = c => tried.every(t => (t.x - c.x) ** 2 + (t.z - c.z) ** 2 > SIEGE_SPOT_SPREAD ** 2);
+      let unsure = null;
       for (const c of cands) {
-        if (budget-- <= 0) break;
-        if (flyer || reaches(c.x, c.z)) {
-          if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
-          return { x: c.x, z: c.z };
-        }
+        if (budget <= 0) break;
+        if (!spread(c)) continue;                          // too close to a spot we already probed
+        tried.push(c); budget--;
+        const r = flyer ? 'yes' : reaches(c.x, c.z);
+        if (r === 'unsure' && !unsure) unsure = c;          // remember the best far-but-unproven one
+        if (r !== 'yes') continue;
+        if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
+        return { x: c.x, z: c.z };
+      }
+      // Nothing PROVEN reachable, but something was merely too far to prove. Take it rather than
+      // abandoning a workable tower — the unit walks the partial route and closes the distance,
+      // which is exactly what the driver does with a budget partial.
+      if (unsure) {
+        aiLog(this.team, `${this.cname}: Firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) is a long haul — heading over to confirm it.`);
+        return { x: unsure.x, z: unsure.z };
       }
     }
     return null;
@@ -7591,6 +7840,27 @@ class AICommander {
       if (dd < 8 * 8 || this._exitT <= 0) { this._exit = null; this._exitCoolT = 6; }   // cleared the gate (or timed out) — cool the re-arm so advance gets a clean run
       else mustGo = true;
     }
+    // FIGHT FROM UNDER THE ELEVATOR SHIELD (Jacob). A unit that tops out gets 5s of total
+    // invulnerability — but ONLY while it stands on the pad — and an exit waypoint in the same
+    // breath. mustGo is the TOP rung of the ladder, above every combat state, so with an enemy in
+    // its face it drove for the gate and spent its invulnerability travelling. Yielding here (as
+    // opposed to reordering the ladder) is deliberate: the exit route is gate-threading with
+    // skipWhiskers, and combat modes have no such route, so promoting them generally would drive
+    // units at enemies THROUGH their own base walls. This yields only while the shield is
+    // actually up and something is actually in reach — at most those 5 seconds.
+    if (mustGo && elevShieldOn(v) && aiPadFight) {
+      const foeR = (ENGAGE_RANGE[v.type] || 36) * 1.1;
+      for (const o of combatants) {
+        if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
+        const dx = o.holder.position.x - px, dz = o.holder.position.z - pz;
+        if (dx * dx + dz * dz > foeR * foeR) continue;
+        if (v.ammo <= 0) break;                       // nothing to shoot with — take the gate
+        mustGo = false;                               // let the ladder fall through to engage
+        if (!v._padFightLogged) { v._padFightLogged = true;
+          aiLog(this.team, `${this.cname}: Contact right off the pad — holding the shield and fighting from here.`); }
+        break;
+      }
+    }
     // The nearest LIVE enemy wall-turret this unit can actually SHOOT — sensed wide
     // (TURRET_SENSE) so heavies snipe from outside the towers' own range, but ONLY
     // counted if there's a clear line to it. That LOS gate is the key: a unit no
@@ -7622,6 +7892,29 @@ class AICommander {
       const inSense = k && (k.x - px) ** 2 + (k.z - pz) ** 2 <= senseR * senseR;
       this._suppressing = !!inSense;
       if (k && inSense) {
+        // CONFIRM THE TARGET YOU ARE SHOOTING AT (Jacob: "units should be able to see the target
+        // they are shooting at — 80u doesn't sound that far to see a tower"). The general sight
+        // sweep above only refreshes a tower when the unit happens to hold LOS to it during its
+        // pass; a corner tower sits inside a fort ringed by its own walls, so from a standoff the
+        // fort blocks the view of its own gun and the record never updates. A commander could
+        // therefore shell a tower that died minutes ago — measured on seed 74: believedArmed=1
+        // with actualTowers=0 for 400s, burning 40 rounds and never touching the HQ, because
+        // `crack the keep` only applies once the plan is EMPTY and the ghost kept it occupied.
+        // So: whenever the target is in sensing range AND we have a clear line to it — the same
+        // line the firing spot was chosen for — believe our own eyes about whether it still has
+        // a gun. No omniscience: this is exactly what the unit can see from where it stands.
+        const kt = k.wall && k.wall.turret;
+        if (kt && hasLOS(px, pz, k.x, k.z)) {
+          const armedNow = !kt.dead && !kt.falling;
+          const rec = this.knownTowers.get(k.wall);
+          if (rec && rec.armed !== armedNow) {
+            rec.armed = armedNow; rec.seenT = this._matchT;
+            if (!armedNow) {
+              aiLog(this.team, `${this.cname}: That tower at (${Math.round(k.x)}, ${Math.round(k.z)}) is already wrecked — scratch it, next target.`);
+              this._siegePlan.spots.delete(k.wall);
+            }
+          }
+        }
         // The firing spot is computed ONCE per tower and cached on the plan — the expensive part
         // (A* reachability over candidate spots) now happens per SIEGE, not per tick. That is what
         // makes the relaxation ladder affordable and kills the replan storm at the same time.
@@ -8019,7 +8312,25 @@ function stateDetail(d, st) {
     default:         return '';
   }
 }
-function updateCommanders(dt) { _astarFrameMs = 0; updateReservations(); for (const cmd of commanders) cmd.update(dt); updateFlags(dt); publishAILive(dt); }
+function updateCommanders(dt) {
+  _astarFrameMs = 0; _planFrame = 0;
+  updateReservations();
+  for (const cmd of commanders) cmd.update(dt);
+  // Run the no-move watch ONCE per unit per tick, here rather than at the drive boundary, so it
+  // catches units whose brain wants to move but which never reach a drive call at all.
+  for (const v of combatants) if (!v.dead && v.ai) _noMoveWatch(v, dt);
+  updateFlags(dt); publishAILive(dt);
+  // A* STORM ALARM. The siege re-solve loop ran ~40 searches a FRAME and was only noticed
+  // because ?perf's replans/s disagreed with its own cause tags. A number that high is never
+  // legitimate work — it is something re-deciding instead of deciding. Shout once, naming the
+  // callers, so the next loop of this kind announces itself instead of waiting to be spotted.
+  if (_planFrame >= ASTAR_FRAME_ALARM && !_astarAlarmed) {
+    _astarAlarmed = true;
+    const by = Object.entries(_planBy).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(', ');
+    aiLog('red', `[A* ALARM] ${_planFrame} pathfinding searches in ONE frame (${by || 'callers untracked — needs ?perf'}). `
+      + `That is a loop, not a plan. Frames like this are what caused the 16fps stutter.`);
+  }
+}
 
 // AI LAB LIVE OVERLAY: publish each commander's current mission to localStorage on a light
 // throttle (~2.5 Hz). The standalone ai-lab/commanders.html (same origin) reads this key and
@@ -9807,6 +10118,8 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples }),   // match-wide driver counters
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
+  setVehSwap: on => { aiVehSwap = !!on; return aiVehSwap; },   // A/B: blame the chassis for a failing mission, or only the mission
+  setPadFight: on => { aiPadFight = !!on; return aiPadFight; },   // A/B: fight from under the elevator shield vs always drive out first
   setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
   setRightOfWay: on => { aiRightOfWay = !!on; if (!aiRightOfWay) RESV.clear(); return aiRightOfWay; },   // friendly path-reservation yielding (A/B knob)
   setMissionWeights: on => setMissionWeights(on),                       // MissionScore weighted picker vs the classic playbook (dual-brain A/B)
@@ -9843,6 +10156,7 @@ window.RR = {
   get aiEvents() { return aiEvents.slice(); },                 // debug: the rolling AI decision log (headless can't read the DOM overlay)
   get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
   planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
+  planBy: () => ({ ..._planBy }),                              // debug: those calls attributed to their CALLER (nav vs standoff) — needs ?perf
   setVision: (v) => { AI_VISION = v; return AI_VISION; },      // base sight range (A/B the "less distraction" idea)
   getVision: () => AI_VISION,
   setShieldSight: (m) => { SHIELD_SIGHT_MULT = m; return SHIELD_SIGHT_MULT; },   // shield beacon sight = m × base (A/B scouting-for-shields)
