@@ -4770,58 +4770,53 @@ function updateScrap(dt) {
 // but collision didn't sent units grinding into the corner). Gate corridors, roads
 // and elevator pads are explicitly open (so the tighter margin can't seal a gate), and
 // sinkers still avoid open water. drive()'s full-radius slide handles the final sliver.
+// Behaviour here is UNCHANGED from the version this replaced — proved cell-by-cell over the whole
+// grid for every live vehicle (~/pw/_navequiv.cjs, 18818 checks per function, zero mismatches),
+// then confirmed end to end: the 20-seed tournament came back byte-identical, same winners and
+// same tick counts. That exact test is why this needed no statistical gate.
+// Two things were costing the time (Jacob's trace: 42.5% of CPU here, vs 6.4% in A* itself):
+//   1. the same string key `i+','+j` was rebuilt FOUR times per call, one per lookup
+//   2. all 80 obstacles were scanned linearly for every cell tested
 function cellBlocked(v, i, j) {
   const c = grid.cell, x = i * c, z = j * c;
   const halfW = map.worldW / 2 + 24, halfH = map.worldH / 2 + 24;
   if (x < -halfW || x > halfW || z < -halfH || z > halfH) return true;
   if (islandBound && x * x + z * z > islandBound * islandBound) return true;
-  const gw = gateCells.get(i + ',' + j);
-  if (gw) return v._move.ignoreWalls ? false : gateBlocks(gw, v.team);   // shut enemy gate blocks; ally/open/breached/flyer → passable
-  // A shut gate's collision slab (blockedFor: halfNorm + VEH_R each side of the plane) is
-  // WIDER than the corridor/jamb cells above — cell centres one row off the plane sit 5u out
-  // vs a 4.6u slab edge, so A* could legally route a hull-width path along the door and leave
-  // the unit pressing it, creeping ~0.15u/s ("gate-band hug"). Mirror the slab here with the
-  // planning margin so nav stands off a shut gate exactly as far as collision does. Checked
-  // per-team like the corridor, so it opens the moment the gate is breached or held.
-  if (aiGateBand && !v._move.ignoreWalls) for (const g of gates) {
+  const key = i + ',' + j;                              // built ONCE, reused by all four lookups
+  const m = v._move;
+  const gw = gateCells.get(key);
+  if (gw) return m.ignoreWalls ? false : gateBlocks(gw, v.team);
+  if (aiGateBand && !m.ignoreWalls) for (const g of gates) {
     const ax = x - g.gx, az = z - g.gz;
-    if (ax * ax + az * az > 400) continue;             // >20u away — can't be in any slab
+    if (ax * ax + az * az > 400) continue;
     if (!gateBlocks(g.w, v.team)) continue;
     if (Math.abs(ax * g.nx + az * g.nz) < g.halfNorm + VEH_R + VEH_R * 0.9 &&
         Math.abs(ax * g.px + az * g.pz) < g.halfRun + VEH_R * 0.9) return true;
   }
-  if (roadNet.cells && roadNet.cells.has(i + ',' + j)) return false;
+  if (roadNet.cells && roadNet.cells.has(key)) return false;
   if (elevatorPadAt(x, z)) return false;
-  if (gateSideCells.has(i + ',' + j)) return true;   // a gate flank — force the centre throat
-  if (navAvoid.size) {                               // temporary no-go (a spot a unit kept grinding) — NEVER over a gate/road/pad (handled above) so it can't strand
-    const e = navAvoid.get(i + ',' + j);
-    if (e !== undefined) { if (e > performance.now()) return true; navAvoid.delete(i + ',' + j); }
+  if (gateSideCells.has(key)) return true;
+  if (navAvoid.size) {
+    const e = navAvoid.get(key);
+    if (e !== undefined) { if (e > performance.now()) return true; navAvoid.delete(key); }
   }
-  const m = v._move;
   if (m.water === 'sink' && !map.isLand(x, z)) {
-    // A sinker fords only SHALLOW water, and only where the whole HULL clears deep water. A*
-    // plans on cell centres but the hull has radius VEH_R and can move DIAGONALLY, so check the
-    // full footprint (8 neighbours at full radius, matching the collision layer) — otherwise A*
-    // threads a sliver of shallows the hull can't actually follow: the collision stops it at the
-    // first deep lip and it grinds the shoreline, following a nav line out over water it can't
-    // cross ("dancing on the shore"). Tighter here = A* prefers a real land/bridge route.
     if (map.isDeepWater(x, z)) return true;
     const r = aiSoftFord ? VEH_R * 0.85 : VEH_R;
     if (map.isDeepWater(x + r, z) || map.isDeepWater(x - r, z) || map.isDeepWater(x, z + r) || map.isDeepWater(x, z - r)) return true;
     if (!aiSoftFord && (map.isDeepWater(x + r, z + r) || map.isDeepWater(x + r, z - r) || map.isDeepWater(x - r, z + r) || map.isDeepWater(x - r, z - r))) return true;
   }
   if (!m.ignoreWalls) {
-    const margin = VEH_R * 0.9;   // ≈ collision's full VEH_R, so A* won't route into a corner the hull can't enter
-    for (const o of obstacles) {
-      if (o.body && o.body.dead) continue;           // destroyed wall/tower → A* may route through the gap
-      const dx = x - o.x, dz = z - o.z, rr = o.r + margin;
-      if (dx * dx + dz * dz < rr * rr) return true;
+    const near = obsBuckets.get(key);                   // only obstacles that can reach this cell
+    if (near) {
+      const margin = VEH_R * 0.9;
+      for (const o of near) {
+        if (o.body && o.body.dead) continue;
+        const dx = x - o.x, dz = z - o.z, rr = o.r + margin;
+        if (dx * dx + dz * dz < rr * rr) return true;
+      }
     }
   }
-  // NOTE: trees do NOT hard-block here even for tree:'bump' vehicles — the Firebrat can shoot a
-  // tree clear, so a treed cell is merely EXPENSIVE (see vehCellCost). Hard-blocking meant that in
-  // dense woods every neighbouring cell was blocked, A* died instantly, and the unit fell back to
-  // a DIRECT beeline ("no A* route" while the forest was plainly routable-by-fire).
   return false;
 }
 // Nearest open cell to (gi,gj) within `R` rings — lets us aim at a goal that sits
@@ -4839,15 +4834,20 @@ function nearestOpenCell(v, gi, gj, R, minR = 0) {
 // Grid cells that contain a tree — the "forest" the Hunter likes to travel through. Built
 // once from the foliage scatter (rebuilt on a new match via page reload), looked up cheaply
 // in the A* cost. Stays null until foliage exists so we don't cache an empty set early.
-let forestCells = null;
-function forestHas(k) {
-  if (forestCells === null) {
+// Grid cells containing a tree, built once from the foliage scatter. The cost function asks
+// this up to four times per cell (the tree-adjacency test), so it was four string allocations on
+// the hottest path in the game. CELL_K packs i,j into one integer; the offset keeps it positive
+// for cells left of / behind the origin, and 8192 is far wider than any grid we generate.
+let forestCellsN = null;
+const CELL_K = (i, j) => (i + 4096) * 8192 + (j + 4096);
+function forestHasN(i, j) {
+  if (forestCellsN === null) {
     if (!foliage || !foliage.trees) return false;
-    forestCells = new Set();
+    forestCellsN = new Set();
     const fc = grid.cell;
-    for (const t of foliage.trees) forestCells.add(Math.round(t.x / fc) + ',' + Math.round(t.z / fc));
+    for (const t of foliage.trees) forestCellsN.add(CELL_K(Math.round(t.x / fc), Math.round(t.z / fc)));
   }
-  return forestCells.has(k);
+  return forestCellsN.has(CELL_K(i, j));
 }
 // Per-vehicle A* cell cost. Infinity = impassable (blocked). SHARED by the live navigator
 // (planPath) AND the A* visualizer (buildAstarGrid) so the picture you inspect is EXACTLY the
@@ -4857,7 +4857,8 @@ function forestHas(k) {
 function vehCellCost(v, i, j) {
   if (cellBlocked(v, i, j)) return Infinity;
   const c = grid.cell, roads = roadNet.cells;
-  const onRoad = roads && (roads.has(i + ',' + j) || gateCells.has(i + ',' + j));
+  const key = i + ',' + j;                              // built once, both lookups share it
+  const onRoad = roads && (roads.has(key) || gateCells.has(key));
   // SINK vehicles wade shallow water but bog there — make off-road shallows EXPENSIVE so A* keeps
   // them on land/roads and only fords when there's genuinely no dry route (overrides archetype).
   if (v._move.water === 'sink' && !onRoad && !map.isLand(i * c, j * c)) return 35;
@@ -4869,7 +4870,7 @@ function vehCellCost(v, i, j) {
     // woods it could blast through.
     if (foliage && foliage.treeAt(i * c, j * c, VEH_R * 0.5)) return 30;
     if (onRoad) return 0.5;
-    const treeNear = forestHas((i + 1) + ',' + j) || forestHas((i - 1) + ',' + j) || forestHas(i + ',' + (j + 1)) || forestHas(i + ',' + (j - 1));
+    const treeNear = forestHasN(i + 1, j) || forestHasN(i - 1, j) || forestHasN(i, j + 1) || forestHasN(i, j - 1);
     return treeNear ? 6 : 1;   // water == clean land (1); don't PREFER water, just skirt trees
   }
   // Personality terrain preference: Rogue sneaks over OCEAN, Hunter moves under FOREST cover,
@@ -4880,7 +4881,7 @@ function vehCellCost(v, i, j) {
     if (water && subDanger(i * c, j * c)) return 8;   // sub territory — sneak along the coast, not out to sea
     return water ? 0.45 : (onRoad ? 0.8 : 1);
   }
-  if (arch === 'hunter') return forestHas(i + ',' + j) ? 0.45 : (onRoad ? 0.8 : 1);
+  if (arch === 'hunter') return forestHasN(i, j) ? 0.45 : (onRoad ? 0.8 : 1);
   return onRoad ? 0.5 : 1;
 }
 // Closest point on segment A→B to point P (clamped to the segment).
@@ -8978,6 +8979,28 @@ function buildObstacles() {
   let maxCamp = 0;
   for (const c of camps) maxCamp = Math.max(maxCamp, Math.hypot(c.center.x, c.center.z));
   islandBound = maxCamp + 70;
+  buildObsBuckets();
+}
+// OBSTACLE BUCKETS — cellBlocked used to scan all 80 obstacles for EVERY cell A* touched, which
+// on a 9216-cell grid is the single most-executed loop in the game (42.5% of sampled CPU in
+// Jacob's laptop trace). Each obstacle only blocks the handful of cells within its radius, so
+// register it into those cells once and the per-cell check reads a list that is almost always
+// empty. Rebuilt with the obstacle array; the body-dead test stays per-query so a destroyed wall
+// opens its gap immediately without a rebuild.
+const obsBuckets = new Map();   // cell key "i,j" → obstacles overlapping that cell
+function buildObsBuckets() {
+  obsBuckets.clear();
+  const c = grid.cell, margin = VEH_R * 0.9;
+  for (const o of obstacles) {
+    const rr = o.r + margin;
+    const i0 = Math.floor((o.x - rr) / c), i1 = Math.ceil((o.x + rr) / c);
+    const j0 = Math.floor((o.z - rr) / c), j1 = Math.ceil((o.z + rr) / c);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const k = i + ',' + j;
+      const list = obsBuckets.get(k);
+      if (list) list.push(o); else obsBuckets.set(k, [o]);
+    }
+  }
 }
 
 const VEH_R = 3.0;            // vehicle collision radius (vs walls/trees)
@@ -10007,6 +10030,11 @@ const ray = new THREE.Raycaster();
 // Debug handle (headless verification / console poking).
 window.RR = {
   THREE, scene, camera, map,
+  planPath: (v, dest, opts) => planPath(v, dest, opts),          // nav benchmark / path probes
+  cellBlocked: (v, i, j) => cellBlocked(v, i, j),                // nav benchmark: equivalence checking
+  vehCellCost: (v, i, j) => vehCellCost(v, i, j),                // nav benchmark: equivalence checking
+  navStats: () => ({ obstacles: obstacles.length, gates: gates.length, cell: grid.cell,
+    cells: Math.ceil(map.worldW / grid.cell) * Math.ceil(map.worldH / grid.cell) }),
   mapCfg: () => MAP_CFG,                                       // debug: the decoded ?mapcfg (designed map), or null
   get destructibles() { return destructibles; },
   get soldiers() { return soldiers; },                          // debug: the base-infantry corps (counts/behavior probes)
