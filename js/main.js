@@ -38,7 +38,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn, setCapRoutes, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5103,6 +5103,10 @@ let aiGradedTour = !QS.has('nograded');
 // File the report card under the DIRECTIONAL mission key the scorer reads, not the base name.
 // A/B via RR.setMsnDirKey / ?nodirkey — off restores the old (mis-filing) behaviour.
 let aiMsnDirKey = !QS.has('nodirkey');
+// Protect the LAST firebrat: it is the only unit that can carry a flag, so don't spend it on
+// errands and don't bet it on a still-armed fort. A/B via RR.setSaveRunner / ?nosaverunner.
+let aiSaveRunner = !QS.has('nosaverunner');
+setSaveRunnerScore(aiSaveRunner);   // keep the scorer's copy in step with the deploy guard
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
 Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → routes opened/closed
@@ -6576,7 +6580,26 @@ class AICommander {
     // because `want` below has already been through _pickAvailableType, which answers "what can
     // we field from stock" and therefore can never name a type we have none of. Any rescue that
     // asks "the plan needs X and we have no X" has to read this one; see the runner rebuild.
-    const rawWant = this.strategy.wantVehicle(this);
+    let rawWant = this.strategy.wantVehicle(this);
+    // DON'T SPEND THE LAST RUNNER ON ERRANDS. "SAVE THE LAST OF A TYPE" in _pickAvailableType
+    // holds each type's final vehicle back while another type has spares — but its pool is empty
+    // for the firebrat, so the ONE irreplaceable unit is the only one it does not protect. The
+    // comment there says the Hunter's firebrat reserve covers it; no such reserve exists. And the
+    // Rogue's role table asks for a FIREBRAT to scout (AIStrategies.js), so a commander will send
+    // its last flag carrier out sightseeing.
+    // A capture has no substitute and must still go. Everything else does have one, so when the
+    // runner pool is down to its last and the mission is not a capture, field something else.
+    if (aiSaveRunner && rawWant === 'firebrat' && this.strategy.step !== 'capture'
+        && (this.roster.firebrat || 0) <= 1) {
+      const sub = ['lurcher', 'valkyrie', 'jotun'].find(t => (this.roster[t] || 0) > 0);
+      if (sub) {
+        if (this._saveRunnerLogged !== this.strategy.step) {
+          this._saveRunnerLogged = this.strategy.step;
+          aiLog(this.team, `${this.cname}: That's our last Firebrat — it's the only thing that can carry a flag. Sending a ${sub} on ${this.strategy.step} instead.`);
+        }
+        rawWant = sub;
+      }
+    }
     const want = this._vehicleForMission(this.strategy.step,
       this._pickAvailableType(rawWant) || rawWant);
     // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
@@ -10347,6 +10370,8 @@ window.RR = {
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
+  saveRunner: () => aiSaveRunner,
+  setSaveRunner: (v) => { aiSaveRunner = !!v; setSaveRunnerScore(aiSaveRunner); return aiSaveRunner; },   // A/B: protect the last flag carrier (both halves)
   setMsnDirKey: (v) => { aiMsnDirKey = !!v; return aiMsnDirKey; },   // A/B: file tour results under the directional mission key
   setGradedTour: (v) => { aiGradedTour = !!v; return aiGradedTour; },   // A/B: graded tour report card vs the old 3% pass/fail
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off

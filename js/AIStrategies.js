@@ -601,6 +601,13 @@ const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
   'capture-front', 'capture-left', 'capture-right', 'capture-rear',
   'defend', 'intercept', 'scavenge', 'sap', 'trap'];
 
+// A/B for the last-runner term, set from main.js so both halves of the change — this and the
+// substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
+// missionScore runs for all 13 candidates every decision, and the existing setMissionWeights
+// pattern right here is the house way to pass a knob across this boundary.
+let SAVE_RUNNER = true;
+export function setSaveRunner(on) { SAVE_RUNNER = !!on; return SAVE_RUNNER; }
+
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
 export function missionScore(cmd, key) {
   const T = []; let w = 0;
@@ -702,6 +709,18 @@ export function missionScore(cmd, key) {
   const s = cmd._missionSuccess && cmd._missionSuccess[key]; if (s) add('success', s);
   // affordability: a capture with no runner and no scrap to build one can't execute
   if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')) add('no runner', -6);
+  // THE LAST RUNNER IS A ONE-SHOT BET — the mirror of spareFB above. That term pays for having
+  // SPARE runners, so holding exactly one produced no signal either way, and the fleet-comp term
+  // is bonus-only (`if (b > 0)`) so being down to a last runner never discouraged capture at all:
+  // a fleet of 2L/2V/1FB pushes attack +1.7 and siege-back +2.5 while capture gets nothing, and
+  // late on capture still carries up to +3 of clock pressure. Scales with the guns still standing
+  // (Jacob: "every other unit should have tried to kill the enemies and towers before the last FB
+  // gets sent out"), so at four towers this is a bad bet and at zero it is exactly the moment to
+  // go — the term falls to nothing on its own rather than needing a threshold.
+  if (base === 'capture' && SAVE_RUNNER) {
+    const runners = (roster.firebrat || 0) + (cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat' ? 1 : 0);
+    if (runners === 1 && !cmd.canAfford('firebrat')) add('last runner', -Math.min(4, towers));
+  }
   return { total: Math.round(w * 10) / 10, terms: T };
 }
 
