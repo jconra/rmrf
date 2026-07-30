@@ -4718,7 +4718,13 @@ function updateGadgets(dt) {
   if (!minefield) return;
   aiHandleGadgets(dt);
   const booms = minefield.update(dt, combatants, isFlyer);
-  if (booms.length) bumpNavEpoch();   // detonated mines vanish from the cost field — detours can relax
+  // NO EPOCH BUMP HERE. A detonated mine only ever OPENS ground, so every cached path is still
+  // drivable — it is merely taking a detour it no longer needs, which the 7s NAV_TTL will clear on
+  // its own. Bumping invalidated EVERY unit's path across both teams to relax a detour, and
+  // map_changed was 21.6% of all replans (464 of 2150 over 12 matches, 222 of them mid-suppress).
+  // Jacob's rule: "when towers fall that opens the pathfinding options, but that doesn't warrant a
+  // new route immediately. Only closing the route would warrant that." The bumps that remain are
+  // all closures — a wall built, a mine laid, a mine becoming known to a team.
   for (const b of booms) {
     const p = new THREE.Vector3(b.x, b.y + 0.4, b.z);
     // Snapshot the living so we can attribute this mine's damage/kills (friendly vs enemy).
@@ -5091,6 +5097,9 @@ const NAV_TTL = 7;   // s — safety-net expiry (was the 1.1s "just in case" cad
 // keeping the staleness window short enough that a unit which has just been boxed in finds out
 // quickly. Deliberately not longer: the call exists BECAUSE a wrong "no path" stranded a unit.
 const REACH_TTL = 2;
+// Grade a mission tour in proportion to what it achieved, instead of pass/fail at 3% fort damage.
+// A/B via RR.setGradedTour / ?nograded — off restores the old binary test exactly.
+let aiGradedTour = !QS.has('nograded');
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
 Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → routes opened/closed
@@ -7195,13 +7204,27 @@ class AICommander {
         if (rec && rec.feat) { const r = this._tourRecord(rec, 1, this._slotI); aiTrainLog.push(r); this._noteTour(r); }
         if (rec) {
           const step = this.strategy.step;
-          const progress = this.kills > rec.kills0 || rec.flagTouched
-            || rec.fort0 - fortHpOf(this.targetTeam()) > 60;   // more than a stray chip of base damage
-          // MissionScore success memory: a total-failure tour drops this mission to −4 (it
-          // decays back toward 0 over the next few decisions — the smooth anti-repeat); a
-          // tour that made progress forgives it immediately.
+          // GRADE THE TOUR, DON'T PASS/FAIL IT. The old test forgave any tour that took 60hp off a
+          // fort of roughly 1960 (four 340hp towers plus a 600hp keep) — about 3% — so siege was
+          // very nearly incapable of failing its own report card, and the anti-repeat never bit it.
+          // Measured: on seed 1025 NINE units died on siege and the success memory stayed
+          // completely empty; across four seeds siege took 32 of 39 deaths while the worst any key
+          // reached was −4. That is why "[LOSS ALARM] 4 units lost in a row on siege" fires in
+          // nearly every match.
+          // Now the tour is worth what it achieved, in TOWER-EQUIVALENTS: a 340hp tower is 1.0, a
+          // kill is worth half of one, a hand on the flag is 2. The −4 for losing the unit is
+          // bought back in proportion, so a scratch recovers almost nothing and flattening a tower
+          // recovers all of it. Gradual, per the house rule, instead of a cliff at 3%.
+          const tourDmg = Math.max(0, rec.fort0 - fortHpOf(this.targetTeam()));
+          const tourKills = Math.max(0, this.kills - rec.kills0);
+          const ach = tourDmg / 340 + tourKills * 0.5 + (rec.flagTouched ? 2 : 0);
+          const progress = aiGradedTour ? ach >= 0.5           // half a tower, or one kill
+            : (this.kills > rec.kills0 || rec.flagTouched || tourDmg > 60);
           if (!this._missionSuccess) this._missionSuccess = {};
-          if (!progress) this._missionSuccess[step] = -4; else delete this._missionSuccess[step];
+          if (aiGradedTour) {
+            const pen = Math.min(0, -4 + ach * 4);
+            if (pen < -0.05) this._missionSuccess[step] = pen; else delete this._missionSuccess[step];
+          } else if (!progress) this._missionSuccess[step] = -4; else delete this._missionSuccess[step];
           // BLAME THE CHASSIS, NOT JUST THE PLAN (Jacob, watching a 4907s match: a Lurcher
           // scuttled on siege over and over, then one Jotun cleared the towers in a single
           // mission). The memory above keys on the MISSION alone, so a plan that is right but
@@ -10308,6 +10331,7 @@ window.RR = {
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
+  setGradedTour: (v) => { aiGradedTour = !!v; return aiGradedTour; },   // A/B: graded tour report card vs the old 3% pass/fail
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   navNodes: () => _astarFrameNodes,
   resetNavNodes: () => { _astarFrameNodes = 0; },   // benchmark hook: start a fresh 'frame'
