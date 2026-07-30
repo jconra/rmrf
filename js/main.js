@@ -5401,6 +5401,8 @@ const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold
 // a net-progress watchdog whose ALARM dumps an autopsy (and, pinned long enough past
 // the grace, scuttles the unit — a stuck vehicle is a bug, not a situation).
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
+const navScuttles = [];                     // units the driver destroyed for being unable to move
+const navScuttlesByTeam = {};               // per-team scuttle tally — RR.navScuttles()
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
 const driverHooks = {
@@ -5415,7 +5417,16 @@ const driverHooks = {
         JSON.stringify(navAlarms.slice(-6).map(a => ({ ...a, rec: a.rec.slice(-50) }))));
     } catch (e) { /* storage full/blocked — the in-memory copy still has everything */ }
   },
-  selfDestruct: (v, why) => { if (aiNavScuttle && !v.dead) damageVehicle(v, 1e6, 'other', null); },
+  selfDestruct: (v, why) => {
+    if (!aiNavScuttle || v.dead) return;
+    // A SCUTTLE is its own failure class and deserves its own count: a unit the driver had to
+    // destroy because it could not move, not a unit that died fighting. It was only ever a log
+    // line, so the tournament could not report it — and the counter that DID appear in the summary
+    // as "repeated-scuttle" was neither repeats nor scuttles (see failStreak).
+    navScuttles.push({ t: Math.round(v._cmdMatchT || 0), team: v.team, type: v.type, why: why || 'nav-alarm' });
+    navScuttlesByTeam[v.team] = (navScuttlesByTeam[v.team] || 0) + 1;
+    damageVehicle(v, 1e6, 'other', null);
+  },
 };
 
 // ── MULTI-UNIT SLOTS ─────────────────────────────────────────────────────────
@@ -7226,9 +7237,16 @@ class AICommander {
         // REPEATED-SCUTTLE ALARM (Jacob: "better a loud alarm than a rare bug to diagnose").
         // Losing unit after unit on the same plan is the signature of a decision loop, and it is
         // exactly what he sat and watched for 4907s. Say so, once, with the numbers.
+        // This counts CONSECUTIVE LOSSES WITH NOTHING TO SHOW — it is reset by any tour that makes
+        // progress (below). It previously claimed "N units lost in a row on <mission>", which it
+        // never measured: failStreak counts every death regardless of mission, and its only reset
+        // lived in redraw(), which is gated on !this.archetype and so never runs for the archetype
+        // commanders all teams use now. It was a monotonic death counter that fired once per team
+        // per match in any match with four losses — ~27 per 30 — and could not respond to any
+        // anti-repeat fix, while sitting in the tournament summary labelled "repeated-scuttle".
         if (this.failStreak === SCUTTLE_ALARM_N) {
-          aiLog(this.team, `[LOSS ALARM] ${this.cname}: ${SCUTTLE_ALARM_N} units lost in a row on ${this.strategy.step}`
-            + ` (latest a ${this.unit.type}). Something here is not working and the commander is repeating it.`);
+          aiLog(this.team, `[LOSS ALARM] ${this.cname}: ${SCUTTLE_ALARM_N} units lost in a row with nothing to show`
+            + ` (latest a ${this.unit.type}, on ${this.strategy.step}). The plans are not working and the losses are adding up.`);
         }
         this._lostRecentT = this._matchT;            // MissionScore: recent-death boosts Attack for a bit
         const lost = this.unit.type;                 // attrition: that vehicle is gone from the roster
@@ -7259,6 +7277,10 @@ class AICommander {
           const progress = aiGradedTour ? ach >= 0.5           // half a tower, or one kill
             : (this.kills > rec.kills0 || rec.flagTouched || tourDmg > 60);
           if (!this._missionSuccess) this._missionSuccess = {};
+          // A tour that ACHIEVED something clears the streak — that is what makes the counter mean
+          // "consecutive losses with nothing to show" instead of a running death toll. Its only
+          // reset used to be redraw(), which never runs for archetype commanders.
+          if (progress) this.failStreak = 0;
           const msnKey = aiMsnDirKey ? this._msnKeyFor(step) : step;
           if (aiGradedTour) {
             const pen = Math.min(0, -4 + ach * 4);
@@ -10392,6 +10414,7 @@ window.RR = {
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples }),   // match-wide driver counters
+  navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setVehSwap: on => { aiVehSwap = !!on; return aiVehSwap; },   // A/B: blame the chassis for a failing mission, or only the mission
   setPadFight: on => { aiPadFight = !!on; return aiPadFight; },   // A/B: fight from under the elevator shield vs always drive out first
