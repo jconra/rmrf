@@ -5106,6 +5106,10 @@ let aiMsnDirKey = !QS.has('nodirkey');
 // Protect the LAST firebrat: it is the only unit that can carry a flag, so don't spend it on
 // errands and don't bet it on a still-armed fort. A/B via RR.setSaveRunner / ?nosaverunner.
 let aiSaveRunner = !QS.has('nosaverunner');
+// Treat the closest reachable point as arrival when the driver proves a goal unreachable, instead
+// of re-issuing the impossible order until the unit is scuttled. A/B via RR.setReachArrive.
+let aiReachArrive = !QS.has('noreacharrive');
+const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
 setSaveRunnerScore(aiSaveRunner);   // keep the scorer's copy in step with the deploy guard
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
@@ -7011,6 +7015,16 @@ class AICommander {
     // The DRIVER takes it from here: the state's resolved destination becomes a standing
     // GOTO order; the driver route-follows it (same A* cache) and reports the contract
     // violation if the goal turns out unreachable. Returns true = the driver owns motion.
+    // A GOAL THE DRIVER ALREADY PROVED UNREACHABLE stays unreachable until the map changes, so
+    // re-issuing it is exactly how a unit ends up parked at the end of a partial route until the
+    // driver scuttles it. If this state's goal was capped earlier, steer to the capped point — the
+    // closest ground the unit can actually stand on — instead of the impossible one. The cap is
+    // tied to _navEpoch, so a wall coming down or a gate opening clears it and the real goal is
+    // tried again; it also ages out on its own.
+    const rcap = this._reachCap;
+    if (rcap && aiReachArrive && rcap.by === st && rcap.epoch === _navEpoch
+        && this._matchT - rcap.t < REACHCAP_TTL) { dest = { x: rcap.x, z: rcap.z }; }
+    else if (rcap && (rcap.epoch !== _navEpoch || this._matchT - rcap.t >= REACHCAP_TTL)) this._reachCap = null;
     const isStand = this._destIsStand; this._destIsStand = false;
     const ord = this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, by: st });
     const s = this._driver.tick(dt);
@@ -7038,6 +7052,24 @@ class AICommander {
         // reached, move down the kill order.
         this._resolveStand(v, 'the driver refused the spot');
         this._nav.path = null;
+      }
+      // EVERY OTHER ISSUER — chiefly `advance`, which produced 69 of the violations in a 40-match
+      // run and had no listener at all. The driver latched the violation, logged "the ORDER is the
+      // bug", and nobody revised anything: the unit walked its partial route to the end, stood
+      // there re-issuing the same impossible GOTO, and the driver scuttled it 15s later. That is
+      // most of the 17 scuttles per 40 matches, 96% of them Lurchers stopped at a shoreline.
+      // An objective is not optional the way a pursuit contact is, and it has no alternative spot
+      // the way a firing position does — so the answer is neither "write it off" nor "re-solve".
+      // The unit is already standing at the closest reachable point to it; treat THAT as arrival
+      // so the mission proceeds from there, instead of failing to reach something forever.
+      else if (aiReachArrive && !isStand && st !== 'pursue') {
+        const p = this._nav && this._nav.path;
+        const end = p && p.length ? p[p.length - 1] : null;
+        if (end) {
+          this._reachCap = { x: end.x, z: end.z, t: this._matchT, by: st, epoch: _navEpoch };
+          aiLog(this.team, `${this.cname}: ${v.type} can't reach (${Math.round(dest.x)},${Math.round(dest.z)}) on ${st} — `
+            + `holding at the closest ground we can actually stand on and carrying on from there.`);
+        }
       }
     }
     if (!s) return;                                 // no route — keep the brain's command
@@ -10393,6 +10425,7 @@ window.RR = {
   get player() { return player; },
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
   saveRunner: () => aiSaveRunner,
+  setReachArrive: (v) => { aiReachArrive = !!v; return aiReachArrive; },   // A/B: cap an unreachable goal at the closest reachable point
   setSaveRunner: (v) => { aiSaveRunner = !!v; setSaveRunnerScore(aiSaveRunner); return aiSaveRunner; },   // A/B: protect the last flag carrier (both halves)
   setMsnDirKey: (v) => { aiMsnDirKey = !!v; return aiMsnDirKey; },   // A/B: file tour results under the directional mission key
   setGradedTour: (v) => { aiGradedTour = !!v; return aiGradedTour; },   // A/B: graded tour report card vs the old 3% pass/fail
