@@ -5100,6 +5100,9 @@ const REACH_TTL = 2;
 // Grade a mission tour in proportion to what it achieved, instead of pass/fail at 3% fort damage.
 // A/B via RR.setGradedTour / ?nograded — off restores the old binary test exactly.
 let aiGradedTour = !QS.has('nograded');
+// File the report card under the DIRECTIONAL mission key the scorer reads, not the base name.
+// A/B via RR.setMsnDirKey / ?nodirkey — off restores the old (mis-filing) behaviour.
+let aiMsnDirKey = !QS.has('nodirkey');
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
 Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → routes opened/closed
@@ -6443,6 +6446,18 @@ class AICommander {
     const px = this.unit ? this.unit.holder.position.x : 0, pz = this.unit ? this.unit.holder.position.z : 0;
     return !!this.nearestKnownScrap(px, pz) || this.explore.fraction() < 0.8;
   }
+  // THE KEY THE SCORER ACTUALLY READS. missionScore() scores DIRECTIONAL keys — MSN_CANDS holds
+  // both 'siege' and 'siege-back', and the four 'capture-*' lanes — but strategy.step carries the
+  // BASE name, because AIStrategies collapses 'siege-back' to 'siege' and 'capture-rear' to
+  // 'capture' on the way in. Writing the report card under `step` therefore filed a failed REAR
+  // siege against the FRONTAL one, benching the plan that did not fail while the one that did kept
+  // a clean record and stayed top of the list. Measured with _msnkeys.cjs: siege-back lost 3 units
+  // across four seeds and never took a single point; capture-front lost 2 and likewise.
+  // This is the same runningKey idiom AIStrategies.js:853 already uses to pick a mission, in one
+  // place so the write site and the vehicle swapper can never drift apart again.
+  _msnKeyFor(step) {
+    return (this._msnKey && this._msnKey.split('-')[0] === step) ? this._msnKey : step;
+  }
   // The type to actually field: the wanted one if any remain, else a same-class
   // substitute, else whatever we have most of, else null (roster empty → eliminated).
   // THE PLAN MIGHT BE RIGHT AND THE VEHICLE WRONG. If this mission has already eaten
@@ -6458,7 +6473,7 @@ class AICommander {
     // score AND this CHASSIS is the one that has been failing it. A pure count of 2 also trips it
     // on its own, but that needs a long match to accumulate (his was 4907s); the paired test
     // catches it inside a normal one, which is where the swap is worth anything.
-    const msnNeg = (this._missionSuccess && this._missionSuccess[step]) || 0;
+    const msnNeg = (this._missionSuccess && this._missionSuccess[this._msnKeyFor(step)]) || 0;
     const trip = failed(want) >= VEH_FAIL_SWAP || (failed(want) >= 1 && msnNeg < 0);
     if (!trip) return want;
     // Same-role stand-ins only (a runner has none) — reuse the substitution pool's intent.
@@ -7221,10 +7236,11 @@ class AICommander {
           const progress = aiGradedTour ? ach >= 0.5           // half a tower, or one kill
             : (this.kills > rec.kills0 || rec.flagTouched || tourDmg > 60);
           if (!this._missionSuccess) this._missionSuccess = {};
+          const msnKey = aiMsnDirKey ? this._msnKeyFor(step) : step;
           if (aiGradedTour) {
             const pen = Math.min(0, -4 + ach * 4);
-            if (pen < -0.05) this._missionSuccess[step] = pen; else delete this._missionSuccess[step];
-          } else if (!progress) this._missionSuccess[step] = -4; else delete this._missionSuccess[step];
+            if (pen < -0.05) this._missionSuccess[msnKey] = pen; else delete this._missionSuccess[msnKey];
+          } else if (!progress) this._missionSuccess[msnKey] = -4; else delete this._missionSuccess[msnKey];
           // BLAME THE CHASSIS, NOT JUST THE PLAN (Jacob, watching a 4907s match: a Lurcher
           // scuttled on siege over and over, then one Jotun cleared the towers in a single
           // mission). The memory above keys on the MISSION alone, so a plan that is right but
@@ -10331,6 +10347,7 @@ window.RR = {
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
+  setMsnDirKey: (v) => { aiMsnDirKey = !!v; return aiMsnDirKey; },   // A/B: file tour results under the directional mission key
   setGradedTour: (v) => { aiGradedTour = !!v; return aiGradedTour; },   // A/B: graded tour report card vs the old 3% pass/fail
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   navNodes: () => _astarFrameNodes,
