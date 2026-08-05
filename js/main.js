@@ -5376,6 +5376,7 @@ let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab i
 let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
+let aiLandmass = !QS.has('nolandmass');   // reject destinations on ground the unit can't drive to (see buildNavComp). RR.setLandmass
 let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
 // How many times ONE tower's firing spot may be re-solved before we stop trying and move down the
@@ -5427,7 +5428,25 @@ const driverHooks = {
     // destroy because it could not move, not a unit that died fighting. It was only ever a log
     // line, so the tournament could not report it — and the counter that DID appear in the summary
     // as "repeated-scuttle" was neither repeats nor scuttles (see failStreak).
-    navScuttles.push({ t: Math.round(v._cmdMatchT || 0), team: v.team, type: v.type, why: why || 'nav-alarm' });
+    // Record WHAT IT WAS DOING, not just that it died. "7 scuttled" is a number you can't act
+    // on; "7 scuttled, 5 of them lurchers stuck in `advance` on `defend`" names the defect. The
+    // owning commander's live snapshot has the state and the goal it never reached.
+    const own = commanders.find(c => c.ownsUnit(v));
+    const dbg = own ? own.dbgFor(v) : null;
+    // the SLOT's card, not the commander's — each slot runs its own mission, and reading the
+    // commander-level one would credit the scuttle to whichever slot happened to be bound.
+    const slot = own ? own._slotFor(v) : null;
+    const card = slot && slot.strategy ? slot.strategy : (own ? own.strategy : null);
+    navScuttles.push({
+      // …from the owning commander's clock. This read `v._cmdMatchT`, which nothing writes, so
+      // every scuttle in every report was stamped t0s — and a whole match's worth of them looked
+      // like they happened at kickoff.
+      t: Math.round(own ? own._matchT || 0 : 0), team: v.team, type: v.type, why: why || 'nav-alarm',
+      state: dbg ? dbg.state : null,
+      mission: card ? card.step : null,
+      px: Math.round(v.holder.position.x), pz: Math.round(v.holder.position.z),
+      gd: dbg ? dbg.gd : null,   // how far off the goal it was when it was written off
+    });
     navScuttlesByTeam[v.team] = (navScuttlesByTeam[v.team] || 0) + 1;
     damageVehicle(v, 1e6, 'other', null);
   },
@@ -6560,7 +6579,10 @@ class AICommander {
     }
     // minR beyond the clear radius so a fresh waypoint is always something to actually TRAVEL to
     // (never one that's cleared next tick → the scout keeps moving instead of freezing).
-    if (!this._exploreWp) { const home = this.homePos(), enemy = this.enemyBasePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12, enemy.x, enemy.z); }
+    // …and never send a ground unit to a patch of land it can't drive to (see drivableTo): the
+    // recon grid knows what is LAND, which is not the same question. When every unexplored patch
+    // left is across water, this returns null and the Scout card falls back to its real goal.
+    if (!this._exploreWp) { const home = this.homePos(), enemy = this.enemyBasePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12, enemy.x, enemy.z, (x, z) => drivableTo(v, x, z)); }
     return this._exploreWp;
   }
 
@@ -6572,6 +6594,12 @@ class AICommander {
   redraw() { this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, this.strategy.constructor, m => aiLog(this.team, `${this.cname}: ${m}`)); this.fortHp0 = fortHpOf(this.targetTeam()) || this.fortHp0; this.failStreak = 0; aiLog(this.team, `${this.cname}: That's not working — new plan, listen up!`); }
 
   deploy() {
+    // PICK THE MISSION BEFORE THE LIFT MOVES. Everything below chooses a chassis for
+    // `this.strategy.step`, so a stale step buys the wrong vehicle: slot 0's very first
+    // roll-out happened before the doctrine had ticked even once, and each respawn deploys
+    // from a dead slot (which returns before its tick). Deciding here is what makes the
+    // garage choice and the mission the same decision.
+    if (this.strategy.garagePick) this.strategy.garagePick(this);
     // NN mission assigner: under 'explore'/'nn' a SUPPORT slot re-picks its role card
     // each tour from the battlefield state (slot 0 keeps the archetype — the persona).
     // The pick runs BEFORE the vehicle choice below, since the card drives wantVehicle.
@@ -6984,6 +7012,14 @@ class AICommander {
       return;   // engage/suppress: steer as-is
     }
     if (!dest) return;
+    // Every dest above is a raw coordinate out of a mission or a memory, and none of that code
+    // ever asked whether this hull could stand there. Snap it onto ground the unit can actually
+    // reach (nearestDrivable). One place rather than per-mission: the missions all have the same
+    // blind spot, and the last time a fix like this lived in one branch, the other branch kept
+    // the bug for months. A no-op on a single connected landmass — which is the normal case —
+    // it earns its keep on the goal over open water or on an islet, where the unit used to drive
+    // at the sea and grind on the beach until the watchdog scuttled it.
+    dest = nearestDrivable(v, dest.x, dest.z);
     const d2 = (dest.x - v.holder.position.x) ** 2 + (dest.z - v.holder.position.z) ** 2;
     if (d2 < slack * slack) return;                 // close enough — hand back to the behavior
     // ESCALATION: when a unit has been genuinely stuck a long time (the local jolt + the
@@ -7702,7 +7738,12 @@ class AICommander {
     const others = this.plannableTowers().filter(o => o.wall !== k.wall)
       .map(o => ({ x: o.x, z: o.z, r: towerStats((o.wall.turret && o.wall.turret.upg) || 0).range }));
     const crossfire = (x, z) => others.some(o => (o.x - x) ** 2 + (o.z - z) ** 2 < o.r * o.r);
-    const spotOK = (x, z) => flyer || (!v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z));
+    // drivableTo first — it's two array lookups, and it throws out the spots that make the
+    // `unsure` branch below dangerous. A firing position on the far side of a channel fails no
+    // other test here (it's open ground with a clean shot), so it reached the A* probe, came
+    // back budget-truncated = "unproven, not disproven", and got taken. The unit then drove to
+    // the shoreline and stalled. A different landmass is the one case we can rule out for free.
+    const spotOK = (x, z) => flyer || (drivableTo(v, x, z) && !v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z));
     // REACHABILITY, done properly ONCE rather than cheaply forty times (Jacob's rule: one good
     // A* beats hundreds of poor ones). Two things were wrong here:
     //   * it ran up to `budget` full-grid searches per call, DIRECTLY — outside
@@ -9282,6 +9323,101 @@ function buildNavStatic() {
     const k = navIdx(i, j); if (k >= 0) navStatic[k] = f;
   }
 }
+// LANDMASS LABELS — which cells a ground vehicle can reach from which. Flood-filled over the
+// static bitmap using TERRAIN alone (world edge + water), so like the rest of the bitmap it is
+// baked once and never changes during a match.
+//
+// Buildings, walls and gates are deliberately left OUT, which makes this a one-way test: two
+// cells in DIFFERENT components definitely cannot be driven between, while two in the SAME
+// component merely might be. That direction is the useful one — a cheap, certain no.
+//
+// It exists because several systems pick a destination off the terrain and never ask whether
+// the unit can get there: the scout's recon waypoints come from "unexplored land", the siege
+// standoff spot from "somewhere with a shot". A target across a channel sends a ground unit to
+// the shoreline, where it grinds until the stuck watchdog scuttles it — a vehicle lost, an
+// alarm raised, and a mission marked failed at something it was never able to attempt.
+//
+// Uses the SOFT sinker footprint on purpose (the smaller radius, no diagonals): it blocks
+// fewer cells, so the components come out as generous as possible and "different landmass"
+// stays a claim worth acting on.
+let navComp = null;
+function buildNavComp() {
+  const N = navStaticN, WET = NAVF.OOB | NAVF.SINKSOFT;
+  navComp = new Int32Array(N * N);   // 0 = water/off-map, ≥1 = landmass id
+  const stack = []; let next = 0;
+  for (let s = 0; s < navComp.length; s++) {
+    if (navComp[s] || (navStatic[s] & WET)) continue;
+    const id = ++next;
+    navComp[s] = id; stack.push(s);
+    while (stack.length) {
+      const k = stack.pop(), a = k % N, b = (k / N) | 0;
+      for (let db = -1; db <= 1; db++) for (let da = -1; da <= 1; da++) {
+        const na = a + da, nb = b + db;
+        if (na < 0 || nb < 0 || na >= N || nb >= N) continue;
+        const nk = nb * N + na;
+        if (navComp[nk] || (navStatic[nk] & WET)) continue;
+        navComp[nk] = id; stack.push(nk);
+      }
+    }
+  }
+}
+// Landmass id at a world point. 0 means water, off the baked grid, or a coastal cell the
+// sinker footprint clips — i.e. "don't know", never "unreachable".
+function landmassAt(x, z) {
+  if (!navStatic) buildNavStatic();
+  if (!navComp) buildNavComp();
+  const k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell));
+  return k < 0 ? 0 : navComp[k];
+}
+// Could this vehicle DRIVE from where it stands to (x,z)? Anything that flies or fords always
+// can. A 0 on either end is an unknown, and an unknown answers YES — this test is here to rule
+// destinations out with certainty, never to rule them in.
+// GO AS CLOSE AS THE GROUND ALLOWS. Missions hand out RAW remembered coordinates — a tower's
+// radio call, a sighting, a heard contact — and nothing in that path ever asked whether a ground
+// unit could stand there. The thing that shot our base may have been a Valkyrie over open water;
+// the contact we heard may be across a channel. Defend.objective even carries a comment about
+// it: a unit sent at homeAttack()'s raw position was stranded for 164 seconds.
+// Refusing the order would be wrong (the threat is real and the direction is right), so instead
+// snap the goal to the nearest cell on the unit's OWN landmass. That turns "drive at the sea and
+// grind on the beach" into "get as close to it as you can" — which is what the order meant.
+// No A* involved: it's a ring search over the baked component labels, a few array reads.
+// Returns the point unchanged when it's already drivable, or when nothing better is within maxR.
+function nearestDrivable(v, x, z, maxR = 60) {
+  if (!aiLandmass || !v || !v._move || v._move.water !== 'sink') return { x, z };
+  const here = landmassAt(v.holder.position.x, v.holder.position.z);
+  if (!here) return { x, z };
+  // A 0 here means water, off-grid, or a coastal cell the sinker footprint clips — "don't know",
+  // NOT "unreachable", same rule as drivableTo. Getting this wrong is expensive: treating 0 as a
+  // mismatch fired the snap on every goal near a shoreline (a normal, fine goal) and dragged it
+  // inland. Worse, the moved goal often sat inside a wall — which the component labels ignore by
+  // design — so the driver ACCEPTED an order it still couldn't fulfil, and the unreachable-GOTO
+  // report that the recovery path keys off never came. Measured: goal snapping on coastal cells
+  // cut contract violations 235 -> 145 while RAISING scuttles 7 -> 10 and nav alarms 14 -> 23.
+  // Suppressing the alarm is not the same as fixing the problem.
+  const there = landmassAt(x, z);
+  if (!there || there === here) return { x, z };
+  const c = grid.cell, i0 = Math.round(x / c), j0 = Math.round(z / c), R = Math.ceil(maxR / c);
+  for (let r = 1; r <= R; r++) {
+    let best = null, bd = Infinity;
+    for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
+      if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;   // walk the ring, not the disc
+      const k = navIdx(i0 + di, j0 + dj);
+      if (k < 0 || navComp[k] !== here) continue;
+      const d = di * di + dj * dj;
+      if (d < bd) { bd = d; best = { x: (i0 + di) * c, z: (j0 + dj) * c }; }
+    }
+    if (best) return best;
+  }
+  return { x, z };
+}
+function drivableTo(v, x, z) {
+  if (!aiLandmass) return true;
+  if (!v || !v._move || v._move.water !== 'sink') return true;
+  const here = landmassAt(v.holder.position.x, v.holder.position.z);
+  if (!here) return true;
+  const there = landmassAt(x, z);
+  return !there || there === here;
+}
 const obsBuckets = new Map();   // cell key "i,j" → obstacles overlapping that cell
 function buildObsBuckets() {
   obsBuckets.clear();
@@ -10469,6 +10605,18 @@ window.RR = {
   setDefendInPlace: on => { aiDefendInPlace = !!on; return aiDefendInPlace; }, // defend-under-fire responds in the current vehicle vs home-swap (A/B)
   getDefendInPlace: () => aiDefendInPlace,
   setStand2: on => { aiStand2 = !!on; return aiStand2; },                  // lab-logic standoff vs old radial+_standRot (A/B)
+  setLandmass: on => { aiLandmass = !!on; return aiLandmass; },            // refuse goals on ground we can't drive to (A/B)
+  // Landmass census: how many components the map actually has and how big they are. The point
+  // is to know whether the "target across water" idea describes this map at all before trusting
+  // a test built on it — a single-component island means it can never fire.
+  lmDebug: () => {
+    if (!navStatic) buildNavStatic();
+    if (!navComp) buildNavComp();
+    const size = new Map();
+    for (const id of navComp) if (id) size.set(id, (size.get(id) || 0) + 1);
+    const cells = navComp.length, water = cells - [...size.values()].reduce((a, b) => a + b, 0);
+    return { components: size.size, cells, water, biggest: [...size.values()].sort((a, b) => b - a).slice(0, 6) };
+  },
   setStandRelease: on => { aiStandRelease = !!on; return aiStandRelease; },// give up a firing position held outside our own weapon range (A/B)
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
   getDeepLog: () => aiDeepLog,

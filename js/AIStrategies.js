@@ -589,12 +589,25 @@ export function missionWeightsOn(cmd) {
 const FLEET_FAV = { firebrat: ['capture', 0.40], lurcher: ['attack', 0.23], valkyrie: ['siege-back', 0.15], jotun: ['siege', 0.15] };
 // archetype nudges per mission (the personalities survive, like v.fofW biases the fight
 // score). A bare base key ('capture') applies to every direction of it.
+// These are MULTIPLIED early in the match — see PERSONA_EARLY below.
 const PERSONA_BIAS = {
   warrior: { attack: 2, siege: 1 },
   turtle:  { defend: 2, scout: -1 },
   hunter:  { attack: 1, siege: 1, trap: 3, scout: 1 },
-  rogue:   { capture: 1, 'capture-rear': 1, scout: 1, sap: 1, siege: 1, 'siege-back': 1 },
+  // The rogue's list used to include plain `siege` — the frontal assault on the tower line,
+  // which is the least rogue-like plan on the board, and the one term that made every rogue
+  // open exactly like every warrior. It keeps the BACK door (siege-back) and the sneak.
+  rogue:   { capture: 1, 'capture-rear': 2, scout: 1, sap: 2, 'siege-back': 2 },
 };
+// HOW LOUD IS THE PERSONALITY, AND FOR HOW LONG. Without this the archetypes were cosmetic
+// for the opening: siege scores off `towers standing` + `flag sealed`, both of which are
+// maximal BY DEFINITION at kickoff, so every commander of every persona opened siege and a
+// whole dimension of the game never showed up. The bias is multiplied by (1 + PERSONA_EARLY)
+// at t=0 and eases back to its plain value by PERSONA_FADE — who a commander IS decides the
+// opening, what the BOARD says decides the rest of the match.
+const PERSONA_EARLY = 3;     // ×4 bias at kickoff…
+const PERSONA_FADE = 240;    // …down to ×1 by the four-minute mark
+export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_FADE - matchT) / PERSONA_FADE);
 // A2: capture is DIRECTIONAL (front/left/right/rear — a stonewalled lane has three other
 // angles, and each direction remembers its own failures) and the rear siege is its own plan.
 const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
@@ -701,9 +714,15 @@ export function missionScore(cmd, key) {
   }
   // persona bias: the exact key's nudge plus the base key's (so rogue's capture +1 applies to
   // every direction, and its capture-rear +1 stacks on top of that for the back door)
-  const PB = PERSONA_BIAS[arch] || {};
-  if (PB[base] && base !== key) add(arch, PB[base]);
-  if (PB[key]) add(arch, PB[key]);
+  const PB = PERSONA_BIAS[arch] || {}, pw = personaWeight(matchT);
+  // The hunter's trap nudge only counts when this hunter actually rolled a trap this match —
+  // otherwise the persona was selling a plan it had no mines for, and at kickoff (where the
+  // bias is loudest) that outscored everything the board was actually saying.
+  const armed = key !== 'trap' || (cmd._trapMode && !cmd._trapDone);
+  if (armed) {
+    if (PB[base] && base !== key) add(arch, PB[base] * pw);
+    if (PB[key]) add(arch, PB[key] * pw);
+  }
   // success memory (the anti-repeat): a just-failed mission sits at −4, drifts back to 0.
   // Directional captures each carry their OWN memory — "front failed" leaves rear untouched.
   const s = cmd._missionSuccess && cmd._missionSuccess[key]; if (s) add('success', s);
@@ -787,16 +806,21 @@ class Doctrine {
     this.step = this.mission.key;
   }
   role(key) { return this.roles[key] || this.roles.attack || 'lurcher'; }
+  // One-time per-match rolls that shape the opening. Called from the garage pick as well as
+  // tick, because the picker scores `sap` and `trap` off these — deciding the opening before
+  // the dice are thrown had the hunter committing to a mine trap it might have no mines for.
+  _rollOpening(cmd) {
+    if (cmd._sapOn !== undefined) return;
+    cmd._sapOn = this.rng() < (SAP_CHANCE[cmd.archetype] ?? 0.35);
+    cmd._sapSide = this.rng() < 0.5 ? 1 : -1;   // which flank to sap — rolled per match (was hardcoded per team)
+    // A HUNTER that saps may turn it into a baited TRAP: mines on the lane + a Lurcher that lures.
+    cmd._trapMode = cmd.archetype === 'hunter' && cmd._sapOn && this.rng() < 0.7;
+    if (!cmd._sapOn) cmd._sapDone = true;
+  }
   tick(cmd, dt) {
     this.t += dt;
     this.mission.tick(cmd, dt);
-    if (cmd._sapOn === undefined) {   // one-time roll: does this commander open with a sapper sortie?
-      cmd._sapOn = this.rng() < (SAP_CHANCE[cmd.archetype] ?? 0.35);
-      cmd._sapSide = this.rng() < 0.5 ? 1 : -1;   // which flank to sap — rolled per match (was hardcoded per team)
-      // A HUNTER that saps may turn it into a baited TRAP: mines on the lane + a Lurcher that lures.
-      cmd._trapMode = cmd.archetype === 'hunter' && cmd._sapOn && this.rng() < 0.7;
-      if (!cmd._sapOn) cmd._sapDone = true;
-    }
+    this._rollOpening(cmd);
     if (this.step === 'sap' && this.mission.t > SAP_BUDGET) cmd._sapDone = true;   // sortie ran long — move on
     // The trap ends when its mines are spent (blew/cleared) or after a budget → resume normal play.
     if (this.step === 'trap' && ((cmd.trapSpent() && this.mission.t > 8) || this.mission.t > TRAP_BUDGET)) cmd._trapDone = true;
@@ -870,15 +894,7 @@ class Doctrine {
         // the soften/clearPath loop is the seed-116 fix). Only the flag emergency (_urgent) and
         // home-defense still hard-preempt.
         const runningKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;
-        next = missionPick(cmd, runningKey); why = 'mission weights'; fk = 'weights';
-        // Directional keys map onto the base missions: 'capture-rear' runs the Capture mission
-        // approaching from the rear (cmd._capDir routes the runner); 'siege-back' runs Siege
-        // with the rear-tower bias (cmd._siegeBack gates the tower hunt).
-        cmd._msnKey = next;
-        if (next.startsWith('capture-')) { cmd._capDir = next.slice(8); next = 'capture'; }
-        else cmd._capDir = null;
-        cmd._siegeBack = next === 'siege-back';
-        if (next === 'siege-back') next = 'siege';
+        next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = 'mission weights'; fk = 'weights';
       } else {
         // L2 mission net (opt-in policy): stands in for the persona playbook's choose() —
         // the urgent/universal rungs above and the dwell + report-card bans below still apply.
@@ -915,6 +931,30 @@ class Doctrine {
     if (cmd.ourFlagStolen()) return 'intercept';
     if (cmd.ourFlagLoose && cmd.ourFlagLoose()) return 'intercept';
     return null;
+  }
+  // Directional keys map onto the base missions: 'capture-rear' runs the Capture mission
+  // approaching from the rear (cmd._capDir routes the runner); 'siege-back' runs Siege with
+  // the rear-tower bias (cmd._siegeBack gates the tower hunt). Records the full scored key on
+  // the commander so failures are filed against the DIRECTION that failed, not the base plan.
+  _applyKey(cmd, key) {
+    cmd._msnKey = key;
+    if (key.startsWith('capture-')) { cmd._capDir = key.slice(8); return 'capture'; }
+    cmd._capDir = null;
+    cmd._siegeBack = key === 'siege-back';
+    return key === 'siege-back' ? 'siege' : key;
+  }
+  // DECIDE IN THE GARAGE. The vehicle a commander rolls out is chosen FOR the mission, so the
+  // mission has to exist before the lift moves. It didn't: `opening` is an archetype constant
+  // picked with no sight of the board, and deploy() ran before this doctrine had ever ticked —
+  // so slot 0 committed a chassis to a mission nobody had scored, then re-decided seconds
+  // later and swapped. Called from deploy(); a fresh unit has no plan in progress to protect,
+  // so this skips the dwell timer and the incumbent bonus and just asks what the board wants.
+  garagePick(cmd) {
+    if (!missionWeightsOn(cmd)) return;
+    this._rollOpening(cmd);
+    const urg = this._urgent(cmd);
+    const next = urg || this._applyKey(cmd, missionPick(cmd, null));
+    if (next !== this.step) this._switch(next, cmd, 'chosen in the garage, before roll-out');
   }
   _switch(key, cmd, why = null) {
     if (!key || key === this.step) { this.t = 0; return; }

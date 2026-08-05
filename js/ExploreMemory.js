@@ -78,7 +78,11 @@ export class ExploreMemory {
   // enemyX/enemyZ (optional): the enemy base — scouting should sweep TOWARD it (that's where
   // the intel worth having is), not back toward home. When omitted, falls back to a mild
   // pull toward home (safer ground) so callers without an enemy anchor still don't ping-pong.
-  pickTarget(selfX, selfZ, homeX, homeZ, minR = 0, enemyX = null, enemyZ = null) {
+  // canReach(x,z) (optional): "could the unit actually GET here?" Land is not the same thing as
+  // reachable — a cell can be solid ground on the far side of a channel, and the scout that was
+  // sent there drove to the coast and sat until it was written off. The caller supplies the test
+  // because only the game knows what the unit can cross.
+  pickTarget(selfX, selfZ, homeX, homeZ, minR = 0, enemyX = null, enemyZ = null, canReach = null) {
     let best = -Infinity, target = null, nearBest = Infinity, near = null;
     const minR2 = minR * minR;
     const toEnemy = enemyX != null && enemyZ != null;
@@ -87,6 +91,7 @@ export class ExploreMemory {
         const k = j * this.gw + i;
         if (this.seen[k] || !this.land[k]) continue;   // skip already-seen AND ocean (unreachable, nothing to scout)
         const c = this._cellCentre(i, j);
+        if (canReach && !canReach(c.x, c.z)) continue;
         const d2 = (c.x - selfX) ** 2 + (c.z - selfZ) ** 2;
         if (d2 < nearBest) { nearBest = d2; near = c; }   // absolute nearest (fallback if all are inside minR)
         if (d2 < minR2) continue;
