@@ -5439,7 +5439,7 @@ const navScuttlesByTeam = {};               // per-team scuttle tally — RR.nav
 // that counts the non-event can see it.
 const DRY_TRIP_ALARM = 3;     // trips to the enemy base without firing a shot, per commander, before it screams
 const DRY_TRIP_R = 110;       // u — inside this of the enemy base counts as "it got there"
-const SWAP_LOOP_ALARM = 3;    // recalls answered by re-fielding the very type we recalled
+const SWAP_LOOP_ALARM = 8;    // CONSECUTIVE recalls answered by re-fielding the very type we recalled (a run, not a tally — see deploy)
 let dryTripsTotal = 0;        // RR.decisionAlarms() — tournament summary
 let swapLoopsTotal = 0;
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
@@ -6767,6 +6767,15 @@ class AICommander {
     // sensible mission throughout. Seed 1151 ran this 285 times in twenty minutes: a fresh Jotun
     // every 3.5 seconds, hull never scratched, never more than 170u from home, while the recall
     // held out for a Valkyrie the chassis-blame layer substituted away every single time.
+    // A swap that actually changed the chassis proves the machinery works, so it clears the run.
+    // What this alarm is for is the case where EVERY swap comes back the same — 285 of them in
+    // twenty minutes on seed 1151 — not the occasional wasted one. Measured across 30 matches, a
+    // couple per match are normal: a recall placed on a perishable plan (intercept) whose reason
+    // expires in the one second between despawn and deploy. That costs a second of unit time.
+    // Preventing it outright was tried and cost three stalemates and triple the nav alarms, so it
+    // is TOLERATED — and an alarm that fires on the tolerated case is noise, which is why this
+    // counts consecutive repeats rather than a total. The total still goes to the summary.
+    if (this._recallFrom && type !== this._recallFrom) this._swapLoops = 0;
     if (this._recallFrom && type === this._recallFrom && type !== this._recallWant) {
       swapLoopsTotal++;
       this._swapLoops = (this._swapLoops || 0) + 1;
@@ -9575,6 +9584,13 @@ function reachFrom(v) {
       const ni = i + di, nj = j + dj, k = navIdx(ni, nj);
       if (k < 0 || R[k]) continue;
       if (cellBlocked(v, ni, nj)) continue;
+      // MIRROR A*'s CORNER RULE (astar.js: "a diagonal step is only allowed if both
+      // orthogonally-adjacent cells are passable, so units don't clip the corner of a
+      // wall/building"). A flood that squeezes through diagonal gaps the router will not take
+      // marks ground as reachable that no route can deliver — the unit is then sent to a firing
+      // position, gets no path, and stands there until the watchdog destroys it. A reachability
+      // field is only worth having if it answers the same question the router answers.
+      if (di !== 0 && dj !== 0 && (cellBlocked(v, i, nj) || cellBlocked(v, ni, j))) continue;
       R[k] = 1; qi[tail] = ni; qj[tail] = nj; tail++;
     }
   }
