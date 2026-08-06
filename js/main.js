@@ -2061,7 +2061,7 @@ function noteTowerKillsNear(point, blast, team) {
     if (dx * dx + dz * dz > r * r) continue;
     if (wall.turret.dead || wall.turret.falling) {
       rec.armed = false; rec.seenT = cm._matchT;
-      if (cm._siegePlan) cm._siegePlan.spots.delete(wall);
+      if (cm._siegePlan) { cm._siegePlan.spots.delete(wall); cm._siegePlan.spotReach.delete(wall); }
       aiLog(team, `${cm.cname}: That's its gun off — tower at (${Math.round(rec.x)}, ${Math.round(rec.z)}) is done.`);
     }
   }
@@ -7773,7 +7773,10 @@ class AICommander {
     // counted nothing, and a re-solve moves the answer enough to mint a fresh order, which resets
     // the per-order guard and lets it fire again next tick. Counting per TOWER is what makes
     // "once" true. See SIEGE_RESOLVE_MAX.
-    this._siegePlan = { order, idx: 0, mode, fobOnApproach, builtT: this._matchT, spots: new Map(), tries: new Map() };
+    // spotReach: the gun REACH each cached firing spot was solved for. A standoff is a property of
+    // the gun, not just the tower — the ring is sized from SHOT_REACH/TURRET_HOLD — so a spot is
+    // only reusable by a chassis whose gun is at least as long. See the read sites below.
+    this._siegePlan = { order, idx: 0, mode, fobOnApproach, builtT: this._matchT, spots: new Map(), spotReach: new Map(), tries: new Map() };
     aiLog(this.team, `${this.cname}: Siege plan — ${mode === 'rear' ? 'flank and take the BACK towers' : 'frontal assault'}, ${order.length} tower(s) on the list${fobOnApproach ? ' (their FOB is on the front approach)' : ''}.`);
     return this._siegePlan;
   }
@@ -7832,6 +7835,7 @@ class AICommander {
     }
     const again = this._standoffFor(v, k);
     plan.spots.set(k.wall, again);
+    plan.spotReach.set(k.wall, SHOT_REACH[v.type] || 42);   // stamp the gun this answer was drawn for
     // A failed SOLVE is not the same as a failed TOWER. Advancing the kill order on the first
     // null threw away towers whose far side was reachable, and a siege that skips its list stops
     // being a siege (measured: resolution 19/20 -> 16/20). Let the attempt counter above decide
@@ -8366,7 +8370,7 @@ class AICommander {
             rec.armed = armedNow; rec.seenT = this._matchT;
             if (!armedNow) {
               aiLog(this.team, `${this.cname}: That tower at (${Math.round(k.x)}, ${Math.round(k.z)}) is already wrecked — scratch it, next target.`);
-              this._siegePlan.spots.delete(k.wall);
+              this._siegePlan.spots.delete(k.wall); this._siegePlan.spotReach.delete(k.wall);
             }
           }
         }
@@ -8374,9 +8378,23 @@ class AICommander {
         // (A* reachability over candidate spots) now happens per SIEGE, not per tick. That is what
         // makes the relaxation ladder affordable and kills the replan storm at the same time.
         let spot = this._siegePlan.spots.get(k.wall);
+        // …BUT A FIRING SPOT BELONGS TO A GUN, NOT JUST A TOWER. The ring _standoffFor searches is
+        // sized from this chassis's SHOT_REACH and TURRET_HOLD, so a spot solved for a long gun can
+        // sit outside a short one's reach entirely. The cache is keyed by wall alone, and the
+        // commander re-fields whatever the roster has — so a Valkyrie's standoff was being handed
+        // to the Lurcher that replaced it. Seed 1053: the plan cached a spot 54u from the tower
+        // (a Valkyrie reaches 80u); six consecutive Lurchers, 42u guns, drove out to it, arrived
+        // with a clean line and full ammo, could not fire a single round, and were scuttled for
+        // standing still — six identical 58-second lives, hull never scratched. Re-solve when our
+        // gun is SHORTER than the one this spot was drawn for; a longer gun inheriting a close
+        // spot still reaches, so that direction costs nothing and keeps the search rare.
+        const myReach = SHOT_REACH[v.type] || 42;
+        const forReach = this._siegePlan.spotReach.get(k.wall);
+        if (spot !== undefined && forReach != null && forReach > myReach) spot = undefined;
         if (spot === undefined) {
           spot = this._standoffFor(v, k);
           this._siegePlan.spots.set(k.wall, spot);   // null is cached too: don't re-search a hopeless tower every tick
+          this._siegePlan.spotReach.set(k.wall, myReach);
           if (!spot) {
             aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — moving to the next one.`);
             this._siegePlan.idx++;                   // crossfire/terrain ruled it out — try another tower
@@ -8490,9 +8508,12 @@ class AICommander {
           // and one route. See devblog/2026-08-05-one-mission-layer.md.
           const hqKey = ec.flagHQ || ec;
           let hqSpot = this._siegePlan ? this._siegePlan.spots.get(hqKey) : undefined;
+          const hqReach = SHOT_REACH[v.type] || 42;                       // same gun-length rule as a tower's spot
+          const hqFor = this._siegePlan ? this._siegePlan.spotReach.get(hqKey) : undefined;
+          if (hqSpot !== undefined && hqFor != null && hqFor > hqReach) hqSpot = undefined;
           if (hqSpot === undefined) {
             hqSpot = this._standoffFor(v, { x: hqPt.x, z: hqPt.z, camp: ec, wall: hqKey });
-            if (this._siegePlan) this._siegePlan.spots.set(hqKey, hqSpot);   // null cached too — don't re-search a hopeless keep every tick
+            if (this._siegePlan) { this._siegePlan.spots.set(hqKey, hqSpot); this._siegePlan.spotReach.set(hqKey, hqReach); }   // null cached too — don't re-search a hopeless keep every tick
           }
           if (hqSpot) { stand2 = hqSpot; stand2Ref = threat; }
         }
