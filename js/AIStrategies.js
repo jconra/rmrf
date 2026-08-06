@@ -470,8 +470,106 @@ class Scavenge extends Mission {
   ]); }
 }
 
-const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass };
+// ---- SUPPLY MISSIONS — the first slice of the flattened decision stack ----------------
+// Topping up used to live one layer down, as rungs on the brain's priority ladder in AI.js,
+// each with its own trip condition rebuilt every tick. That is where the thrash lived: the
+// number deciding "do I want fuel" was the number the pump pushed past, so a unit stopped
+// wanting the thing the moment it started getting it, walked away, and un-got it. See
+// devblog/2026-08-05-one-mission-layer.md.
+//
+// As MISSIONS they get an ending for free: a mission runs until it is done, and `done()` here
+// means FULL — not "no longer starving". Their scores (in missionScore) hold up while they are
+// the running mission, which is the latch expressed as a weight rather than a boolean, so a
+// real emergency can still outbid them instead of being locked out.
+//
+// `supplyWant` tells main.js's _view WHICH kind of source to route to, so the depot choice is a
+// consequence of the mission we are on rather than a per-tick re-derivation off raw levels
+// (which is what made a unit shuttle between the fuel dump and the ammo dump forever).
+// RE-ANCHORED to the operating points the brain's own latches already used, so this slice moves
+// WHERE the decision is made without also moving WHEN it fires: fuelLow 0.18 and bailBase 0.45
+// are lifted straight from AI.js's config. Guessing new numbers here would have confounded the
+// refactor with a balance change and made the measurement unreadable.
+export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
+export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
+// How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
+// merely a weak one. Armour is the softest — worth a detour, never worth a crisis.
+const SUPPLY_URGE = { fuel: 9, ammo: 6, hp: 6, shield: 3 };
+// The curve. A plain linear ramp from the low line is nearly zero just under it, so the mission
+// could never get STARTED — it would only become winnable once the unit was already in trouble,
+// and "finish the job" only applies to a mission already running. The square root bites early
+// and screams late: ~30% of full urge as soon as we dip under the line, all of it at empty. No
+// step at the threshold, which is the house rule.
+const supplyUrge = (frac, low, urge) => urge * Math.sqrt(Math.max(0, 1 - frac / low));
+const fracOf = (cmd, what) => {
+  const v = cmd.unit; if (!v || v.dead) return 1;
+  if (what === 'fuel') return v.maxFuel ? v.fuel / v.maxFuel : 1;
+  if (what === 'ammo') return v.maxAmmo ? v.ammo / v.maxAmmo : 1;
+  if (what === 'hp') return v.maxHp ? v.hp / v.maxHp : 1;
+  return v.maxShield ? v.shield / v.maxShield : 1;
+};
+class Supply extends Mission {
+  get what() { return 'fuel'; }
+  get supplyWant() { return 'fuel'; }
+  // Never buy a chassis for a top-up: these are things a unit ALREADY in the field decides to
+  // do, and deploy() picks its vehicle from the running mission. Keep whatever we are driving.
+  get garageOK() { return false; }
+  wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }
+  done(cmd) { return fracOf(cmd, this.what) >= SUPPLY_FULL_F; }
+  objective(cmd) { return cmd._supply || cmd._home || cmd.homePos(); }
+  shoot(cmd) { return false; }
+  arriveDist(cmd) { return 6; }
+}
+class Refuel extends Supply {
+  get key() { return 'refuel'; }
+  label(cmd) { return 'running dry — heading in to refuel'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Low on fuel — breaking off to top up!',
+    'Running on fumes, heading for the pump!',
+    'Fuel’s down — I need to tank up before I’m a statue out here!',
+  ]); }
+}
+class Rearm extends Supply {
+  get key() { return 'rearm'; }
+  get what() { return 'ammo'; }
+  get supplyWant() { return 'ammo'; }
+  label(cmd) { return 'winchester — heading in to rearm'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Winchester! Falling back to rearm!',
+    'Out of rounds — going for a reload!',
+    'Magazine’s dry, I’m no use out here. Rearming!',
+  ]); }
+}
+class Repair extends Supply {
+  get key() { return 'repair'; }
+  get what() { return 'hp'; }
+  get supplyWant() { return 'base'; }   // only an OWN base patches a hull; a depot cannot
+  objective(cmd) { return cmd._home || cmd.homePos(); }
+  label(cmd) { return 'shot up — pulling back to patch the hull'; }
+  cry(cmd) { return pickCry(cmd, [
+    'I’m chewed up — pulling back to patch it!',
+    'Taking too much damage, falling back to repair!',
+    'Hull’s failing. Breaking off before I lose it!',
+  ]); }
+}
+class ArmourUp extends Supply {
+  get key() { return 'armour'; }
+  get what() { return 'shield'; }
+  get supplyWant() { return 'shield'; }
+  objective(cmd) { const g = cmd.nearestKnownShield && cmd.unit ? cmd.nearestKnownShield(cmd.unit.holder.position.x, cmd.unit.holder.position.z) : null; return (g && g.pos) || cmd._home || cmd.homePos(); }
+  label(cmd) { return 'topping up armour at the generator'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Swinging by the generator — I want armour before this fight!',
+    'No shield, no duel. Topping up first!',
+    'Grabbing armour, then I’m back in it!',
+  ]); }
+}
+
+const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass,
+  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
+// Is this mission one a commander may buy a chassis for at the lift? (Top-ups are decisions a
+// unit already in the field makes; letting one reach the garage would deploy the wrong vehicle.)
+export function missionGarageOK(key) { const M = MISSIONS[key]; return !(M && M.prototype.garageOK === false); }
 
 // ---- DOCTRINE — a persona running one mission at a time ------------------------------
 // Re-evaluates choose() every tick. A change only takes effect once the current mission
@@ -480,6 +578,12 @@ function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // the old linear step machine that could never let go of a finished objective.
 const URGENT = new Set(['capture', 'intercept', 'sap']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
+// A floor and a ceiling on how often the plan is re-examined. The floor stops a trigger that
+// fires repeatedly (a threat flickering at the edge of vision) from becoming per-tick scoring
+// by another name — the very thing triggers exist to replace. The ceiling is a safety net for
+// standing missions that have no legs yet; see _triggers.
+const MSN_RESCORE_MIN = 1.0;    // s — never re-score more often than this
+const MSN_RESCORE_MAX = 15;     // s — and never go longer than this without looking
 const SAP_BUDGET = 40;   // s the opening sapper gets to lay its kit before we move on regardless
 const TRAP_BUDGET = 120; // s a hunter tends its mine trap (bait/lure) before resuming normal play
 // Chance a commander opens with a recon-and-mine sapper sortie, by persona (rolled once at start).
@@ -612,7 +716,12 @@ export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_
 // angles, and each direction remembers its own failures) and the rear siege is its own plan.
 const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
   'capture-front', 'capture-left', 'capture-right', 'capture-rear',
-  'defend', 'intercept', 'scavenge', 'sap', 'trap'];
+  'defend', 'intercept', 'scavenge', 'sap', 'trap',
+  // The supply missions (see the Supply classes above). `repair` and `armour` are DEFINED but
+  // deliberately not candidates yet: a mission that wins the slot without driving the unit is a
+  // new disagreement between the layers, which is the disease being cured. They join once their
+  // rungs (hurtLatched / shieldRun) are wired to them the way resupLatched now is for these two.
+  'refuel', 'rearm'];
 
 // A/B for the last-runner term, set from main.js so both halves of the change — this and the
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
@@ -622,7 +731,7 @@ let SAVE_RUNNER = true;
 export function setSaveRunner(on) { SAVE_RUNNER = !!on; return SAVE_RUNNER; }
 
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
-export function missionScore(cmd, key) {
+export function missionScore(cmd, key, running = null) {
   const T = []; let w = 0;
   const add = (label, v) => { if (v) { T.push([label, Math.round(v * 10) / 10]); w += v; } return v; };
   const roster = cmd.roster || {}, fleet = cmd.fleetLeft() || 1, arch = cmd.archetype;
@@ -706,6 +815,35 @@ export function missionScore(cmd, key) {
       if (earlyB >= 0.1 && spareFB >= 0.5) add('opening sap', earlyB); break;
     case 'trap':
       if (arch === 'hunter' && cmd._trapMode && !cmd._trapDone) add('trap ready', 2); break;
+    // SUPPLY MISSIONS. Two terms, and the split between them is the whole point. "how empty" is
+    // GRADUAL — it rises as the tank drains rather than stepping on at a line — and "finish the
+    // job" only applies while this IS the running mission, holding the score up until FULL. That
+    // second term is the latch: it stops a top-up from un-justifying itself the instant the pump
+    // lifts the level back over the line that sent us (the two-depot shuttle and the shield
+    // flicker were both exactly that). It is a weight, not a lock, so a flag emergency still
+    // outbids it — which is the ordering Jacob asked for, expressed as numbers on one scale.
+    case 'refuel': case 'rearm': case 'repair': case 'armour': {
+      const what = key === 'refuel' ? 'fuel' : key === 'rearm' ? 'ammo' : key === 'repair' ? 'hp' : 'shield';
+      const v = cmd.unit;
+      if (!v || v.dead) break;                                        // nothing in the field to top up
+      if (key === 'armour' && !(v.maxShield > 0 && cmd.nearestKnownShield
+          && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no armour to fetch
+      if (key === 'repair' && !cmd._home) break;                      // only an own base patches a hull
+      const frac = fracOf(cmd, what), low = SUPPLY_LOW[what];
+      add('low ' + what, supplyUrge(frac, low, SUPPLY_URGE[what]));
+      // CANNOT DO THE JOB AT ALL. A dry unit is not a weak unit, it is furniture: it parks at the
+      // siege standoff with nothing to fire and sits there until the watchdog destroys it. This
+      // term is why. As a ladder RUNG, resupply used to override the mission outright; as a
+      // mission it merely competes — and `rearm` at ~6 loses to `siege` at ~9, so units kept
+      // sieging on an empty magazine (measured: 23 scuttles, 14 of them lurchers in `suppress on
+      // siege`, and one valkyrie sat dry from t316s while its fuel drained to 2%).
+      // +10 is the same number the design gives fight/flight and the desperate grab: the moments
+      // where one option has to win rather than argue. Being unable to act is one of them.
+      if (what === 'ammo' && frac <= 0.02) add('nothing to shoot with', 10);
+      if (what === 'fuel' && frac <= 0.05) add('about to be a statue', 10);
+      if (running === key && frac < SUPPLY_FULL_F) add('finish the job', 8);
+      break;
+    }
   }
   // fleet-comp (play to strength) — a bare fav ('capture') covers all its directions
   for (const t in FLEET_FAV) {
@@ -770,7 +908,7 @@ export function missionPick(cmd, incumbent = null) {
   else if (!exp) cmd._expForgave = false;
   let best = null, bestV = -1e9; const all = [];
   for (const key of MSN_CANDS) {
-    const r = missionScore(cmd, key);
+    const r = missionScore(cmd, key, incumbent);
     // INCUMBENT BONUS: the running plan is worth +1.5 just for being underway — near-tied
     // scores must not flap the commander between missions every few seconds (autopsy: a
     // siege↔scavenge↔attack cycle at 4-6s). A challenger has to genuinely beat the plan.
@@ -894,7 +1032,18 @@ class Doctrine {
         // the soften/clearPath loop is the seed-116 fix). Only the flag emergency (_urgent) and
         // home-defense still hard-preempt.
         const runningKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;
-        next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = 'mission weights'; fk = 'weights';
+        // RE-SCORE ON A TRIGGER, NOT EVERY TICK. This used to run missionPick on every single
+        // tick, with a +1.5 bonus for the incumbent as the only thing holding a plan together —
+        // a substitute for a latch. A reflex does not CHOOSE anything now; it says the situation
+        // changed enough that the plan is worth re-examining, and calls the scorer. Between
+        // triggers the mission simply runs, which is what makes it a commitment rather than an
+        // opinion re-formed 20 times a second. See devblog/2026-08-05-one-mission-layer.md.
+        const trig = this._triggers(cmd, dt);
+        this._scoreT = (this._scoreT || 0) + dt;
+        if (trig && this._scoreT >= MSN_RESCORE_MIN) {
+          this._scoreT = 0; this._lastTrig = trig;
+          next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = `re-scored: ${trig}`; fk = 'weights';
+        } else { next = runningKey ? this._applyKey(cmd, runningKey) : this.step; why = 'carrying on'; fk = 'weights'; }
       } else {
         // L2 mission net (opt-in policy): stands in for the persona playbook's choose() —
         // the urgent/universal rungs above and the dwell + report-card bans below still apply.
@@ -936,6 +1085,43 @@ class Doctrine {
   // approaching from the rear (cmd._capDir routes the runner); 'siege-back' runs Siege with
   // the rear-tower bias (cmd._siegeBack gates the tower hunt). Records the full scored key on
   // the commander so failures are filed against the DIRECTION that failed, not the base plan.
+  // WHAT MAKES A PLAN WORTH RE-EXAMINING. Returns a short reason string, or null to carry on.
+  // Every one of these is an EDGE — the moment a thing becomes true — not a state, so a threat
+  // that stays visible for a minute triggers one re-score, not twelve hundred. That distinction
+  // is the whole difference between a trigger and the per-tick scoring it replaces.
+  _triggers(cmd, dt) {
+    const v = cmd.unit, S = cmd._msnTrig || (cmd._msnTrig = {});
+    const edge = (name, now, label) => { const was = S[name]; S[name] = now; return now && !was ? label : null; };
+    // 1-3: the reflexes. Self-preservation, then our flag, in the order Jacob set out.
+    const sees  = edge('sees',  !!(cmd.lastEnemyPos && cmd.lastEnemyPos()), 'enemy in view');
+    const fire  = edge('fire',  !!(v && v._incomingFire), 'taking fire');
+    const flag  = edge('flag',  !!(cmd.ourFlagStolen && cmd.ourFlagStolen()), 'our flag taken');
+    if (sees || fire || flag) return sees || fire || flag;
+    // 4: the mission says it is finished (the supply missions know when they are full).
+    if (this.mission && this.mission.done && this.mission.done(cmd)) return 'mission complete';
+    // 5: a LEG ended — arrived at the current waypoint, or the driver proved it can't be reached.
+    // The unreachable case matters as much as the arrival: without it a unit grinds at an
+    // impossible goal until the watchdog destroys it, which is the failure this whole
+    // investigation started from. Either way the leg is over and the plan gets another look.
+    const o = cmd._driver && cmd._driver.o;
+    let legLabel = null;
+    if (o && o.type === 'GOTO' && v && !v.dead) {
+      const p = v.holder.position, d = Math.hypot(o.x - p.x, o.z - p.z);
+      legLabel = edge('leg', d <= (o.arrive || 6) + 2 || !!o.violated,
+        o.violated ? 'waypoint proven unreachable' : 'reached the waypoint');
+    } else S.leg = false;
+    if (legLabel) return legLabel;
+    // 6: a supply crossed its low mark (the thing that starts a top-up).
+    for (const what in SUPPLY_LOW) {
+      const t = edge('low' + what, fracOf(cmd, what) < SUPPLY_LOW[what], `${what} is low`);
+      if (t) return t;
+    }
+    // BACKSTOP, not part of the design: a standing mission with no legs (attack aims at a single
+    // point) could otherwise ride a stale plan indefinitely. Defining legs for attack is the open
+    // item that retires this — until then, a slow heartbeat is cheaper than a stuck commander.
+    if ((this._scoreT || 0) >= MSN_RESCORE_MAX) return 'nothing has happened for a while';
+    return null;
+  }
   _applyKey(cmd, key) {
     cmd._msnKey = key;
     if (key.startsWith('capture-')) { cmd._capDir = key.slice(8); return 'capture'; }

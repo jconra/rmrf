@@ -390,7 +390,13 @@ export class Driver {
     this.hooks.log(this.team, `[NAV ALARM · ${why}] ${this.cname}: ${v.type} is making NO ground `
       + `@(${Math.round(v.holder.position.x)},${Math.round(v.holder.position.z)}) on ${this.label()} — `
       + `flight recording dumped (${this.rec.length} samples). ${DESTRUCT_GRACE}s to break free.`);
-    this.hooks.alarm(dump);
+    // Hand the VEHICLE over too, so the sink can stamp what the unit was actually doing
+    // (mission, behavior state, match clock). The driver deliberately knows none of that —
+    // but an alarm you can only read as "a lurcher stopped at (240,-96)" cannot be grouped,
+    // and a failure class you can't group is one you can't fix. Same attribution the
+    // scuttle record already carries; the scuttles are only the ~quarter of alarms that
+    // never recovered, so without this the other three quarters were invisible.
+    this.hooks.alarm(dump, v);
   }
 
   // One-line order description — the chain-of-command display's "maneuver" row.

@@ -284,6 +284,11 @@ const CONDITIONS = {
 
   // --- latch triggers ---
   resupNeeded: (v, m, p, cfg) => {
+    // THE MISSION LAYER ANSWERS THIS NOW when it is running (AIStrategies.js's Refuel/Rearm).
+    // Those missions are scored from the same thresholds this rung used to test directly, and
+    // they end when the tank is FULL rather than when it stops being empty — which is the fix
+    // for the two-depot shuttle. Where the mission layer is present, this rung only executes.
+    if (v.supplyRun !== undefined) return !!v.supplyRun;
     // low fuel / truly dry → rearm. EXCEPT a runner (flag-grabber/scout) doesn't need ammo to do
     // its job — don't let an empty magazine pull a Firebrat off a flag it's standing next to to go
     // rearm (Jacob: "ran out of ammo and drove right by the flag to get more"). Still rearms for fuel.
@@ -312,7 +317,7 @@ const CONDITIONS = {
   // hp targets respect view.healCap — base repair may CAP below full (a trap bait holds a
   // killable 55%), and demanding more hp than the base will ever give deadlocks the unit
   // at its own FOB "topping up" forever.
-  resupDone:   (v, m, p, cfg) => v.supplyHeals
+  resupDone:   (v, m, p, cfg) => v.supplyRun !== undefined ? !v.supplyRun : v.supplyHeals
     ? (ammoFrac(v) >= cfg.topFull && v.self.fuelFrac >= cfg.topFull
        && v.self.hpFrac >= Math.min(cfg.topFull, (v.healCap ?? 1) - 0.01))
     : ((ammoFrac(v) >= cfg.ammoFull && v.self.fuelFrac >= cfg.fuelOK) ||
@@ -908,9 +913,6 @@ export const DEFAULT_BRAIN = {
     // IMMEDIATE VEHICLE THREAT leads everything below the gate/runner: an inescapable rival on
     // top of us gets answered NOW — never keep sieging or flee-to-heal with our back to it.
     { when: 'underAttack',  mode: 'engage',   target: 'enemy' },
-    // SECURE THE SHIELD: committed to a close generator → grab the armour BEFORE picking a fight
-    // (outranks engage/suppress). It's a short beeline; once topped up the commit clears and normal
-    // fight-or-flight resumes. Stops units fighting next to a shield they never actually pick up.
     { when: 'shieldRun',    mode: 'advance',  target: 'goal' },
     // FIGHT-OR-FLIGHT LEADS when a rival is in range: fightScore already weighs hp, ammo,
     // matchup, numbers AND (now) escape-survivability, so let IT decide fight-vs-flee before
@@ -927,6 +929,13 @@ export const DEFAULT_BRAIN = {
     // only fires when the alternative is driving on oblivious.
     { when: 'ambushed',     mode: 'pursue',   target: 'lastSeen' },
     { when: 'pursuing',     mode: 'pursue',   target: 'lastSeen' },
+    // SECURE THE SHIELD: committed to a close generator → grab the armour before picking a fight.
+    // The commit is a real latch now (SHIELD_WANT trip / SHIELD_FULL clear, in _view) rather than
+    // a value rebuilt every tick. DEMOTING this rung below engage/hurt/resupply was tried on
+    // 2026-08-05 and measured badly on its own (attack thrash 9.66 -> 31.07, scuttles 4 -> 20,
+    // two stalemates): a long-lived latch sitting under rules that flicker is worse than a
+    // short-lived one sitting on top. The demotion is right once fight/armour-up are missions
+    // that cannot both be running — see devblog/2026-08-05-one-mission-layer.md.
     { when: 'shootGoal',    mode: 'assault',  target: 'goal' },
     { when: 'always',       mode: 'advance',  target: 'goal' },
   ],

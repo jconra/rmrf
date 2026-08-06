@@ -3007,6 +3007,12 @@ const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to to
 const GUARD_GEN_DWELL = 25000;  // ms a patrolling guard holds ON the shield generator each lap (turtle v2)
 let turtleGuardOn = true;       // A/B: turtle v2 (slot-kill gate + gen guarding + maintenance) — RR.setTurtleGuard
 const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT — grab the armour before fighting
+// THE GAP. A single number can't be both "start wanting armour" and "stop wanting armour": a
+// shield sitting on one line flips the decision every time it wobbles across, and under fire at a
+// generator it wobbles every second. Want it below 60%, done at 95% — so topping up ENDS the job
+// instead of instantly un-justifying it. Same shape as SUPPLY_FULL below.
+const SHIELD_WANT = 0.6;        // below this fraction of max armour, go top up
+const SHIELD_FULL = 0.95;       // …and stay until this full (not merely back over the want line)
 const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the armour top-up
 let SHIELD_SIGHT_MULT = 1.4;    // shield beacon spotted at this × base vision. Tall & glowing so it carries
                                 // past a crate, but NOT half the map — a shield is a reason to SCOUT, not a
@@ -5398,6 +5404,7 @@ const SCUTTLE_ALARM_N = 4;      // units lost in a row on one mission before we 
 const ASTAR_FRAME_ALARM = 12;   // A* searches in ONE frame that mean something is looping, not working
 let _astarAlarmed = false;      // fire once per match — an alarm that repeats every frame IS the storm
 setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
+const TGT_COMMIT = 6;   // s on a target before a fresh hit is allowed to re-point us (re-selecting ONCE is fine; every 2s is the bug)
 const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold out at (0.55 close/fast … 0.85 far/safe). RR.setStandBand
 
 // ── THE DRIVER (js/Driver.js) ────────────────────────────────────────────────
@@ -5405,16 +5412,52 @@ const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold
 // route-follows and drives, and everything is observed — order log, flight recorder,
 // a net-progress watchdog whose ALARM dumps an autopsy (and, pinned long enough past
 // the grace, scuttles the unit — a stuck vehicle is a bug, not a situation).
+const tgtEvents = [];                       // TARGET-DECISION TRACE: one entry per change, written where the decision is made
+// Is there still a LIVE gun at this point? A target that stopped existing is a target you are
+// SUPPOSED to leave — so without this, a correct switch and a thrashing switch look identical.
+const _liveV = new THREE.Vector3();   // own scratch: _threatV is live during threat selection
+function liveTurretNear(x, z, r = 8) {
+  for (const c of camps) for (const w of (c.walls || [])) {
+    const t = w.turret; if (!t || t.dead || t.falling) continue;
+    // WORLD position, matching how the target key was built (getWorldPosition on the head).
+    // `group.position` is the LOCAL transform — using it made every comparison miss, so every
+    // switch reported "the old target is gone" and 6 matches showed 397 tower kills against a
+    // board that only has about eight a side. A test that can only return one answer is worse
+    // than no test: it turned every case into the answer I was hoping for.
+    t.group.updateWorldMatrix(true, false);
+    (t.head || t.group).getWorldPosition(_liveV);
+    if ((_liveV.x - x) ** 2 + (_liveV.z - z) ** 2 < r * r) return true;
+  }
+  return false;
+}
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
 const navScuttles = [];                     // units the driver destroyed for being unable to move
 const navScuttlesByTeam = {};               // per-team scuttle tally — RR.navScuttles()
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
+// WHAT WAS THIS UNIT DOING? Shared by the alarm and the scuttle records — both are autopsies,
+// and both are useless as bare counts. The commander knows the behavior state; the SLOT knows
+// the mission (each slot runs its own, so reading the commander-level card would credit the
+// failure to whichever slot happened to be bound last).
+function unitDoing(v) {
+  const own = commanders.find(c => c.ownsUnit(v));
+  const dbg = own ? own.dbgFor(v) : null;
+  const slot = own ? own._slotFor(v) : null;
+  const card = slot && slot.strategy ? slot.strategy : (own ? own.strategy : null);
+  return {
+    t: Math.round(own ? own._matchT || 0 : 0),
+    arch: own ? own.archetype || null : null,
+    mission: card ? card.step : null,
+    state: dbg ? dbg.state : null,
+    gd: dbg ? dbg.gd : null,       // how far off its goal it was
+  };
+}
 const driverHooks = {
   navWaypoint,
   log: aiLog,
-  alarm: d => {
+  alarm: (d, v) => {
     if (d && d.team) navAlarmsByTeam[d.team] = (navAlarmsByTeam[d.team] || 0) + 1;
+    if (v) Object.assign(d, unitDoing(v));
     navAlarms.push(d); if (navAlarms.length > 40) navAlarms.shift();
     // trimmed copy for the live ai-lab console (full recordings stay in-memory via RR.navAlarms)
     try {
@@ -5431,21 +5474,13 @@ const driverHooks = {
     // Record WHAT IT WAS DOING, not just that it died. "7 scuttled" is a number you can't act
     // on; "7 scuttled, 5 of them lurchers stuck in `advance` on `defend`" names the defect. The
     // owning commander's live snapshot has the state and the goal it never reached.
-    const own = commanders.find(c => c.ownsUnit(v));
-    const dbg = own ? own.dbgFor(v) : null;
-    // the SLOT's card, not the commander's — each slot runs its own mission, and reading the
-    // commander-level one would credit the scuttle to whichever slot happened to be bound.
-    const slot = own ? own._slotFor(v) : null;
-    const card = slot && slot.strategy ? slot.strategy : (own ? own.strategy : null);
     navScuttles.push({
-      // …from the owning commander's clock. This read `v._cmdMatchT`, which nothing writes, so
-      // every scuttle in every report was stamped t0s — and a whole match's worth of them looked
-      // like they happened at kickoff.
-      t: Math.round(own ? own._matchT || 0 : 0), team: v.team, type: v.type, why: why || 'nav-alarm',
-      state: dbg ? dbg.state : null,
-      mission: card ? card.step : null,
+      // t comes from the owning commander's clock (see unitDoing). This used to read
+      // `v._cmdMatchT`, which nothing writes, so every scuttle in every report was stamped
+      // t0s — a whole match's worth of them looked like they happened at kickoff.
+      ...unitDoing(v),
+      team: v.team, type: v.type, why: why || 'nav-alarm',
       px: Math.round(v.holder.position.x), pz: Math.round(v.holder.position.z),
-      gd: dbg ? dbg.gd : null,   // how far off the goal it was when it was written off
     });
     navScuttlesByTeam[v.team] = (navScuttlesByTeam[v.team] || 0) + 1;
     damageVehicle(v, 1e6, 'other', null);
@@ -5520,6 +5555,8 @@ function freshSlot() {
     _lootPile: null, _lootUntil: 0,                    // fresh-kill wreck grab
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
     _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
+    _tgtKey: null, _tgtT: 0, _tgtWhy: null,
+    _tgtLock: null,                                    // the target we are COMMITTED to (see _tgtStillValid)                          // the target we are COMMITTED to, and how long we have held it
     _stand2: null,                                     // standoff v2 commitment — PER SLOT (left off the record once: two siege slots shared one commit and ping-ponged goals every tick — the DIRECT(suppress) pin class)
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
@@ -6855,6 +6892,11 @@ class AICommander {
       blk: (view.blockedLeft ? 'L' : '·') + (view.blockedAhead ? 'A' : '·') + (view.blockedRight ? 'R' : '·'),
       hp: Math.round(v.hp / v.maxHp * 100), ammo: v.ammo, fuel: Math.round(v.fuel), maxFuel: Math.round(v.maxFuel), shield: Math.round(v.shield),
       fof: v.ai && v.ai._fof != null ? +v.ai._fof.toFixed(1) : null,   // live fight-or-flight score vs the rival in sight
+      // WHAT IS IT SHOOTING AT, and is that the keep or a gun? Re-selecting a target is fine once
+      // — it is re-selecting REPEATEDLY that shuttles a unit, because the firing position moves
+      // with the target. Without this the switch was invisible: only its consequence (the goal
+      // jumping) showed up, which is why it read as nav churn for so long.
+      tgt: view.threat ? { x: Math.round(view.threat.x), z: Math.round(view.threat.z), kind: this._prioTarget || 'tower', why: this._tgtWhy || '?' } : null,
       // CHAIN OF COMMAND (driver architecture): the standing maneuver order + the pedals
       // actually driven — the two bottom rows of the console's layer display.
       mnv: this._driver ? this._driver.label() : null,
@@ -6980,21 +7022,26 @@ class AICommander {
     // stays without 'suppress' — the nav overlay treats the close-in fight as combat-steered.
     else if (st === 'suppress' && view.threatStand
              && (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2 > 26 * 26) {
-      // While the stand is a LONG march away, travel on the MISSION OBJECTIVE's route — the
-      // same dest assault uses. The threat line flickers at long range, and suppress↔assault
-      // flips used to alternate two DIVERGENT A* routes (they left opposite ways around an
-      // inlet): 20u out, flip, 20u back — six minutes of zero-net triangle jiggle at one spot
-      // (seed 11). The radial standoff owns only the final ~70u approach.
+      // ONE DESTINATION, ONE ROUTE. There used to be a 70u split here: beyond it the unit drove
+      // to the MISSION OBJECTIVE, inside it to the firing spot. Two stable destinations far apart,
+      // chosen by a bare distance test recomputed every tick — so a unit hovering at the boundary
+      // committed to a 60u journey, was told one step later it was on the wrong journey, and
+      // committed to the opposite one. The routes could leave in opposite directions around an
+      // inlet. Measured: 77% of all goal movement in suppress was these swaps, median 68u, one at
+      // 285u; the code's own comment recorded a unit frozen at the boundary for 400s.
+      //
+      // The split existed because the firing spot would not hold still at long range — it was a
+      // formula off the unit's own position, so it slid as the unit moved. That is fixed at
+      // source now (the keep gets a real committed stand like a tower's), so there is nothing
+      // left for the boundary to protect against and it is DELETED rather than tuned. Widening it
+      // would only have made a unit flip less often toward a destination still sliding out from
+      // under it. The destination changes on new INFORMATION — a tower seen, a tower shooting at
+      // us, the target re-scored — never on how far we have driven.
       const d2s = (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2;
-      const obj = d2s > 70 * 70 ? this.strategy.objective(this) : null;
-      dest = obj || view.threatStand; slack = 14;
-      if (!obj) this._destIsStand = true;   // final approach to the radial standoff (rotation applies)
-      // No hysteresis on this 70u split (last night's diagnosis, unresolved) — logging the MODE
-      // (not just distance) means dlog's own change-detection surfaces flip-flopping for free:
-      // rapid repeat log lines here == the route swapping every tick between two divergent A*
-      // caches, same shape traced on seed 116 (400s+ frozen at the boundary).
-      dlog(`suppressFarSplit:${this.team}`, { unit: v.type, mode: obj ? 'far-objective' : 'close-radial', distU: +Math.sqrt(d2s).toFixed(0) },
-        `${this.cname} ${v.type}: suppress route mode = ${obj ? 'FAR (mission objective)' : 'CLOSE (radial standoff)'} at ${Math.round(Math.sqrt(d2s))}u from stand.`);
+      dest = view.threatStand; slack = 14;
+      this._destIsStand = true;
+      dlog(`suppressStand:${this.team}`, { unit: v.type, distU: +Math.sqrt(d2s).toFixed(0) },
+        `${this.cname} ${v.type}: routing to its firing position, ${Math.round(Math.sqrt(d2s))}u out.`);
     }
     else {
       if (st === 'unstick') {
@@ -7020,6 +7067,9 @@ class AICommander {
     // it earns its keep on the goal over open water or on an islet, where the unit used to drive
     // at the sea and grind on the beach until the watchdog scuttled it.
     dest = nearestDrivable(v, dest.x, dest.z);
+    // …then off any cell this hull could never occupy. Landmass first (which island), structures
+    // second (where on it), so the answer that comes out is standable.
+    dest = standableGoal(v, dest.x, dest.z);
     const d2 = (dest.x - v.holder.position.x) ** 2 + (dest.z - v.holder.position.z) ** 2;
     if (d2 < slack * slack) return;                 // close enough — hand back to the behavior
     // ESCALATION: when a unit has been genuinely stuck a long time (the local jolt + the
@@ -7729,6 +7779,18 @@ class AICommander {
   }
   // budget = how many REAL reachability searches this solve may run (was 40 cheap ones; now a
   // handful of thorough ones — see `reaches` below).
+  // IS THE COMMITTED TARGET STILL WORTH HOLDING? Deliberately a short list — the point of
+  // committing is that ordinary events do NOT release it. A target ends when it is destroyed,
+  // when the mission that wanted it is over, or when the driver has proven we cannot get to the
+  // firing spot. Being shot by something else, driving out of sensing range, or a nearer tower
+  // appearing are all reasons to KEEP GOING, and each of them used to silently re-point the unit.
+  _tgtStillValid(lock) {
+    if (!lock || !this.unit || this.unit.dead) return false;
+    if (lock.msn !== (this.strategy && this.strategy.step)) return false;   // the mission moved on
+    if (lock.hq) { const c = lock.camp; return !!(c && c.flagHQ && !c.flagHQ.dead); }
+    if (lock.wall) { const t = lock.wall.turret; return !!(t && !t.dead && !t.falling); }
+    return liveTurretNear(lock.x, lock.z);   // no object handle (a jeep, a raw point) — ask the board
+  }
   _standoffFor(v, k, budget = 5) {
     const px = v.holder.position.x, pz = v.holder.position.z, flyer = v._move.ignoreWalls;
     const T = { x: k.x, z: k.z };
@@ -7763,6 +7825,14 @@ class AICommander {
       if (near) return 'yes';
       return p.budgetHit ? 'unsure' : 'no';   // ran out of nodes = unproven, not disproven
     };
+    // ARE WE ALREADY STANDING IN ONE? Every candidate below is a point on a ring around the
+    // TARGET, so the unit's own position was never among them — a unit sitting in a perfectly
+    // good firing position would still be sent on a journey to an equivalent one, and the journey
+    // is where units get shot, wedged and re-decided. A decent spot you are already on beats a
+    // better spot you have to travel to, and emphatically so under fire. It also needs no A*
+    // probe: we are demonstrably able to be here, because we are here.
+    const dHere = Math.hypot(px - T.x, pz - T.z);
+    if (dHere >= minR && dHere <= Math.min(reach * 0.95, unitR * 1.25) && spotOK(px, pz)) return { x: px, z: pz };
     // Radius ladder: ideal band first, then RELAXED — further out (falloff) then closer in (pain).
     const ideal = [unitR, (minR + unitR) / 2, minR];
     const relaxed = [Math.min(reach * 0.95, unitR * 1.25), Math.min(reach * 0.99, unitR * 1.5), Math.max(14, minR * 0.75), Math.max(12, minR * 0.55)];
@@ -7946,25 +8016,38 @@ class AICommander {
     // ATTACK prep (ai_behavior): a Lurcher/Valkyrie rolling out with little shield swings
     // by a KNOWN, nearby shield generator to armour up first. (Firebrats run — speed is
     // their armour; Jotuns siege — too slow to detour. Intercept always outranks this.)
-    this._shielding = false; this._shieldRun = false; this._shieldGen = null;
-    if (!this._intercepting && (v.type === 'lurcher' || v.type === 'valkyrie')
-        && v.maxShield > 0 && v.shield < v.maxShield * 0.6
-        && !(this.flag() && this.flag().carrier === v)) {
-      const gen = this.nearestKnownShield(px, pz);
-      // Detour distance scales with how EMPTY the shield is: a fresh unit (0 armour) will
-      // go well out of its way to top up (×1.6), one already half-full barely diverts (×1).
-      // So armour-capable units reliably swing by the generator on the way out, instead of
-      // only grabbing it when it happens to be right next to them.
-      const reach = SHIELD_GRAB_RANGE * (1.6 - v.shield / v.maxShield);
-      const gd = gen ? Math.hypot(gen.pos.x - px, gen.pos.z - pz) : Infinity;
-      if (gen && gd < reach) {
-        goal = { x: gen.pos.x, z: gen.pos.z }; this._shielding = true; this._shieldGen = gen;
-        // SECURE IT: once we're CLOSE, grabbing the armour beats picking a fight — beeline the gen,
-        // top up, THEN fight (shieldRun outranks combat in the brain). Fixes the "went for the shield,
-        // then wandered off to a turret and never got it" bail. shootGoal is already off while
-        // detouring, so it won't gun down its own generator on the way in.
-        if (gd < SHIELD_COMMIT) this._shieldRun = true;
-      }
+    this._shielding = false; this._shieldGen = null;
+    // ARMOUR UP IS A JOB, NOT A TICK-BY-TICK OPINION. `_shieldRun` used to be wiped to false here
+    // and rebuilt from a bare `shield < 60%` test, so a unit at a generator UNDER FIRE — where the
+    // recharge and the incoming rounds very nearly cancel — flipped its mind once a second: at 62%
+    // "I'm fine" handed the unit to the next rule down (out of fuel), a round landed, and at 58%
+    // armour outranked fuel again. Seed 1123: 145.8 shield gained against 138.9 lost over thirty
+    // seconds, the fraction balanced on the 60% line, seventeen seconds of shuttling, tank run dry,
+    // scuttled having got neither the armour nor the fuel. Trip on LOW, clear on FULL — the same
+    // shape as the resupply latch next door, which never had this problem because it clears on
+    // `resupDone`. See devblog/2026-08-05-one-mission-layer.md.
+    const shieldable = !this._intercepting && (v.type === 'lurcher' || v.type === 'valkyrie')
+      && v.maxShield > 0 && !(this.flag() && this.flag().carrier === v);
+    const shFrac = v.maxShield > 0 ? v.shield / v.maxShield : 1;
+    const gen = shieldable ? this.nearestKnownShield(px, pz) : null;
+    const gd = gen ? Math.hypot(gen.pos.x - px, gen.pos.z - pz) : Infinity;
+    // Detour distance scales with how EMPTY the shield is: a fresh unit (0 armour) will
+    // go well out of its way to top up (×1.6), one already half-full barely diverts (×1).
+    // So armour-capable units reliably swing by the generator on the way out, instead of
+    // only grabbing it when it happens to be right next to them.
+    const reach = SHIELD_GRAB_RANGE * (1.6 - shFrac);
+    // Clear first, and clear on distance too: the latch outlives the vehicle in the slot record,
+    // and a generator that was close to the LAST unit is not a commitment for this one.
+    if (!shieldable || !gen || shFrac >= SHIELD_FULL || gd > SHIELD_GRAB_RANGE) this._shieldRun = false;
+    // SECURE IT: once we're CLOSE, grabbing the armour beats shelling a fort — beeline the gen and
+    // top up. Fixes the "went for the shield, then wandered off to a turret and never got it" bail.
+    // shootGoal is already off while detouring, so it won't gun down its own generator on the way in.
+    else if (!this._shieldRun && shFrac < SHIELD_WANT && gd < SHIELD_COMMIT) this._shieldRun = true;
+    // The soft swing-by keeps its own gradual reach test, but a COMMITTED run holds the goal even
+    // once the shield rises past the want line — otherwise the goal flickers even when the brain's
+    // rung doesn't, which is the same bug one layer down.
+    if (gen && (this._shieldRun || (shFrac < SHIELD_WANT && gd < reach))) {
+      goal = { x: gen.pos.x, z: gen.pos.z }; this._shielding = true; this._shieldGen = gen;
     }
     if (this._shieldRun && !this._shieldRunOn) shieldBark(this, v, 'grab');   // announce the commit once
     this._shieldRunOn = this._shieldRun;
@@ -8038,9 +8121,18 @@ class AICommander {
     const consider = (x, z, isBase) => { const d = (px - x) ** 2 + (pz - z) ** 2; if (d < bestD) { bestD = d; supply = { center: { x, z } }; supplyHeals = isBase; } };
     if (fob) consider(fob.center.x, fob.center.z, true);
     if (home && flagBaseAlive(this.team)) consider(home.center.x, home.center.z, true);   // a levelled flag base resupplies no one
-    // Divert to a single-resource depot when it fixes the actual need AND the other
-    // resource is still OK (so the latch will clear there). Both genuinely low → base only.
-    const depotKind = (needAmmo && fuelOk) ? 'ammo' : (needFuel && ammoOk) ? 'fuel' : null;
+    // WHICH KIND OF SOURCE — the RUNNING MISSION says so. This used to be re-derived every tick
+    // from raw levels, and because a depot raises the very level that chose it, arriving flipped
+    // the choice to the other depot: seed 1193's lurcher shuttled 90u between the fuel dump and
+    // the ammo dump for the rest of its life and was scuttled for making no net ground. Now
+    // `refuel` routes to fuel and `rearm` routes to ammo, and the choice holds until the mission
+    // ends — because the mission ends when the tank is FULL, not when it stops being empty.
+    // With no supply mission running this is only a hint (it is read while the state is
+    // resupply), so the old nearest-source derivation stays as the fallback.
+    const want = (this.strategy && this.strategy.mission && this.strategy.mission.supplyWant) || null;
+    const depotKind = (want === 'fuel' || want === 'ammo') ? want
+      : want ? null                                     // 'base'/'shield' — a neutral depot can't help
+      : ((needAmmo && fuelOk) ? 'ammo' : (needFuel && ammoOk) ? 'fuel' : null);
     if (depotKind) for (const rp of resupplies) if (!rp.dead && rp.kind === depotKind && this.knownSupplies.has(rp)) consider(rp.pos.x, rp.pos.z, false);
     this._supply = supply ? { x: supply.center.x, z: supply.center.z } : null;   // nav target while resupplying
     this._supplyHeals = supplyHeals;   // chosen supply is an own base → hold for a FULL top-off (ammo+fuel+hp)
@@ -8128,8 +8220,33 @@ class AICommander {
     // once from the team's own intel, ordered furthest-from-their-FOB first, rear-face first when
     // the plan is a flank. SIEGE-BACK is folded into the plan's `mode`, so the old per-tick
     // rear-only filter is gone along with the raw nearest-turret scan it used to feed.
+    let _tgtWhy = 'none';   // WHICH code path chose the target — for the re-selection autopsy
+    const _br = { plan: false, inSense: false, promote: false, hitBack: false, jeep: false };   // which branches were LIVE this tick
     let stand2 = null, stand2Ref = null;
-    if (aiStand2) {
+    let hqThreat = false;
+    let _tgtWall = null;   // the live wall/turret this target IS, for the are-you-still-there test
+    // ── THE TARGET IS STATE, NOT A DERIVATION ────────────────────────────────────────────
+    // Everything below used to run EVERY TICK from `threat = null`, so the target was whatever
+    // the last branch to fire happened to write. Nothing carried a choice forward, which meant
+    // nothing could re-select — and nothing could KEEP a selection either. Traced on seed 1011:
+    // "shoot back" overwrote the plan's tower whenever a round had landed in the last 4s, so with
+    // several guns firing the target changed with the incoming rounds (median hold 2s; 161 of 496
+    // switches were gun-to-gun with neither gun destroyed). And a target 111u away vanished
+    // outright because the sensing ring was 110u — one unit of driving deleted the intent.
+    //
+    // Now: SEE a tower, commit to it, execute; only release when it is genuinely over. The
+    // machinery that existed to stabilise the per-tick rebuild (the sensing ring's 1.15 strobe
+    // hysteresis, the 70u objective/standoff split, the sliding radial spot, the shoot-back
+    // override) is all answering a question that is no longer asked.
+    const _lock = this._tgtLock;
+    const _locked = this._tgtStillValid(_lock);
+    if (_locked) {
+      threat = { x: _lock.x, y: _lock.y, z: _lock.z };
+      threatCamp = _lock.camp; hqThreat = !!_lock.hq; _tgtWhy = _lock.why;
+      if (_lock.spot) { stand2 = _lock.spot; stand2Ref = threat; }
+      _br.locked = true;
+    }
+    if (aiStand2 && !_locked) {
       // THE PLAN owns the target. Not gated on the siege mission any more: `suppress` is entered
       // from ANY mission (the threatened transition — a tower is shelling us), and the old gate
       // meant every non-siege case fell through to a raw global nearest-turret scan with no
@@ -8145,7 +8262,11 @@ class AICommander {
       // boundary doesn't strobe suppress/advance on its own jitter.
       const senseR = TURRET_SENSE * (this._suppressing ? 1.15 : 1);
       const inSense = k && (k.x - px) ** 2 + (k.z - pz) ** 2 <= senseR * senseR;
-      this._suppressing = !!inSense;
+      this._suppressing = !!inSense; _br.plan = !!k; _br.inSense = !!inSense;
+      // WHAT the plan names, and how far outside the sensing ring it is — recorded here, inside
+      // _view, because `_planTarget()` reads the BOUND slot's plan. Asking the slot object for it
+      // from outside an update returns undefined and reads as 'no plan at all'.
+      if (k) { _br.planD = Math.round(Math.hypot(k.x - px, k.z - pz)); _br.senseR = Math.round(senseR); }
       if (k && inSense) {
         // CONFIRM THE TARGET YOU ARE SHOOTING AT (Jacob: "units should be able to see the target
         // they are shooting at — 80u doesn't sound that far to see a tower"). The general sight
@@ -8184,7 +8305,7 @@ class AICommander {
         }
         if (spot) {
           const ty = map.heightAt(k.x, k.z) + 5;
-          threat = { x: k.x, y: ty, z: k.z }; threatCamp = k.camp; stand2 = spot; stand2Ref = threat;
+          threat = { x: k.x, y: ty, z: k.z }; _tgtWhy = 'siege-plan tower'; _tgtWall = k.wall; threatCamp = k.camp; stand2 = spot; stand2Ref = threat;
         }
       }
     }
@@ -8195,8 +8316,7 @@ class AICommander {
     // nearest turret (it's walled behind the keep), or the HQ is simply closer. Dropping the HQ
     // reveals the flag AND opens angles on the back towers. LOS-gated, so units still grind the
     // walls/near towers until a line to the keep actually opens (they don't charge blind).
-    let hqThreat = false;
-    if (this.strategy.step === 'siege') {   // (was this.strategy.key — always undefined, so this HQ-targeting block never ran: siegers only ever shelled turrets, never the keep)
+    if (this.strategy.step === 'siege' && !_locked) {   // (was this.strategy.key — always undefined, so this HQ-targeting block never ran: siegers only ever shelled turrets, never the keep)
       let bestH = Infinity, ec = null, hqPt = null;
       for (const c of camps) {
         if (c.team === this.team || !c.flagHQ || c.flagHQ.dead) continue;
@@ -8262,10 +8382,14 @@ class AICommander {
           // Hysteresis: a target we are already committed to is worth staying on, so a near-tie
           // cannot flip the unit back and forth mid-siege (the same reason missionPick gives the
           // running plan +1.5).
-          const committed = this._prioTarget === 'hq' ? PRIO.hq * 0.15 : 0;
-          promote = (PRIO.hq + committed) > towerScore;
+          // Symmetric commitment. This bonus only ever applied to the KEEP, so a tower the unit had
+          // already committed to could be dropped on a hair's-breadth score change while the keep
+          // could not — which is why `tower -> tower` was 139 of the 374 re-selections.
+          const cHq  = this._prioTarget === 'hq'    ? PRIO.hq * 0.15 : 0;
+          const cTwr = this._prioTarget === 'tower' ? PRIO.tower * 0.15 : 0;
+          promote = (PRIO.hq + cHq) > (towerScore + cTwr);
         }
-        this._prioTarget = promote ? 'hq' : 'tower';
+        this._prioTarget = promote ? 'hq' : 'tower'; _br.promote = !!promote;
         if (promote) {
           // This silently THROWS AWAY whatever `threat` already was (including a validated,
           // reachable _pickStandoff pick — stand2 truthy) in favor of the HQ's raw center point,
@@ -8276,7 +8400,22 @@ class AICommander {
             hadStand2: !!stand2, discardedThreat: threat ? { x: +threat.x.toFixed(0), z: +threat.z.toFixed(0) } : null,
             hqX: +hqPt.x.toFixed(0), hqZ: +hqPt.z.toFixed(0)
           }, `${this.cname} ${v.type}: promoting to HQ${stand2 ? ' — DISCARDING an already-validated reachable stand' : ''} (reason: ${this._gambit ? 'gambit' : !threat ? 'no threat at all' : 'no path to the picked stand right now'}).`);
-          threat = hqPt; threatCamp = ec; hqThreat = true;
+          threat = hqPt; _tgtWhy = 'promoted to the keep'; threatCamp = ec; hqThreat = true;
+          // GIVE THE KEEP A REAL FIRING POSITION. Without this the HQ fell through to the radial
+          // fallback further down, which computes "a point `hold` out from the target, along the
+          // line from the target to wherever I am standing right now" — that is not a place. It
+          // moves whenever the unit moves, so no single route can ever arrive at it, and the 70u
+          // objective/stand split exists purely to hide that. _standoffFor picks an ACTUAL spot
+          // (in range, line of sight, clear of other towers' arcs, proven reachable by a real A*)
+          // and it is cached per siege exactly like a tower's, so the unit gets one destination
+          // and one route. See devblog/2026-08-05-one-mission-layer.md.
+          const hqKey = ec.flagHQ || ec;
+          let hqSpot = this._siegePlan ? this._siegePlan.spots.get(hqKey) : undefined;
+          if (hqSpot === undefined) {
+            hqSpot = this._standoffFor(v, { x: hqPt.x, z: hqPt.z, camp: ec, wall: hqKey });
+            if (this._siegePlan) this._siegePlan.spots.set(hqKey, hqSpot);   // null cached too — don't re-search a hopeless keep every tick
+          }
+          if (hqSpot) { stand2 = hqSpot; stand2Ref = threat; }
         }
       }
     }
@@ -8286,7 +8425,16 @@ class AICommander {
     // gun killed it.) Match the remembered head position back to a live turret.
     let hitBack = false;
     const hb = this.unit && this.unit._hitByTurret;
-    if (hb && performance.now() - hb.t < 4000) {
+    // DON'T LET THE MOST RECENT SHOT STEER US. This used to re-point the unit at whichever turret
+    // hit it last, with no comparison at all to what it was already shooting — so with two towers
+    // both firing, the target simply alternated with the incoming rounds. Measured over 6 matches:
+    // 374 target re-selections, median hold 2s, one lurcher swapping between two towers 84u apart
+    // four times in twelve seconds. Because the firing position is DERIVED from the target, each
+    // of those swaps relocated its destination by 84u — that is the "nav churn" this whole
+    // investigation started on. Once we are committed to a live target we can still shoot, a new
+    // hit no longer takes the wheel; it just has to wait its turn.
+    const committedToLive = threat && !hqThreat && (this._tgtT || 0) > TGT_COMMIT;
+    if (hb && performance.now() - hb.t < 4000 && !committedToLive && !_locked) {
       for (const c of camps) {
         if (c.team === this.team) continue;
         for (const w of c.walls) {
@@ -8295,7 +8443,7 @@ class AICommander {
           t.group.updateWorldMatrix(true, false);   // matrices can be stale outside a render (headless sims)
           t.head.getWorldPosition(_threatV);
           if ((_threatV.x - hb.x) ** 2 + (_threatV.z - hb.z) ** 2 < 5 * 5) {
-            threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; threatCamp = c; hqThreat = false; hitBack = true;
+            threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; _tgtWhy = 'shooting back'; _br.hitBack = true; _tgtWall = w; threatCamp = c; hqThreat = false; hitBack = true;
             break;
           }
         }
@@ -8305,10 +8453,41 @@ class AICommander {
     // Tower under ACTIVE repair → shoot the crew's JEEP instead (cancels the heal); the
     // tower itself is a sponge that soaks fire while its neighbours shoot back. (Unless
     // we're being SHOT — then the gun firing at us stays the target.)
-    if (threat && !hqThreat && !hitBack) {
+    if (threat && !hqThreat && !hitBack && !_locked) {
       const jp = enemyRepairJeepNear(this.team, threat.x, threat.z);
-      if (jp) { threat = jp; if (!this._healHuntOn) { this._healHuntOn = true; aiLog(this.team, `${this.cname} ${this.unit.type}: “That tower's got a repair crew — kill the jeep, kill the fix!”`); } }
+      if (jp) { threat = jp; _tgtWhy = 'the repair jeep'; _br.jeep = true; if (!this._healHuntOn) { this._healHuntOn = true; aiLog(this.team, `${this.cname} ${this.unit.type}: “That tower's got a repair crew — kill the jeep, kill the fix!”`); } }
       else this._healHuntOn = false;
+    }
+    // COMMIT. Whatever the selection above landed on becomes the standing target, together with
+    // the firing spot and the live object we can ask "are you still there?".
+    if (!_locked) {
+      this._tgtLock = threat ? {
+        x: threat.x, y: threat.y != null ? threat.y : 0, z: threat.z,
+        camp: threatCamp, hq: hqThreat, spot: stand2, why: _tgtWhy,
+        wall: _tgtWall, msn: this.strategy && this.strategy.step,
+      } : null;
+    }
+    // HOW LONG HAVE WE HELD THIS TARGET? Read next tick by the shoot-back guard above. Keyed on
+    // the rounded position rather than object identity: the threat is rebuilt as a fresh object
+    // every tick, so identity would report "changed" every single time.
+    const _tk = threat ? Math.round(threat.x) + ',' + Math.round(threat.z) : null;
+    if (_tk && _tk === this._tgtKey) this._tgtT = (this._tgtT || 0) + dt;
+    else {
+      if (this._tgtKey) {
+        const [fx, fz] = this._tgtKey.split(',').map(Number);
+        const wasHq = this._tgtWhy === 'promoted to the keep';
+        tgtEvents.push({
+          t: Math.round(this._matchT || 0), team: this.team, type: v.type,
+          msn: this.strategy && this.strategy.step, state: this.state,
+          from: this._tgtKey, fromWhy: this._tgtWhy || '?', to: _tk, toWhy: _tgtWhy,
+          held: +(this._tgtT || 0).toFixed(1), br: { ..._br },
+          // did the OLD target stop existing? that makes the switch correct, not churn
+          fromGone: wasHq ? false : !liveTurretNear(fx, fz),
+          wasHq,
+        });
+        if (tgtEvents.length > 6000) tgtEvents.shift();
+      }
+      this._tgtKey = _tk; this._tgtT = 0; this._tgtWhy = _tgtWhy;
     }
     // Is there a CLEAR shot at the nearest tower, and which way to peel around it?
     // `threatLOS` lets the brain hold + fire when it can see the tower, or swing wide
@@ -8501,6 +8680,10 @@ class AICommander {
       })(),
 
       shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
+      // THE MISSION DECIDES whether we are on a supply run. Two layers each answering "do I need
+      // fuel" is what produced the 90u depot shuttle; the brain's resupply rung now just executes
+      // what the mission layer picked (AIStrategies.js's Refuel/Rearm, in MSN_CANDS).
+      supplyRun: this.strategy ? (this.strategy.step === 'refuel' || this.strategy.step === 'rearm') : undefined,
       // Salvage detour: drive ONTO the pile (within SCRAP_PICKUP_R) instead of stopping at the
       // mission's arriveDist — Scout(12)/Attack(10) exceed the 8u pickup, so the unit used to halt
       // just short and idle for seconds before drifting into range. Tight like the shield/intercept grabs.
@@ -9409,6 +9592,52 @@ function nearestDrivable(v, x, z, maxR = 60) {
     if (best) return best;
   }
   return { x, z };
+}
+// A GOAL INSIDE A WALL IS AN ORDER NOBODY CAN OBEY. Several missions hand out raw coordinates
+// that are, by construction, points no hull can ever stand on: `_supply` and `_home` are base
+// CENTRES (measured blocked 25-33% of the time, seed-dependent) and `homeAttack()` is the impact
+// point of a shell ON A STRUCTURE (48-75%). A* then settles the whole island without ever
+// reaching the goal cell, the contract fires, and the unit walks a partial route and stands
+// short of an order it was never able to obey.
+//
+// This is NOT the goal-snapping that failed on 2026-08-04. That one moved goals using the
+// LANDMASS labels, which ignore buildings by design — so it fired on innocent coastal goals and
+// often moved them INTO a wall: contract violations 235 -> 145, but scuttles 7 -> 10 and nav
+// alarms 14 -> 23. Suppressing the report is not fixing the problem. This one uses `v._blocked`,
+// the exact test A* itself uses, and only fires when the goal cell genuinely cannot be occupied.
+//
+// It deliberately does NOT hide unreachability: a snapped cell that is still walled off from the
+// unit is still proven unreachable by A* and still reports. The only thing being fixed here is
+// the goal sitting ON the wall, which is impossible by construction rather than by situation.
+const GOAL_SNAP_R = 26;      // u — beyond this the goal isn't "on a structure", it's somewhere else
+const GOAL_SNAP_TTL = 500;   // ms to trust a cached snap (gates and lift decks change what's blocked)
+let goalSnaps = 0;           // how often an impossible goal had to be rescued — RR.navAlarmStats
+function standableGoal(v, x, z) {
+  if (!v || !v._blocked) return { x, z };
+  const memo = v.__goalSnap;
+  if (memo && Math.abs(memo.rx - x) < 1 && Math.abs(memo.rz - z) < 1 && performance.now() - memo.t < GOAL_SNAP_TTL) return memo.out;
+  let out = { x, z };
+  if (v._blocked(x, z)) {
+    const c = grid.cell, i0 = Math.round(x / c), j0 = Math.round(z / c), R = Math.ceil(GOAL_SNAP_R / c);
+    const here = aiLandmass && navComp ? landmassAt(v.holder.position.x, v.holder.position.z) : 0;
+    ring: for (let r = 1; r <= R; r++) {
+      let best = null, bd = Infinity;
+      for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
+        if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;   // walk the ring, not the disc
+        const gx = (i0 + di) * c, gz = (j0 + dj) * c;
+        if (v._blocked(gx, gz)) continue;
+        // don't rescue the goal onto a DIFFERENT island on the way out (0 = don't know, allowed)
+        if (here) { const k = navIdx(i0 + di, j0 + dj); if (k >= 0 && navComp[k] && navComp[k] !== here) continue; }
+        const d = di * di + dj * dj;
+        if (d < bd) { bd = d; best = { x: gx, z: gz }; }
+      }
+      if (best) { out = best; goalSnaps++; break ring; }
+    }
+    // ringed all the way out and found nothing standable — leave the goal alone and let the
+    // driver's contract report it, rather than inventing a destination.
+  }
+  v.__goalSnap = { rx: x, rz: z, out, t: performance.now() };
+  return out;
 }
 function drivableTo(v, x, z) {
   if (!aiLandmass) return true;
@@ -10580,9 +10809,10 @@ window.RR = {
   roadDeckY: (x, z) => roadDeckY(x, z),                       // debug: road/bridge surface height, or null
   bridgeDeckY: (x, z) => roadDeckY(x, z),                     // alias (kept for older verification scripts)
   navPlan: (v, x, z) => planPath(v, { x, z }),                 // debug: A* path for a unit
+  tgtEvents: () => tgtEvents,                                  // target-decision trace (was the old target still alive when we left it?)
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
-  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples }),   // match-wide driver counters
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setVehSwap: on => { aiVehSwap = !!on; return aiVehSwap; },   // A/B: blame the chassis for a failing mission, or only the mission
