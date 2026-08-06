@@ -1437,6 +1437,9 @@ const PRIO = {
   recent: 6,     // …and fades over THREAT_FADE rather than switching off (gradual weights)
 };
 const THREAT_FADE = 15;   // seconds for "it shot at me" to decay from PRIO.recent to nothing
+const INTERCEPT_GUN_CLEAR = 8;      // u of daylight past a tower's reach when picking the ambush spot
+const INTERCEPT_PUSH_MAX = 140;     // u — furthest we walk outward looking for cover-free ground
+const INTERCEPT_GATE_STANDOFF = 14; // u in front of the gate mouth once the front guns are down
 const HQ_YIELD_FRESH = 2000;   // ms — a turret hit this recent still counts as "it is shooting us" (see _tgtStillValid)
 // How much extra a structure at (x,z) is worth because it has been shooting at us. Reads the
 // turret hit-marker damageVehicle already records, so this needs no new plumbing.
@@ -6262,11 +6265,71 @@ class AICommander {
   // DEFEND intercept point (ai_behavior): chase the carrier directly; thief down and the
   // flag lying loose → drive to the FLAG (touching it snaps it home); if it's somehow
   // out of play fall back to the enemy's elevator — where they must take it to score.
+  // WHERE TO WAIT FOR A FLAG RUNNER. Nothing on the field outruns a Firebrat, so a chase the
+  // carrier has already started is a chase we lose — and this used to return the carrier's LIVE
+  // position, which is a goal that relocates every tick. Seed 158: an interceptor drove 100.3u
+  // over ten seconds for 1.0u of net progress while its goal moved 106.4u, throttle averaging
+  // 0.53, and did it seven times in one match. It also means the leg never completes, so the only
+  // thing that could ever re-open the plan was the 15-second backstop.
+  //
+  // The carrier has exactly ONE place it can turn the flag in, so stop racing and hold the door.
+  // Jacob's spec: wait directly between the two towers in front of their FOB, just outside their
+  // range; if those towers are down, stand in front of the gate instead, clear of the ones at the
+  // back. (A heavy that would rather remove the problem than wait behind it can still siege — that
+  // is a different mission and it scores on its own merits.)
+  interceptCampSpot() {
+    const tt = this.targetTeam();
+    const camp = camps.find(c => c.team === tt && c.role === 'fob') || camps.find(c => c.team === tt);
+    if (!camp || !camp.center) return null;
+    const cx = camp.center.x, cz = camp.center.z, home = this.homePos();
+    // The face they will approach from is the one pointing at US — that is the side a runner
+    // crosses, and the side whose guns we have to stay off.
+    let ax = home.x - cx, az = home.z - cz; const am = Math.hypot(ax, az) || 1; ax /= am; az /= am;
+    const live = [];
+    for (const w of (camp.walls || [])) {
+      if (!w.turret || w.turret.dead || w.turret.falling || !w.body || w.body.dead) continue;
+      const p = w.group.position;
+      live.push({ x: p.x, z: p.z, r: towerStats((w.turret && w.turret.upg) || 0).range,
+        front: (p.x - cx) * ax + (p.z - cz) * az });
+    }
+    const covered = (x, z) => live.some(t => (t.x - x) ** 2 + (t.z - z) ** 2 < (t.r + INTERCEPT_GUN_CLEAR) ** 2);
+    // Walk outward along the approach until no live gun reaches the spot. Starting inside their
+    // arcs and stepping out is what makes "just outside" fall out of the geometry rather than
+    // being a number someone picked.
+    const pushOut = (x, z) => {
+      for (let d = 0; d <= INTERCEPT_PUSH_MAX; d += 4) {
+        const qx = x + ax * d, qz = z + az * d;
+        if (!covered(qx, qz)) return { x: qx, z: qz };
+      }
+      return { x: x + ax * INTERCEPT_PUSH_MAX, z: z + az * INTERCEPT_PUSH_MAX };
+    };
+    const frontT = live.filter(t => t.front > 0).sort((a, b) => b.front - a.front).slice(0, 2);
+    if (frontT.length === 2) return pushOut((frontT[0].x + frontT[1].x) / 2, (frontT[0].z + frontT[1].z) / 2);
+    if (frontT.length === 1) return pushOut(frontT[0].x + ax * 6, frontT[0].z + az * 6);
+    // Front guns are down: hold the doorway itself. The gate record carries its outward normal.
+    const g = gates.find(q => q.team === tt && (camp.walls || []).includes(q.w));
+    if (g) return pushOut(g.gx + g.nx * INTERCEPT_GATE_STANDOFF, g.gz + g.nz * INTERCEPT_GATE_STANDOFF);
+    return pushOut(cx + ax * (INTERCEPT_PUSH_MAX * 0.5), cz + az * (INTERCEPT_PUSH_MAX * 0.5));
+  }
   interceptSpot() {
     const f = this.ourFlag();
-    if (f && f.carried && f.carrier && !f.carrier.dead) { const c = f.carrier.holder.position; return { x: c.x, z: c.z }; }
+    if (f && f.carried && f.carrier && !f.carrier.dead) {
+      const c = f.carrier.holder.position;
+      // CUT THEM OFF, don't tail them. If we can reach the door before the runner does, go and
+      // stand in it — closing then is geometry rather than a foot race nothing in the game wins.
+      // Only when the runner is already past us is tailing it worth anything, and then only
+      // because it may be killed or forced to drop on the way.
+      const camp = this.interceptCampSpot();
+      if (camp) {
+        const v = this.unit;
+        const runnerToDoor = Math.hypot(c.x - camp.x, c.z - camp.z);
+        const usToDoor = v && !v.dead ? Math.hypot(v.holder.position.x - camp.x, v.holder.position.z - camp.z) : Infinity;
+        if (usToDoor < runnerToDoor) return camp;   // we can get there first — go hold the door
+      }
+      return { x: c.x, z: c.z };
+    }
     if (this.ourFlagLoose()) { const p = f.group.position; return { x: p.x, z: p.z }; }
-    return this.enemyFobPos();
+    return this.interceptCampSpot() || this.enemyFobPos();
   }
   // Nearest KNOWN, live shield generator to (x,z) — only POIs this team has discovered
   // (fog-of-war), so a commander won't beeline to a generator it's never seen.
@@ -8801,6 +8864,9 @@ class AICommander {
       // the Firebrat's runnerFlee reflex so an ordered-to-engage Firebrat actually closes +
       // shoots instead of dodging the instant an enemy is near.
       runnerMode: this.strategy.step === 'capture' || this.strategy.step === 'scout',
+      // ON INTERCEPT, GET TO THE DOOR — don't get drawn into a chase on the way. Nothing on the
+      // field outruns a flag runner, so a pursuit is a race we lose while the carrier scores.
+      intercepting: this.strategy.step === 'intercept',
       flagGrabbable: this.strategy.step === 'capture' && this.flagGrabbable(),   // endgame: sightings alone don't turn the runner around (runnerFlee)
       blockedAhead,
       blockedLeft: feeler(lx, lz),

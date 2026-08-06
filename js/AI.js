@@ -263,6 +263,13 @@ const CONDITIONS = {
   // the enemy fleet is gone (the commander redirects to the base instead of wasting time).
   pursuing: (v, m, p) => {
     if (v.enemyGone) return false;
+    // NEVER CHASE WHILE INTERCEPTING. The carrier is faster than anything that could catch it, so
+    // a pursuit is a foot race we lose while it walks the flag in — and it was the biggest single
+    // source of wasted driving measured: an interceptor covered 100.3u in ten seconds for 1.0u of
+    // net progress, seven times in one match, because "the last place I saw them" moves every
+    // tick. Get to the door instead (interceptCampSpot). An enemy actually in range is still
+    // fought — `engaging` sits above this rung and answers that case.
+    if (v.intercepting) return false;
     // DON'T RE-CHASE A CONTACT WE ALREADY KNOW WE CANNOT REACH. When the driver refuses a pursue
     // goal the issuer clears lastSeen — but if we can still SEE the enemy (across water, across a
     // wall), perception rewrites lastSeen on the very next tick, pursue re-triggers, the driver
