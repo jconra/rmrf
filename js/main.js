@@ -7883,31 +7883,10 @@ class AICommander {
     const others = this.plannableTowers().filter(o => o.wall !== k.wall)
       .map(o => ({ x: o.x, z: o.z, r: towerStats((o.wall.turret && o.wall.turret.upg) || 0).range }));
     const crossfire = (x, z) => others.some(o => (o.x - x) ** 2 + (o.z - z) ** 2 < o.r * o.r);
-    // drivableTo first — it's two array lookups, and it throws out the spots that make the
-    // `unsure` branch below dangerous. A firing position on the far side of a channel fails no
-    // other test here (it's open ground with a clean shot), so it reached the A* probe, came
-    // back budget-truncated = "unproven, not disproven", and got taken. The unit then drove to
-    // the shoreline and stalled. A different landmass is the one case we can rule out for free.
+    // The per-spot tests that the flood fill does NOT answer: can the round get there, and is
+    // some other tower covering the spot. (drivableTo is left in as a cheap early-out, but the
+    // flood below subsumes it — it knows about walls and gates, not merely which island.)
     const spotOK = (x, z) => flyer || (drivableTo(v, x, z) && !v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z));
-    // REACHABILITY, done properly ONCE rather than cheaply forty times (Jacob's rule: one good
-    // A* beats hundreds of poor ones). Two things were wrong here:
-    //   * it ran up to `budget` full-grid searches per call, DIRECTLY — outside
-    //     NAV_FRAME_BUDGET_MS — so nothing capped them. With two units alive that was 58ms of a
-    //     61.5ms frame.
-    //   * it ignored path.budgetHit. Driver.js:275 deliberately does not: "a budget-truncated
-    //     search proves NOTHING about reachability". So this accepted spots off truncated
-    //     searches that the driver then correctly refused — and the refusal re-ran the solver,
-    //     which is the loop.
-    // Now: a bigger node budget (so the answer is real), and `unsure` reported separately from
-    // `no` so a far-but-fine spot is not confused with an unreachable one.
-    const reaches = (x, z) => {
-      const p = planPath(v, { x, z }, { nodeMul: 2.5, by: 'standoff' });
-      if (!p || !p.length) return 'no';
-      const e = p[p.length - 1];
-      const near = (e.x - x) ** 2 + (e.z - z) ** 2 <= (grid.cell * 2) ** 2;
-      if (near) return 'yes';
-      return p.budgetHit ? 'unsure' : 'no';   // ran out of nodes = unproven, not disproven
-    };
     // ARE WE ALREADY STANDING IN ONE? Every candidate below is a point on a ring around the
     // TARGET, so the unit's own position was never among them — a unit sitting in a perfectly
     // good firing position would still be sent on a journey to an equivalent one, and the journey
@@ -7916,40 +7895,40 @@ class AICommander {
     // probe: we are demonstrably able to be here, because we are here.
     const dHere = Math.hypot(px - T.x, pz - T.z);
     if (dHere >= minR && dHere <= Math.min(reach * 0.95, unitR * 1.25) && spotOK(px, pz)) return { x: px, z: pz };
-    // Radius ladder: ideal band first, then RELAXED — further out (falloff) then closer in (pain).
-    const ideal = [unitR, (minR + unitR) / 2, minR];
-    const relaxed = [Math.min(reach * 0.95, unitR * 1.25), Math.min(reach * 0.99, unitR * 1.5), Math.max(14, minR * 0.75), Math.max(12, minR * 0.55)];
-    for (const [tier, radii] of [['ideal', ideal], ['relaxed', relaxed]]) {
-      const cands = [];
-      for (const r of radii) for (let i = 0; i < 24; i++) {
-        const th = i / 24 * Math.PI * 2, x = T.x + Math.sin(th) * r, z = T.z + Math.cos(th) * r;
-        if (spotOK(x, z)) cands.push({ x, z, d: (x - px) ** 2 + (z - pz) ** 2 });
+    // SCAN THE WHOLE REACHABLE REGION, don't sample a ring. One flood fill (reachFrom) answers
+    // "can this hull get there" for every cell at once, so the search can afford to look at all of
+    // them and take the nearest good one — which is exactly what lab/standoff-lab.html does, and
+    // why the lab reliably finds a spot where this used to abandon the tower. What it replaces:
+    // 24 points on each of three or four fixed radii, of which only ~5 could be checked for
+    // reachability at all (a full A* each, spread-filtered so they didn't all probe one arc), and
+    // a 'unsure' fallback that accepted budget-truncated searches the driver then refused.
+    //
+    // The band is capped at reach*0.99 in EVERY tier: a firing position out of the gun's range is
+    // not a relaxed answer, it is a wrong one (see the spotReach fix — a Lurcher parked 54u from a
+    // tower with a 42u gun, arrived, in line of sight, unable to fire, scuttled for standing still).
+    const R = flyer ? null : reachFrom(v);
+    const cell = grid.cell, top = Math.min(reach * 0.99, unitR * 1.5);
+    const bands = [
+      ['ideal', Math.max(minR, 12), Math.min(unitR, reach * 0.99)],   // the comfortable one-gun spot
+      ['relaxed', 12, top],                                          // anywhere we can still shoot from
+    ];
+    for (const [tier, lo, hi] of bands) {
+      if (hi <= lo) continue;
+      let best = null, bestD = Infinity;
+      const iA = Math.floor((T.x - hi) / cell), iB = Math.ceil((T.x + hi) / cell);
+      const jA = Math.floor((T.z - hi) / cell), jB = Math.ceil((T.z + hi) / cell);
+      for (let i = iA; i <= iB; i++) for (let j = jA; j <= jB; j++) {
+        const x = i * cell, z = j * cell;
+        const dT = Math.hypot(x - T.x, z - T.z);
+        if (dT < lo || dT > hi) continue;
+        if (R) { const k = navIdx(i, j); if (k < 0 || !R[k]) continue; }   // proven undrivable-to
+        if (!spotOK(x, z)) continue;
+        const dU = (x - px) ** 2 + (z - pz) ** 2;                          // nearest = least travel
+        if (dU < bestD) { bestD = dU; best = { x, z }; }
       }
-      cands.sort((A, C) => A.d - C.d);                     // nearest to the unit = least travel
-      // SPREAD the few searches we can afford. Ranking purely by travel puts the cheapest
-      // candidates shoulder to shoulder on one side of the tower, so a handful of tries all probe
-      // the SAME approach — and if that side is blocked the tower gets abandoned even though the
-      // far side was open. Skip candidates that sit near one already tried, so ~5 searches cover
-      // the ring instead of one arc of it. (Trying 40 hid this: brute force bought diversity.)
-      const tried = [];
-      const spread = c => tried.every(t => (t.x - c.x) ** 2 + (t.z - c.z) ** 2 > SIEGE_SPOT_SPREAD ** 2);
-      let unsure = null;
-      for (const c of cands) {
-        if (budget <= 0) break;
-        if (!spread(c)) continue;                          // too close to a spot we already probed
-        tried.push(c); budget--;
-        const r = flyer ? 'yes' : reaches(c.x, c.z);
-        if (r === 'unsure' && !unsure) unsure = c;          // remember the best far-but-unproven one
-        if (r !== 'yes') continue;
+      if (best) {
         if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
-        return { x: c.x, z: c.z };
-      }
-      // Nothing PROVEN reachable, but something was merely too far to prove. Take it rather than
-      // abandoning a workable tower — the unit walks the partial route and closes the distance,
-      // which is exactly what the driver does with a budget partial.
-      if (unsure) {
-        aiLog(this.team, `${this.cname}: Firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) is a long haul — heading over to confirm it.`);
-        return { x: unsure.x, z: unsure.z };
+        return best;
       }
     }
     return null;
@@ -9560,6 +9539,48 @@ const navIdx = (i, j) => {
   const a = i + navStaticHalf, b = j + navStaticHalf;
   return (a < 0 || b < 0 || a >= navStaticN || b >= navStaticN) ? -1 : b * navStaticN + a;
 };
+// REACHABILITY AS A FIELD, NOT AS A QUESTION ASKED N TIMES. One breadth-first flood from the
+// unit's own cell over the same blocked test A* uses, 8-connected, ~96x96 cells. Every cell it
+// reaches is somewhere this hull can actually drive to; every cell it doesn't, isn't.
+//
+// This is how the standoff playground (lab/standoff-lab.html) has always worked, and why it finds
+// good firing positions when the game struggles to: the lab floods once and then judges EVERY
+// reachable cell, while _standoffFor used to sample 24 points on three or four fixed radii and
+// could afford about five real A* searches before giving up and abandoning the tower. The flood is
+// both more thorough and far cheaper — one pass over 9k cells instead of five full-grid searches —
+// so the search stops being rationed.
+//
+// Cached per unit for a beat: a siege solves a spot for several towers in the same breath, and the
+// hull has not moved between them.
+const FLOOD_TTL = 400;   // ms a reachability flood stays good for (the unit has barely moved)
+function reachFrom(v) {
+  if (!navStatic) buildNavStatic();
+  const c = grid.cell;
+  const i0 = Math.round(v.holder.position.x / c), j0 = Math.round(v.holder.position.z / c);
+  const memo = v.__reach;
+  if (memo && memo.i === i0 && memo.j === j0 && performance.now() - memo.t < FLOOD_TTL) return memo.R;
+  const R = new Uint8Array(navStaticN * navStaticN);
+  const start = navIdx(i0, j0);
+  if (start < 0) return R;
+  // Start cell blocked (parked against a wall, mid-gate) would flood nothing at all, so seed it
+  // regardless — we are demonstrably able to be here.
+  R[start] = 1;
+  const qi = new Int16Array(R.length), qj = new Int16Array(R.length);
+  qi[0] = i0; qj[0] = j0;
+  let head = 0, tail = 1;
+  while (head < tail) {
+    const i = qi[head], j = qj[head]; head++;
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      if (!di && !dj) continue;
+      const ni = i + di, nj = j + dj, k = navIdx(ni, nj);
+      if (k < 0 || R[k]) continue;
+      if (cellBlocked(v, ni, nj)) continue;
+      R[k] = 1; qi[tail] = ni; qj[tail] = nj; tail++;
+    }
+  }
+  v.__reach = { i: i0, j: j0, t: performance.now(), R };
+  return R;
+}
 function buildNavStatic() {
   const c = grid.cell;
   const iMax = Math.ceil(map.worldW / 2 / c) + 12;
