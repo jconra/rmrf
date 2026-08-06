@@ -1739,6 +1739,7 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
   if (!veh || veh.dead) return;
   if (veh.ammo <= 0) { if (veh.isPlayer) updatePlayerHud(); return; }   // dry — rearm at a depot/base
   veh.ammo -= 1;
+  veh._shots = (veh._shots || 0) + 1;   // whole-life shot count — the DRY-TRIP alarm asks whether this unit ever fired
   veh._lastFireT = performance.now();   // Driver's nav-alarm watchdog: a real shot means "fighting", not "stuck"
   if (veh.isPlayer) updatePlayerHud();
   const idx = veh.def.soundIndex;
@@ -5432,6 +5433,15 @@ function liveTurretNear(x, z, r = 8) {
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
 const navScuttles = [];                     // units the driver destroyed for being unable to move
 const navScuttlesByTeam = {};               // per-team scuttle tally — RR.navScuttles()
+// TWO FAILURE CLASSES THAT HID IN PLAIN SIGHT FOR TWENTY MINUTES (seed 1151), so they get to be
+// loud now. Both are silent by nature: nothing crashes, no unit gets stuck, the commander picks
+// the right mission the whole time — the units just never accomplish anything, and only a metric
+// that counts the non-event can see it.
+const DRY_TRIP_ALARM = 3;     // trips to the enemy base without firing a shot, per commander, before it screams
+const DRY_TRIP_R = 110;       // u — inside this of the enemy base counts as "it got there"
+const SWAP_LOOP_ALARM = 3;    // recalls answered by re-fielding the very type we recalled
+let dryTripsTotal = 0;        // RR.decisionAlarms() — tournament summary
+let swapLoopsTotal = 0;
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
 // WHAT WAS THIS UNIT DOING? Shared by the alarm and the scuttle records — both are autopsies,
@@ -6541,6 +6551,12 @@ class AICommander {
   // clears the towers in one tour instead of eventually abandoning siege altogether.
   _vehicleForMission(step, want) {
     if (!aiVehSwap || !want || !this._msnVehFail) return want;
+    // The rear-door gambit is a DIFFERENT plan from the grind we're abandoning, so the chassis
+    // blame this layer keeps ("valkyries keep losing this siege") is about a mission we're no
+    // longer running. Letting it veto the flyer kills the only play that can break the deadlock —
+    // and it can't substitute anyway, since no ground unit flies the flank. _pickAvailableType
+    // already carves the same exception out of its save-the-last reserve.
+    if (want === 'valkyrie' && this._gambit) return want;
     const failed = t => this._msnVehFail[`${step}|${t}`] || 0;
     // Jacob's framing: "if the siege is getting negative points for LURCHER siege, roll out a new
     // vehicle." So the trigger is the two facts together — the MISSION is carrying a negative
@@ -6629,6 +6645,52 @@ class AICommander {
   // Draw a fresh card (on repeated losses / stalls) — keeps the AI unpredictable.
   redraw() { this.strategy = makeDoctrine(this.archetype, this.personality, Math.random, this.strategy.constructor, m => aiLog(this.team, `${this.cname}: ${m}`)); this.fortHp0 = fortHpOf(this.targetTeam()) || this.fortHp0; this.failStreak = 0; aiLog(this.team, `${this.cname}: That's not working — new plan, listen up!`); }
 
+  // WHAT WOULD WE ACTUALLY ROLL OUT for the plan we're running? Every substitution deploy applies,
+  // in deploy's order, and nothing that spends scrap — so it is safe to ask at any time.
+  //
+  // This exists because deploy and _maybeRecall used to work it out separately, and a recall that
+  // demands a vehicle deploy will never field is a deadlock with no way out. Seed 1151: the
+  // stalemate gambit armed, _pickAvailableType's gambit override answered "valkyrie", the recall
+  // saw a valkyrie coming and pulled the Jotun off the pad — then deploy ran the FULL chain, where
+  // the chassis-blame layer substituted the valkyrie straight back to a Jotun. Neither side ever
+  // changed its mind: 285 swaps, a fresh Jotun every 3.5 seconds for twenty minutes, hull never
+  // scratched, never more than 170u from home. One question, one answer, and the loop can't form.
+  //
+  //   rawWant — what the doctrine ASKED for, before any substitution. A rescue that reasons "the
+  //             plan needs X and we own no X" has to read this one, since `want` has already been
+  //             through _pickAvailableType and can never name a type we're out of.
+  //   want    — the plan's ask after the save-the-last reserve and the chassis-blame layer.
+  //   type    — what the roster can actually put on the pad right now.
+  _wouldField(announce = false) {
+    let rawWant = this.strategy.wantVehicle(this);
+    // DON'T SPEND THE LAST RUNNER ON ERRANDS. "SAVE THE LAST OF A TYPE" in _pickAvailableType
+    // holds each type's final vehicle back while another type has spares — but its pool is empty
+    // for the firebrat, so the ONE irreplaceable unit is the only one it does not protect. The
+    // comment there says the Hunter's firebrat reserve covers it; no such reserve exists. And the
+    // Rogue's role table asks for a FIREBRAT to scout (AIStrategies.js), so a commander will send
+    // its last flag carrier out sightseeing.
+    // A capture has no substitute and must still go. Everything else does have one, so when the
+    // runner pool is down to its last and the mission is not a capture, field something else.
+    if (aiSaveRunner && rawWant === 'firebrat' && this.strategy.step !== 'capture'
+        && (this.roster.firebrat || 0) <= 1) {
+      const sub = ['lurcher', 'valkyrie', 'jotun'].find(t => (this.roster[t] || 0) > 0);
+      if (sub) {
+        if (announce && this._saveRunnerLogged !== this.strategy.step) {
+          this._saveRunnerLogged = this.strategy.step;
+          aiLog(this.team, `${this.cname}: That's our last Firebrat — it's the only thing that can carry a flag. Sending a ${sub} on ${this.strategy.step} instead.`);
+        }
+        rawWant = sub;
+      }
+    }
+    const want = this._vehicleForMission(this.strategy.step,
+      this._pickAvailableType(rawWant) || rawWant);
+    // The scrap-funded builds in deploy are deliberately NOT modelled here: they spend, and this
+    // has to stay free to call. They only ever fire when the roster is short, and their effect is
+    // to field MORE than this predicts — so a caller comparing against the current unit errs
+    // toward leaving it alone, which is the safe direction for a swap.
+    return { rawWant, want, type: this._pickAvailableType(want) };
+  }
+
   deploy() {
     // PICK THE MISSION BEFORE THE LIFT MOVES. Everything below chooses a chassis for
     // `this.strategy.step`, so a stale step buys the wrong vehicle: slot 0's very first
@@ -6655,32 +6717,7 @@ class AICommander {
         this.strategy = this._makeCard(role);
       }
     }
-    // What the PLAN asks for, before any substitution — the doctrine's intent. Kept separate
-    // because `want` below has already been through _pickAvailableType, which answers "what can
-    // we field from stock" and therefore can never name a type we have none of. Any rescue that
-    // asks "the plan needs X and we have no X" has to read this one; see the runner rebuild.
-    let rawWant = this.strategy.wantVehicle(this);
-    // DON'T SPEND THE LAST RUNNER ON ERRANDS. "SAVE THE LAST OF A TYPE" in _pickAvailableType
-    // holds each type's final vehicle back while another type has spares — but its pool is empty
-    // for the firebrat, so the ONE irreplaceable unit is the only one it does not protect. The
-    // comment there says the Hunter's firebrat reserve covers it; no such reserve exists. And the
-    // Rogue's role table asks for a FIREBRAT to scout (AIStrategies.js), so a commander will send
-    // its last flag carrier out sightseeing.
-    // A capture has no substitute and must still go. Everything else does have one, so when the
-    // runner pool is down to its last and the mission is not a capture, field something else.
-    if (aiSaveRunner && rawWant === 'firebrat' && this.strategy.step !== 'capture'
-        && (this.roster.firebrat || 0) <= 1) {
-      const sub = ['lurcher', 'valkyrie', 'jotun'].find(t => (this.roster[t] || 0) > 0);
-      if (sub) {
-        if (this._saveRunnerLogged !== this.strategy.step) {
-          this._saveRunnerLogged = this.strategy.step;
-          aiLog(this.team, `${this.cname}: That's our last Firebrat — it's the only thing that can carry a flag. Sending a ${sub} on ${this.strategy.step} instead.`);
-        }
-        rawWant = sub;
-      }
-    }
-    const want = this._vehicleForMission(this.strategy.step,
-      this._pickAvailableType(rawWant) || rawWant);
+    const { rawWant, want } = this._wouldField(true);
     // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
     // plus running LOW on the wanted type builds a fresh one before picking — not just at
     // zero. A commander sat on 15 scrap feeding lone runners into a defended base; a rich
@@ -6724,6 +6761,21 @@ class AICommander {
       if (!this._eliminated) { this._eliminated = true; aiLog(this.team, `${this.cname}: We're combat ineffective — no vehicles left! We're out!`); }
       return;
     }
+    // SWAP-LOOP ALARM: we pulled a unit off the field to trade it for something better, and the
+    // lift just brought the same type back up. That is a recall placed against a vehicle deploy
+    // will not field, and nothing about it looks broken from outside — no crash, no stuck unit, a
+    // sensible mission throughout. Seed 1151 ran this 285 times in twenty minutes: a fresh Jotun
+    // every 3.5 seconds, hull never scratched, never more than 170u from home, while the recall
+    // held out for a Valkyrie the chassis-blame layer substituted away every single time.
+    if (this._recallFrom && type === this._recallFrom && type !== this._recallWant) {
+      swapLoopsTotal++;
+      this._swapLoops = (this._swapLoops || 0) + 1;
+      if (this._swapLoops === SWAP_LOOP_ALARM) {
+        aiLog(this.team, `[SWAP-LOOP ALARM] ${this.cname}: ${SWAP_LOOP_ALARM}x now we've recalled a ${type} to swap it `
+          + `for a ${this._recallWant} and rolled out another ${type}. The recall wants something the garage won't build.`);
+      }
+    }
+    this._recallFrom = null; this._recallWant = null;
     this._stepAtDeploy = this.strategy.step;   // lock the type for this step — no mid-step churn
     this._recalling = false;
     const sub = type !== want ? ` (${want}s are gone)` : '';
@@ -7177,9 +7229,11 @@ class AICommander {
     // HQ-finisher (towers down, walled HQ) OR the stalemate gambit (base untouched, we're bailing
     // on the mid-field grind to fly one around the back). Both want the flyer that a ground sieger
     // can't be.
+    // Ask what deploy would ACTUALLY field, not what the doctrine wants — a recall placed against
+    // a vehicle that never rolls out is a loop with no exit (see _wouldField, seed 1151).
     const hqSwap = this.strategy.step === 'siege' && (this.fortDown() || this._gambit) && !this.flagExposed()
       && this.unit.type !== 'valkyrie' && !this.unit._move.ignoreWalls
-      && this._pickAvailableType(this.strategy.wantVehicle(this)) === 'valkyrie';
+      && this._wouldField().type === 'valkyrie';
     // RUNNER SWAP: we're on CAPTURE with a grabbable flag, but the fielded unit is a stand-in
     // heavy (all firebrats died earlier, so the type fell back to "most numerous"). deploy()
     // knows how to build a fresh firebrat from scrap — but deploy only runs on death/recall,
@@ -7200,6 +7254,7 @@ class AICommander {
     if (aiDefendInPlace && this.strategy.step === 'defend' && this.homeAttack()) return;
     if (runnerSwap) {
       this._stepAtDeploy = this.strategy.step; this._recalling = true;
+      this._recallWant = 'firebrat'; this._recallFrom = this.unit.type;   // SWAP-LOOP alarm: what we pulled it back FOR
       this._recallForce = true;   // committed — same deadlock-proofing as the hqSwap recall
       this._recallBestD = Infinity; this._recallStallT = 0; this._nav.path = null;
       aiLog(this.team, `${this.cname}: The flag's sitting right there — pull the ${this.unit.type} back, we're sending a real runner!`);
@@ -7208,6 +7263,7 @@ class AICommander {
     if (hqSwap) {   // commit the swap even with defenders near — a unit lost en route just respawns as the Valkyrie
       _hqSwapCount++;
       this._stepAtDeploy = this.strategy.step; this._recalling = true;
+      this._recallWant = 'valkyrie'; this._recallFrom = this.unit.type;   // SWAP-LOOP alarm: what we pulled it back FOR
       this._recallForce = true;   // COMMITTED: the threat-abort must not cancel this recall — aborting re-armed it same tick (log ×11k, Valkyrie never launched, stalemate stayed deadlocked)
       this._recallBestD = Infinity; this._recallStallT = 0; this._nav.path = null;
       aiLog(this.team, this.fortDown()
@@ -7227,7 +7283,7 @@ class AICommander {
     // Compare against the type we'd ACTUALLY field (after save-last / role substitution),
     // not the raw role want — otherwise a unit that's already the best available substitute
     // gets recalled to "swap" for a wanted type we'd only re-substitute right back to it.
-    const want = this._vehicleForMission(this.strategy.step, this._pickAvailableType(this.strategy.wantVehicle(this)));
+    const want = this._wouldField().type;
     this._stepAtDeploy = this.strategy.step;                        // consume the step change either way
     if (!want || this.unit.type === want) return;                  // new beat wants the same vehicle → carry on
     // INTERCEPT (our flag was just lifted): only worth driving HOME to fetch a Valkyrie if it's a
@@ -7242,6 +7298,7 @@ class AICommander {
       if (!(ground && nearElev)) return;   // chase with the current unit — no recall home
     }
     this._recalling = true;
+    this._recallWant = want; this._recallFrom = this.unit.type;    // SWAP-LOOP alarm: what we pulled it back FOR
     this._recallForce = false;                                     // a routine swap still defers to the threat-abort
     this._recallBestD = Infinity;                                  // closest we've gotten to home so far
     this._recallStallT = 0;                                        // time since we last made headway toward home
@@ -7255,7 +7312,7 @@ class AICommander {
     const v = this.unit;
     this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
     applyAltitude(v, dt); decayAim(v, dt); v.cooldown -= dt;
-    if (v.dead) { this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 3; return; }
+    if (v.dead) { this._endTour(v); this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 3; return; }
     const home = teamCenter(this.team, 'fob');
     const d = Math.hypot(v.holder.position.x - home.x, v.holder.position.z - home.z);
     const reach = (this._elev ? this._elev.padHalf : 8) + 5;
@@ -7269,6 +7326,7 @@ class AICommander {
     const stuck = this._recallStallT > RECALL_STALL;
     if (d < reach || stuck) {
       aiLog(this.team, d < reach ? `${this.cname}: ${v.type} is home — swapping it out now!` : `${this.cname}: ${v.type} can't get home, it's hung up — ditch it and swap!`);
+      this._endTour(v);
       removeCombatant(v); scene.remove(v.group); this.unit = null; this._recalling = false; this._recallForce = false; this.respawnT = 1.0;
       return;
     }
@@ -7442,6 +7500,7 @@ class AICommander {
         // mid-siege shouldn't restart the whole plan from scratch); it just redeploys.
         if (!this.archetype && Math.random() < Math.min(0.85, 0.25 + this.failStreak * 0.2)) this.redraw();
       }
+      this._endTour(this.unit);
       this.unit = null;
       this._rising = false; this._recalling = false; this._recallForce = false;
       this.respawnT -= dt;
@@ -7449,6 +7508,12 @@ class AICommander {
       // under it) retires here instead of redeploying (_syncSlots prunes it once empty).
       if (this.started && !this._eliminated && this.respawnT <= 0 && this._slotI < this.unitCap()) { this.respawnT = 4 + Math.random() * 3; this.deploy(); }
       return;
+    }
+    // Did this unit ever actually GET there? The DRY-TRIP alarm only cares about units that
+    // completed the drive — a unit killed in mid-field never had the chance to shoot a base.
+    if (!this.unit._reachedEnemy) {
+      const eb = this.enemyBasePos(), up = this.unit.holder.position;
+      if ((up.x - eb.x) ** 2 + (up.z - eb.z) ** 2 < DRY_TRIP_R * DRY_TRIP_R) this.unit._reachedEnemy = true;
     }
     // Report card: a hand on the enemy flag at ANY point counts as progress (even if the
     // runner is later gunned down, the plan produced something — don't ban it).
@@ -7570,7 +7635,7 @@ class AICommander {
     driveChassis(v, out, dt, v._move.omni && OMNI_STATES[cmd.state]);
     applyAltitude(v, dt);
     decayAim(v, dt);
-    if (v.dead) { this.unit = null; this.respawnT = 4; this._rising = false; return; }
+    if (v.dead) { this._endTour(v); this.unit = null; this.respawnT = 4; this._rising = false; return; }
     v.cooldown -= dt;
     // Fire at the current target: a suppressed wall-turret (aimed at its raised head so
     // the slug arcs up). With NO clean line to it (a wall/HQ blocks the shot) a siege
@@ -7783,6 +7848,21 @@ class AICommander {
   // when the mission that wanted it is over, or when the driver has proven we cannot get to the
   // firing spot. Being shot by something else, driving out of sensing range, or a nearer tower
   // appearing are all reasons to KEEP GOING, and each of them used to silently re-point the unit.
+  // END OF A TOUR — the unit is leaving the field, whichever way. If it got all the way to the
+  // enemy base and never pulled the trigger, that is a delivery route, not an attack, and nothing
+  // else in the gate can see it: the unit isn't stuck, isn't lost, and its commander is picking a
+  // perfectly sensible mission the whole time. Seed 1151's Lurcher ran that route ten times over
+  // twenty minutes — 180u out, chewed to a quarter health by towers it never fired at, 180u home,
+  // heal on the pad, go again, ammo 68/68 throughout.
+  _endTour(v) {
+    if (!v || !v._reachedEnemy || (v._shots || 0) > 0) return;
+    dryTripsTotal++;
+    this._dryTrips = (this._dryTrips || 0) + 1;
+    if (this._dryTrips === DRY_TRIP_ALARM) {
+      aiLog(this.team, `[DRY-TRIP ALARM] ${this.cname}: ${DRY_TRIP_ALARM} ${v.type}s have now driven all the way to their base `
+        + `and come back without firing a shot. We're running a bus route, not a war.`);
+    }
+  }
   _tgtStillValid(lock) {
     if (!lock || !this.unit || this.unit.dead) return false;
     if (lock.msn !== (this.strategy && this.strategy.step)) return false;   // the mission moved on
@@ -10798,6 +10878,7 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal }),   // units that reached the enemy base and never fired; recalls answered by the same chassis
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setVehSwap: on => { aiVehSwap = !!on; return aiVehSwap; },   // A/B: blame the chassis for a failing mission, or only the mission
   setPadFight: on => { aiPadFight = !!on; return aiPadFight; },   // A/B: fight from under the elevator shield vs always drive out first
