@@ -691,6 +691,7 @@ export function missionWeightsOn(cmd) {
 // what we have — a Firebrat-heavy fleet leans capture, a Jotun-heavy one leans the front
 // siege, a Valkyrie-heavy one the rear siege (the flyer clears the walls to get there).
 const FLEET_FAV = { firebrat: ['capture', 0.40], lurcher: ['attack', 0.23], valkyrie: ['siege-back', 0.15], jotun: ['siege', 0.15] };
+const FLEET_FAV_CAP = 5;   // most the fleet-composition nudge can be worth — see the cap note in missionScore
 // archetype nudges per mission (the personalities survive, like v.fofW biases the fight
 // score). A bare base key ('capture') applies to every direction of it.
 // These are MULTIPLIED early in the match — see PERSONA_EARLY below.
@@ -848,7 +849,15 @@ export function missionScore(cmd, key, running = null) {
   // fleet-comp (play to strength) — a bare fav ('capture') covers all its directions
   for (const t in FLEET_FAV) {
     const [fav, thr] = FLEET_FAV[t];
-    if (fav === key || (fav === base && key !== 'siege-back')) { const b = ((roster[t] || 0) / fleet - thr) * 10; if (b > 0) add('fleet ' + t[0].toUpperCase(), b); }
+    // CAPPED. Uncapped, a one-chassis fleet pays the full (share - threshold) x 10 — a roster of
+    // nothing but Jotuns scores siege +8.5 on its own. Seed 1095 stalemated on exactly that: the
+    // enemy keep was rubble and every board-driven siege term was ZERO, yet siege totalled 13
+    // (clock 3, fleet 8.5, incumbency 1.5) and beat an open, grabbable flag at 10 for four hundred
+    // seconds. The loop is self-sealing — owning only Jotuns says "siege", sieging keeps the Jotun
+    // alive, and a roster that never turns over keeps owning only Jotuns.
+    // "Play to your strengths" must not outvote the win condition being on the table. Owning the
+    // wrong chassis is a reason to CHANGE chassis, not a reason to prefer the mission that suits it.
+    if (fav === key || (fav === base && key !== 'siege-back')) { const b = Math.min(FLEET_FAV_CAP, ((roster[t] || 0) / fleet - thr) * 10); if (b > 0) add('fleet ' + t[0].toUpperCase(), b); }
   }
   // persona bias: the exact key's nudge plus the base key's (so rogue's capture +1 applies to
   // every direction, and its capture-rear +1 stacks on top of that for the back door)
