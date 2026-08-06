@@ -1437,6 +1437,7 @@ const PRIO = {
   recent: 6,     // …and fades over THREAT_FADE rather than switching off (gradual weights)
 };
 const THREAT_FADE = 15;   // seconds for "it shot at me" to decay from PRIO.recent to nothing
+const HQ_YIELD_FRESH = 2000;   // ms — a turret hit this recent still counts as "it is shooting us" (see _tgtStillValid)
 // How much extra a structure at (x,z) is worth because it has been shooting at us. Reads the
 // turret hit-marker damageVehicle already records, so this needs no new plumbing.
 function turretThreatBonus(v, x, z) {
@@ -7888,7 +7889,32 @@ class AICommander {
   _tgtStillValid(lock) {
     if (!lock || !this.unit || this.unit.dead) return false;
     if (lock.msn !== (this.strategy && this.strategy.step)) return false;   // the mission moved on
-    if (lock.hq) { const c = lock.camp; return !!(c && c.flagHQ && !c.flagHQ.dead); }
+    // …with one exception, and it is the siege rule PRIO already encodes: "the keep is the top
+    // priority, but a tower that is actually shooting at us outranks it" (tower 6 + shooting 10 >
+    // hq 10). A GROUND unit cannot shoot a walled keep, so an HQ lock has no natural end, and the
+    // gun grinding the unit down never becomes its target. Measured: a Valkyrie died on siege with
+    // a live tower 48u away, clear line of sight, an 80u gun, a full magazine, and a turret hit
+    // 0.3 SECONDS earlier — still pointed at the keep. The scorer would have picked the tower; the
+    // lock never let it be asked.
+    //
+    // THE RELEASE IS DELIBERATELY NARROW, because a wider one was built, measured and thrown away.
+    // The first version released on any turret hit and then went looking for a firing position,
+    // which meant a fresh journey: fresh-set scuttles 1 -> 18 and nav alarms 7 -> 28, because a
+    // new destination is a new chance to get stranded. This version only yields to a gun we can
+    // shoot from EXACTLY WHERE WE STAND — no new route, no travel, nothing for the driver to fail
+    // at. If it is out of reach we keep the keep and keep driving, which is the same answer the
+    // old code gave and cost nothing to reach.
+    if (lock.hq) {
+      const c = lock.camp;
+      if (!(c && c.flagHQ && !c.flagHQ.dead)) return false;
+      const h = this.unit._hitByTurret, now = performance.now();
+      if (!h || now - h.t >= HQ_YIELD_FRESH) return true;             // nothing is shooting us
+      const p = this.unit.holder.position;
+      const reach = SHOT_REACH[this.unit.type] || 42;
+      if ((h.x - p.x) ** 2 + (h.z - p.z) ** 2 > reach * reach) return true;   // can't hit back from here
+      aiLog(this.team, `${this.cname}: That tower's got our range and we've got its — leave the keep, kill the gun!`);
+      return false;
+    }
     if (lock.wall) { const t = lock.wall.turret; return !!(t && !t.dead && !t.falling); }
     return liveTurretNear(lock.x, lock.z);   // no object handle (a jeep, a raw point) — ask the board
   }

@@ -489,6 +489,30 @@ class Scavenge extends Mission {
 // WHERE the decision is made without also moving WHEN it fires: fuelLow 0.18 and bailBase 0.45
 // are lifted straight from AI.js's config. Guessing new numbers here would have confounded the
 // refactor with a balance change and made the measurement unreadable.
+// HOW MUCH OF THE RUNNING PLAN IS ALREADY PAID FOR — the incumbent bonus, weighted by travel.
+// A unit on the pad has invested nothing and should change its mind freely; a unit at the enemy
+// fort has spent most of a sortie getting there and a near-tie should not throw that away.
+const INCUMBENT_BASE = 1.0;   // just for being underway, anywhere
+const INCUMBENT_MAX = 3.0;    // …rising to this at the objective
+// Supply missions are exempt from the SCALING (they keep the base): a unit is on refuel BECAUSE
+// it is nearly dry, and rewarding it for having driven a long way to the pump would make the
+// worst case — out of fuel, far from home — the hardest one to interrupt.
+const INCUMBENT_FLAT = { refuel: 1, rearm: 1, repair: 1, armour: 1 };
+export function incumbentBonus(cmd) {
+  const key = (cmd._msnKey || '').split('-')[0];
+  if (INCUMBENT_FLAT[key]) return INCUMBENT_BASE;
+  const v = cmd.unit;
+  if (!v || v.dead || !v.holder) return INCUMBENT_BASE;
+  let home, away;
+  try { home = cmd.homePos(); away = cmd.enemyBasePos(); } catch (e) { return INCUMBENT_BASE; }
+  if (!home || !away) return INCUMBENT_BASE;
+  const span = Math.hypot(away.x - home.x, away.z - home.z);
+  if (!(span > 1)) return INCUMBENT_BASE;
+  const p = v.holder.position;
+  const gone = Math.hypot(p.x - home.x, p.z - home.z) / span;          // 0 at the pad, 1 at their base
+  const f = Math.max(0, Math.min(1, gone));
+  return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
+}
 export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
@@ -936,10 +960,18 @@ export function missionPick(cmd, incumbent = null) {
   let best = null, bestV = -1e9; const all = [];
   for (const key of MSN_CANDS) {
     const r = missionScore(cmd, key, incumbent);
-    // INCUMBENT BONUS: the running plan is worth +1.5 just for being underway — near-tied
+    // INCUMBENT BONUS — now weighted by how much of the plan is already PAID FOR. Near-tied
     // scores must not flap the commander between missions every few seconds (autopsy: a
-    // siege↔scavenge↔attack cycle at 4-6s). A challenger has to genuinely beat the plan.
-    if (incumbent && key === incumbent) { r.total = Math.round((r.total + 1.5) * 10) / 10; r.terms.push(['running', 1.5]); }
+    // siege↔scavenge↔attack cycle at 4-6s), so a challenger has to genuinely beat the plan.
+    // But a flat +1.5 gave a unit still on the pad exactly the same loyalty to its plan as a unit
+    // 228u downrange that has spent forty seconds and half a tank getting there. Jacob's framing:
+    // "if a siege does get re-evaluated 150u from the fob that translates to +1.5 towards siege."
+    // So it scales with committed distance — the sunk cost is real and the scorer should see it.
+    // Gradual per the house rule: 0 at the pad, INCUMBENT_MAX at the objective.
+    if (incumbent && key === incumbent) {
+      const bonus = incumbentBonus(cmd);
+      r.total = Math.round((r.total + bonus) * 10) / 10; r.terms.push(['running', bonus]);
+    }
     all.push([key, r.total, r.terms]);
     if (r.total > bestV) { bestV = r.total; best = key; }
   }
