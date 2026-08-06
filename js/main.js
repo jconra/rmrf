@@ -7867,8 +7867,17 @@ class AICommander {
   // perfectly sensible mission the whole time. Seed 1151's Lurcher ran that route ten times over
   // twenty minutes — 180u out, chewed to a quarter health by towers it never fired at, 180u home,
   // heal on the pad, go again, ammo 68/68 throughout.
+  // Only missions whose job is to SHOOT something. A Firebrat on capture is supposed to drive in,
+  // take the flag and run — it has no business trading shots, so counting it here measured
+  // correct-by-design behaviour and drowned the signal: 12 of the first 19 dry trips were runners
+  // on capture, and not one of them had touched the flag. That is a capture that failed on the
+  // approach, which the mission report card already grades (no flag, no damage -> no progress ->
+  // the mission takes its penalty). This alarm asks one question only: did a unit sent to FIGHT
+  // arrive and not fight?
+  static DRY_TRIP_MISSIONS = { siege: 1, 'siege-back': 1, attack: 1, defend: 1 };
   _endTour(v) {
     if (!v || !v._reachedEnemy || (v._shots || 0) > 0) return;
+    if (!AICommander.DRY_TRIP_MISSIONS[(this.strategy && this.strategy.step) || '']) return;
     dryTripsTotal++;
     this._dryTrips = (this._dryTrips || 0) + 1;
     if (this._dryTrips === DRY_TRIP_ALARM) {
