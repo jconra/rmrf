@@ -5404,7 +5404,6 @@ const SCUTTLE_ALARM_N = 4;      // units lost in a row on one mission before we 
 const ASTAR_FRAME_ALARM = 12;   // A* searches in ONE frame that mean something is looping, not working
 let _astarAlarmed = false;      // fire once per match — an alarm that repeats every frame IS the storm
 setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
-const TGT_COMMIT = 6;   // s on a target before a fresh hit is allowed to re-point us (re-selecting ONCE is fine; every 2s is the bug)
 const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold out at (0.55 close/fast … 0.85 far/safe). RR.setStandBand
 
 // ── THE DRIVER (js/Driver.js) ────────────────────────────────────────────────
@@ -8423,33 +8422,18 @@ class AICommander {
     // nearest gun, not the keep, and not the healing sponge next door. (Watched live: a
     // lurcher ground away at a gunless tower under repair while the far corner's live
     // gun killed it.) Match the remembered head position back to a live turret.
-    let hitBack = false;
-    const hb = this.unit && this.unit._hitByTurret;
-    // DON'T LET THE MOST RECENT SHOT STEER US. This used to re-point the unit at whichever turret
-    // hit it last, with no comparison at all to what it was already shooting — so with two towers
-    // both firing, the target simply alternated with the incoming rounds. Measured over 6 matches:
-    // 374 target re-selections, median hold 2s, one lurcher swapping between two towers 84u apart
-    // four times in twelve seconds. Because the firing position is DERIVED from the target, each
-    // of those swaps relocated its destination by 84u — that is the "nav churn" this whole
-    // investigation started on. Once we are committed to a live target we can still shoot, a new
-    // hit no longer takes the wheel; it just has to wait its turn.
-    const committedToLive = threat && !hqThreat && (this._tgtT || 0) > TGT_COMMIT;
-    if (hb && performance.now() - hb.t < 4000 && !committedToLive && !_locked) {
-      for (const c of camps) {
-        if (c.team === this.team) continue;
-        for (const w of c.walls) {
-          const t = w.turret;
-          if (!t || t.dead || t.falling) continue;
-          t.group.updateWorldMatrix(true, false);   // matrices can be stale outside a render (headless sims)
-          t.head.getWorldPosition(_threatV);
-          if ((_threatV.x - hb.x) ** 2 + (_threatV.z - hb.z) ** 2 < 5 * 5) {
-            threat = { x: _threatV.x, y: _threatV.y, z: _threatV.z }; _tgtWhy = 'shooting back'; _br.hitBack = true; _tgtWall = w; threatCamp = c; hqThreat = false; hitBack = true;
-            break;
-          }
-        }
-        if (hitBack) break;
-      }
-    }
+    // SHOOT BACK — DELETED as a target override (2026-08-05). A turret that had landed a hit in
+    // the last 4s used to be assigned as the target directly, reaching past the plan and past the
+    // priority score. It was the single biggest source of churn: 161 of 496 switches were
+    // gun-to-gun with neither gun destroyed, because against several firing towers the "most
+    // recent hit" changes with every incoming round, and the firing position moves with the
+    // target. The symptom it was added for — grinding a gunless tower under repair while a live
+    // gun kills you — is now covered by the target being COMMITTED to a chosen tower and by
+    // turretThreatBonus preferring a gun that is actually shooting when the choice is first made.
+    // Being shot is a reason to re-examine the plan (the brain's `threatened`/`ambushed` rungs
+    // still respond, and taking fire is a re-score trigger); it is not a reason to silently
+    // rewrite what we are shooting at.
+    const hitBack = false;
     // Tower under ACTIVE repair → shoot the crew's JEEP instead (cancels the heal); the
     // tower itself is a sponge that soaks fire while its neighbours shoot back. (Unless
     // we're being SHOT — then the gun firing at us stays the target.)
