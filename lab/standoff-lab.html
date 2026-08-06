@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RMRF · Standoff Playground</title>
+<style>
+  :root { --bg:#0c1016; --panel:#141b25; --ink:#dfe8ef; --dim:#8ba0b3; --acc:#7fd4ff; --good:#57e08a; --bad:#ff5f4a; --warn:#ffcf6a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:13px/1.45 "Courier New",monospace; padding:8px; max-width:620px; margin:0 auto; }
+  h1 { font-size:14px; letter-spacing:1px; margin:0 0 6px; color:var(--acc); }
+  .sub { color:var(--dim); font-size:11px; margin:-4px 0 8px; }
+  #bar { position:sticky; top:0; z-index:5; display:flex; gap:6px; background:var(--bg); padding:4px 0 6px; }
+  #bar .tool { flex:1; text-align:center; padding:11px 4px; font-size:14px; }
+  canvas { display:block; width:100%; height:auto; aspect-ratio:1; background:#0a1420; border:1px solid #223040; border-radius:6px; touch-action:none; }
+  .panel { background:var(--panel); border:1px solid #223040; border-radius:6px; padding:8px 10px; margin-top:8px; }
+  .row { display:flex; align-items:center; gap:8px; margin:7px 0; }
+  .row label { flex:1; color:var(--dim); }
+  input[type=range] { flex:1.5; height:26px; }
+  input[type=checkbox] { width:20px; height:20px; vertical-align:middle; }
+  button, .tool { background:#1d2836; color:var(--ink); border:1px solid #33465c; border-radius:6px; padding:9px 10px; font:inherit; cursor:pointer; }
+  button { flex:1; }
+  .tool.on { background:#1b3a52; border-color:var(--acc); color:var(--acc); }
+  .key { display:flex; align-items:center; gap:6px; margin:3px 0; color:var(--dim); font-size:11px; }
+  .sw { width:14px; height:14px; border-radius:3px; border:1px solid #0006; flex:none; }
+  #readout { white-space:pre-wrap; color:var(--ink); font-size:12px; }
+  .hint { color:var(--dim); font-size:11px; }
+</style>
+</head>
+<body>
+  <h1>STANDOFF PLAYGROUND</h1>
+  <div class="sub">✖ = CURRENT pick (radial + _standRot) · green + ● cyan = PROPOSED fix</div>
+  <div id="bar">
+    <span class="tool on" id="t-drag">✥ Drag</span><span class="tool" id="t-water">💧 Water</span><span class="tool" id="t-land">▦ Land</span>
+  </div>
+  <canvas id="cv" width="720" height="720"></canvas>
+  <div class="panel">
+    <div class="row"><button id="b-preset">Coastal preset</button><button id="b-clear">Clear water</button></div>
+    <div class="hint">In ✥ Drag: drag the Lurcher (▲) or a tower (■); <b>tap a tower to kill/revive it</b> (✖). Red line = the route the Lurcher drives to its pick. Use 💧/▦ to paint a coastline.</div>
+  </div>
+  <div class="panel">
+    <div class="row"><label>Lurcher range</label><input type="range" id="s-unit" min="60" max="260" value="150"><span id="v-unit">150</span></div>
+    <div class="row"><label>Tower range</label><input type="range" id="s-tower" min="80" max="300" value="216"><span id="v-tower">216</span></div>
+    <div class="row"><label>Stand-off band (min %)</label><input type="range" id="s-fall" min="40" max="98" value="85"><span id="v-fall">85%</span></div>
+    <div class="row"><label><input type="checkbox" id="c-cross" checked> avoid crossfire</label>
+      <label><input type="checkbox" id="c-los" checked> require LOS</label></div>
+  </div>
+  <div class="panel">
+    <div class="key"><span class="sw" style="background:#2f4a30"></span> reachable land · <span class="sw" style="background:#12324e"></span> water (sinks)</div>
+    <div class="key"><span class="sw" style="background:rgba(255,95,74,.22)"></span> tower range · <span class="sw" style="background:rgba(255,95,74,.5)"></span> crossfire</div>
+    <div class="key"><span class="sw" style="background:var(--good)"></span> VALID region · <span class="sw" style="background:var(--warn)"></span> current ✖ · <span class="sw" style="background:var(--acc)"></span> fix ●</div>
+  </div>
+  <div class="panel"><div id="readout"></div></div>
+<script>
+const cv = document.getElementById('cv'), g = cv.getContext('2d');
+const W = 720, H = 720, N = 90, CELL = W / N;      // reachability grid: 90×90 cells of 8px
+const water = new Uint8Array(N * N);
+const wi = (i,j) => i * N + j;
+const inGrid = (i,j) => i>=0 && i<N && j>=0 && j<N;
+const cellOf = (x,y) => [Math.floor(x/CELL), Math.floor(y/CELL)];
+
+// scene
+let base = { x: 470, y: 250 };
+let towers = [];
+function layoutTowers(){ const d = 95; towers = [ {x:base.x-d,y:base.y-d},{x:base.x+d,y:base.y-d},{x:base.x+d,y:base.y+d},{x:base.x-d,y:base.y+d} ].map(t=>({...t, dead:false})); }
+layoutTowers();
+let unit = { x: 150, y: 430 };
+
+const S = { unit:150, tower:216, fall:0.85, cross:true, los:true };
+let tool = 'drag';
+
+// ---- interaction ----
+let drag = null;
+function pick(x,y){
+  if (Math.hypot(x-unit.x,y-unit.y) < 16) return { t:'unit' };
+  for (let k=0;k<towers.length;k++) if (Math.hypot(x-towers[k].x,y-towers[k].y) < 15) return { t:'tower', k };
+  if (Math.hypot(x-base.x,y-base.y) < 14) return { t:'base' };
+  return null;
+}
+function paintAt(x,y,val){ const r=2; const [ci,cj]=cellOf(x,y); for(let i=-r;i<=r;i++)for(let j=-r;j<=r;j++){ if(inGrid(ci+i,cj+j)) water[wi(ci+i,cj+j)]=val; } }
+function evtXY(e){ const r=cv.getBoundingClientRect(); const t=e.touches?e.touches[0]:e; return [ (t.clientX-r.left)*W/r.width, (t.clientY-r.top)*H/r.height ]; }
+cv.addEventListener('pointerdown', e=>{ cv.setPointerCapture(e.pointerId); const [x,y]=evtXY(e);
+  if (tool==='drag'){ drag = pick(x,y) || { t:'paintW' }; if(drag.t==='paintW'){ paintAt(x,y,1); } else { drag.sx=x; drag.sy=y; drag.moved=false; } }
+  else { drag = { t: tool==='water'?'paintW':'paintL' }; paintAt(x,y, tool==='water'?1:0); }
+  if (e.button===2) { drag = { t:'paintW' }; paintAt(x,y,1); }
+  render(); });
+cv.addEventListener('pointermove', e=>{ if(!drag) return; const [x,y]=evtXY(e);
+  if(drag.sx!=null && Math.hypot(x-drag.sx,y-drag.sy)>7) drag.moved=true;   // tell a drag from a tap
+  if(drag.t==='unit') unit={x,y};
+  else if(drag.t==='tower'){ if(drag.moved) towers[drag.k]={...towers[drag.k],x,y}; }
+  else if(drag.t==='base'){ const dx=x-base.x,dy=y-base.y; base={x,y}; towers=towers.map(t=>({...t,x:t.x+dx,y:t.y+dy})); }
+  else if(drag.t==='paintW') paintAt(x,y,1);
+  else if(drag.t==='paintL') paintAt(x,y,0);
+  render(); });
+cv.addEventListener('pointerup', ()=>{ if(drag && drag.t==='tower' && !drag.moved){ towers[drag.k].dead=!towers[drag.k].dead; render(); } drag=null; });
+cv.addEventListener('contextmenu', e=>e.preventDefault());
+
+function setTool(t){ tool=t; for(const id of ['drag','water','land']) document.getElementById('t-'+id).classList.toggle('on', id===t); }
+document.getElementById('t-drag').onclick=()=>setTool('drag');
+document.getElementById('t-water').onclick=()=>setTool('water');
+document.getElementById('t-land').onclick=()=>setTool('land');
+document.getElementById('b-clear').onclick=()=>{ water.fill(0); render(); };
+document.getElementById('b-preset').onclick=()=>{ // water in the SW: a coastal corner the Lurcher must skirt
+  water.fill(0);
+  for(let i=0;i<N;i++)for(let j=0;j<N;j++){ const x=i*CELL,y=j*CELL;
+    if (x < 300 && y > 360 && (x*0.7 + (720-y)*0.7) < 470) water[wi(i,j)]=1;    // a diagonal inlet
+    if (x < 120) water[wi(i,j)]=1;                                             // left sea
+  }
+  render();
+};
+for (const [id,key,pct] of [['s-unit','unit',0],['s-tower','tower',0],['s-fall','fall',1]]) {
+  const el=document.getElementById(id); el.oninput=()=>{ S[key]= pct? el.value/100 : +el.value;
+    document.getElementById('v-'+id.slice(2)).textContent = pct? el.value+'%' : el.value; render(); };
+}
+document.getElementById('c-cross').onchange=e=>{ S.cross=e.target.checked; render(); };
+document.getElementById('c-los').onchange=e=>{ S.los=e.target.checked; render(); };
+
+// ---- geometry helpers ----
+const isWaterPx = (x,y)=>{ const [i,j]=cellOf(x,y); return inGrid(i,j) ? water[wi(i,j)] : 1; };
+// LOS: sample the segment; blocked if it crosses water (a Lurcher can't see/shoot across a hill of water? no —
+// water blocks a GROUND shot only if we say so). Here LOS is blocked by the BASE INTERIOR (behind the walls):
+// the segment from the stand to the tower must not pass through the tower quad's far side.
+function segCrossesBase(ax,ay,bx,by){
+  // base quad edges = consecutive towers; a shot to tower k is blocked if the line crosses a NON-adjacent wall
+  const poly = towers.map(t=>[t.x,t.y]);
+  let hits=0;
+  for(let e=0;e<4;e++){ const p=poly[e], q=poly[(e+1)%4];
+    if (segSeg(ax,ay,bx,by,p[0],p[1],q[0],q[1])) hits++; }
+  return hits>=1;   // crosses any wall edge → blocked (a corner tower is reachable from OUTSIDE its two edges)
+}
+function segSeg(ax,ay,bx,by,cx,cy,dx,dy){
+  const d=(bx-ax)*(dy-cy)-(by-ay)*(dx-cx); if(Math.abs(d)<1e-9) return false;
+  const t=((cx-ax)*(dy-cy)-(cy-ay)*(dx-cx))/d, u=((cx-ax)*(by-ay)-(cy-ay)*(bx-ax))/d;
+  return t>0.02 && t<0.98 && u>0.02 && u<0.98;
+}
+// reachability: BFS from the unit over land cells (8-connectivity), blocked by water + the base
+// interior. Tracks `prev` so we can reconstruct the actual route the Lurcher would drive.
+function reachField(){
+  const R = new Uint8Array(N*N); const prev = new Int32Array(N*N).fill(-1);
+  const inBase = (i,j)=>{ const x=i*CELL+CELL/2,y=j*CELL+CELL/2; return pointInQuad(x,y, towers); };
+  const blocked=(i,j)=> water[wi(i,j)] || inBase(i,j);
+  let [si,sj]=cellOf(unit.x,unit.y);
+  if(!inGrid(si,sj)||blocked(si,sj)){ let best=null,bd=1e9; for(let i=0;i<N;i++)for(let j=0;j<N;j++) if(!blocked(i,j)){ const d=(i-si)**2+(j-sj)**2; if(d<bd){bd=d;best=[i,j];} }
+    if(!best) return {R,prev,start:-1}; [si,sj]=best; }
+  const start=wi(si,sj); R[start]=1; const q=[[si,sj]]; let head=0;
+  const nb=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  while(head<q.length){ const [i,j]=q[head++]; for(const [di,dj] of nb){ const ni=i+di,nj=j+dj;
+    if(inGrid(ni,nj)&&!R[wi(ni,nj)]&&!blocked(ni,nj)){ R[wi(ni,nj)]=1; prev[wi(ni,nj)]=wi(i,j); q.push([ni,nj]); } } }
+  return {R,prev,start};
+}
+function tracePath(prev,start,cellIdx){
+  const cells=[]; let idx=cellIdx, guard=0;
+  while(idx!==-1 && idx!==start && guard++<8000){ cells.push([Math.floor(idx/N)*CELL+CELL/2, (idx%N)*CELL+CELL/2]); idx=prev[idx]; }
+  if(start>=0) cells.push([Math.floor(start/N)*CELL+CELL/2, (start%N)*CELL+CELL/2]);
+  return cells.reverse();
+}
+function pointInQuad(x,y,poly){ let inside=false; for(let e=0,f=3;e<4;f=e++){ const [xi,yi]=[poly[e].x,poly[e].y],[xj,yj]=[poly[f].x,poly[f].y];
+  if(((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi)) inside=!inside; } return inside; }
+
+// how many OTHER live towers cover a point (crossfire)
+function crossfireAt(x,y,selfIdx){ let n=0; for(let k=0;k<towers.length;k++){ if(k===selfIdx||towers[k].dead) continue;
+  if(Math.hypot(x-towers[k].x,y-towers[k].y) < S.tower) n++; } return n; }
+
+// ---- the CURRENT algorithm's radial pick + the FIX's pick ----
+function computeStand(){
+  const live = towers.map((t,k)=>({...t,k})).filter(t=>!t.dead);
+  if(!live.length) return null;
+  // target = nearest tower to the unit (matches the game's nearest-turret pick)
+  live.sort((a,b)=> Math.hypot(a.x-unit.x,a.y-unit.y)-Math.hypot(b.x-unit.x,b.y-unit.y));
+  const T = live[0];
+  // CURRENT: radial OUT from base-center through the tower, at unit range
+  let rx=T.x-base.x, ry=T.y-base.y; const rm=Math.hypot(rx,ry)||1; rx/=rm; ry/=rm;
+  const radial = { x: T.x + rx*S.unit, y: T.y + ry*S.unit };
+  const { R, prev, start } = reachField();
+  const reachAt = (x,y)=>{ const [i,j]=cellOf(x,y); return inGrid(i,j) && R[wi(i,j)]; };
+  const radialStatus = [];
+  if (isWaterPx(radial.x,radial.y)) radialStatus.push('in WATER');
+  if (!reachAt(radial.x,radial.y)) radialStatus.push('unreachable');
+  if (crossfireAt(radial.x,radial.y,T.k)>0) radialStatus.push('in crossfire');
+  if (S.los && segCrossesBase(radial.x,radial.y,T.x,T.y)) radialStatus.push('no LOS');
+  // FIX: among REACHABLE land cells, keep those within useful range of T, no crossfire, with LOS.
+  // Pick the one nearest the unit (least travel).
+  let best=null, bestD=1e9; const region=[];
+  for(let i=0;i<N;i++)for(let j=0;j<N;j++){ if(!R[wi(i,j)]) continue;
+    const x=i*CELL+CELL/2, y=j*CELL+CELL/2; const dT=Math.hypot(x-T.x,y-T.y);
+    if(dT > S.unit || dT < Math.max(24, S.unit*S.fall)) continue;         // stand in the OUTER band [fall·range, range] — far out, near max reach (falloff ok)
+    if(S.cross && crossfireAt(x,y,T.k)>0) continue;                       // crossfire avoided
+    if(S.los && segCrossesBase(x,y,T.x,T.y)) continue;                    // needs a line to the tower
+    region.push([x,y]);
+    const dU=Math.hypot(x-unit.x,y-unit.y); if(dU<bestD){ bestD=dU; best={x,y,idx:wi(i,j)}; }
+  }
+  const path = best ? tracePath(prev, start, best.idx) : null;   // the route the Lurcher actually drives
+  return { T, radial, radialStatus, region, best, path, R, reachAt };
+}
+
+// ---- render ----
+function render(){
+  g.clearRect(0,0,W,H);
+  const info = computeStand();
+  const R = info ? info.R : reachField();
+  // land / water + reachable tint
+  for(let i=0;i<N;i++)for(let j=0;j<N;j++){ const x=i*CELL,y=j*CELL;
+    if(water[wi(i,j)]) g.fillStyle='#12324e';
+    else g.fillStyle = R[wi(i,j)] ? '#2f4a30' : '#26302a';   // reachable land brighter than isolated land
+    g.fillRect(x,y,CELL+0.5,CELL+0.5);
+  }
+  // tower ranges + crossfire (draw range discs additively so overlaps read darker)
+  g.save(); g.globalCompositeOperation='lighter';
+  for(const t of towers){ if(t.dead) continue; const grd=g.createRadialGradient(t.x,t.y,0,t.x,t.y,S.tower);
+    grd.addColorStop(0,'rgba(255,95,74,0.16)'); grd.addColorStop(1,'rgba(255,95,74,0.03)');
+    g.fillStyle=grd; g.beginPath(); g.arc(t.x,t.y,S.tower,0,7); g.fill(); }
+  g.restore();
+  // valid standoff region
+  if(info){ g.fillStyle='rgba(87,224,138,0.5)'; for(const [x,y] of info.region) g.fillRect(x-CELL/2,y-CELL/2,CELL,CELL); }
+  // base walls
+  g.strokeStyle='#69809a'; g.lineWidth=3; g.beginPath();
+  for(let e=0;e<4;e++){ const p=towers[e],q=towers[(e+1)%4]; if(e===0)g.moveTo(p.x,p.y); g.lineTo(q.x,q.y);} g.closePath(); g.stroke();
+  // lurcher's route to its standoff pick
+  if(info && info.path && info.path.length){ g.strokeStyle='#ff5f4a'; g.lineWidth=3; g.lineJoin='round';
+    g.beginPath(); g.moveTo(unit.x,unit.y); for(const [x,y] of info.path) g.lineTo(x,y); if(info.best) g.lineTo(info.best.x,info.best.y); g.stroke(); }
+  // towers (range circle only while alive; a dead one gets an ✖)
+  for(const t of towers){ g.fillStyle=t.dead?'#3a4552':'#c9d6e2'; g.fillRect(t.x-8,t.y-8,16,16);
+    g.strokeStyle='#0008'; g.lineWidth=1; g.strokeRect(t.x-8,t.y-8,16,16);
+    if(t.dead){ g.strokeStyle='#ff5f4a'; g.lineWidth=2; g.beginPath(); g.moveTo(t.x-6,t.y-6); g.lineTo(t.x+6,t.y+6); g.moveTo(t.x+6,t.y-6); g.lineTo(t.x-6,t.y+6); g.stroke(); }
+    else { g.strokeStyle='rgba(255,95,74,0.5)'; g.lineWidth=1; g.beginPath(); g.arc(t.x,t.y,S.tower,0,7); g.stroke(); } }
+  // unit + its range
+  g.strokeStyle='rgba(127,212,255,0.5)'; g.lineWidth=1; g.beginPath(); g.arc(unit.x,unit.y,S.unit,0,7); g.stroke();
+  g.fillStyle='#7fd4ff'; g.beginPath(); g.moveTo(unit.x,unit.y-11); g.lineTo(unit.x+9,unit.y+8); g.lineTo(unit.x-9,unit.y+8); g.closePath(); g.fill();
+  // current radial pick
+  if(info){ const bad=info.radialStatus.length>0; g.strokeStyle=bad?'#ff5f4a':'#ffcf6a'; g.lineWidth=2;
+    g.beginPath(); g.arc(info.radial.x,info.radial.y,9,0,7); g.stroke();
+    g.beginPath(); g.moveTo(info.radial.x-6,info.radial.y-6); g.lineTo(info.radial.x+6,info.radial.y+6); g.moveTo(info.radial.x+6,info.radial.y-6); g.lineTo(info.radial.x-6,info.radial.y+6); g.stroke();
+    // line to target tower
+    g.strokeStyle='rgba(255,207,106,0.4)'; g.setLineDash([4,4]); g.beginPath(); g.moveTo(info.radial.x,info.radial.y); g.lineTo(info.T.x,info.T.y); g.stroke(); g.setLineDash([]);
+    // fix's pick
+    if(info.best){ g.fillStyle='#7fd4ff'; g.beginPath(); g.arc(info.best.x,info.best.y,7,0,7); g.fill(); g.strokeStyle='#0a2233'; g.stroke();
+      g.strokeStyle='rgba(127,212,255,0.6)'; g.beginPath(); g.moveTo(info.best.x,info.best.y); g.lineTo(info.T.x,info.T.y); g.stroke(); }
+  }
+  // readout
+  const ro=document.getElementById('readout');
+  if(!info){ ro.textContent='No live towers.'; return; }
+  const tIdx = info.T.k+1;
+  let s = `TARGET: nearest tower #${tIdx}\n`;
+  s += `CURRENT radial pick: ${info.radialStatus.length? '✖ '+info.radialStatus.join(', ') : '✔ ok'}\n`;
+  s += info.radialStatus.length ? `  → the old code hands this bad spot to the driver;\n    _standRot then rotates it around the tower.\n` : '';
+  s += `\nFIX (A*-reachable + in-range + no-crossfire + LOS):\n`;
+  s += info.best ? `  ✔ found ${info.region.length} valid cells — stand at the\n    green ● (nearest reachable good spot to the unit).\n`
+                 : `  ✖ NO valid standoff for this tower from reachable\n    ground → try the next tower, else the keep.\n`;
+  ro.innerHTML = s.replace(/✔/g,'<span style="color:var(--good)">✔</span>').replace(/✖/g,'<span style="color:var(--bad)">✖</span>');
+}
+render();
+</script>
+</body>
+</html>
