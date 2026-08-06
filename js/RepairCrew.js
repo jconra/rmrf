@@ -187,9 +187,18 @@ export class RepairJob {
     } else if (this.state === 'building') {
       if (this._crewWipedOut()) return this._end('cancelled');
       const body = this.wall.body;
-      // A fully-destroyed tower is a valid worksite: raise it from the rubble and rebuild.
-      // (Also covers the tower being shot down MID-repair — the crew just starts over.)
-      if (body.dead) { body.revive(1); this.startHp = 1; this.rebuilt = true; }
+      // A fully-destroyed tower is a valid worksite: raise it from the rubble and rebuild —
+      // but ONLY if it was already rubble when we got here. A tower that dies while we are
+      // working on it is a tower under fire, and reviving it at 1hp just feeds the shooter an
+      // endless sponge: shell to zero, crew revives to 1, shell again, forever. Measured on
+      // seed 1095 — a tower held at 1-2hp through 993 separate heal ticks while a Lurcher put
+      // 87 shells into that corner of the base over six minutes. Stand the crew down instead
+      // and let them drive home; the tower is lost, but the shooter stops being fed and the
+      // jeep survives to fix something that isn't currently being demolished.
+      if (body.dead) {
+        if (this.startHp != null) { this.abandoned = true; this._packUp(); return this.state; }
+        body.revive(1); this.startHp = 1; this.rebuilt = true;
+      }
       if (this.startHp == null) this.startHp = body.hp;
       const full = this.wall.maxHp;
       // Heal a flat 1%/s toward full. The crew keeps working until the tower is topped off, so any

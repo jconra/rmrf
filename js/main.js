@@ -4630,7 +4630,11 @@ function updateRepairs(dt, camera) {
       ts.hpHealed += j.healed;
       if (j.rebuilt) ts.rebuilds++;
       if (j.gunMounted) ts.gunsMounted++;
-      if (st === 'done') ts.done++; else { ts.cancelled++; ts.jeepsLostField++; }
+      // A crew that ABANDONED a tower being shelled to rubble under it drove home intact — that
+      // is neither a completed job nor a jeep lost in the field. Booking it as either hid the
+      // sponge (see RepairCrew: the revive-at-1hp loop) behind a healthy-looking counter.
+      if (j.abandoned) ts.abandoned = (ts.abandoned || 0) + 1;
+      else if (st === 'done') ts.done++; else { ts.cancelled++; ts.jeepsLostField++; }
       repairJobs.splice(i, 1);
     }
   }
