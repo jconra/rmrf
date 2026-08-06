@@ -1435,7 +1435,18 @@ const PRIO = {
   wall: 2,       // low on its own — rises when it stands between us and something better
   shooting: 10,  // this structure is hitting us RIGHT NOW → jumps above the keep (6+10 > 10)
   recent: 6,     // …and fades over THREAT_FADE rather than switching off (gradual weights)
+  inReach: 5,    // …and a gun we can shoot FROM HERE also outranks it (6+5 > 10) — see below
 };
+// WHY "IN REACH" AND NOT JUST "SHOOTING AT US" (Jacob: "shouldn't the keep have higher priority
+// unless the tower is in range?"). The keep is the win condition so it stays the default pick —
+// but a tower only outranked it while actively firing, which meant a quiet tower scored 6 against
+// the keep's 10 and lost, forever. Seed 1095: a Lurcher spent 261 seconds on station with its gun
+// aimed at a keep 170u away, behind a wall, with a 42u reach and its reload counter sitting at
+// MINUS 22 SECONDS — ready, aimed at something it could never hit — while towers it kills in 3.2
+// seconds each (35 damage a shell, 340hp, 0.32s reload) stood untouched 8u away.
+// A target we can physically shoot right now beats one we cannot, whatever the win condition says;
+// for a ground hull the keep is not a target at all until the fort comes down. "Can I hit it from
+// here" is a fact rather than a spectrum, which is why this is a step and not a curve.
 const THREAT_FADE = 15;   // seconds for "it shot at me" to decay from PRIO.recent to nothing
 const INTERCEPT_GUN_CLEAR = 8;      // u of daylight past a tower's reach when picking the ambush spot
 const INTERCEPT_PUSH_MAX = 140;     // u — furthest we walk outward looking for cover-free ground
@@ -7974,11 +7985,23 @@ class AICommander {
     if (lock.hq) {
       const c = lock.camp;
       if (!(c && c.flagHQ && !c.flagHQ.dead)) return false;
-      const h = this.unit._hitByTurret, now = performance.now();
-      if (!h || now - h.t >= HQ_YIELD_FRESH) return true;             // nothing is shooting us
       const p = this.unit.holder.position;
       const reach = SHOT_REACH[this.unit.type] || 42;
-      if ((h.x - p.x) ** 2 + (h.z - p.z) ** 2 > reach * reach) return true;   // can't hit back from here
+      const inReach = (x, z) => (x - p.x) ** 2 + (z - p.z) ** 2 <= reach * reach;
+      // A GUN WE CAN SHOOT FROM HERE ends the keep lock — it does not have to be shooting first.
+      // PRIO scores it above the keep for exactly this reason (see PRIO.inReach), but the lock held
+      // the target so the scorer was never asked, and the priority change alone changed nothing.
+      // Still no travel involved: the tower is inside our reach by construction, so this cannot
+      // send the unit hunting a new firing position — which is what made the first version of this
+      // release cost 18 scuttles.
+      const gun = this.plannableTowers().find(k => inReach(k.x, k.z));
+      if (gun) {
+        aiLog(this.team, `${this.cname}: Tower in reach — forget the keep, put it down first!`);
+        return false;
+      }
+      const h = this.unit._hitByTurret, now = performance.now();
+      if (!h || now - h.t >= HQ_YIELD_FRESH) return true;             // nothing is shooting us either
+      if (!inReach(h.x, h.z)) return true;                            // …and we can't hit back from here
       aiLog(this.team, `${this.cname}: That tower's got our range and we've got its — leave the keep, kill the gun!`);
       return false;
     }
@@ -8565,7 +8588,9 @@ class AICommander {
         // highest rather than to whatever the queue happened to name.
         let promote = this._gambit || !threat || !hasPathNow;
         if (aiTargetPrio && !promote && threat) {
-          const towerScore = PRIO.tower + turretThreatBonus(v, threat.x, threat.z);
+          const _dT = Math.hypot(threat.x - px, threat.z - pz);
+          const _inReach = _dT <= (SHOT_REACH[v.type] || 42) ? PRIO.inReach : 0;
+          const towerScore = PRIO.tower + turretThreatBonus(v, threat.x, threat.z) + _inReach;
           // Hysteresis: a target we are already committed to is worth staying on, so a near-tie
           // cannot flip the unit back and forth mid-siege (the same reason missionPick gives the
           // running plan +1.5).
