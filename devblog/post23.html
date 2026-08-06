@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the map it never looked at</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:20px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  a { color:var(--blue); }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); } td b.warn { color:var(--warn); }
+  .matrix td, .matrix th { text-align:center; }
+  .matrix td:first-child, .matrix th:first-child { text-align:left; color:var(--dim); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+  .bar { display:inline-block; height:9px; border-radius:2px; vertical-align:middle; }
+</style>
+</head><body>
+<a class="navbtn" style="left:10px" href="post22.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 23 · the map it never looked at</div>
+</header>
+<main>
+
+<article>
+  <h2>&#8470;23 — THE MAP IT NEVER LOOKED AT</h2>
+  <div class="date">2026-08-06 · six identical deaths, a lab that already had the answer, and three fixes that didn't earn their keep</div>
+
+  <p>Seed 1053. A Lurcher rolls out of the base, drives a hundred and eighty units to the enemy
+  fort, arrives, and dies fifty-eight seconds later. The next Lurcher rolls out, drives the same
+  route, and dies fifty-eight seconds later. This happens six times.</p>
+
+  <div class="k">
+    <b>25</b> red lurcher 524–582 <b>58s</b> 253&#8594;253 &nbsp; siege<br>
+    <b>26</b> red lurcher 586–645 <b>58s</b> 220&#8594;220 &nbsp; siege<br>
+    <b>27</b> red lurcher 649–707 <b>58s</b> 220&#8594;220 &nbsp; siege<br>
+    <b>28</b> red lurcher 711–769 <b>58s</b> 220&#8594;220 &nbsp; siege<br>
+    <b>29</b> red lurcher 773–832 <b>58s</b> 220&#8594;220 &nbsp; siege
+  </div>
+
+  <p>Look at the hull column. <code>220&#8594;220</code>. Not one of them takes a scratch. They are
+  not dying in a fight — they are being destroyed by the stuck-watchdog for standing still. And
+  they are standing still at their assigned firing position, with a clean line of sight and a full
+  magazine of sixty-eight rounds, having never pulled the trigger once.</p>
+
+  <h3>A FIRING POSITION BELONGS TO A GUN</h3>
+
+  <p>The firing position was <b>54 units</b> from the tower. A Lurcher's gun reaches <b>42</b>.</p>
+
+  <p>The siege plan solves a standoff once per tower and caches it, which is what makes the whole
+  relaxation ladder affordable. But the ring it searches is sized from the <em>current</em> chassis
+  — reach and hold range — while the cache is keyed by the wall alone. Red had flown a Valkyrie
+  earlier in that siege. A Valkyrie reaches 80. It solved a perfectly good spot for itself, parked
+  it in the cache, and every Lurcher that followed inherited a firing position it could not
+  physically shoot from.</p>
+
+  <p>Each cached spot now records the gun it was drawn for, and re-solves when the current gun is
+  shorter. A longer gun inheriting a close spot still reaches, so that direction is left alone and
+  the expensive search stays rare. Seed 1053 went from the twenty-minute cap to resolving.</p>
+
+  <h3>THE OBSERVATION THAT MATTERED</h3>
+
+  <p>There is a standoff playground in <code>lab/</code> — a little 2D sandbox for exactly this
+  problem, and it works. It reliably finds a good spot. So the question, reasonably enough, was
+  why the game finds it so hard.</p>
+
+  <p>The answer is that they were not doing the same thing at all.</p>
+
+  <table>
+    <tr><th></th><th>the lab</th><th>the game</th></tr>
+    <tr><td>reachability</td><td>one breadth-first flood over the whole grid</td>
+        <td><b class="bad">none</b></td></tr>
+    <tr><td>candidates considered</td><td>every reachable cell — ~8100</td>
+        <td>24 points on each of 3–4 fixed radii</td></tr>
+    <tr><td>cost</td><td>one pass</td><td>up to five full-grid A* searches, then give up</td></tr>
+  </table>
+
+  <p>The game leaned on a cheap filter called <code>drivableTo</code>, which compares landmass
+  ids. That answers <em>"is this the same island"</em> — not <em>"can this hull get there"</em>. It
+  knows nothing about walls, gates, or a channel three cells wide. So the real question had to be
+  asked with A*, A* is expensive, and the search was rationed to about five probes. A tower whose
+  five probes all landed badly was simply abandoned.</p>
+
+  <p>The lab was not smarter. It just had a map.</p>
+
+  <h3>SO THE GAME GOT ONE</h3>
+
+  <p><code>reachFrom(v)</code> floods outward from the unit's own cell using the same blocked test
+  A* uses, eight-connected, across about nine thousand cells, cached for a beat so a siege solving
+  several towers floods once. Every cell it touches is somewhere that hull can actually drive.</p>
+
+  <p>The standoff search now scans the entire annulus around the tower and takes the nearest cell
+  that passes range, line of sight, and crossfire. One flood replaces five A* searches: cheaper
+  <em>and</em> exhaustive. The search stopped being rationed, and towers stopped being abandoned
+  for want of probe budget.</p>
+
+  <p>One detail that had to be right: the flood originally squeezed through diagonal gaps that A*
+  refuses — the router will not clip a wall corner. A field that promises ground the router won't
+  deliver is worse than no field, because the unit sets out, gets no route, and stands there until
+  the watchdog kills it. The flood now uses the router's corner rule.</p>
+
+  <h3>THE OTHER WALL: WINNING ON PAPER</h3>
+
+  <p>With units suddenly closing to twelve units instead of parking at fifty-four, more matches
+  reached a state the AI could not finish: enemy keep cracked, enemy fleet gone, and a stalemate
+  anyway.</p>
+
+  <p>Seed 116 is the clean case. Blue is annihilated — zero units, zero reserves, keep at 0hp, all
+  four towers down. Red spends the last six minutes running <code>capture-front 7.5</code> in a
+  <b>Lurcher</b>, which cannot carry a flag. It holds no Firebrat and no scrap to build one, and
+  there are parts lying on the field the whole time. Scavenge — go get the parts, build a runner,
+  walk in — scored <b>4</b>.</p>
+
+  <p>The scorer already knew. Capture carried a term reading <code>no runner &#8722;6</code>. But
+  &#8722;6 prices an <em>impossible</em> plan as merely a weak one, and capture still won the vote.
+  A capture with nothing that can carry a flag cannot produce a win no matter how good the rest of
+  the board looks, so it is now priced out of contention entirely, and fetching the parts that
+  restore a runner is worth +10 when their base is already open. Same genuine binary as "there is
+  an enemy" — a fact, not a spectrum.</p>
+
+  <h3>THREE FIXES THAT DIDN'T EARN THEIR KEEP</h3>
+
+  <p>All three were plausible, all three were built, all three were measured, and none of them
+  shipped. They are worth more written down than deleted.</p>
+
+  <table>
+    <tr><th>the idea</th><th>what it bought</th><th>what it cost</th></tr>
+    <tr><td>Tower fire releases the keep — a sieger locked on a walled HQ it can't shoot should
+        switch to the gun grinding it down</td>
+        <td>default-set transit-stuck <b class="good">1585 &#8594; 625</b></td>
+        <td>fresh-set scuttles <b class="bad">1 &#8594; 18</b>, alarms <b class="bad">7 &#8594; 28</b></td></tr>
+    <tr><td>Never swap vehicles mid-intercept — the plan expires before the swap completes</td>
+        <td>no-op swaps <b class="good">54 &#8594; 5</b> and <b class="good">82 &#8594; 2</b></td>
+        <td>three stalemates, default alarms <b class="bad">10 &#8594; 31</b></td></tr>
+    <tr><td>Re-validate a cached firing spot the current unit can't reach</td>
+        <td>nothing measurable</td>
+        <td><b class="bad">30/30 &#8594; 29/30</b>, alarms <b class="bad">10 &#8594; 30</b>, stuck went <em>up</em></td></tr>
+  </table>
+
+  <p>The pattern took three failures to see, and it is the most useful thing to come out of the
+  night:</p>
+
+  <div class="k">
+    Every change that <b>added a decision</b> cost churn — stalemates, alarms, scuttles.<br>
+    The change that <b>replaced a bad search with a good one</b> won outright.
+  </div>
+
+  <p>A new decision point is a new place for the plan to change its mind, and this AI has spent
+  months being taught to stop changing its mind. Fixing what a search <em>knows</em> does not add
+  one.</p>
+
+  <h3>THE NUMBERS</h3>
+
+  <p>240 seeds, two populations, the same seeds before and after.</p>
+
+  <table class="matrix">
+    <tr><th></th><th>before</th><th>after</th></tr>
+    <tr><td>resolved</td><td>224 / 240</td><td><b class="good">230 / 240</b></td></tr>
+    <tr><td>stalemates</td><td>16</td><td><b class="good">10</b></td></tr>
+    <tr><td>transit-stuck</td><td>6524</td><td><b class="good">4641</b></td></tr>
+    <tr><td>nav alarms</td><td>178</td><td><b class="good">112</b></td></tr>
+    <tr><td>scuttled</td><td>57</td><td><b class="good">35</b></td></tr>
+    <tr><td>avg resolve</td><td>549s</td><td>538s</td></tr>
+    <tr><td>no-op swaps</td><td>432</td><td><b class="bad">565</b></td></tr>
+    <tr><td>dry trips</td><td>602</td><td><b class="bad">634</b></td></tr>
+  </table>
+
+  <p>Stalemates, stuck time, alarms and scuttles all down by roughly a third.</p>
+
+  <p class="fine">One correction, on the record. The two 30-seed gate populations both came back
+  30/30 with zero stalemates, and that got reported as "zero stalemates". The 240-seed run says
+  ten. Two 30-seed sets are not enough to call a sweep, and the small gate was flattering.</p>
+
+  <h3>WHAT'S STILL WRONG</h3>
+
+  <p>Two counters got worse and both are honest signals rather than noise.</p>
+
+  <p><b>No-op swaps, up 31%.</b> A commander pulls a unit off the field to trade it for something
+  better, and the lift brings back the same chassis. The cause is known: the recall is placed on a
+  plan that expires in the one second between the unit despawning and the next one deploying —
+  overwhelmingly an intercept, the most perishable plan there is. Each instance wastes about a
+  second. Blocking them measured worse, so the behaviour is tolerated and the alarm was
+  re-tuned to count a <em>run</em> rather than a tally: the 285-in-a-row pathology still screams,
+  the tolerated couple no longer does.</p>
+
+  <p><b>Dry trips, ~2.5 a match.</b> A unit drives all the way to the enemy base and never fires a
+  shot. This alarm was built during this same investigation, specifically because that failure is
+  invisible to everything else — the unit isn't stuck, isn't lost, and its commander is picking a
+  sensible mission the whole time. It just never accomplishes anything. It is now the loudest
+  thing left, and it is next.</p>
+
+</article>
+
+</main>
+</body></html>
