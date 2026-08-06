@@ -811,7 +811,19 @@ export function missionScore(cmd, key, running = null) {
       if (cmd.ourFlagStolen()) add('flag STOLEN', 12);
       else if (cmd.ourFlagLoose && cmd.ourFlagLoose()) add('flag loose', 10); break;
     case 'scavenge':
-      if (cmd.needsPartsRun && cmd.needsPartsRun()) add('need parts', 4); break;
+      if (cmd.needsPartsRun && cmd.needsPartsRun()) {
+        add('need parts', 4);
+        // THE ONLY WAY WE WIN. Their base is already open and we have no runner, no scrap to
+        // build one, and parts lying on the field: fetching them is not one option among
+        // several, it is the entire remaining path to a victory. Same genuine binary as
+        // "there is an enemy" (+10) and "nothing to shoot with" (+10) — a fact, not a spectrum,
+        // which is why the gradual-weights rule allows it. Seed 116: blue annihilated, keep at
+        // 0hp, all four towers down, and red ran capture-front 7.5 in a LURCHER for the last
+        // six minutes of the match while scavenge sat at 4 and the parts to win sat on the
+        // ground. The flag cannot be carried by anything but a Firebrat.
+        if (cmd.flagExposed && cmd.flagExposed()) add('only way we win', 10);
+      }
+      break;
     case 'sap':
       if (earlyB >= 0.1 && spareFB >= 0.5) add('opening sap', earlyB); break;
     case 'trap':
@@ -874,7 +886,13 @@ export function missionScore(cmd, key, running = null) {
   // Directional captures each carry their OWN memory — "front failed" leaves rear untouched.
   const s = cmd._missionSuccess && cmd._missionSuccess[key]; if (s) add('success', s);
   // affordability: a capture with no runner and no scrap to build one can't execute
-  if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')) add('no runner', -6);
+  // A capture with nothing that can carry a flag is not a WEAKER plan, it is an IMPOSSIBLE one,
+  // and -6 priced it as merely weak: capture still won the vote at 7.5 and the commander drove a
+  // Lurcher at an open enemy flag until the clock ran out (seed 116). Price it out of contention
+  // instead — this mission cannot produce a win no matter how good the board looks. The fielded
+  // unit counts too: a Firebrat already on the field can finish the job with an empty roster.
+  if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')
+      && !(cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat')) add('nothing can carry the flag', -14);
   // THE LAST RUNNER IS A ONE-SHOT BET — the mirror of spareFB above. That term pays for having
   // SPARE runners, so holding exactly one produced no signal either way, and the fleet-comp term
   // is bonus-only (`if (b > 0)`) so being down to a last runner never discouraged capture at all:
