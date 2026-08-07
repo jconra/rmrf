@@ -169,17 +169,24 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
 
     return function () {
 
-      if ( !!material ) { return material; }
+      if ( !!material && !VolumetricFire._dirty ) { return material; }
+      VolumetricFire._dirty = false;
 
       // TODO
       // Canvas2D で noise 画像を作る
-      var nzw = textureLoader.load( VolumetricFire.texturePath + 'nzw.png' );
+      // PROCEDURAL OVERRIDE. Set VolumetricFire.textures = { nzw, fireProfile } and no files are
+      // fetched at all. Both of these are generatable: nzw is a hash table of random bytes (the
+      // shader reads .xy as a value and a slope — only its randomness matters, which is why the
+      // original calls it "pregenerated noise"), and fireProfile is a (radius, height) -> colour
+      // lookup, i.e. a picture of a flame cone in cylindrical coordinates.
+      var supplied = VolumetricFire.textures;
+      var nzw = supplied ? supplied.nzw : textureLoader.load( VolumetricFire.texturePath + 'nzw.png' );
       nzw.wrapS = THREE.RepeatWrapping;
       nzw.wrapT = THREE.RepeatWrapping;
       nzw.magFilter = THREE.LinearFilter;
       nzw.minFilter = THREE.LinearFilter;
 
-      var fireProfile = textureLoader.load( VolumetricFire.texturePath + 'firetex.png' );
+      var fireProfile = supplied ? supplied.fireProfile : textureLoader.load( VolumetricFire.texturePath + 'firetex.png' );
       fireProfile.wrapS = THREE.ClampToEdgeWrapping;
       fireProfile.wrapT = THREE.ClampToEdgeWrapping;
       fireProfile.colorSpace = THREE.SRGBColorSpace;   // colour ramp, not data
