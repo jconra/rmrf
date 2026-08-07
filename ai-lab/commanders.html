@@ -38,13 +38,44 @@
   .legend { font-size: 10px; opacity: 0.6; margin-top: 10px; line-height: 1.9; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
     margin-right: 4px; vertical-align: middle; }
+  #chart { max-width: 860px; }
+  .hd { color: #d9a441; font-size: 12px; letter-spacing: 2px; margin: 6px 0 8px; }
+  .hd span { display: block; color: #8fa3b3; font-size: 10px; letter-spacing: 0; margin-top: 2px; }
+  .note { font-size: 11px; color: #8fa3b3; line-height: 1.6; margin: 10px 0 22px; }
+  .note code { color: #ffcf6a; }
+  .pre { border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; overflow: hidden; }
+  .prow { display: grid; grid-template-columns: 74px 128px 1fr 108px 46px; gap: 8px; align-items: center;
+    padding: 7px 10px; font-size: 11px; border-bottom: 1px solid rgba(255,255,255,0.07); position: relative; }
+  .prow:last-child { border-bottom: none; }
+  .prow.w { background: rgba(217,164,65,0.09); }
+  .pbarwrap { grid-column: 1; height: 8px; background: #0d141c; border-radius: 2px; overflow: hidden; }
+  .pbarwrap i { display: block; height: 100%; background: #7dd3fc; }
+  .prow.w .pbarwrap i { background: #d9a441; }
+  .pk { color: #cfe0ee; } .pc { color: #9fb4c6; } .pt { text-align: right; }
+  .pp { text-align: right; color: #7fe0b8; font-variant-numeric: tabular-nums; }
+  .clockrow { display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; font-size: 11px; }
+  .clockrow input { flex: 1; accent-color: #d9a441; }
+  .clockrow .pw { color: #ffcf6a; }
+  .bars { display: flex; flex-direction: column; gap: 6px; }
+  .brow { display: grid; grid-template-columns: 150px 1fr 60px; gap: 10px; align-items: center; font-size: 11px; }
+  .brow .bk { color: #cfe0ee; } .brow .bk em { color: #8fa3b3; font-size: 9.5px; }
+  .brow .btrack { height: 12px; background: #0d141c; border-radius: 3px; overflow: hidden; display: flex; }
+  .brow .btrack i { display: block; height: 100%; }
+  .brow .bv { text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 720px) {
+    #app { flex-direction: column; } #side { width: auto; border-left: none;
+      border-top: 1px solid rgba(255,255,255,0.12); }
+    .prow { grid-template-columns: 60px 1fr 52px; }
+    .prow .pc, .prow .pt { display: none; }
+    .brow { grid-template-columns: 116px 1fr 52px; }
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
   <header>
     <h1>AI&nbsp;LAB &middot; COMMANDERS</h1>
-    <span class="src">hand-authored from rmrf/js/AIStrategies.js &mdash; shared ladder + each persona&rsquo;s choose()</span>
+    <span class="src">imports PERSONA_BIAS + personaWeight live from rmrf/js/AIStrategies.js</span>
     <a href="./index.html">&larr; unit brain</a>
   </header>
   <div id="tabs"></div>

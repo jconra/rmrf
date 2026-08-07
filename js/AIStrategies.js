@@ -719,7 +719,10 @@ const FLEET_FAV_CAP = 5;   // most the fleet-composition nudge can be worth — 
 // archetype nudges per mission (the personalities survive, like v.fofW biases the fight
 // score). A bare base key ('capture') applies to every direction of it.
 // These are MULTIPLIED early in the match — see PERSONA_EARLY below.
-const PERSONA_BIAS = {
+// Exported so the AI Lab's commander page can chart the REAL numbers instead of a copy. The
+// hand-authored copy it used to hold is exactly how that page drifted: it went on drawing each
+// persona's choose() ladder long after MissionScore gated every one of them off.
+export const PERSONA_BIAS = {
   warrior: { attack: 2, siege: 1 },
   turtle:  { defend: 2, scout: -1 },
   hunter:  { attack: 1, siege: 1, trap: 3, scout: 1 },

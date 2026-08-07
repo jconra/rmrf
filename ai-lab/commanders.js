@@ -1,188 +1,187 @@
-// AI Lab — Commander decision flows. Hand-authored from the REAL logic in
-// rmrf/js/AIStrategies.js (Doctrine.tick + each persona's choose()), rendered as a
-// per-commander priority ladder. The shared "universal" rungs run for every persona and
-// PREEMPT its playbook; the persona rungs are that archetype's own choose().
+// AI Lab — what a PERSONA actually does.
 //
-// KEEP IN SYNC: if AIStrategies.js changes, update UNIVERSAL / PERSONA below. Each rung's
-// `why` is copied from the code's own decision string so the chart reads like the log.
+// This page used to chart each archetype's choose() ladder as though that were the decision.
+// It hasn't been since MissionScore became the default brain on 2026-07-18, and the drift went
+// unnoticed because the ladder was HAND-COPIED from AIStrategies.js. Measured over four full
+// matches (4,444 samples), what _firedRung actually reads:
 //
-// LIVE OVERLAY: polls localStorage 'rmrf-ai-live' (published cheaply by the game on each
-// mission switch — no per-frame cost) and highlights the rung the active commander is on.
+//     weights          86.7%      <- MissionScore picks
+//     home_under_fire   6.6%
+//     flag_stolen       3.5%
+//     flag_loose        2.5%
+//     (none)            0.7%
+//
+// Every other rung — losing_attrition, need_parts, towers_down, gambit, clear_path, soften,
+// sapper, trap, choose, benched — fired ZERO times. They sit behind !missionWeightsOn(cmd),
+// and so does every persona choose().
+//
+// So the personas are not dead; their PLAYBOOKS are. A rogue still shapes every match, through
+// PERSONA_BIAS in the scorer. That is what this page charts now.
+//
+// AND IT IMPORTS THE REAL VALUES. flowchart.html never rotted because it pulls DEFAULT_BRAIN
+// straight from the game; this page rotted because it held a copy. Same fix: PERSONA_BIAS,
+// personaWeight and each persona's own opening/roles come from AIStrategies.js, so the chart
+// cannot disagree with the game again.
+import { PERSONA_BIAS, personaWeight, makeDoctrine } from '../js/AIStrategies.js';
 
-// Mission palette (by intent) — matches the unit-brain chart's colour language.
-const MCOLOR = {
-  intercept: '#c0392b', attack: '#c0392b', harass: '#cf6f3a', siege: '#cf6f3a',
-  defend: '#caa23a', scavenge: '#caa23a', capture: '#3a8f6f', scout: '#2e8fb0',
-  sap: '#8e44ad', trap: '#8e44ad',
+const ORDER = ['warrior', 'rogue', 'hunter', 'turtle'];
+const BLURB = {
+  warrior: 'Ride out, rack up kills, then break the base.',
+  rogue: 'Snatch before they know you’re there. Leans on the back door and avoids brawls.',
+  hunter: 'Own the field, ambush the weak, then snatch.',
+  turtle: 'Hold the wall, bleed them, then sortie.',
 };
+const MCOLOR = {
+  scout: '#7dd3fc', attack: '#ff8a6a', siege: '#ffcf6a', capture: '#9fe6b0', defend: '#b88df0',
+  intercept: '#ff6a9a', scavenge: '#d9a441', harass: '#f0a0d0', sap: '#8fd3ff', trap: '#c0e070',
+  refuel: '#8fa3b3', rearm: '#8fa3b3', repair: '#8fa3b3', armour: '#8fa3b3',
+};
+const mcol = k => MCOLOR[String(k).split('-')[0]] || '#667';
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-// The shared ladder every commander runs FIRST (Doctrine.tick), top = highest priority.
-const UNIVERSAL = [
-  { cond: 'Our flag stolen\n(and we’re not carrying theirs)?', mission: 'intercept', why: 'run the thief down' },
-  { cond: 'Losing the attrition war\n(and flag not grabbable)?', mission: 'defend', why: 'preserve what we have left' },
-  { cond: 'Home under fire?\n(persona dice: turtle 1.0 → rogue 0.25)', mission: 'defend', why: 'get back and stop them' },
-  { cond: 'Can win by capture but\nno runner and no parts?', mission: 'scavenge', why: 'go collect salvage to build one' },
-  { cond: 'Their towers down,\nflag not yet exposed?', mission: 'siege', why: 'crack the HQ while it’s open' },
-  { cond: 'Stalemate gambit armed\n(and flag not grabbable)?', mission: 'siege', why: 'the rear-door Valkyrie gambit' },
-  { cond: 'Runner’s killer still alive?\n(clear-path timer)', mission: 'attack', why: 'clear the interceptor first' },
-  { cond: 'Towers keep killing runners?\n(soften timer)', mission: 'siege', why: 'silence the guns before retry' },
-  { cond: 'Opening sapper rolled\n(and not done)?', mission: 'sap', why: 'flank recon + mines' },
-  { cond: 'Hunter trap armed\n(and not sprung)?', mission: 'trap', why: 'tend the bait trap' },
+// The rungs that STILL pre-empt the score, with their measured share. Everything else that used
+// to live on this page is gone because it never fires.
+const PREEMPT = [
+  { k: 'flag_stolen', pct: 3.5, cond: 'Our flag is being carried', to: 'intercept', why: 'run the thief down' },
+  { k: 'flag_loose', pct: 2.5, cond: 'Our flag is lying in the field', to: 'intercept', why: 'touch it to snap it home' },
+  { k: 'home_under_fire', pct: 6.6, cond: 'Our base is taking rounds (persona dice)', to: 'defend', why: 'get back and stop them' },
+  { k: 'weights', pct: 86.7, cond: 'MISSIONSCORE — score all 13, take the best', to: '', why: 'the persona tilts these scores, it does not bypass them' },
 ];
 
-// Each persona's own choose() (runs only if NOTHING above fired).
-const PERSONA = {
-  warrior: {
-    blurb: 'Ride out, rack up kills, then break the base.',
-    opening: 'attack',
-    roles: { scout: 'lurcher', attack: 'lurcher', siege: 'jotun', defend: 'lurcher', capture: 'firebrat' },
-    choose: [
-      { cond: 'Flag grabbable?', mission: 'capture', why: 'go take it' },
-      { cond: 'Killed 2+ OR enemy eliminated?', mission: 'siege', why: 'proved it — break the base' },
-      { cond: 'Otherwise', mission: 'attack', why: 'ride out and fight' },
-    ],
-  },
-  rogue: {
-    blurb: 'Snatch before they know you’re there — Valkyrie softens from range, Firebrat races in. Avoids brawls.',
-    opening: 'siege',
-    roles: { scout: 'firebrat', attack: 'valkyrie', siege: 'valkyrie', defend: 'valkyrie', capture: 'firebrat' },
-    choose: [
-      { cond: 'Flag grabbable?', mission: 'capture', why: 'race in — it’s open' },
-      { cond: 'Otherwise', mission: 'siege', why: 'quietly crack the HQ from range' },
-    ],
-  },
-  hunter: {
-    blurb: 'Own the field, ambush the weak, then snatch. Reserves Firebrats for the grab.',
-    opening: 'scout',
-    roles: { scout: 'valkyrie', attack: 'lurcher', siege: 'valkyrie', defend: 'lurcher', capture: 'firebrat' },
-    choose: [
-      { cond: 'Flag grabbable?', mission: 'capture', why: 'go take it' },
-      { cond: 'Enemy eliminated?', mission: 'siege', why: 'no one to hunt — press the base' },
-      { cond: 'Enemy unknown AND\nmap < 80% explored?', mission: 'scout', why: 'recon with the Valkyrie' },
-      { cond: 'No contact, OR contact\nhugging their base? (harass on)', mission: 'harass', why: 'make their half loud, flush reveals' },
-      { cond: 'Otherwise', mission: 'attack', why: 'hunt what roams the field' },
-    ],
-  },
-  turtle: {
-    blurb: 'Hold the wall, bleed them, then sortie. Only pushes once it’s beaten attackers back.',
-    opening: 'defend',
-    roles: { scout: 'lurcher', attack: 'lurcher', siege: 'valkyrie', defend: 'lurcher', capture: 'firebrat' },
-    choose: [
-      { cond: 'Flag grabbable?', mission: 'capture', why: 'go take it' },
-      { cond: 'This guard has 2+ kills AND\nenemy fleet is weaker?', mission: 'siege', why: 'proved from strength — sortie' },
-      { cond: 'Otherwise', mission: 'defend', why: 'hold under tower cover' },
-    ],
-  },
-};
-
-// ---- SVG ladder renderer ----------------------------------------------------
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-const tspans = (text, x, dy0 = 0, lh = 13) => esc(text).split('\n')
-  .map((ln, i) => `<tspan x="${x}" dy="${i === 0 ? dy0 : lh}">${ln}</tspan>`).join('');
-
-const DIA_CX = 210, DIA_W = 300, DIA_H = 74, ST_X = 470, ST_W = 220, ST_H = 54;
-const Y0 = 96, ROW_H = 104, ENTRY_Y = 20;
-
-function renderLadder(archetype) {
-  const p = PERSONA[archetype];
-  // rungs = shared universal ladder + this persona's choose(), tagged by source.
-  const rungs = [
-    ...UNIVERSAL.map(r => ({ ...r, src: 'shared' })),
-    ...p.choose.map(r => ({ ...r, src: 'persona' })),
-  ];
-  const n = rungs.length;
-  const W = ST_X + ST_W + 30, H = Y0 + n * ROW_H + 20;
-  const out = [`<defs>
-    <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8aa0b4"/></marker>
-    </defs>`];
-
-  out.push(`<rect x="${DIA_CX - 90}" y="${ENTRY_Y}" width="180" height="34" rx="17" fill="#1b2a3a" stroke="#4a6580"/>
-    <text x="${DIA_CX}" y="${ENTRY_Y + 22}" text-anchor="middle" font-size="12" fill="#cfe0ee" letter-spacing="2">EACH TICK</text>`);
-  out.push(`<path d="M${DIA_CX},${ENTRY_Y + 34} L${DIA_CX},${Y0 - DIA_H / 2}" stroke="#8aa0b4" fill="none" marker-end="url(#ah)"/>`);
-
-  rungs.forEach((r, i) => {
-    const cy = Y0 + i * ROW_H, last = i === n - 1;
-    const isPersona = r.src === 'persona';
-    const dFill = isPersona ? '#1a2733' : '#15212e';
-    const dStroke = isPersona ? '#5a7fa0' : '#3d566e';
-    // diamond (condition)
-    out.push(`<polygon data-mission="${r.mission}" points="${DIA_CX},${cy - DIA_H / 2} ${DIA_CX + DIA_W / 2},${cy} ${DIA_CX},${cy + DIA_H / 2} ${DIA_CX - DIA_W / 2},${cy}" fill="${dFill}" stroke="${dStroke}"/>
-      <text x="${DIA_CX}" y="${cy}" text-anchor="middle" font-size="11" fill="#dfe8ef">${tspans(r.cond, DIA_CX, -((r.cond.split('\n').length - 1) * 6.5))}</text>`);
-    // YES -> mission box
-    const c = MCOLOR[r.mission] || '#556';
-    out.push(`<path d="M${DIA_CX + DIA_W / 2},${cy} L${ST_X},${cy}" stroke="#8aa0b4" fill="none" marker-end="url(#ah)"/>
-      <text x="${(DIA_CX + DIA_W / 2 + ST_X) / 2}" y="${cy - 6}" text-anchor="middle" font-size="10" fill="#7fd08a">yes</text>`);
-    out.push(`<rect data-mission="${r.mission}" x="${ST_X}" y="${cy - ST_H / 2}" width="${ST_W}" height="${ST_H}" rx="6" fill="${c}22" stroke="${c}"/>
-      <text x="${ST_X + ST_W / 2}" y="${cy - 4}" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold" letter-spacing="1">${esc(r.mission.toUpperCase())}</text>
-      <text x="${ST_X + ST_W / 2}" y="${cy + 13}" text-anchor="middle" font-size="9.5" fill="#cfe0ee">${esc(r.why || '')}</text>`);
-    // NO -> next rung
-    if (!last) out.push(`<path d="M${DIA_CX},${cy + DIA_H / 2} L${DIA_CX},${cy + ROW_H - DIA_H / 2}" stroke="#8aa0b4" fill="none" marker-end="url(#ah)"/>
-      <text x="${DIA_CX + 14}" y="${cy + ROW_H / 2}" font-size="10" fill="#c98">no</text>`);
-  });
-
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${out.join('')}</svg>`;
-}
-
-// ---- tabs + side panel ------------------------------------------------------
-const ORDER = ['warrior', 'rogue', 'hunter', 'turtle'];
 let active = 'warrior';
+let liveData = null;
+let tSim = 0;              // the match clock the bias chart is drawn for
 
-function sidePanel(archetype) {
-  const p = PERSONA[archetype];
-  const roles = Object.entries(p.roles).map(([k, v]) => `<div class="cfg"><span>${k}</span><span class="v">${v}</span></div>`).join('');
-  return `<div class="panel-title">${archetype.toUpperCase()}</div>
-    <div class="card"><div class="row">${esc(p.blurb)}</div>
-      <div class="row" style="margin-top:6px">opening mission: <span class="to">${p.opening}</span></div></div>
-    <div class="panel-title">Vehicle role table</div>${roles}
-    <div class="panel-title">Live</div>
-    <div class="card" id="live-card"><div class="row" id="live-row">no live game detected — open a match to follow decisions.</div></div>
-    <div class="panel-title">Mission weights</div>
-    <div class="card" id="weights-card"><div class="row" id="weights-row">no live game detected.</div></div>
-    <div class="legend"><i style="background:#5a7fa0"></i>persona rungs (this archetype)&nbsp;
-      <i style="background:#3d566e"></i>shared rungs (every commander)</div>`;
+// Each persona's real opening + role table, read off a throwaway instance rather than copied.
+const DOC = {};
+for (const a of ORDER) {
+  try { const d = makeDoctrine(a, null, () => 0.5); DOC[a] = { opening: d.opening, roles: d.roles }; }
+  catch (e) { DOC[a] = { opening: '?', roles: {} }; }
 }
 
-function draw() {
-  document.getElementById('tabs').querySelectorAll('button').forEach(b =>
-    b.classList.toggle('on', b.dataset.a === active));
-  document.getElementById('chart').innerHTML = renderLadder(active);
-  document.getElementById('side').innerHTML = sidePanel(active);
+// ---- the bias chart ---------------------------------------------------------
+// For the selected archetype: every mission key it nudges, at the current match clock. A
+// DIRECTIONAL key (capture-rear) collects two rows of the table — its base key AND itself — so
+// the bar is drawn in two stacked parts, which is the thing that is easy to miss in a log line.
+function biasRows(arch, t) {
+  const PB = PERSONA_BIAS[arch] || {}, pw = personaWeight(t);
+  const keys = Object.keys(PB);
+  const seen = new Set(keys);
+  // directional keys whose base is also biased → show the stack
+  const rows = keys.map(k => {
+    const base = k.split('-')[0];
+    const stacked = base !== k && PB[base] != null;
+    return { key: k, own: PB[k] * pw, base: stacked ? PB[base] * pw : 0, stacked };
+  });
+  // a base key that ONLY exists to feed directional variants still applies to all of them
+  rows.sort((a, b) => (b.own + b.base) - (a.own + a.base));
+  return { rows, pw, seen };
+}
+
+function drawChart() {
+  const host = document.getElementById('chart');
+  const { rows, pw } = biasRows(active, tSim);
+  const max = Math.max(1, ...rows.map(r => Math.abs(r.own + r.base)));
+  const bar = r => {
+    const total = r.own + r.base;
+    const neg = total < 0;
+    const w = Math.abs(total) / max * 100;
+    const basePct = total !== 0 ? Math.abs(r.base) / Math.abs(total) * w : 0;
+    const ownPct = w - basePct;
+    const c = mcol(r.key);
+    return `<div class="brow">
+      <div class="bk">${esc(r.key)}${r.stacked ? ' <em>×2 rows</em>' : ''}</div>
+      <div class="btrack">
+        <i style="width:${basePct}%;background:${c};opacity:.45"></i><i style="width:${ownPct}%;background:${c}"></i>
+      </div>
+      <div class="bv" style="color:${neg ? '#ff6a5a' : '#7fe0b8'}">${total >= 0 ? '+' : ''}${total.toFixed(1)}</div>
+    </div>`;
+  };
+  const d = DOC[active] || {};
+  host.innerHTML = `
+    <div class="hd">WHAT STILL PRE-EMPTS THE SCORE
+      <span>measured over 4 matches · 4,444 samples</span></div>
+    <div class="pre">${PREEMPT.map(p => `
+      <div class="prow${p.k === 'weights' ? ' w' : ''}">
+        <div class="pbarwrap"><i style="width:${p.pct}%"></i></div>
+        <div class="pk">${esc(p.k)}</div>
+        <div class="pc">${esc(p.cond)}</div>
+        <div class="pt">${p.to ? `→ <b style="color:${mcol(p.to)}">${esc(p.to)}</b>` : ''}</div>
+        <div class="pp">${p.pct}%</div>
+      </div>`).join('')}</div>
+    <p class="note">Every other rung this page used to draw — the persona playbooks, and
+      <code>towers_down</code>, <code>gambit</code>, <code>soften</code>, <code>clear_path</code>,
+      <code>need_parts</code>, <code>sapper</code>, <code>trap</code>, <code>benched</code> —
+      fired <b>zero</b> times. They are gated behind <code>!missionWeightsOn(cmd)</code>.</p>
+
+    <div class="hd">${active.toUpperCase()} — HOW IT TILTS THE SCORES
+      <span>PERSONA_BIAS × personaWeight(t), imported live from AIStrategies.js</span></div>
+    <div class="clockrow">
+      <label>match clock <b>${tSim}s</b></label>
+      <input id="clock" type="range" min="0" max="400" step="5" value="${tSim}">
+      <span class="pw">weight ×${pw.toFixed(2)}</span>
+    </div>
+    <div class="bars">${rows.map(bar).join('')}</div>
+    <p class="note">The bias is multiplied by up to <b>4×</b> at kickoff and eases to plain by
+      <b>240s</b> — who a commander <em>is</em> decides the opening, what the board says decides the
+      rest. A directional key such as <code>capture-rear</code> matches <b>two</b> rows of the
+      table (its base <code>capture</code> and itself) and collects both; the paler segment is the
+      base. That stacking is why a rogue's back door can carry ~12 points before the board has
+      said anything at all.</p>`;
+
+  const slider = document.getElementById('clock');
+  if (slider) slider.addEventListener('input', e => { tSim = +e.target.value; drawChart(); applyLive(); });
+  drawSide();
+}
+
+// ---- side panel: the persona's own kit, then the live board -----------------
+function drawSide() {
+  const side = document.getElementById('side');
+  const d = DOC[active] || { roles: {} };
+  side.innerHTML = `
+    <div class="panel-title">${active.toUpperCase()}</div>
+    <div class="card"><div class="row">${esc(BLURB[active] || '')}</div></div>
+    <div class="panel-title">OPENING</div>
+    <div class="card"><div class="row">first mission of the match:
+      <b class="to">${esc(d.opening || '?')}</b></div></div>
+    <div class="panel-title">ROLE TABLE <span style="opacity:.5">which chassis for which job</span></div>
+    <div class="card">${Object.entries(d.roles || {}).map(([m, v]) =>
+      `<div class="cfg"><span>${esc(m)}</span><span class="v">${esc(v)}</span></div>`).join('') || '<div class="row">—</div>'}</div>
+    <div class="panel-title">LIVE</div>
+    <div class="card"><div class="row" id="live-row">no live game detected.</div></div>
+    <div class="panel-title">THE BOARD <span style="opacity:.5">scored every re-think</span></div>
+    <div id="weights-row" class="card"><div class="row">no live game detected.</div></div>`;
   applyLive();
 }
 
-// ---- live overlay (cheap: reads localStorage the game writes on mission switch)
-let liveData = null;
+// ---- live overlay ----------------------------------------------------------
 function applyLive() {
   const row = document.getElementById('live-row');
   if (!row) return;
-  const mine = liveData && liveData.teams
-    ? Object.entries(liveData.teams).filter(([, v]) => v.archetype === active) : [];
-  // dim all mission boxes, then light the active ones
-  document.querySelectorAll('#chart [data-mission]').forEach(el => el.style.filter = '');
-  if (!mine.length) { row.textContent = 'no live game detected — open a match to follow decisions.'; return; }
-  row.innerHTML = mine.map(([team, v]) =>
-    `<b style="color:#7dd3fc">${team}</b> → <b>${esc(v.mission)}</b><br><span style="opacity:.75">${esc(v.why || '')}</span>`).join('<hr style="border:none;border-top:1px dashed rgba(255,255,255,.12);margin:5px 0">');
-  const on = new Set(mine.map(([, v]) => v.mission));
-  document.querySelectorAll('#chart rect[data-mission]').forEach(el => {
-    if (on.has(el.dataset.mission)) el.style.filter = 'drop-shadow(0 0 7px #fff) brightness(1.5)';
-  });
+  const teams = (liveData && liveData.teams) || {};
+  const mine = Object.entries(teams);
+  if (!mine.length) { row.textContent = 'no live game detected — open a match to follow decisions.'; renderWeights([]); return; }
+  row.innerHTML = mine.map(([team, v]) => {
+    const isThis = v.archetype === active;
+    return `<div style="${isThis ? '' : 'opacity:.6'}">
+      <b style="color:#7dd3fc">${esc(team)}</b>
+      <span style="opacity:.7">${esc(v.archetype || '?')}</span>${isThis ? ' <b style="color:#ffcf6a">◀ shown</b>' : ''}
+      → <b>${esc(v.mission)}</b><br>
+      <span style="opacity:.75;font-size:10.5px">${esc(v.why || '')}</span>
+      <span style="opacity:.5;font-size:10px"> · rung ${esc(v.rung || '—')}</span></div>`;
+  }).join('<hr style="border:none;border-top:1px dashed rgba(255,255,255,.12);margin:5px 0">');
   renderWeights(mine);
 }
 
-// ---- MISSION WEIGHTS -------------------------------------------------------
-// Since MissionScore became the default brain (2026-07-18) the ladder above is mostly INERT:
-// seven of the ten shared rungs sit behind `!missionWeightsOn(cmd)` and every persona choose()
-// only runs when weights are off. The commander no longer walks a cascade — it SCORES every
-// candidate mission and takes the best. So the honest doctrine view is this: the full ranked
-// board, top-down, winner first, each with the terms that earned it.
+// The full ranked board — this IS the doctrine layer now, so it gets the space.
 function renderWeights(mine) {
   const row = document.getElementById('weights-row');
   if (!row) return;
   const scored = mine.filter(([, v]) => v.scores && v.scores.length);
   if (!scored.length) {
     row.innerHTML = mine.length
-      ? '<span style="opacity:.7">weights off for this commander — the ladder on the left is live.</span>'
-      : 'no live game detected.';
+      ? '<div class="row" style="opacity:.7">weights off for this commander — it is walking the legacy cascade.</div>'
+      : '<div class="row">no live game detected.</div>';
     return;
   }
   row.innerHTML = scored.map(([team, v]) => {
@@ -191,8 +190,12 @@ function renderWeights(mine) {
     const rows = v.scores.map(([k, val, terms], i) => {
       const running = k === v.mission || k.split('-')[0] === v.mission;
       const w = Math.max(2, Math.round(100 * (val - lo) / span));
-      const c = MCOLOR[k.split('-')[0]] || '#667';
       const gap = i === 1 ? ` <span style="opacity:.5">(gap ${(top - val).toFixed(1)})</span>` : '';
+      // highlight the persona's own contribution inside the term list
+      const tms = terms.map(([l, x]) => {
+        const isBias = String(l).startsWith(v.archetype + ':') || l === v.archetype;
+        return `<span style="${isBias ? 'color:#ffcf6a' : ''}">${esc(l)} ${x >= 0 ? '+' : ''}${x}</span>`;
+      }).join(', ');
       return `<div style="margin:3px 0;${running ? '' : 'opacity:.72'}">
         <div style="display:flex;justify-content:space-between;font-size:11px">
           <span style="color:${running ? '#fff' : '#cfe0ee'};font-weight:${running ? 700 : 400}">
@@ -200,21 +203,20 @@ function renderWeights(mine) {
           <span style="color:#7fe0b8;font-variant-numeric:tabular-nums">${val >= 0 ? '+' : ''}${val}${gap}</span>
         </div>
         <div style="height:4px;background:#0d141c;border-radius:2px;overflow:hidden;margin:2px 0">
-          <div style="height:100%;width:${w}%;background:${c}"></div></div>
-        ${terms.length ? `<div style="font-size:9.5px;opacity:.62;line-height:1.35">${
-          terms.map(([l, x]) => `${esc(l)} ${x >= 0 ? '+' : ''}${x}`).join(', ')}</div>` : ''}
+          <div style="height:100%;width:${w}%;background:${mcol(k)}"></div></div>
+        ${terms.length ? `<div style="font-size:9.5px;opacity:.62;line-height:1.35">${tms}</div>` : ''}
       </div>`;
     }).join('');
     return `<div style="margin-bottom:8px"><b style="color:#7dd3fc">${esc(team)}</b>
-      <span style="opacity:.6;font-size:10px">— scored every tick, best wins</span>${rows}</div>`;
+      <span style="opacity:.6;font-size:10px">— ${esc(v.archetype || '')}, yellow terms are its persona</span>${rows}</div>`;
   }).join('<hr style="border:none;border-top:1px dashed rgba(255,255,255,.12);margin:6px 0">');
 }
+
 function pollLive() {
   try {
     const raw = localStorage.getItem('rmrf-ai-live');
     liveData = raw ? JSON.parse(raw) : null;
-    // stale after 8s (game closed) → treat as gone
-    if (liveData && Date.now() - (liveData.t || 0) > 8000) liveData = null;
+    if (liveData && Date.now() - (liveData.t || 0) > 8000) liveData = null;   // stale → game closed
   } catch (e) { liveData = null; }
   applyLive();
 }
@@ -222,7 +224,12 @@ function pollLive() {
 // ---- boot -------------------------------------------------------------------
 const tabsEl = document.getElementById('tabs');
 tabsEl.innerHTML = ORDER.map(a => `<button data-a="${a}">${a.toUpperCase()}</button>`).join('');
-tabsEl.addEventListener('click', e => { const b = e.target.closest('button'); if (b) { active = b.dataset.a; draw(); } });
-draw();
+function syncTabs() { tabsEl.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.a === active)); }
+tabsEl.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  active = b.dataset.a; syncTabs(); drawChart();
+});
+syncTabs();
+drawChart();
 setInterval(pollLive, 400);
-window.addEventListener('storage', pollLive);   // instant cross-tab update
+window.addEventListener('storage', pollLive);
