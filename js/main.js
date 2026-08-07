@@ -5450,6 +5450,7 @@ function liveTurretNear(x, z, r = 8) {
   return false;
 }
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
+let standFails = 0;                         // RR.decisionAlarms() — sieges with no firing position at all
 const navScuttles = [];                     // units the driver destroyed for being unable to move
 const navScuttlesByTeam = {};               // per-team scuttle tally — RR.navScuttles()
 // TWO FAILURE CLASSES THAT HID IN PLAIN SIGHT FOR TWENTY MINUTES (seed 1151), so they get to be
@@ -8020,7 +8021,19 @@ class AICommander {
     // The per-spot tests that the flood fill does NOT answer: can the round get there, and is
     // some other tower covering the spot. (drivableTo is left in as a cheap early-out, but the
     // flood below subsumes it — it knows about walls and gates, not merely which island.)
-    const spotOK = (x, z) => flyer || (drivableTo(v, x, z) && !v._blocked(x, z) && hasLOS(x, z, T.x, T.z) && !crossfire(x, z));
+    // Why a cell FAILS, not merely that it did. With the geometric fallback gone this is the only
+    // answer there is, so when it comes back empty the alarm has to be able to say what ruled every
+    // candidate out. (Jacob: "I don't want backup algorithms, I just want one that works" — and if
+    // it doesn't work, a loud alarm and logs that show why.)
+    const why = { scanned: 0, offIsland: 0, blocked: 0, noLOS: 0, crossfire: 0, unreachable: 0 };
+    const spotOK = (x, z, needLOS) => {
+      if (flyer) return true;
+      if (!drivableTo(v, x, z)) { why.offIsland++; return false; }
+      if (v._blocked(x, z)) { why.blocked++; return false; }
+      if (needLOS && !hasLOS(x, z, T.x, T.z)) { why.noLOS++; return false; }
+      if (crossfire(x, z)) { why.crossfire++; return false; }
+      return true;
+    };
     // ARE WE ALREADY STANDING IN ONE? Every candidate below is a point on a ring around the
     // TARGET, so the unit's own position was never among them — a unit sitting in a perfectly
     // good firing position would still be sent on a journey to an equivalent one, and the journey
@@ -8042,11 +8055,27 @@ class AICommander {
     // tower with a 42u gun, arrived, in line of sight, unable to fire, scuttled for standing still).
     const R = flyer ? null : reachFrom(v);
     const cell = grid.cell, top = Math.min(reach * 0.99, unitR * 1.5);
+    // A CLEAN LINE IS A PREFERENCE, NOT A REQUIREMENT. Demanding line of sight before accepting a
+    // position rules out every cell behind a wall — which, for a tower inside a wall ring, is all
+    // of them. Seed 1193 drew that exactly: the whole 25-38u band around a corner tower is inside
+    // the compound or on ground the hull cannot reach, so the solver returned nothing and the unit
+    // had no firing position at all. But the shooter already knows what to do without a line;
+    // AI.js has carried this since long before today:
+    //   "SIEGE FLATTEN: a ground unit with NO clean line on the tower doesn't circle forever
+    //    hunting an angle — it PLANTS, squares onto the nearest WALL in the way, and blasts a path
+    //    through, so it levels the far side too."
+    // That code could essentially never run, because the solver refused to hand it a position from
+    // which it would be needed. The solver demanded a line; the shooter is built to make its own.
+    // (Jacob: "it should just shoot through a wall. Maybe having LOS shouldn't even be a
+    // requirement. Make your own LOS.") So it becomes the last rung of the ladder that is already
+    // here, not a second algorithm. CROSSFIRE IS STILL NEVER RELAXED — standing where two guns
+    // reach you defeats the whole point of a standoff.
     const bands = [
-      ['ideal', Math.max(minR, 12), Math.min(unitR, reach * 0.99)],   // the comfortable one-gun spot
-      ['relaxed', 12, top],                                          // anywhere we can still shoot from
+      ['ideal', Math.max(minR, 12), Math.min(unitR, reach * 0.99), true],   // the comfortable one-gun spot
+      ['relaxed', 12, top, true],                                          // anywhere with a line we can still shoot from
+      ['through the wall', 12, top, false],                                // no line — bring the wall down and make one
     ];
-    for (const [tier, lo, hi] of bands) {
+    for (const [tier, lo, hi, needLOS] of bands) {
       if (hi <= lo) continue;
       let best = null, bestD = Infinity;
       const iA = Math.floor((T.x - hi) / cell), iB = Math.ceil((T.x + hi) / cell);
@@ -8055,15 +8084,29 @@ class AICommander {
         const x = i * cell, z = j * cell;
         const dT = Math.hypot(x - T.x, z - T.z);
         if (dT < lo || dT > hi) continue;
-        if (R) { const k = navIdx(i, j); if (k < 0 || !R[k]) continue; }   // proven undrivable-to
-        if (!spotOK(x, z)) continue;
+        why.scanned++;
+        if (R) { const k = navIdx(i, j); if (k < 0 || !R[k]) { why.unreachable++; continue; } }   // proven undrivable-to
+        if (!spotOK(x, z, needLOS)) continue;
         const dU = (x - px) ** 2 + (z - pz) ** 2;                          // nearest = least travel
         if (dU < bestD) { bestD = dU; best = { x, z }; }
       }
       if (best) {
         if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
+        else if (tier === 'through the wall') aiLog(this.team, `${this.cname}: No line to the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) from anywhere we can stand — planting anyway and blasting through the wall.`);
         return best;
       }
+    }
+    // NO SPOT. There is no second algorithm to fall back to, so say so loudly and show the working:
+    // which test threw out every candidate is the difference between "walled in", "no line through
+    // the base" and "every angle is covered by another gun", and those need different fixes.
+    standFails++;
+    this._standFail = { x: Math.round(T.x), z: Math.round(T.z), type: v.type, reach: Math.round(reach), ...why };
+    if (!this._standFailAlarmed) {
+      this._standFailAlarmed = true;
+      aiLog(this.team, `[STANDOFF ALARM] ${this.cname}: no firing position on the target at `
+        + `(${Math.round(T.x)}, ${Math.round(T.z)}) for a ${v.type} (reach ${Math.round(reach)}). `
+        + `Of ${why.scanned} cells in the band: ${why.unreachable} can't be driven to, ${why.offIsland} across water, `
+        + `${why.blocked} solid, ${why.noLOS} have no line to it, ${why.crossfire} sit under another gun.`);
     }
     return null;
   }
@@ -8739,42 +8782,31 @@ class AICommander {
       // the base walls, so it sprays the wall face and idles (the audit's "lone jotun frozen at
       // the wall for 640s"). Drive to a short hold — when we can actually finish (enemy wiped, OR
       // turrets down, OR we've already punched a hole) — to get a real line on the breach / keep.
-      const finisher = this.enemyEliminated();
-      const closeIn = aiBreachCommit ? (finisher || this.fortDown() || breached) : finisher;
-      const sniper = TURRET_HOLD[v.type] || (ENGAGE_RANGE[v.type] || 36) * 0.9;
-      // These are worst-case fallback targets only, reached when NOTHING is shootable on
-      // the way in (see the canBear early-stop in AI.js combat()) — bumped from 24/34 so
-      // even that dead-end case doesn't land the unit in the middle of the base's wreckage.
-      const hold = !aiBreachCommit ? (finisher ? Math.min(22, TURRET_HOLD[v.type] || 22) : sniper)
-                 : closeIn ? Math.min(36, TURRET_HOLD[v.type] || 36)
-                 : breachWall ? Math.min(44, TURRET_HOLD[v.type] || 44)
-                 : sniper;
+      // (The hold-distance ladder lived here — finisher / closeIn / breachWall / sniper radii for
+      // the geometric fallbacks. Those fallbacks are gone, and the distance question belongs to
+      // _standoffFor now: its band is sized from SHOT_REACH and TURRET_HOLD and every tier is
+      // capped at reach*0.99, so a spot it returns is one the gun can actually shoot from.)
+      // ONE ALGORITHM. _standoffFor picks the firing position the way lab/standoff-lab.html does —
+      // flood the reachable ground, keep the cells in range with a line to the target and clear of
+      // other guns, take the nearest. If it finds nothing there is NO SECOND METHOD: it raises a
+      // STANDOFF ALARM naming the test that rejected every candidate, and the unit gets no stand.
+      //
+      // What used to be here were three geometric fallbacks — radial from the base centre through
+      // the tower, or straight back along our approach line — and none of them checked LINE OF
+      // SIGHT. They looked like they worked, which is worse than failing. Seed 1193: red's last
+      // Lurcher spent the final ten minutes driving 200u to a firing position it had been handed
+      // 100% of the time, and could see its target from it on 3 ticks out of 6459. It never fired a
+      // shot. Its reload counter read MINUS FOUR MINUTES — loaded, ready, aiming at a wall — while
+      // one tower stood between it and the win, and it kills a tower in 3.2 seconds.
+      // (Jacob: "I hate silent fallbacks… I don't want backup algorithms, I just want one that
+      // works.")
       if (stand2 && threat === stand2Ref) {
-        // The lab-logic picker already chose a reachable, in-range, crossfire-free, LOS spot —
-        // use it and skip the radial + _standRot walk. Only active while a tower stands; once
-        // they're down, _pickStandoff returns null and the keep/breach logic takes the finish.
         threatStand = { x: stand2.x, z: stand2.z };
-      } else if (breachWall) {
-        // Plant OUTSIDE the latched breach wall (radial from base centre) and HOLD — hammer this
-        // one wall down instead of circling and smearing fire across the ring.
-        const cx = threatCamp.center.x, cz = threatCamp.center.z;
-        const wx = breachWall.group.position.x, wz = breachWall.group.position.z;
-        let dx = wx - cx, dz = wz - cz; const dm = Math.hypot(dx, dz) || 1;
-        threatStand = { x: wx + (dx / dm) * hold, z: wz + (dz / dm) * hold };
-      } else if (hqThreat) {
-        // The keep IS the base centre, so there's no "radial through a corner tower" to
-        // stand off along — and no other guns left to dodge. Just hold at range on our
-        // current approach line and pour fire in.
-        const ux = px - threat.x, uz = pz - threat.z, um = Math.hypot(ux, uz) || 1;
-        threatStand = { x: threat.x + (ux / um) * hold, z: threat.z + (uz / um) * hold };
-      } else if (threatCamp) {
-        const bx = threat.x - threatCamp.center.x, bz = threat.z - threatCamp.center.z;
-        const ux = px - threat.x, uz = pz - threat.z;
-        flankSide = (bx * uz - bz * ux) >= 0 ? 1 : -1;
-        // The one-gun-at-a-time spot: radially OUTSIDE the base through this turret,
-        // at the type's hold range — far from the OTHER corner turrets' fire arcs.
-        const om = Math.hypot(bx, bz) || 1;
-        threatStand = { x: threat.x + (bx / om) * hold, z: threat.z + (bz / om) * hold };
+        if (threatCamp && !hqThreat) {   // flank side still informs the approach arc
+          const bx = threat.x - threatCamp.center.x, bz = threat.z - threatCamp.center.z;
+          const ux = px - threat.x, uz = pz - threat.z;
+          flankSide = (bx * uz - bz * ux) >= 0 ? 1 : -1;
+        }
       }
       // (The old _standRot bearing-walk lived here: when the driver refused a geometric standoff
       // as unreachable, the stand was rotated around the tower and re-planned, one bearing at a
@@ -11085,7 +11117,10 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
-  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal }),   // units that reached the enemy base and never fired; recalls answered by the same chassis
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails }),
+  cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
+  hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
+  standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
   setVehSwap: on => { aiVehSwap = !!on; return aiVehSwap; },   // A/B: blame the chassis for a failing mission, or only the mission
   setPadFight: on => { aiPadFight = !!on; return aiPadFight; },   // A/B: fight from under the elevator shield vs always drive out first
