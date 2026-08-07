@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fire Lab — RMRF</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --ink:#dfe8ef; --dim:#8fa3b3; --accent:#d9a441;
+          --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; background:var(--bg); color:var(--ink);
+               font-family:'Courier New',monospace; overflow:hidden; }
+  canvas { display:block; }
+  #hud { position:fixed; top:10px; left:10px; z-index:10; background:rgba(12,17,24,.88);
+         border:1px solid #223041; border-radius:9px; padding:11px 13px; width:296px; }
+  h1 { font-size:13px; letter-spacing:2px; color:var(--accent); }
+  .sub { font-size:10px; color:var(--dim); margin:3px 0 9px; line-height:1.5; }
+  .row { display:flex; gap:5px; margin-bottom:6px; flex-wrap:wrap; }
+  button { flex:1; min-width:52px; background:#17212e; border:1px solid #2a3a4d; color:var(--ink);
+           font-family:inherit; font-size:11px; padding:5px 4px; border-radius:5px; cursor:pointer; }
+  button[aria-pressed="true"] { background:#1d2c3d; border-color:var(--accent); color:var(--accent); }
+  .lab { font-size:9.5px; color:var(--dim); letter-spacing:1px; margin:9px 0 3px; }
+  table { width:100%; font-size:11px; border-collapse:collapse; }
+  td { padding:2px 0; } td:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+  td.k { color:var(--dim); }
+  .big { font-size:17px; color:var(--good); }
+  .big.warn { color:var(--warn); } .big.bad { color:var(--bad); }
+  .note { font-size:10px; color:var(--dim); line-height:1.55; margin-top:9px;
+          border-top:1px solid #223041; padding-top:8px; }
+  .note b { color:var(--warn); }
+  a { color:var(--dim); font-size:11px; text-decoration:none; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>FIRE LAB</h1>
+  <div class="sub">Is yomotsu's volumetric fire cheap enough to burn things in RMRF?
+    Measure it here, on a real GPU &mdash; a headless run tells you nothing.</div>
+
+  <div class="lab">EFFECT</div>
+  <div class="row" id="mode"></div>
+  <div class="lab">HOW MANY</div>
+  <div class="row" id="count"></div>
+  <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
+  <div class="row" id="spacing"></div>
+
+  <table>
+    <tr><td class="k">frame time</td><td><span class="big" id="ms">—</span> ms</td></tr>
+    <tr><td class="k">fps</td><td id="fps">—</td></tr>
+    <tr><td class="k">cost per fire</td><td id="per">—</td></tr>
+    <tr><td class="k">draw calls</td><td id="calls">—</td></tr>
+    <tr><td class="k">triangles</td><td id="tris">—</td></tr>
+    <tr><td class="k">renderer</td><td id="gpu" style="font-size:9px">—</td></tr>
+  </table>
+
+  <div class="note" id="verdict">warming up&hellip;</div>
+  <div class="note"><b>Budget:</b> at 60fps a whole frame is 16.7ms and RMRF needs most of it.
+    Anything over ~2ms of fire is a problem; under ~0.5ms is free.</div>
+  <a href="index.html">&#8249; labs</a>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import VolumetricFire from './fire/VolumetricFire.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0c1118');
+scene.fog = new THREE.Fog('#0c1118', 60, 190);
+// RMRF's camera is high and tilted, which matters: the volumetric effect is slice-based, so how
+// much it costs (and how good it looks) depends on the angle you view the volume from.
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.5, 400);
+camera.position.set(0, 44, 52); camera.lookAt(0, 3, 0);
+scene.add(new THREE.HemisphereLight('#8fa8c0', '#231d18', 1.0));
+const sun = new THREE.DirectionalLight('#fff2dd', 1.1); sun.position.set(30, 50, 20); scene.add(sun);
+scene.add(new THREE.Mesh(new THREE.CylinderGeometry(120, 120, 0.4, 48),
+  new THREE.MeshStandardMaterial({ color: '#2a3524', roughness: 1 })).translateY(-0.2));
+
+// wrecks to burn, so the fires sit on something and the scale reads true
+const wreckGeo = new THREE.BoxGeometry(3.4, 1.8, 5);
+const wreckMat = new THREE.MeshStandardMaterial({ color: '#242a30', roughness: .95 });
+const wrecks = new THREE.InstancedMesh(wreckGeo, wreckMat, 64);
+scene.add(wrecks);
+
+VolumetricFire.texturePath = './fire/';
+
+// ── the cheap alternative: every flame in ONE draw call ───────────────────────
+// Camera-facing quads in a single merged geometry, animated in the vertex/fragment shader off a
+// procedurally-generated ramp. No texture files, no per-frame CPU work, no per-fire draw call —
+// this is the shape that scales to "every wreck on the map is burning".
+function makeRamp() {
+  const c = document.createElement('canvas'); c.width = 4; c.height = 64;
+  const g = c.getContext('2d').createLinearGradient(0, 64, 0, 0);
+  g.addColorStop(0.00, '#fff6c8'); g.addColorStop(0.18, '#ffd24a');
+  g.addColorStop(0.45, '#ff7b1c'); g.addColorStop(0.75, '#8f2408'); g.addColorStop(1, '#1a0500');
+  const x = c.getContext('2d'); x.fillStyle = g; x.fillRect(0, 0, 4, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const billboardMat = new THREE.ShaderMaterial({
+  uniforms: { time: { value: 0 }, ramp: { value: makeRamp() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float time; attribute vec3 offset; attribute float seed; varying vec2 vUv; varying float vSeed;
+    void main() {
+      vUv = uv; vSeed = seed;
+      vec3 p = position;
+      float t = time * 1.7 + seed * 9.0;
+      p.x += sin(t + p.y * 1.6) * 0.28 * p.y;            // lick side to side, more at the tip
+      vec4 mv = modelViewMatrix * vec4(offset, 1.0);      // billboard: build the quad in view space
+      mv.xy += p.xy * (1.0 + 0.10 * sin(t * 2.3));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform float time; uniform sampler2D ramp; varying vec2 vUv; varying float vSeed;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
+    float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+      return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+    void main() {
+      float t = time * 1.5 + vSeed * 7.0;
+      float n = noise(vec2(vUv.x * 4.0, vUv.y * 3.0 - t)) * 0.55
+              + noise(vec2(vUv.x * 9.0, vUv.y * 7.0 - t * 1.7)) * 0.25;
+      float body = smoothstep(0.5, 0.0, abs(vUv.x - 0.5) * 2.0);   // taper to the sides
+      float h = vUv.y;
+      float a = body * (1.0 - h) * 1.5 + n * body * (1.0 - h * 0.7);
+      a *= smoothstep(1.0, 0.55, h);                                // fade out at the tip
+      if (a < 0.02) discard;
+      gl_FragColor = vec4(texture2D(ramp, vec2(0.5, clamp(1.0 - h - n * 0.25, 0.0, 1.0))).rgb, a);
+    }`,
+});
+
+// ── state ────────────────────────────────────────────────────────────────────
+let mode = 'volumetric', count = 5, spacing = 0.5;
+let fires = [], billboard = null;
+const clock = new THREE.Clock();
+const _m = new THREE.Matrix4();
+
+function layout(n) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / Math.max(1, n)) * Math.PI * 2 * 1.6, r = 6 + i * 2.1;
+    pts.push({ x: Math.cos(a) * r, z: Math.sin(a) * r });
+  }
+  return pts;
+}
+
+function rebuild() {
+  for (const f of fires) { scene.remove(f.mesh); f.mesh.geometry.dispose(); }
+  fires = [];
+  if (billboard) { scene.remove(billboard); billboard.geometry.dispose(); billboard = null; }
+  const pts = layout(count);
+  wrecks.count = count;
+  pts.forEach((p, i) => { _m.makeRotationY(i * 1.1); _m.setPosition(p.x, 0.9, p.z); wrecks.setMatrixAt(i, _m); });
+  wrecks.instanceMatrix.needsUpdate = true;
+
+  if (mode === 'volumetric' || mode === 'both') {
+    for (const p of pts) {
+      const f = new VolumetricFire(3, 6, 3, spacing, camera);
+      f.mesh.position.set(p.x, 3.4, p.z);
+      scene.add(f.mesh); fires.push(f);
+    }
+  }
+  if (mode === 'billboard' || mode === 'both') {
+    // one geometry, every flame in it
+    const quad = [-1.6, 0, 0, 1.6, 0, 0, 1.6, 6.5, 0, -1.6, 6.5, 0];
+    const uv = [0, 0, 1, 0, 1, 1, 0, 1], idx = [0, 1, 2, 0, 2, 3];
+    const P = [], U = [], I = [], OFF = [], SEED = [];
+    pts.forEach((p, i) => {
+      const base = i * 4;
+      for (let k = 0; k < 4; k++) {
+        P.push(quad[k * 3], quad[k * 3 + 1], quad[k * 3 + 2]);
+        U.push(uv[k * 2], uv[k * 2 + 1]);
+        OFF.push(p.x, 1.2, p.z); SEED.push(i * 0.37 % 1);
+      }
+      for (const t of idx) I.push(base + t);
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
+    g.setAttribute('offset', new THREE.Float32BufferAttribute(OFF, 3));
+    g.setAttribute('seed', new THREE.Float32BufferAttribute(SEED, 1));
+    g.setIndex(I);
+    g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 400);   // never cull; we are measuring
+    billboard = new THREE.Mesh(g, billboardMat);
+    scene.add(billboard);
+  }
+  samples.length = 0;
+}
+
+// ── measurement ──────────────────────────────────────────────────────────────
+// Wall-clock frame time, median of a rolling window. The median matters: a mean is dragged around
+// by GC spikes and by the browser's own hitches, and what we want is the steady cost.
+const samples = [];
+let last = performance.now(), baseline = null;
+function measure() {
+  const now = performance.now(); const dt = now - last; last = now;
+  if (dt < 200) samples.push(dt);
+  if (samples.length > 90) samples.shift();
+  if (samples.length < 30) return;
+  const s = [...samples].sort((a, b) => a - b), med = s[s.length >> 1];
+  const el = document.getElementById('ms');
+  el.textContent = med.toFixed(2);
+  el.className = 'big' + (med > 22 ? ' bad' : med > 18 ? ' warn' : '');
+  document.getElementById('fps').textContent = (1000 / med).toFixed(0);
+  const info = renderer.info.render;
+  document.getElementById('calls').textContent = info.calls;
+  document.getElementById('tris').textContent = info.triangles.toLocaleString();
+  if (baseline != null && count > 0) {
+    const per = (med - baseline) / count;
+    document.getElementById('per').textContent = per > 0 ? per.toFixed(3) + ' ms' : '~0 (vsync-bound)';
+  }
+  const v = document.getElementById('verdict');
+  if (baseline == null) { v.textContent = 'measuring an empty scene first…'; return; }
+  const total = med - baseline;
+  v.innerHTML = total < 0.6
+    ? `<b>Cheap.</b> ${count} fires cost ${total.toFixed(2)}ms — burn whatever you like.`
+    : total < 2.2
+      ? `<b>Affordable.</b> ${count} fires cost ${total.toFixed(2)}ms. Fine for set-pieces; watch the count.`
+      : `<b>Too expensive.</b> ${count} fires cost ${total.toFixed(2)}ms of a 16.7ms frame.`;
+}
+
+function tick() {
+  requestAnimationFrame(tick);
+  const t = clock.getElapsedTime();
+  for (const f of fires) f.update(t);
+  billboardMat.uniforms.time.value = t;
+  camera.position.x = Math.sin(t * 0.08) * 14;
+  camera.lookAt(0, 3, 0);
+  renderer.render(scene, camera);
+  measure();
+}
+
+// ── controls ─────────────────────────────────────────────────────────────────
+function buttons(host, opts, get, set) {
+  const el = document.getElementById(host);
+  el.innerHTML = opts.map(o => `<button data-v="${o[1]}">${o[0]}</button>`).join('');
+  const sync = () => el.querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-pressed', String(get()) === b.dataset.v));
+  el.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+    set(b.dataset.v); sync(); rebuild(); });
+  sync();
+}
+buttons('mode', [['volumetric', 'volumetric'], ['billboard', 'billboard'], ['both', 'both']],
+  () => mode, v => mode = v);
+buttons('count', [['0', '0'], ['1', '1'], ['5', '5'], ['10', '10'], ['20', '20'], ['40', '40']],
+  () => count, v => count = +v);
+buttons('spacing', [['0.3', '0.3'], ['0.5', '0.5'], ['1.0', '1'], ['2.0', '2']],
+  () => spacing, v => spacing = +v);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const gl = renderer.getContext();
+const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+document.getElementById('gpu').textContent =
+  (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown').slice(0, 46);
+
+// Establish the empty-scene cost first, so every later number is the fire ALONE rather than the
+// scene plus the fire. Without this the readout mostly measures vsync.
+count = 0; rebuild(); tick();
+setTimeout(() => {
+  const s = [...samples].sort((a, b) => a - b);
+  baseline = s.length ? s[s.length >> 1] : 16.7;
+  count = 5; rebuild();
+  document.querySelectorAll('#count button').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.v === '5'));
+}, 2500);
+window.__ready = true;
+</script>
+</body>
+</html>
