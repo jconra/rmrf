@@ -41,6 +41,8 @@
   <div class="row" id="mode"></div>
   <div class="lab">HOW MANY</div>
   <div class="row" id="count"></div>
+  <div class="lab">BURST RATE &middot; bursts mode &mdash; one every&hellip;</div>
+  <div class="row" id="rate"></div>
   <div class="lab">TEXTURES &middot; volumetric only</div>
   <div class="row" id="tex"></div>
   <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
@@ -50,6 +52,8 @@
     <tr><td class="k">frame time</td><td><span class="big" id="ms">—</span> ms</td></tr>
     <tr><td class="k">fps</td><td id="fps">—</td></tr>
     <tr><td class="k">cost per fire</td><td id="per">—</td></tr>
+    <tr><td class="k">burning now</td><td id="livec">—</td></tr>
+    <tr><td class="k">peak at once</td><td id="peak">—</td></tr>
     <tr><td class="k">draw calls</td><td id="calls">—</td></tr>
     <tr><td class="k">triangles</td><td id="tris">—</td></tr>
     <tr><td class="k">renderer</td><td id="gpu" style="font-size:9px">—</td></tr>
@@ -181,7 +185,7 @@ function setTextureSource(kind) {
   }
   VolumetricFire._dirty = true;         // drop the cached material so it rebuilds
 }
-setTextureSource('file');
+setTextureSource('procedural');   // what an integration would actually use
 
 VolumetricFire.texturePath = './fire/';
 
@@ -229,6 +233,59 @@ const billboardMat = new THREE.ShaderMaterial({
     }`,
 });
 
+// ── BURSTS ───────────────────────────────────────────────────────────────────
+// The real use is not a permanent bonfire, it is a vehicle or a fuel depot going up: a few
+// seconds, then gone. That changes the cost question completely — what matters is the PEAK
+// concurrent count, not the number of things that have ever burned.
+//
+// Instances are POOLED. Constructing a VolumetricFire allocates its slice buffers and builds a
+// geometry, which is not something to do in the middle of a firefight; a pool of eight is reused
+// forever and the pool size is the hard ceiling on cost.
+const KINDS = {
+  vehicle: { w: 2.4, h: 4.5, d: 2.4, life: 2.6, peak: 1.15 },
+  fuel:    { w: 4.5, h: 9.0, d: 4.5, life: 5.5, peak: 1.45 },
+};
+const POOL = 8;
+let pool = [], live = [], peakLive = 0;
+
+function initPool() {
+  for (const f of pool) { scene.remove(f.fire.mesh); f.fire.mesh.geometry.dispose(); }
+  pool = []; live = []; peakLive = 0;
+  for (let i = 0; i < POOL; i++) {
+    const fire = new VolumetricFire(3, 6, 3, spacing, camera);
+    fire.mesh.visible = false;
+    scene.add(fire.mesh);
+    pool.push({ fire, busy: false });
+  }
+}
+
+function spawnBurst(kind, x, z) {
+  const slot = pool.find(s => !s.busy);
+  if (!slot) return false;                 // pool exhausted — the ceiling, and it should be visible
+  const K = KINDS[kind];
+  slot.busy = true;
+  slot.t = 0; slot.K = K;
+  slot.fire.mesh.position.set(x, K.h * 0.32, z);
+  slot.fire.mesh.visible = true;
+  live.push(slot);
+  peakLive = Math.max(peakLive, live.length);
+  return true;
+}
+
+// grow fast, burn, collapse — a fuel fire holds its size much longer than a vehicle does
+function stepBursts(dt, t) {
+  for (let i = live.length - 1; i >= 0; i--) {
+    const s = live[i]; s.t += dt;
+    const u = s.t / s.K.life;
+    if (u >= 1) { s.busy = false; s.fire.mesh.visible = false; live.splice(i, 1); continue; }
+    const grow = Math.min(1, s.t / 0.18);                       // snap up
+    const fall = u < 0.45 ? 1 : 1 - (u - 0.45) / 0.55;          // then sag away
+    const k = s.K.peak * grow * Math.pow(Math.max(0, fall), 0.7);
+    s.fire.mesh.scale.set(k * s.K.w / 3, k * s.K.h / 6, k * s.K.d / 3);
+    s.fire.update(t);
+  }
+}
+
 // ── state ────────────────────────────────────────────────────────────────────
 let mode = 'volumetric', count = 5, spacing = 0.5;
 let fires = [], billboard = null;
@@ -253,6 +310,7 @@ function rebuild() {
   pts.forEach((p, i) => { _m.makeRotationY(i * 1.1); _m.setPosition(p.x, 0.9, p.z); wrecks.setMatrixAt(i, _m); });
   wrecks.instanceMatrix.needsUpdate = true;
 
+  if (mode === 'burst') { wrecks.count = 0; initPool(); samples.length = 0; return; }
   if (mode === 'volumetric' || mode === 'both') {
     for (const p of pts) {
       const f = new VolumetricFire(3, 6, 3, spacing, camera);
@@ -302,6 +360,8 @@ function measure() {
   el.textContent = med.toFixed(2);
   el.className = 'big' + (med > 22 ? ' bad' : med > 18 ? ' warn' : '');
   document.getElementById('fps').textContent = (1000 / med).toFixed(0);
+  document.getElementById('livec').textContent = mode === 'burst' ? live.length : '—';
+  document.getElementById('peak').textContent = mode === 'burst' ? peakLive + ' / ' + POOL : '—';
   const info = renderer.info.render;
   document.getElementById('calls').textContent = info.calls;
   document.getElementById('tris').textContent = info.triangles.toLocaleString();
@@ -322,7 +382,18 @@ function measure() {
 function tick() {
   requestAnimationFrame(tick);
   const t = clock.getElapsedTime();
+  const dt = Math.min(0.1, t - (tick._prev ?? t));   // one delta, clamped over a tab switch
+  tick._prev = t;
   for (const f of fires) f.update(t);
+  if (mode === 'burst') {
+    stepBursts(dt, t);
+    burstT -= dt;
+    if (burstT <= 0) {
+      burstT = burstEvery;
+      const a = Math.random() * Math.PI * 2, r = 4 + Math.random() * 22;
+      spawnBurst(Math.random() < 0.72 ? 'vehicle' : 'fuel', Math.cos(a) * r, Math.sin(a) * r);
+    }
+  }
   billboardMat.uniforms.time.value = t;
   camera.position.x = Math.sin(t * 0.08) * 14;
   camera.lookAt(0, 3, 0);
@@ -340,11 +411,14 @@ function buttons(host, opts, get, set) {
     set(b.dataset.v); sync(); rebuild(); });
   sync();
 }
-buttons('mode', [['volumetric', 'volumetric'], ['billboard', 'billboard'], ['both', 'both']],
+let burstEvery = 1.2, burstT = 0;
+buttons('mode', [['volumetric', 'volumetric'], ['billboard', 'billboard'], ['bursts', 'burst']],
   () => mode, v => mode = v);
+buttons('rate', [['calm 2.5s', '2.5'], ['busy 1.2s', '1.2'], ['chaos 0.35s', '0.35']],
+  () => burstEvery, v => burstEvery = +v);
 buttons('count', [['0', '0'], ['1', '1'], ['5', '5'], ['10', '10'], ['20', '20'], ['40', '40']],
   () => count, v => count = +v);
-let texKind = 'file';
+let texKind = 'procedural';
 buttons('tex', [['from files', 'file'], ['procedural', 'procedural']],
   () => texKind, v => { texKind = v; setTextureSource(v); });
 buttons('spacing', [['0.3', '0.3'], ['0.5', '0.5'], ['1.0', '1'], ['2.0', '2']],
