@@ -45,6 +45,10 @@
   <div class="row" id="amp"></div>
   <div class="lab">BURST RATE &middot; bursts mode &mdash; one every&hellip;</div>
   <div class="row" id="rate"></div>
+  <div class="lab">VARIATION &middot; volumetric only &mdash; all off = every fire identical</div>
+  <div class="row" id="vphase"></div>
+  <div class="row" id="vyaw"></div>
+  <div class="row" id="vgirth"></div>
   <div class="lab">TEXTURES &middot; volumetric only</div>
   <div class="row" id="tex"></div>
   <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
@@ -262,9 +266,20 @@ const billboardMat = new THREE.ShaderMaterial({
 // change against a screenshot from ten minutes ago means nothing.
 let _vseed = 0x9e3779b9;
 const vrnd = () => ((_vseed = (_vseed * 1664525 + 1013904223) >>> 0) / 4294967296);
+// Each switchable on its own, so you can see what each one actually contributes instead of
+// taking the claim on faith. All three off reproduces the original behaviour: one flame, copied.
+let varPhase = true, varYaw = true, varGirth = true;
+// ALWAYS ROLL ALL FOUR, then discard what is switched off. Skipping the roll would shift every
+// later draw from the seeded sequence, so turning yaw off would silently change the phases too —
+// and then the comparison is between two different things rather than one variable.
+function rollLook() {
+  const phase = vrnd() * 40, yaw = vrnd() * Math.PI * 2, jw = 0.82 + vrnd() * 0.36, jh = 0.85 + vrnd() * 0.3;
+  return { phase: varPhase ? phase : 0, yaw: varYaw ? yaw : 0,
+           jw: varGirth ? jw : 1, jh: varGirth ? jh : 1 };
+}
 function individualise(fire) {
   fire.mesh.material = fire.mesh.material.clone();   // own uniforms (textures still shared by ref)
-  return { phase: vrnd() * 40, yaw: vrnd() * Math.PI * 2, jw: 0.82 + vrnd() * 0.36, jh: 0.85 + vrnd() * 0.3 };
+  return rollLook();
 }
 
 // ── BURSTS ───────────────────────────────────────────────────────────────────
@@ -301,8 +316,7 @@ function spawnBurst(kind, x, z) {
   slot.t = 0; slot.K = K;
   // RE-ROLL ON EVERY LIGHT, not once per slot. A pool of eight reused all match would otherwise
   // show the same eight flames over and over, which is the clone problem again wearing a hat.
-  slot.phase = vrnd() * 40; slot.yaw = vrnd() * Math.PI * 2;
-  slot.jw = 0.82 + vrnd() * 0.36; slot.jh = 0.85 + vrnd() * 0.3;
+  Object.assign(slot, rollLook());
   slot.fire.mesh.position.set(x, K.h * 0.32, z);
   slot.fire.mesh.rotation.set(0, slot.yaw, 0);
   slot.fire.mesh.visible = true;
@@ -343,6 +357,10 @@ function layout(n) {
 }
 
 function rebuild() {
+  // RESET THE SEED, so a rebuild re-rolls the SAME fires. That is what makes the variation
+  // toggles a comparison rather than a reshuffle: switch yaw off and you see this exact set of
+  // flames without their rotation, not a fresh set that happens to differ.
+  _vseed = 0x9e3779b9;
   for (const f of fires) { scene.remove(f.mesh); f.mesh.geometry.dispose(); }
   fires = [];
   if (billboard) { scene.remove(billboard); billboard.geometry.dispose(); billboard = null; }
@@ -502,6 +520,12 @@ buttons('rate', [['calm 2.5s', '2.5'], ['busy 1.2s', '1.2'], ['chaos 0.35s', '0.
   () => burstEvery, v => burstEvery = +v);
 buttons('count', [['0', '0'], ['1', '1'], ['5', '5'], ['10', '10'], ['20', '20'], ['40', '40']],
   () => count, v => count = +v);
+buttons('vphase', [['phase on', '1'], ['phase off', '0']],
+  () => varPhase ? '1' : '0', v => varPhase = v === '1');
+buttons('vyaw', [['yaw on', '1'], ['yaw off', '0']],
+  () => varYaw ? '1' : '0', v => varYaw = v === '1');
+buttons('vgirth', [['girth on', '1'], ['girth off', '0']],
+  () => varGirth ? '1' : '0', v => varGirth = v === '1');
 let texKind = 'procedural';
 buttons('tex', [['from files', 'file'], ['procedural', 'procedural']],
   () => texKind, v => { texKind = v; setTextureSource(v); });
