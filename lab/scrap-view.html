@@ -6,7 +6,7 @@
 </head><body>
 <script type="module">
 import * as THREE from 'three';
-import { makePartsPallet, makeWreckage } from './js/Scrap.js?v=3';
+import { makePartsPallet, makeWreckage } from '../js/Scrap.js?v=3';
 const S = 5;                                    // build-grid cell (matches the game)
 const W = 1100, H = 460;
 const renderer = new THREE.WebGLRenderer({ antialias:true });
@@ -36,4 +36,5 @@ cam.position.set(0, S*2.6, S*5.6); cam.lookAt(0, S*0.4, 0);
 renderer.render(scene, cam);
 window.__ready = true;
 </script>
+<a href="index.html" style="position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(19,27,38,.85);border:1px solid #2a3a4d;border-radius:7px;color:#8fa3b3;font:11px 'Courier New',monospace;padding:5px 9px;text-decoration:none">&#8249; labs</a>
 </body></html>

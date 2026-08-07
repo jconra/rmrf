@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF Labs</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --blue:#6ab7ff; --good:#58d17a; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px 60px; }
+  h2 { color:var(--accent); font-size:13px; letter-spacing:2px; margin:26px 0 2px; }
+  h2 .note { color:var(--dim); font-size:11px; letter-spacing:0; display:block; margin-top:2px; }
+  a.lab { display:block; background:var(--card); border:1px solid #223041; border-radius:10px;
+          margin-top:10px; padding:13px 15px; text-decoration:none; color:var(--ink); }
+  a.lab:hover { background:var(--card2); border-color:#31465e; }
+  a.lab .t { color:var(--blue); font-size:14px; letter-spacing:1px; }
+  a.lab .f { color:var(--dim); font-size:10.5px; margin-top:1px; }
+  a.lab .s { font-size:12.5px; margin-top:7px; color:var(--ink); }
+  .back { display:inline-block; margin-top:22px; color:var(--dim); font-size:12px; text-decoration:none; }
+  .back:hover { color:var(--blue); }
+  .lead { font-size:12.5px; color:var(--dim); margin-top:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RMRF LABS</h1>
+  <div class="sub">the sandboxes — one problem each, isolated from the game</div>
+</header>
+<main>
+
+  <p class="lead">Every one of these exists because something was hard to see inside a running match.
+  They load standalone, take no setup, and are safe to break.</p>
+
+  <h2>DECISIONS
+    <span class="note">what the commanders are thinking, and why</span></h2>
+
+  <a class="lab" href="../ai-lab/index.html">
+    <div class="t">AI Lab &middot; Decision Spine</div>
+    <div class="f">ai-lab/index.html</div>
+    <div class="s">The live console. Watch both commanders side by side as a match runs &mdash; the
+    mission scores with their term-by-term maths, the target choice, and the driver state, fed by a
+    cheap publish hook rather than a debugger. Also holds the commander flowcharts
+    (<b>commanders.html</b>, <b>flowchart.html</b>), the behaviour <b>editor.html</b>, and
+    <b>expr.html</b> for reading a nested condition as boxes.</div>
+  </a>
+
+  <a class="lab" href="evolution.html">
+    <div class="t">The Breeding Pit</div>
+    <div class="f">evolution.html</div>
+    <div class="s">The mission-assigner network's evolution dashboard: generations, match outcomes,
+    and which nets survived. This is where the learned strategy layer is judged.</div>
+  </a>
+
+  <a class="lab" href="standoff-lab.html">
+    <div class="t">Standoff Playground</div>
+    <div class="f">standoff-lab.html</div>
+    <div class="s">Where a sieger should stand. A 2D sandbox for picking a firing position &mdash;
+    flood the reachable ground, keep the cells in range with a line to the target and clear of the
+    other guns, take the nearest. The game's solver was rebuilt to match this after the lab kept
+    finding spots the game abandoned.</div>
+  </a>
+
+  <h2>LOOK
+    <span class="note">visual work, tuned against a still frame instead of a firefight</span></h2>
+
+  <a class="lab" href="grass.html">
+    <div class="t">Grass Playground</div>
+    <div class="f">grass.html</div>
+    <div class="s">Blade style, gradient, wind and density, with sliders. The unlit-blade look with a
+    root lighter than the ground was chosen here, and it beat an exact-match root.</div>
+  </a>
+
+  <a class="lab" href="surf.html">
+    <div class="t">Surf Lab</div>
+    <div class="f">surf.html</div>
+    <div class="s">The shoreline &mdash; wave shape, foam and how the water meets the sand.</div>
+  </a>
+
+  <a class="lab" href="sonar-test.html">
+    <div class="t">Sonar HUD preview</div>
+    <div class="f">sonar-test.html</div>
+    <div class="s">The sound-awareness ring, centred on its source, with nothing else on screen.</div>
+  </a>
+
+  <h2>PARTS
+    <span class="note">one model on an empty stage &mdash; geometry you can actually see</span></h2>
+
+  <a class="lab" href="test-soldiers.html">
+    <div class="t">Soldiers</div>
+    <div class="f">test-soldiers.html</div>
+    <div class="s">The SoldierCorps minifigs: a patrol squad marching a square and a scattered group.
+    Deliberately purple and yellow, which proves the fatigues follow any team colour rather than a
+    hardcoded pair.</div>
+  </a>
+
+  <a class="lab" href="test-gadgets.html">
+    <div class="t">Gadgets</div>
+    <div class="f">test-gadgets.html</div>
+    <div class="s">The Firebrat's deployables &mdash; land mine and sensor pod &mdash; on bare ground.</div>
+  </a>
+
+  <a class="lab" href="test-asset.html">
+    <div class="t">Asset viewer</div>
+    <div class="f">test-asset.html?cfg=barracks</div>
+    <div class="s">Renders any one designed asset in an empty scene. Pass <b>?cfg=</b> the name of any
+    <b>js/&lt;name&gt;.config.js</b>, and <b>&amp;accent=</b> a colour to recolour it.</div>
+  </a>
+
+  <a class="lab" href="scrap-view.html">
+    <div class="t">Scrap pile</div>
+    <div class="f">scrap-view.html</div>
+    <div class="s">The salvage piles the scavenge mission collects, on their own.</div>
+  </a>
+
+  <a class="back" href="../index.html">&#8249; back to the game</a> &nbsp;
+  <a class="back" href="../devblog/index.html">the devblog &#8250;</a>
+
+</main>
+</body>
+</html>
