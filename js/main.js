@@ -7866,6 +7866,33 @@ class AICommander {
         + `and come back without firing a shot. We're running a bus route, not a war.`);
     }
   }
+  // DOES THE KEEP STILL OUTRANK THIS GUN? Asked in two places — when the committed keep lock is
+  // tested for release, and when target selection decides whether to promote back to the keep —
+  // and it used to be two separate pieces of arithmetic that DISAGREED BY HALF A POINT.
+  //
+  // _tgtStillValid released the keep the moment any gun came within our reach. Selection then
+  // re-promoted the keep, because the keep carried an incumbency bonus the tower did not:
+  // (10 + 1.5) > (6 + 0 + 5). Release, re-promote, release — every tick. Watched live: twenty-nine
+  // "Tower in reach — forget the keep, put it down first!" lines inside one second, while the
+  // valkyrie shuffled between firing positions eight units apart and accomplished nothing. It is
+  // also why seed 116's keeps died but its TOWERS never did, and nine runners then fed into guns
+  // a committed sieger would have removed.
+  //
+  // THE FLAP HAS TWO STABLE ANSWERS AND ONLY ONE OF THEM IS RIGHT. Letting the gun win whenever it
+  // is in reach also stops the keep ever being shot — a sieger nearly always has SOME gun in reach,
+  // and the keep is what exposes the flag. Measured: seed 116 went from a 973s win to a STALEMATE.
+  // So the contradiction is resolved the conservative way. The incumbency bonus stands, the keep
+  // stays the default target, and the RELEASE is what yields: a gun ends the keep lock only when it
+  // genuinely outscores the keep, which in practice means it is shooting at us. That is a fact
+  // worth switching for; merely being within range is not.
+  _keepOutranks(v, gx, gz, px, pz) {
+    const d = Math.hypot(gx - px, gz - pz);
+    const inReach = d <= (SHOT_REACH[v.type] || 42) ? PRIO.inReach : 0;
+    const towerScore = PRIO.tower + turretThreatBonus(v, gx, gz) + inReach;
+    const cHq  = this._prioTarget === 'hq'    ? PRIO.hq * 0.15 : 0;
+    const cTwr = this._prioTarget === 'tower' ? PRIO.tower * 0.15 : 0;
+    return (PRIO.hq + cHq) > (towerScore + cTwr);
+  }
   _tgtStillValid(lock) {
     if (!lock || !this.unit || this.unit.dead) return false;
     if (lock.msn !== (this.strategy && this.strategy.step)) return false;   // the mission moved on
@@ -7896,7 +7923,10 @@ class AICommander {
       // Still no travel involved: the tower is inside our reach by construction, so this cannot
       // send the unit hunting a new firing position — which is what made the first version of this
       // release cost 18 scuttles.
-      const gun = this.plannableTowers().find(k => inReach(k.x, k.z));
+      // Only release for a gun that the selection below will ACTUALLY take. Asking the same
+      // question in both places is what stops the release/re-promote loop.
+      const gun = this.plannableTowers().find(k => inReach(k.x, k.z)
+        && !this._keepOutranks(this.unit, k.x, k.z, p.x, p.z));
       if (gun) {
         aiLog(this.team, `${this.cname}: Tower in reach — forget the keep, put it down first!`);
         return false;
@@ -8584,18 +8614,7 @@ class AICommander {
         // highest rather than to whatever the queue happened to name.
         let promote = this._gambit || !threat || !hasPathNow;
         if (aiTargetPrio && !promote && threat) {
-          const _dT = Math.hypot(threat.x - px, threat.z - pz);
-          const _inReach = _dT <= (SHOT_REACH[v.type] || 42) ? PRIO.inReach : 0;
-          const towerScore = PRIO.tower + turretThreatBonus(v, threat.x, threat.z) + _inReach;
-          // Hysteresis: a target we are already committed to is worth staying on, so a near-tie
-          // cannot flip the unit back and forth mid-siege (the same reason missionPick gives the
-          // running plan +1.5).
-          // Symmetric commitment. This bonus only ever applied to the KEEP, so a tower the unit had
-          // already committed to could be dropped on a hair's-breadth score change while the keep
-          // could not — which is why `tower -> tower` was 139 of the 374 re-selections.
-          const cHq  = this._prioTarget === 'hq'    ? PRIO.hq * 0.15 : 0;
-          const cTwr = this._prioTarget === 'tower' ? PRIO.tower * 0.15 : 0;
-          promote = (PRIO.hq + cHq) > (towerScore + cTwr);
+          promote = this._keepOutranks(v, threat.x, threat.z, px, pz);
         }
         this._prioTarget = promote ? 'hq' : 'tower'; _br.promote = !!promote;
         if (promote) {
