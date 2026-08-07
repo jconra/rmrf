@@ -240,6 +240,33 @@ const billboardMat = new THREE.ShaderMaterial({
     }`,
 });
 
+// ── MAKING EACH FIRE ITS OWN ─────────────────────────────────────────────────
+// Out of the box every fire is the SAME fire. VolumetricFire memoises one material in a closure
+// and hands it to every instance, so they all share a single `time` uniform — and since the noise
+// field scrolls with time, every flame samples the same noise at the same phase, from an
+// identically sized box, through an identical profile. Not merely similar: mathematically
+// identical, differing only in where it stands. Eight of them read as eight copies of one flame.
+//
+// Three fixes, none of which touch the shader and none of which cost anything per frame:
+//   PHASE  — give the instance its own material so it gets its own clock, then feed it an offset.
+//            Three caches compiled programs by shader source, so N materials is still ONE program;
+//            only the uniform values differ. This is the big one: a different phase is a different
+//            flame shape at any instant.
+//   YAW    — the noise is sampled in the box's own space and updateViewVector slices against
+//            mesh.matrixWorld, so spinning the box rotates the noise field it reads AND changes
+//            which cross-section the camera cuts. Safe at any angle: the profile is already black
+//            outside radius 1, so the box corners were never showing flame.
+//   GIRTH  — a little jitter on width and height, so some burn tall and thin and others squat.
+//
+// Seeded, not Math.random: two runs of the lab should produce the same picture, or comparing a
+// change against a screenshot from ten minutes ago means nothing.
+let _vseed = 0x9e3779b9;
+const vrnd = () => ((_vseed = (_vseed * 1664525 + 1013904223) >>> 0) / 4294967296);
+function individualise(fire) {
+  fire.mesh.material = fire.mesh.material.clone();   // own uniforms (textures still shared by ref)
+  return { phase: vrnd() * 40, yaw: vrnd() * Math.PI * 2, jw: 0.82 + vrnd() * 0.36, jh: 0.85 + vrnd() * 0.3 };
+}
+
 // ── BURSTS ───────────────────────────────────────────────────────────────────
 // The real use is not a permanent bonfire, it is a vehicle or a fuel depot going up: a few
 // seconds, then gone. That changes the cost question completely — what matters is the PEAK
@@ -262,7 +289,7 @@ function initPool() {
     const fire = new VolumetricFire(3, 6, 3, spacing, camera);
     fire.mesh.visible = false;
     scene.add(fire.mesh);
-    pool.push({ fire, busy: false });
+    pool.push({ fire, busy: false, ...individualise(fire) });
   }
 }
 
@@ -272,7 +299,12 @@ function spawnBurst(kind, x, z) {
   const K = KINDS[kind];
   slot.busy = true;
   slot.t = 0; slot.K = K;
+  // RE-ROLL ON EVERY LIGHT, not once per slot. A pool of eight reused all match would otherwise
+  // show the same eight flames over and over, which is the clone problem again wearing a hat.
+  slot.phase = vrnd() * 40; slot.yaw = vrnd() * Math.PI * 2;
+  slot.jw = 0.82 + vrnd() * 0.36; slot.jh = 0.85 + vrnd() * 0.3;
   slot.fire.mesh.position.set(x, K.h * 0.32, z);
+  slot.fire.mesh.rotation.set(0, slot.yaw, 0);
   slot.fire.mesh.visible = true;
   live.push(slot);
   peakLive = Math.max(peakLive, live.length);
@@ -288,8 +320,8 @@ function stepBursts(dt, t) {
     const grow = Math.min(1, s.t / 0.18);                       // snap up
     const fall = u < 0.45 ? 1 : 1 - (u - 0.45) / 0.55;          // then sag away
     const k = s.K.peak * grow * Math.pow(Math.max(0, fall), 0.7);
-    s.fire.mesh.scale.set(k * s.K.w / 3, k * s.K.h / 6, k * s.K.d / 3);
-    s.fire.update(t);
+    s.fire.mesh.scale.set(k * s.K.w / 3 * s.jw, k * s.K.h / 6 * s.jh, k * s.K.d / 3 * s.jw);
+    s.fire.update(t + s.phase);   // its own clock — see individualise()
   }
 }
 
@@ -325,6 +357,10 @@ function rebuild() {
       const f = new VolumetricFire(3, 6, 3, spacing, camera);
       f.mesh.position.set(p.x, 3.4, p.z);
       f.mesh.frustumCulled = false;   // measure what we asked for, not what survived culling
+      const look = individualise(f);
+      f._phase = look.phase;
+      f.mesh.rotation.set(0, look.yaw, 0);
+      f.mesh.scale.set(look.jw, look.jh, look.jw);
       scene.add(f.mesh); fires.push(f);
     }
   }
@@ -402,12 +438,16 @@ function measure() {
       : `<b>Too expensive.</b> ${count} fires cost ${total.toFixed(2)}ms of a 16.7ms frame.`;
 }
 
+// Debug hook, same purpose as __makeFireProfile above: the fires live in module scope, so a probe
+// outside the module cannot see them and reports "no fires" whatever the truth is.
+window.__fires = () => ({ grid: fires, pool });
+
 function tick() {
   requestAnimationFrame(tick);
   const t = clock.getElapsedTime();
   const dt = Math.min(0.1, t - (tick._prev ?? t));   // one delta, clamped over a tab switch
   tick._prev = t;
-  for (const f of fires) f.update(t);
+  for (const f of fires) f.update(t + f._phase);   // each on its own clock — see individualise()
   if (mode === 'burst') {
     stepBursts(dt, t);
     burstT -= dt;
