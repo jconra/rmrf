@@ -6449,23 +6449,74 @@ class AICommander {
     }
     return [{ x: E.x - b.fx * 35, z: E.z - b.fz * 35 }];                       // front: one near stage, then the flag
   }
-  // Dead enemy turrets on the given side (0-2): the "door is open on that side" capture term.
-  // A corner tower guards two sides, so it counts toward both (same rule rearTowersLive uses).
-  towersDownDir(dir) {
-    const tt = this.targetTeam(), b = this._dirBasis();
-    const ax = dir === 'rear' ? b.fx : dir === 'left' ? b.lx : dir === 'right' ? -b.lx : -b.fx;
-    const az = dir === 'rear' ? b.fz : dir === 'left' ? b.lz : dir === 'right' ? -b.lz : -b.fz;
-    let down = 0;
-    for (const c of camps) {
-      if (c.team !== tt || c.role !== 'main') continue;
-      for (const w of c.walls) {
-        if (!w.turret) continue;
-        const p = w.group.position;
-        if ((p.x - b.base.x) * ax + (p.z - b.base.z) * az > 2)   // on this side
-          if (w.turret.dead || w.turret.falling) down++;
+  // WHAT WILL SHOOT AT THE RUNNER ON THE WAY IN.
+  //
+  // A capture direction is a ROUTE (see enemyRoute), so the honest question is not "are the guns
+  // on that side of their keep dead" but "which guns that we know about can reach the path this
+  // runner is actually going to drive". Those are different questions and they give different
+  // answers. The side-count that used to live here (towersDownDir) missed the enemy FOB entirely
+  // — its guns sit nowhere near the keep, belong to no side of it, and shoot runners all the same
+  // — and it only ever paid a BONUS for a cleared side, so a lane with both guns alive scored
+  // exactly the same as a lane with no guns at all. (Watched live: capture-rear +15.7 with two
+  // live rear towers, and not one term in the breakdown mentioning them.)
+  //
+  // Walking the route also drops the last thing that had to be true about a map's shape. Nothing
+  // here knows what "rear" means, and a designed map can put towers anywhere; every gun is scored
+  // by whether it geometrically covers the path, so custom maps need no new bookkeeping.
+  //
+  // Fog-honest by construction: plannableTowers() is the intel notebook, not the board, so a gun
+  // we have never seen costs nothing until we find it.
+  //
+  // Returns { n, exposure, worst }:
+  //   n        — how many known guns cover any part of the route
+  //   exposure — route-units driven inside a gun's range, SUMMED over guns (so a stretch covered
+  //              by two guns costs twice, which is what being caught in it is like)
+  //   worst    — deepest single penetration, 0..1 (grazing the edge of one arc is not the same
+  //              as driving under the muzzle, and the weights should be able to tell)
+  routeGuns(dir) {
+    const guns = this.plannableTowers();
+    // The route itself is fixed by the two base positions, so the ONLY things that can change
+    // this answer are which guns we know about, where they are, and how upgraded they are.
+    // Fingerprint exactly that and the cache can stand until one of them moves.
+    let fp = dir + '|';
+    for (const g of guns) fp += `${Math.round(g.x)},${Math.round(g.z)},${(g.wall && g.wall.turret && g.wall.turret.upg) || 0};`;
+    const memo = this._routeGunMemo || (this._routeGunMemo = {});
+    if (memo[dir] && memo[dir].fp === fp) return memo[dir].v;
+    const pts = [this.homePos(), ...this.enemyRoute(dir), this.enemyBasePos()];
+    const STEP = 6;                                   // sample stride along the path, in world units
+    let n = 0, exposure = 0, worst = 0;
+    for (const g of guns) {
+      const R = towerStats((g.wall && g.wall.turret && g.wall.turret.upg) || 0).range;
+      let cov = 0, deep = 0;
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const ax = pts[i].x, az = pts[i].z, bx = pts[i + 1].x, bz = pts[i + 1].z;
+        const len = Math.hypot(bx - ax, bz - az);
+        const steps = Math.max(1, Math.ceil(len / STEP));
+        for (let s = 0; s <= steps; s++) {
+          const t = s / steps, x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+          const d = Math.hypot(x - g.x, z - g.z);
+          if (d >= R) continue;
+          cov += len / steps;
+          const pen = (R - d) / R; if (pen > deep) deep = pen;
+        }
       }
+      if (cov > 0) { n++; exposure += cov; if (deep > worst) worst = deep; }
     }
-    return Math.min(2, down);
+    const v = { n, exposure: Math.round(exposure), worst: +worst.toFixed(2) };
+    memo[dir] = { fp, v };
+    return v;
+  }
+  // The least fire any approach has to eat right now. Every route converges on the keep, so the
+  // keep's own guns cover the final run-in whichever side you come from — that floor is the price
+  // of capturing AT ALL, and it is the same for all four directions. Subtracting it is what lets
+  // the direction scores actually differ: what distinguishes a lane is the fire it takes ON TOP of
+  // the unavoidable minimum. (Charging the floor to each direction instead suppressed capture
+  // globally — average match time +10% with resolution unchanged — while leaving the four
+  // directions within a point of each other.)
+  safestRouteExposure() {
+    let best = Infinity;
+    for (const d of ['front', 'left', 'right', 'rear']) best = Math.min(best, this.routeGuns(d).exposure);
+    return best === Infinity ? 0 : best;
   }
   // FOG-HONEST lane intel for a capture direction: reads only what the team has actually
   // SEEN or HEARD (the contact notebook below + whether any of our units has had eyes on

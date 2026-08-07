@@ -816,7 +816,35 @@ export function missionScore(cmd, key, running = null) {
       else add('flag OPEN', 4);   // the win condition is on the table — outweigh routine fighting
       if (cmd.flagGrabbable()) add('grabbable', 2);
       const dir = key.includes('-') ? key.split('-')[1] : 'front';
-      add('towers down ' + dir, (cmd.towersDownDir ? cmd.towersDownDir(dir) : Math.min(2, 4 - towers)) * 1);
+      // WHAT SHOOTS AT THIS ROUTE. Not "how many towers on that side of their keep are dead" —
+      // which ignored the FOB's guns, assumed a map has a tidy front and rear, and was BONUS-ONLY
+      // so live guns on the lane cost nothing at all. cmd.routeGuns walks the actual waypoints the
+      // runner will drive and asks which known guns cover them (see routeGuns in main.js).
+      //
+      // Heavily negative, per the design call: a Firebrat has 14-damage pop-guns and no business
+      // trading with a tower, so a lane a tower covers is not a slightly worse lane, it is a lane
+      // that eats runners. Gradual on both counts the house rule cares about — the number of guns
+      // AND how deep under them the path goes — so clipping the edge of one arc is priced well
+      // below driving under two muzzles.
+      const rg = cmd.routeGuns ? cmd.routeGuns(dir) : null;
+      if (rg) {
+        if (rg.n === 0) add('route clear of guns', 2);      // the door really is open on this side
+        else {
+          // PRICED BY HOW LONG WE ARE UNDER FIRE, AND BY HOW MUCH WORSE THIS LANE IS THAN THE
+          // BEST ONE. Counting guns charged the same for clipping the edge of one arc as for
+          // driving 400u beneath six muzzles. Worse, it charged every direction for the keep's
+          // own guns, which cover the final run-in no matter which way you come — so the four
+          // directions landed within a point of each other and capture got shy across the board
+          // (average match time +10%, resolution unchanged).
+          //
+          // Split into the two things it was conflating:
+          //   a flat charge — going for the flag at all, while guns are up, is dangerous
+          //   the EXCESS over the safest lane — the part that actually chooses a direction
+          // `worst` rides on top: deep under a muzzle beats skirting the rim at equal distance.
+          const excess = Math.max(0, rg.exposure - (cmd.safestRouteExposure ? cmd.safestRouteExposure() : rg.exposure));
+          add(`${rg.n} gun${rg.n > 1 ? 's' : ''} covering the route`, -(2 + rg.worst * 1.5 + excess / 40));
+        }
+      }
       // fog-honest lane intel: +1 only for a lane we've had eyes on and know is empty; a lane
       // with a KNOWN contact on it is actively repelling; unscouted = neutral (earn it by scouting)
       if (cmd.laneIntel) { const li = cmd.laneIntel(dir); if (li === 'clear') add('lane clear', 1); else if (li === 'blocked') add('lane blocked', -2); }
