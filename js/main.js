@@ -5450,6 +5450,10 @@ function liveTurretNear(x, z, r = 8) {
 }
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
 let standFails = 0;                         // RR.decisionAlarms() — sieges with no firing position at all
+// Not a failure — a deliberate ugly trade. Counted anyway, because "how often is the only
+// firing position under two guns" is a fact about the MAPS we should be able to see, and
+// because if this number is large the standoff doctrine is not buying what it costs.
+let standCrossfire = 0;                     // RR.decisionAlarms() — stands taken inside another gun's arc
 const navScuttles = [];                     // units the driver destroyed for being unable to move
 const navScuttlesByTeam = {};               // per-team scuttle tally — RR.navScuttles()
 // TWO FAILURE CLASSES THAT HID IN PLAIN SIGHT FOR TWENTY MINUTES (seed 1151), so they get to be
@@ -8076,12 +8080,12 @@ class AICommander {
     // candidate out. (Jacob: "I don't want backup algorithms, I just want one that works" — and if
     // it doesn't work, a loud alarm and logs that show why.)
     const why = { scanned: 0, offIsland: 0, blocked: 0, noLOS: 0, crossfire: 0, unreachable: 0 };
-    const spotOK = (x, z, needLOS) => {
+    const spotOK = (x, z, needLOS, takeFire) => {
       if (flyer) return true;
       if (!drivableTo(v, x, z)) { why.offIsland++; return false; }
       if (v._blocked(x, z)) { why.blocked++; return false; }
       if (needLOS && !hasLOS(x, z, T.x, T.z)) { why.noLOS++; return false; }
-      if (crossfire(x, z)) { why.crossfire++; return false; }
+      if (!takeFire && crossfire(x, z)) { why.crossfire++; return false; }
       return true;
     };
     // ARE WE ALREADY STANDING IN ONE? Every candidate below is a point on a ring around the
@@ -8118,14 +8122,31 @@ class AICommander {
     // which it would be needed. The solver demanded a line; the shooter is built to make its own.
     // (Jacob: "it should just shoot through a wall. Maybe having LOS shouldn't even be a
     // requirement. Make your own LOS.") So it becomes the last rung of the ladder that is already
-    // here, not a second algorithm. CROSSFIRE IS STILL NEVER RELAXED — standing where two guns
-    // reach you defeats the whole point of a standoff.
+    // here, not a second algorithm.
+    //
+    // AND NEITHER IS CROSSFIRE, for the same reason. Refusing every cell a second gun can reach
+    // is the right DEFAULT — that is what a standoff is for, and the first three tiers still hold
+    // it absolutely. But held as a veto it was answering "is this comfortable" when the question
+    // is "can I shoot from anywhere at all", and the honest answer to the second is worth having
+    // even when it is ugly. Measured once the tournament finally printed the alarm: 69 empty
+    // solves per 30 seeds on the default set and 202 on the fresh one. Seed 25 is the shape of
+    // all of them — 508 candidate cells, 203 thrown out for crossfire alone, no spot returned,
+    // and a Lurcher that sat for a thousand seconds while its commander re-picked siege forever.
+    // A Lurcher kills a tower in 3.2 seconds. Standing under two guns for 3.2 seconds to remove
+    // one of them is a trade a person makes without thinking about it; sitting still for a
+    // thousand seconds is not a trade at all.
+    //
+    // So it is the LAST rung and nothing above it changes: a spot out of the crossfire is always
+    // preferred, including one with no line at all, because chewing through a wall is slow but
+    // survivable while two arcs are neither. This tier only ever runs where the alternative was
+    // returning null.
     const bands = [
-      ['ideal', Math.max(minR, 12), Math.min(unitR, reach * 0.99), true],   // the comfortable one-gun spot
-      ['relaxed', 12, top, true],                                          // anywhere with a line we can still shoot from
-      ['through the wall', 12, top, false],                                // no line — bring the wall down and make one
+      ['ideal', Math.max(minR, 12), Math.min(unitR, reach * 0.99), true, false],   // the comfortable one-gun spot
+      ['relaxed', 12, top, true, false],                                  // anywhere with a line we can still shoot from
+      ['through the wall', 12, top, false, false],                        // no line — bring the wall down and make one
+      ['under their crossfire', 12, top, false, true],                    // nowhere safe — take the trade and shoot
     ];
-    for (const [tier, lo, hi, needLOS] of bands) {
+    for (const [tier, lo, hi, needLOS, takeFire] of bands) {
       if (hi <= lo) continue;
       let best = null, bestD = Infinity;
       const iA = Math.floor((T.x - hi) / cell), iB = Math.ceil((T.x + hi) / cell);
@@ -8136,25 +8157,29 @@ class AICommander {
         if (dT < lo || dT > hi) continue;
         why.scanned++;
         if (R) { const k = navIdx(i, j); if (k < 0 || !R[k]) { why.unreachable++; continue; } }   // proven undrivable-to
-        if (!spotOK(x, z, needLOS)) continue;
+        if (!spotOK(x, z, needLOS, takeFire)) continue;
         const dU = (x - px) ** 2 + (z - pz) ** 2;                          // nearest = least travel
         if (dU < bestD) { bestD = dU; best = { x, z }; }
       }
       if (best) {
         if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
         else if (tier === 'through the wall') aiLog(this.team, `${this.cname}: No line to the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) from anywhere we can stand — planting anyway and blasting through the wall.`);
+        else if (tier === 'under their crossfire') { standCrossfire++; aiLog(this.team, `${this.cname}: Every firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) is covered by another gun — taking the trade, get in and put it down fast.`); }
         return best;
       }
     }
-    // NO SPOT. There is no second algorithm to fall back to, so say so loudly and show the working:
-    // which test threw out every candidate is the difference between "walled in", "no line through
-    // the base" and "every angle is covered by another gun", and those need different fixes.
+    // NO SPOT — and now that means something much stronger than it used to. Every preference has
+    // already been given up: line of sight, and then standing clear of the other guns. So this is
+    // no longer "nowhere comfortable", it is "nowhere at all", and the only tests left that can
+    // have rejected everything are physical ones — the cells cannot be driven to, are across
+    // water, or are solid. If crossfire still dominates the tally below, the band itself is wrong.
     standFails++;
     this._standFail = { x: Math.round(T.x), z: Math.round(T.z), type: v.type, reach: Math.round(reach), ...why };
     if (!this._standFailAlarmed) {
       this._standFailAlarmed = true;
       aiLog(this.team, `[STANDOFF ALARM] ${this.cname}: no firing position on the target at `
-        + `(${Math.round(T.x)}, ${Math.round(T.z)}) for a ${v.type} (reach ${Math.round(reach)}). `
+        + `(${Math.round(T.x)}, ${Math.round(T.z)}) for a ${v.type} (reach ${Math.round(reach)}) — `
+        + `not even one under their crossfire. `
         + `Of ${why.scanned} cells in the band: ${why.unreachable} can't be driven to, ${why.offIsland} across water, `
         + `${why.blocked} solid, ${why.noLOS} have no line to it, ${why.crossfire} sit under another gun.`);
     }
@@ -11164,7 +11189,7 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
-  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails }),
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
