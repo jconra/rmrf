@@ -415,7 +415,16 @@ const BEHAVIORS = {
       // Fire whenever the turret can bear on the tower (target inside the arc) and it's
       // in range with a clear line — independent of where the hull is pointed.
       const arc = Math.min(view.shotArc || 0.26, Math.PI * 0.55);
-      const aimed = Math.abs(err) < arc && dist < Math.min(want * 1.3, fireCap);
+      // FIRE AT THE GUN'S REACH, NOT AT DUELLING RANGE. `want` is ENGAGE_RANGE — how close a unit
+      // likes to be in a moving fight — and capping siege fire at want*1.3 meant the standoff
+      // solver and the shooter disagreed about the same distance. The solver deliberately picks a
+      // spot as far out as the gun allows, to stay clear of the other towers' arcs; the shooter
+      // then refused to use it. Seed 655, the only stalemate in 240: a Valkyrie sat at its
+      // assigned stand 76u from the enemy keep, clear line, 80u gun, two thirds of a magazine, and
+      // did not fire for twenty minutes. 6,652 of 6,946 arrived siege decisions read "out of
+      // range" at a range the gun covers. SHOT_REACH is the real limit — a round physically dies
+      // past it — so that is the only limit worth having here.
+      const aimed = Math.abs(err) < arc && dist < fireCap;
       const canBear = view.threatLOS && aimed;
       // SIEGE FLATTEN: a ground unit with NO clean line on the tower (a wall/HQ blocks
       // it) doesn't circle forever hunting an angle — it PLANTS, squares onto the nearest
@@ -426,7 +435,7 @@ const BEHAVIORS = {
       let demolish = false, demoErr = 0, demoAimed = false;
       if (!view.flyer && !view.threatLOS && view.demolishTarget) {
         const ddx = view.demolishTarget.x - self.x, ddz = view.demolishTarget.z - self.z;
-        if (Math.hypot(ddx, ddz) < Math.min(want * 1.3, fireCap)) {
+        if (Math.hypot(ddx, ddz) < fireCap) {   // same rule for the wall we are breaking through
           demolish = true;
           demoErr = wrapPi(Math.atan2(-ddx, -ddz) - self.heading);   // hull-relative bearing to the wall
           demoAimed = Math.abs(demoErr) < arc;

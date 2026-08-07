@@ -7901,6 +7901,19 @@ class AICommander {
   _tgtStillValid(lock) {
     if (!lock || !this.unit || this.unit.dead) return false;
     if (lock.msn !== (this.strategy && this.strategy.step)) return false;   // the mission moved on
+    // A LOCK CARRIES A FIRING SPOT, AND A FIRING SPOT BELONGS TO A GUN. The chassis changes under
+    // a commander while the lock survives — recall, re-field, different vehicle — so a spot solved
+    // for a Jotun's 80u gun gets handed to the Lurcher that replaced it. The siege plan's cache has
+    // stamped the gun each spot was drawn for since 02f644e; the lock never did, and it is the same
+    // bug wearing a different hat. Measured on seed 655: 307 decisions with a Lurcher parked 58u
+    // from its target holding a 42u gun. A commitment we cannot act on is not a commitment.
+    if (lock.spot) {
+      const reach = SHOT_REACH[this.unit.type] || 42;
+      if ((lock.spot.x - lock.x) ** 2 + (lock.spot.z - lock.z) ** 2 > reach * reach) {
+        aiLog(this.team, `${this.cname}: That firing spot was picked for a longer gun — find one this ${this.unit.type} can shoot from.`);
+        return false;
+      }
+    }
     // …with one exception, and it is the siege rule PRIO already encodes: "the keep is the top
     // priority, but a tower that is actually shooting at us outranks it" (tower 6 + shooting 10 >
     // hq 10). A GROUND unit cannot shoot a walled keep, so an HQ lock has no natural end, and the
