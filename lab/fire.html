@@ -41,6 +41,8 @@
   <div class="row" id="mode"></div>
   <div class="lab">HOW MANY</div>
   <div class="row" id="count"></div>
+  <div class="lab">REPEAT &middot; renders per frame, to beat vsync</div>
+  <div class="row" id="amp"></div>
   <div class="lab">BURST RATE &middot; bursts mode &mdash; one every&hellip;</div>
   <div class="row" id="rate"></div>
   <div class="lab">TEXTURES &middot; volumetric only</div>
@@ -292,11 +294,13 @@ let fires = [], billboard = null;
 const clock = new THREE.Clock();
 const _m = new THREE.Matrix4();
 
+// A GRID, NOT A SPIRAL. The spiral put fire 39 at a radius of 88u — off screen — so the renderer
+// culled it and "40 fires" measured 28. Everything the lab counts must actually be drawn.
 function layout(n) {
-  const pts = [];
+  const pts = [], cols = Math.ceil(Math.sqrt(n)) || 1, gap = 7.5;
   for (let i = 0; i < n; i++) {
-    const a = (i / Math.max(1, n)) * Math.PI * 2 * 1.6, r = 6 + i * 2.1;
-    pts.push({ x: Math.cos(a) * r, z: Math.sin(a) * r });
+    const cx = i % cols, cz = (i / cols) | 0;
+    pts.push({ x: (cx - (cols - 1) / 2) * gap, z: (cz - (Math.ceil(n / cols) - 1) / 2) * gap });
   }
   return pts;
 }
@@ -315,6 +319,7 @@ function rebuild() {
     for (const p of pts) {
       const f = new VolumetricFire(3, 6, 3, spacing, camera);
       f.mesh.position.set(p.x, 3.4, p.z);
+      f.mesh.frustumCulled = false;   // measure what we asked for, not what survived culling
       scene.add(f.mesh); fires.push(f);
     }
   }
@@ -365,13 +370,22 @@ function measure() {
   const info = renderer.info.render;
   document.getElementById('calls').textContent = info.calls;
   document.getElementById('tris').textContent = info.triangles.toLocaleString();
-  if (baseline != null && count > 0) {
-    const per = (med - baseline) / count;
-    document.getElementById('per').textContent = per > 0 ? per.toFixed(3) + ' ms' : '~0 (vsync-bound)';
+  const pinned = amplify === 1 && Math.abs(med - 16.67) < 0.9;
+  if (baseline != null && count > 0 && !pinned) {
+    const per = (med - baseline) / amplify / count;
+    document.getElementById('per').textContent = per > 0.0005 ? per.toFixed(3) + ' ms' : '< 0.001 ms';
+  } else if (pinned) {
+    document.getElementById('per').textContent = 'unmeasurable — raise REPEAT';
   }
   const v = document.getElementById('verdict');
   if (baseline == null) { v.textContent = 'measuring an empty scene first…'; return; }
-  const total = med - baseline;
+  if (pinned) {
+    v.innerHTML = '<b>Pinned to vsync — this number means nothing.</b> The GPU is finishing early '
+      + 'and waiting for vblank, so an empty scene reads the same as a full one. Raise REPEAT '
+      + 'until the frame time climbs above 17ms, then read the per-fire cost.';
+    return;
+  }
+  const total = (med - baseline) / amplify;
   v.innerHTML = total < 0.6
     ? `<b>Cheap.</b> ${count} fires cost ${total.toFixed(2)}ms — burn whatever you like.`
     : total < 2.2
@@ -397,7 +411,12 @@ function tick() {
   billboardMat.uniforms.time.value = t;
   camera.position.x = Math.sin(t * 0.08) * 14;
   camera.lookAt(0, 3, 0);
-  renderer.render(scene, camera);
+  // VSYNC MAKES THIS UNMEASURABLE AT amplify=1. The GPU finishes early and waits for vblank, so a
+  // frame with 40 fires and a frame with none both read exactly 16.70ms and everything looks free.
+  // Repeating the render pushes the work past the budget, and dividing by the repeat count gives
+  // the honest per-frame cost. Jacob's 7900 XT reported "40 fires cost 0.00ms" — it could not have
+  // known any different.
+  for (let i = 0; i < amplify; i++) renderer.render(scene, camera);
   measure();
 }
 
@@ -411,7 +430,13 @@ function buttons(host, opts, get, set) {
     set(b.dataset.v); sync(); rebuild(); });
   sync();
 }
-let burstEvery = 1.2, burstT = 0;
+let amplify = 1, burstEvery = 1.2, burstT = 0;
+buttons('amp', [['1', '1'], ['10', '10'], ['30', '30'], ['60', '60']],
+  () => amplify, v => { amplify = +v; baseline = null; samples.length = 0;
+    // re-establish the empty-scene cost at the new repeat count
+    const keep = count; count = 0; rebuild();
+    setTimeout(() => { const q = [...samples].sort((a, b) => a - b);
+      baseline = q.length ? q[q.length >> 1] : 16.7; count = keep; rebuild(); }, 1600); });
 buttons('mode', [['volumetric', 'volumetric'], ['billboard', 'billboard'], ['bursts', 'burst']],
   () => mode, v => mode = v);
 buttons('rate', [['calm 2.5s', '2.5'], ['busy 1.2s', '1.2'], ['chaos 0.35s', '0.35']],
