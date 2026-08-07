@@ -1477,7 +1477,6 @@ const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie i
 let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
 let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a firing tower jumps) instead of walking a queue — RR.setTargetPrio
-let aiBreachCommit = true;   // siegers latch ONE wall + push in through the hole (A/B via RR.setBreachCommit); off = old orbit-and-spray standoff
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
 let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
@@ -8757,26 +8756,16 @@ class AICommander {
     // cross product of (base→tower) × (tower→unit) picks the nearer side to arc to.
     let flankSide = 0, threatLOS = false, threatStand = null;
     if (threat) threatLOS = flyer || hasLOS(px, pz, threat.x, threat.z);
-    // BREACH COMMIT: the siege stall was the sieger ORBITING the base at sniper range,
-    // re-picking the nearest wall every tick — so fire spread across the whole ring and no
-    // gap ever opened (measured: walls stuck at 23/30, HQ never lost a point over 8000 ticks).
-    // Instead LATCH one wall and hammer it to rubble, then the next nearest — punching a single
-    // breach we can push through, exactly how a human cracks a base.
-    let breachWall = null, breached = false;
-    if (aiBreachCommit && threat && !threatLOS && threatCamp && !flyer) {
-      breached = threatCamp.walls.some(w => w.body && w.body.dead);   // a hole already exists?
-      let w = this._breachW;                                          // keep the latched wall while it stands
-      if (!(w && w.body && !w.body.dead && threatCamp.walls.includes(w))) {
-        w = null; let bestW = Infinity;
-        for (const cand of threatCamp.walls) {
-          if (!cand.body || cand.body.dead) continue;
-          const d = (cand.group.position.x - px) ** 2 + (cand.group.position.z - pz) ** 2;
-          if (d < bestW) { bestW = d; w = cand; }
-        }
-        this._breachW = w;
-      }
-      breachWall = w;
-    } else { this._breachW = null; }
+    // (BREACH COMMIT lived here: latch the nearest live wall in the target's camp and hammer it
+    // to rubble. It was added because the sieger used to re-pick the nearest wall every tick and
+    // spread its fire around the whole ring, and the latch did cure that. But "nearest to me" was
+    // never the right question — it names a wall wherever we happen to stand relative to the
+    // ring, not the wall that is stopping our shot. Measured on the stalemates: 11,580 of 12,043
+    // arrived siege decisions on seed 179 had a latched wall a median 49u away with a 42u gun, so
+    // the sieger stood at a perfectly good firing position with nothing it could legally shoot
+    // and blue's keep finished the match on a full 600hp. losBlocker answers the real question,
+    // and its answer is stable for the same reason the latch was — it is a property of the line,
+    // not of where we drifted to.)
     if (threat) {
       // CLOSE IN to finish. A heavy planted at its full 64u sniper hold often has NO line through
       // the base walls, so it sprays the wall face and idles (the audit's "lone jotun frozen at
@@ -8814,28 +8803,23 @@ class AICommander {
       // of units per step. The plan now vets reachability before committing, so there is nothing
       // to walk away from — see _standoffFor's relaxation ladder.)
     }
-    // SIEGE FLATTEN: with no clean line on the tower, shell the latched breach wall (a real,
-    // solidly-hittable target at its true position) to blow a path through — aimed shots at the
-    // hidden turret just arc over. Falls back to the nearest wall if no breach wall is latched.
+    // SIEGE FLATTEN: with no clean line on the target, shell WHATEVER IS BLOCKING THE SHOT to
+    // blow a path through — aimed rounds at the hidden turret just arc over. One rule, and it
+    // needs no camp bookkeeping, no latch and no special cases: walk the line to the target and
+    // shoot the first thing on it.
+    //
+    // It subsumes the three separate answers that used to live here. The latched breach wall and
+    // the nearest-wall scan both asked "which wall am I closest to", which is a different question
+    // and frequently a wall out of gun range while the real obstruction sat right in front of the
+    // hull. And the keep needed its own clause, because a LOS ray to the HQ's centre dies inside
+    // the building's own obstacle circle so threatLOS can never come true against it — but that is
+    // not a special case at all, it is the general rule working: with every wall down the first
+    // thing on the line to the keep IS the keep, so we square onto it and shell it open (seed 207,
+    // a lurcher staring at a 297hp keep for 400s while the flag stayed sealed).
     let demolishTarget = null;
-    if (breachWall) {
-      const wx = breachWall.group.position.x, wz = breachWall.group.position.z;
-      demolishTarget = { x: wx, y: map.heightAt(wx, wz) + 2.5, z: wz };
-    } else if (threat && !threatLOS && threatCamp) {   // knob-OFF fallback: nearest wall, re-picked each tick
-      let bestW = Infinity;
-      for (const w of threatCamp.walls) {
-        if (!w.body || w.body.dead) continue;
-        const wx = w.group.position.x, wz = w.group.position.z;
-        const d = (wx - px) ** 2 + (wz - pz) ** 2;
-        if (d < bestW) { bestW = d; demolishTarget = { x: wx, y: map.heightAt(wx, wz) + 2.5, z: wz }; }
-      }
-      // FINISH THE KEEP: every wall is rubble and the "threat" is the solid HQ itself.
-      // A LOS ray to the HQ's CENTRE dies inside the building's own obstacle circle, so
-      // threatLOS can never come true for a ground unit — the sieger used to park at its
-      // standoff and never fire (seed 207: a lurcher staring at a 297hp keep for 400s
-      // while the flag stayed sealed). With nothing else left to shoot through, the keep
-      // is a demolish target like any wall: square onto the hull and shell it open.
-      if (!demolishTarget && hqThreat) demolishTarget = { x: threat.x, y: map.heightAt(threat.x, threat.z) + 2.5, z: threat.z };
+    if (!flyer && threat && !threatLOS) {
+      const b = losBlocker(px, pz, threat.x, threat.z, this.team);
+      if (b) demolishTarget = { x: b.x, y: map.heightAt(b.x, b.z) + 2.5, z: b.z };
     }
     // Same sponge rule as the turret threat above: chewing a wall a crew is actively
     // re-raising is a losing race — put the rounds into the JEEP and cancel the heal.
@@ -9609,8 +9593,16 @@ function endMatch(winner) {
   }, 5000);
 }
 
-// Line of sight: blocked if any wall obstacle straddles the segment a→b.
-function hasLOS(ax, az, bx, bz) {
+// WHAT IS IN THE WAY — the first obstacle straddling the segment a→b, walking out from a, or
+// null for a clear line. This test always knew which piece blocked the shot; it just threw the
+// answer away and returned a bare false, so every caller that needed to DO something about the
+// obstruction had to go looking for it again with a guess ("the nearest wall in their camp").
+// The guess and the answer are different things: the nearest wall is wherever we happen to be
+// standing relative to the ring, while the blocker is on the line by construction — so if the
+// target is inside our reach, the blocker is too, and breaking it MAKES the line. That is the
+// whole of the siege-flatten rule, and it needs no second algorithm to state it.
+// skipTeam: never nominate our OWN wall as something to shoot through.
+function losBlocker(ax, az, bx, bz, skipTeam) {
   const dx = bx - ax, dz = bz - az;
   const len = Math.hypot(dx, dz) || 1;
   const steps = Math.ceil(len / 4);
@@ -9618,12 +9610,16 @@ function hasLOS(ax, az, bx, bz) {
     const t = s / steps, x = ax + dx * t, z = az + dz * t;
     for (const o of obstacles) {
       if (o.body && o.body.dead) continue;           // a downed wall no longer blocks line of sight
+      if (skipTeam && o.team === skipTeam) continue;
       const ox = x - o.x, oz = z - o.z;
-      if (ox * ox + oz * oz < o.r * o.r) return false;
+      if (ox * ox + oz * oz < o.r * o.r) return o;
     }
   }
-  return true;
+  return null;
 }
+// Line of sight: blocked if any wall obstacle straddles the segment a→b. Own walls block the
+// eye exactly as they always did — only the demolish pick skips them.
+function hasLOS(ax, az, bx, bz) { return !losBlocker(ax, az, bx, bz); }
 
 // --- Collision ---------------------------------------------------------
 // Solid wall pieces the player can't drive through (gates excluded — drive-through).
@@ -11276,7 +11272,6 @@ window.RR = {
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setTargetPrio: (v) => { aiTargetPrio = !!v; return aiTargetPrio; },   // A/B: scored siege targets vs the old tower queue
-  setBreachCommit: (v) => { aiBreachCommit = !!v; return aiBreachCommit; },   // A/B: siegers latch one wall + push in vs orbit-and-spray
   setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
   setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
   get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
