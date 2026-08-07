@@ -902,9 +902,13 @@ export function missionScore(cmd, key, running = null) {
   // otherwise the persona was selling a plan it had no mines for, and at kickoff (where the
   // bias is loudest) that outscored everything the board was actually saying.
   const armed = key !== 'trap' || (cmd._trapMode && !cmd._trapDone);
+  // Name WHICH entry each nudge came from. Both used to log as a bare "rogue", so a directional
+  // capture printed the persona twice with no way to tell it was the base key and the exact key
+  // rather than one term counted twice (Jacob, reading a live match: "why are there 2 rogue
+  // bonuses?"). Same numbers, and now the breakdown says what they are.
   if (armed) {
-    if (PB[base] && base !== key) add(arch, PB[base] * pw);
-    if (PB[key]) add(arch, PB[key] * pw);
+    if (PB[base] && base !== key) add(`${arch}:${base}`, PB[base] * pw);
+    if (PB[key]) add(`${arch}:${key}`, PB[key] * pw);
   }
   // success memory (the anti-repeat): a just-failed mission sits at −4, drifts back to 0.
   // Directional captures each carry their OWN memory — "front failed" leaves rear untouched.
