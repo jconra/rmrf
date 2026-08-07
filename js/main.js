@@ -38,6 +38,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
+import { initFire, fireBurst, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
 import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
@@ -122,6 +123,9 @@ const BASE_FOV = 55;   // landscape vertical fov
 // near plane just threw away depth-buffer precision (far/near went from 2500 to ~415),
 // which is what made the terrain/waterline z-fight so badly when zoomed out.
 const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 3, 1200);
+// Build the fire pool once, here, where the scene and camera both exist. Eight instances, reused
+// for the whole match — see Fire.js for why the pool is the budget.
+initFire(scene, camera);
 
 // Perspective fov is VERTICAL, so a tall portrait window (a phone) collapses the
 // horizontal view and feels zoomed in. In portrait, widen the vertical fov so the
@@ -2623,6 +2627,10 @@ function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
   veh.dead = true;
   spawnExplosion(veh.holder.position, veh.type === 'jotun');
+  // …and it burns for a few seconds afterwards. A Jotun is a bigger machine and gets a bigger
+  // fire; everything else is one size for now (Jacob: "keep it all the same for now").
+  if (cause !== 'sank') fireBurst(veh.holder.position.x, veh.holder.position.y, veh.holder.position.z,
+                                  veh.type === 'jotun' ? 1.35 : 1);
   creditKill(killer, veh);   // credit the firing unit's commander (drives Warrior/Hunter doctrine + kill feed)
   { const bank = rankBankFor(veh); if (bank) bank[veh.type] = 0; }   // the decorated individual is gone — rank dies with it
   if (veh._rankGrp) { scene.remove(veh._rankGrp); veh._rankGrp = null; veh._rankSpr = null; }
@@ -3302,7 +3310,12 @@ function addResupply(kind, site) {
   const rp = { kind, group: g, pos: new THREE.Vector3(site.x, gy, site.z), radius: grid.cell * 2.2, dead: false };
   applyStaging(g, kind);   // authored fallAt/dmgStyle (if any) before the Destructible reads them
   destructibles.add(new Destructible(g, { type: 'structure', hp: RESUPPLY_HP[kind] || 130, blocks: true, staged: true,
-    onDestroyed: () => { rp.dead = true; } }));
+    onDestroyed: () => {
+      rp.dead = true;
+      // A fuel or diesel dump is the one that should really go up. Same fire for now, just a
+      // bigger one; giving fuel a longer burn than a vehicle is the obvious next refinement.
+      fireBurst(rp.pos.x, rp.pos.y, rp.pos.z, kind === 'fuel' ? 1.9 : 1.5);
+    } }));
   resupplies.push(rp);
   return rp;
 }
@@ -10987,6 +11000,14 @@ window.RR = {
   },
   upgradeJeep: (team = PLAYER_TEAM) => { const h = findWoundedTowerAny(team); return h ? deployUpgrade(team, h.camp, h.wall) : false; },   // debug: roll an upgrade jeep to the first tower
   enterTowerPick: () => enterTowerPick(), exitTowerPick: () => exitTowerPick(),   // debug: drive the tower-upgrade picker
+  fireStatus: () => fireStatus(),   // debug: pool occupancy — the count is the budget
+  // Light one on demand, in front of the camera by default — for eyeballing the effect without
+  // waiting for something to actually blow up.
+  testFire: (x, z, scale = 1) => {
+    const p = (x == null) ? camera.position.clone().add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(60))
+                          : new THREE.Vector3(x, 0, z);
+    return fireBurst(p.x, map ? map.heightAt(p.x, p.z) : 0, p.z, scale);
+  },
   fxCounts: () => ({ blood: bloodMarks.length, tents: crushables.length, crushed: crushables.filter(c => c.crushed).length, bloodPos: bloodMarks.slice(0, 5).map(m => ({ x: +m.position.x.toFixed(0), y: +m.position.y.toFixed(2), z: +m.position.z.toFixed(0), vis: m.visible, scl: +m.scale.x.toFixed(1) })) }),   // debug: blood marks + squishable-tent state
   killTowerGun: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.turretDest.damage(1e9); return !!h; },   // debug: shoot a tower's gun off (test gun purchase)
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
@@ -11165,6 +11186,7 @@ window.RR = {
       projectiles.update(dt); updateProjectileHits();
       destructibles.update(dt);
       updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateTowerUpgrades(); updateCrushables(); updateLock(dt);
+      tickFire(dt);   // lifecycle only — nothing is drawn here, but the pool must still recycle
       if (soldiers) soldiers.update(dt, combatants);
       updateGadgets(dt);
       updateRepairs(dt);
@@ -11829,11 +11851,15 @@ function animate() {
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateTowerUpgrades();                         // treasure-box drop + partial rebuild on tower death/revive
       updateCrushables();                            // flatten a tent + blood mark when a tread rolls over it
+      tickFire(dt);                                  // burn down (the other half runs in stepField)
       updateGates(dt);                       // raise/lower base gates for friendly units in range
       updatePlayerHud();                     // live HUD: fuel drains every frame, not just on events
     }
     updateAiLog();                         // AI decision overlay (renders even while paused)
     updateNavOverlay();                    // ?nav: A* route (grounders) + goal-line (flyers), also while paused
+    // Slice the fire volumes against the camera. Only here: this is the part that costs, and a
+    // headless step has no camera worth slicing against and nothing to show for it.
+    _pfT('fire', () => drawFire(clock.elapsedTime));
     _pfT('render', () => renderer.render(scene, camera));
     if (fade) {
       if (returning && victoryReturn) {
