@@ -531,6 +531,70 @@ const fracOf = (cmd, what) => {
   if (what === 'hp') return v.maxHp ? v.hp / v.maxHp : 1;
   return v.maxShield ? v.shield / v.maxShield : 1;
 };
+// FLEE — the one way home, and the only mission that is never re-scored.
+//
+// Jacob's ruling (2026-08-07): a unit that loses the fight-or-flight call is by definition in no
+// state to carry on doing what it was doing — hurt, dry, or outmatched — and base is where
+// healing, fuel and ammo all are. So "run away", "limp home to patch up" and "the brain has
+// judged this fight lost" are the SAME decision, and they get one owner. This replaces the
+// brain's `_flee` latch, its `_hurt` latch feeding the retreat state, and fofBail. Three
+// rulebooks for one judgement is the shape behind every flap this week.
+//
+// THE ROUTE IS FIXED AT THE MOMENT OF THE DECISION AND NEVER RECONSIDERED. That is the whole
+// point. A plan that needs to see an enemy in order to exist evaporates and comes back every time
+// the sighting flickers, and a destination changing fourteen times a second makes a unit spin on
+// the spot instead of driving: measured at 881 goal changes in 64 seconds, throttle at zero 72%
+// of the time, a 15-second run home stretched to 64 and two thirds of a tank burned.
+//
+//   1 BREAK AWAY   — square off the line between us and where the enemy WAS when we decided
+//   2 STAGE BEHIND — a point out the far side of our own FOB
+//   3 IN THE BACK  — through the gate nearest that point, and home
+//
+// A JOTUN NEVER FLEES (the brain refuses to raise the flag for one): it is far too slow to run
+// and would only die with its back turned, so it stands and trades.
+//
+// For a Firebrat carrying the flag this is not a retreat at all. Capture is abandoned, but the
+// destination is the same base, and an AI carrier scores on ARRIVAL — so fleeing is the backup
+// plan that still wins the match.
+class Flee extends Mission {
+  get key() { return 'flee'; }
+  get garageOK() { return false; }          // a decision taken in the field; never buy a chassis for it
+  wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }
+  shoot(cmd) { return false; }              // the waypoints are places to be, not things to shell
+  arriveDist(cmd) { return 6; }
+  enter(cmd, doc) {
+    super.enter(cmd, doc);
+    // Snapshot the threat ONCE. After this the mission never reads perception again.
+    const v = cmd.unit;
+    const from = (cmd.lastEnemyPos && cmd.lastEnemyPos())
+      || (v && v._hitByVeh ? { x: v._hitByVeh.x, z: v._hitByVeh.z } : null);
+    this.route = (cmd.planFleeRoute && cmd.planFleeRoute(from)) || null;
+    this.leg = 0;
+  }
+  objective(cmd) {
+    const home = cmd.homePos();
+    if (!this.route || !this.route.length) return home;
+    const v = cmd.unit; if (!v) return home;
+    const p = v.holder.position;
+    while (this.leg < this.route.length - 1
+      && (this.route[this.leg].x - p.x) ** 2 + (this.route[this.leg].z - p.z) ** 2 < FLEE_REACH * FLEE_REACH) this.leg++;
+    return this.route[this.leg];
+  }
+  // Home. Nothing else ends it — not losing sight of the enemy, not healing up on the way, not a
+  // better-looking mission. MissionScore gets to choose again when the unit is actually back.
+  done(cmd) {
+    const v = cmd.unit; if (!v || v.dead) return true;
+    return cmd.atHomeBase();   // the SAME test that decides whether to flee at all — see atHomeBase
+  }
+  label(cmd) { return 'breaking off — going home the back way'; }
+  cry(cmd) { return pickCry(cmd, [
+    'I’m done out here — breaking off, coming in the back way!',
+    'Can’t hold this. Going wide and heading for the back gate!',
+    'Disengaging! Route’s around and in through the rear!',
+  ]); }
+}
+const FLEE_REACH = 14;   // u — close enough to call a leg done and start the next
+
 class Supply extends Mission {
   get what() { return 'fuel'; }
   get supplyWant() { return 'fuel'; }
@@ -589,7 +653,7 @@ class ArmourUp extends Supply {
 }
 
 const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass,
-  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp };
+  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp, flee: Flee };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // Is this mission one a commander may buy a chassis for at the lift? (Top-ups are decisions a
 // unit already in the field makes; letting one reach the garage would deploy the wrong vehicle.)
@@ -600,7 +664,7 @@ export function missionGarageOK(key) { const M = MISSIONS[key]; return !(M && M.
 // has run a short dwell (anti-thrash) — except URGENT transitions (grab the flag now),
 // which fire immediately. This is what makes missions complete/abort cleanly instead of
 // the old linear step machine that could never let go of a finished objective.
-const URGENT = new Set(['capture', 'intercept', 'sap']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
+const URGENT = new Set(['capture', 'intercept', 'sap', 'flee']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch (event re-decides)
 // How long a SCORED mission runs before a non-urgent re-think. Deliberately far calmer than the
 // old cascade's 1.5s: the incumbent bonus plus this dwell are what turn a score into a commitment
@@ -1050,6 +1114,15 @@ class Doctrine {
     if (cmd._clearPathT > 0) cmd._clearPathT -= dt;   // countdown: clearing a downed runner's interceptor
     if (cmd._softenT > 0) cmd._softenT -= dt;         // countdown: silencing the towers that keep killing runners
     if (cmd._softenT > 0 && cmd.fortDown && cmd.fortDown()) cmd._softenT = 0;   // towers are down — job done, go grab
+    // ONCE WE ARE LEAVING, WE ARE LEAVING. Flee is the one mission nothing re-scores: no urgent
+    // rung, no persona plan, no decisive score jump. It ends when the unit is home and MissionScore
+    // gets to choose again — that is what "a decision replaces the route and is then committed to"
+    // means in code, and it is the difference between this and every flapping version before it.
+    if (this.step === 'flee') {
+      if (!this.mission.done(cmd)) return;
+      this._switch(this._applyKey(cmd, missionPick(cmd, null)) || 'attack', cmd, 'made it home — picking up the next job');
+      return;
+    }
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
     let next = this._urgent(cmd);
@@ -1142,6 +1215,10 @@ class Doctrine {
   // the thief died and dropped it in the field → go RECOVER it (any teammate's touch snaps
   // it home). Both waived when WE'RE carrying the enemy flag home — don't blow a winning run.
   _urgent(cmd) {
+    // SELF-PRESERVATION OUTRANKS EVERYTHING, and unlike the two below it is NOT waived for a
+    // flag carrier: Flee's destination is our own base, so for a carrier it is the same trip by
+    // a safer road, and arriving still wins the match.
+    if (cmd.shouldFlee && cmd.shouldFlee()) return 'flee';
     if (cmd.flag() && cmd.flag().carrier === cmd.unit) return null;
     if (cmd.ourFlagStolen()) return 'intercept';
     if (cmd.ourFlagLoose && cmd.ourFlagLoose()) return 'intercept';

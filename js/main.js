@@ -1452,6 +1452,13 @@ const PRIO = {
 const INTERCEPT_GUN_CLEAR = 8;      // u of daylight past a tower's reach when picking the ambush spot
 const INTERCEPT_PUSH_MAX = 140;     // u — furthest we walk outward looking for cover-free ground
 const INTERCEPT_GATE_STANDOFF = 14; // u in front of the gate mouth once the front guns are down
+// The Flee mission's route home (Commander.planFleeRoute). Wide enough that leg 1 genuinely
+// breaks contact rather than brushing past — a Valkyrie spots a Firebrat out to 71u.
+const FLEE_BREAK = 90;     // u square off the enemy→home line before turning for home
+const FLEE_STAGE = 25;     // u beyond our own wall ring for the staging point behind the base
+const FLEE_GATE_OUT = 8;   // u outside the gate mouth we aim at, so A* threads the throat
+const FLEE_CORRIDOR = 45;  // u — a remembered contact has no chassis, so assume this much reach
+const NERVE_FAR = 160;     // u from the flag at which a runner's nerve is 0; it rises to 1 on the flag
 // Lurcher engage/hold pulled INSIDE its 42u reach (was 50/46) so it plants close enough to
 // actually connect instead of raining rounds down short of the tower.
 const ENGAGE_RANGE = { lurcher: 40, firebrat: 24, valkyrie: 50, jotun: 70 };
@@ -5466,6 +5473,14 @@ const navScuttlesByTeam = {};               // per-team scuttle tally — RR.nav
 // loud now. Both are silent by nature: nothing crashes, no unit gets stuck, the commander picks
 // the right mission the whole time — the units just never accomplish anything, and only a metric
 // that counts the non-event can see it.
+// THE RECALL FIGHTS THE MISSION LAYER. `_driveHome` sets the destination directly, so a recall
+// bypasses whatever mission is running — and when the abort branch below fires (an enemy is near
+// and the recall is not forced) it re-arms on the very next tick. Two owners of one steering
+// wheel, swapping about once a second. Seed 305: a firebrat covered 128u in 40 seconds and ended
+// 0.8u from where it started, burning a whole tank, while its two destinations pointed opposite
+// ways. Counted so we know whether that is one unlucky seed or a whole class.
+let recallAbortsTotal = 0;    // recalls that armed and then gave up (the re-arm loop's fuel)
+let recallVsFleeTotal = 0;    // ...of those, ones that interrupted a unit already driving home on Flee
 const DRY_TRIP_ALARM = 3;     // trips to the enemy base without firing a shot, per commander, before it screams
 const DRY_TRIP_R = 110;       // u — inside this of the enemy base counts as "it got there"
 const SWAP_LOOP_ALARM = 8;    // CONSECUTIVE recalls answered by re-fielding the very type we recalled (a run, not a tally — see deploy)
@@ -6222,6 +6237,100 @@ class AICommander {
     if (this.ourFlagLoose()) { const p = f.group.position; return { x: p.x, z: p.z }; }
     return this.interceptCampSpot() || this.enemyFobPos();
   }
+  // ── GOING HOME ────────────────────────────────────────────────────────────────────────────
+  // Has this unit decided it is done fighting? The BRAIN answers that (AI.js publishes `_bail`),
+  // because that is where the personality and its tuned thresholds live and asking the same
+  // question twice in two places is what produced every flap this week. This only reads it.
+  // The heroic dash, as a fraction: 0 beyond NERVE_FAR from the flag, 1 standing on it. A curve
+  // rather than a switch, so the runner is cautious on the long approach and committed at the end
+  // — the same shape as the old 85u capture commit, but weighed in the fight-or-flight sum with
+  // everything else instead of overriding it.
+  runnerNerve(v) {
+    if (!v || v.type !== 'firebrat' || !this.strategy || this.strategy.step !== 'capture') return 0;
+    const f = this.flag(); if (!f || f.carrier === v) return 0;      // carrying → the job is the trip home
+    const p = v.holder.position;
+    const d = Math.hypot(p.x - f.group.position.x, p.z - f.group.position.z);
+    return Math.max(0, Math.min(1, 1 - d / NERVE_FAR));
+  }
+  shouldFlee() {
+    const v = this.unit;
+    if (!v || v.dead) return false;
+    // TWO REASONS TO BREAK OFF, and they are different decisions:
+    //   1. this unit is done — badly hurt with no fight worth having (the brain's verdict)
+    //   2. we are CARRYING and the main road home is blocked — nothing to do with health; the
+    //      direct route simply is not available, so take the back way. This is the case the whole
+    //      investigation started from: a Valkyrie parked on the lane home for a whole match.
+    const carrying = (() => { const f = this.flag(); return !!(f && f.carrier === v); })();
+    const reason = (v.ai && v.ai._bail) || (carrying && this.mainRouteBlocked(v));
+    if (!reason) return false;
+    // YOU DO NOT FLEE HOME WHEN YOU ARE HOME. Without this a unit that limped back still wanted to
+    // flee (its hull is low until it has healed), so the mission ended on arrival and re-armed on
+    // the same tick — flee episodes of zero seconds, forever. Being at base is the state the
+    // decision was reaching for; once there it is spent, and healing is the repair mission's job.
+    return !this.atHomeBase();
+  }
+  // IS THE MAIN ROAD HOME BLOCKED? Asked ONCE, when deciding — never as a running condition.
+  // A known enemy counts as blocking only if it sits ALONG the line home (not behind us, not past
+  // the base) and inside a corridor about as wide as its own gun, i.e. it can actually shoot us
+  // on the way past.
+  mainRouteBlocked(v) {
+    const e = this.lastEnemyPos && this.lastEnemyPos();
+    if (!e) return false;
+    const p = v.holder.position, g = this.homePos();
+    const dx = g.x - p.x, dz = g.z - p.z, len2 = dx * dx + dz * dz;
+    if (len2 < 1) return false;
+    const s = ((e.x - p.x) * dx + (e.z - p.z) * dz) / len2;
+    if (s <= 0 || s >= 1) return false;
+    const ox = p.x + dx * s - e.x, oz = p.z + dz * s - e.z;
+    const reach = SHOT_REACH[e.type] || FLEE_CORRIDOR;
+    return ox * ox + oz * oz < reach * reach;
+  }
+  // ONE definition of "home", used by BOTH the decision to flee and the mission's finish line.
+  // They started as two radii — "near own supply" (12u) to start, 18u from the FOB to end — which
+  // left a ring where a unit was simultaneously home enough to finish and far enough to start:
+  // flee, done, flee, done, on every tick. Exactly the two-rulebooks defect this whole change is
+  // about, written by me, twenty minutes after writing the note about it.
+  atHomeBase() {
+    const v = this.unit; if (!v) return false;
+    const p = v.holder.position;
+    return nearOwnSupply(v, p.x, p.z);
+  }
+  // THE ROUTE HOME, PLANNED ONCE. `from` is where the enemy was AT THE MOMENT WE DECIDED — a
+  // snapshot, never re-read. With no known threat there is nothing to route around and the direct
+  // way home is right.
+  //   1 BREAK AWAY   — square off the line between us and them, on the side we are already on
+  //   2 STAGE BEHIND — out the far side of our own FOB from them
+  //   3 IN THE BACK  — the gate nearest that staging point, then home
+  planFleeRoute(from) {
+    const v = this.unit; if (!v) return null;
+    const p = v.holder.position, g = this.homePos();
+    if (!from) return [{ x: g.x, z: g.z }];
+    let ax = g.x - from.x, az = g.z - from.z;
+    const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;      // the lane they are sitting on
+    let qx = -az, qz = ax;                                        // square off it, our side
+    if ((p.x - from.x) * qx + (p.z - from.z) * qz < 0) { qx = -qx; qz = -qz; }
+    const wp = [{ x: p.x + qx * FLEE_BREAK, z: p.z + qz * FLEE_BREAK }];
+    const camp = camps.find(c => c.center && (c.center.x - g.x) ** 2 + (c.center.z - g.z) ** 2 < 400);
+    let ring = 0;
+    if (camp) for (const q of gates) {
+      if (!(camp.walls || []).includes(q.w)) continue;
+      ring = Math.max(ring, Math.hypot(q.gx - camp.center.x, q.gz - camp.center.z));
+    }
+    const stage = { x: g.x + ax * (ring + FLEE_STAGE), z: g.z + az * (ring + FLEE_STAGE) };
+    wp.push(stage);
+    if (camp) {                                                   // a walled base is entered by a gate
+      let best = null, bd = Infinity;
+      for (const q of gates) {
+        if (!(camp.walls || []).includes(q.w)) continue;
+        const d = (q.gx - stage.x) ** 2 + (q.gz - stage.z) ** 2;
+        if (d < bd) { bd = d; best = q; }
+      }
+      if (best) wp.push({ x: best.gx + best.nx * FLEE_GATE_OUT, z: best.gz + best.nz * FLEE_GATE_OUT });
+    }
+    wp.push({ x: g.x, z: g.z });
+    return wp;
+  }
+
   // Nearest KNOWN, live shield generator to (x,z) — only POIs this team has discovered
   // (fog-of-war), so a commander won't beeline to a generator it's never seen.
   nearestKnownShield(x, z) {
@@ -6919,7 +7028,6 @@ class AICommander {
     // is what makes the log honest about "where is it trying to get to" (Jacob's ask).
     let dest = view.goal;
     if (cmd.state === 'exit') dest = this._exit || view.goal;
-    else if (cmd.state === 'retreat') dest = this._home || view.goal;
     else if (cmd.state === 'resupply') dest = this._supply || view.goal;
     else if (cmd.state === 'pursue') dest = (v.ai && v.ai.lastSeen) || view.goal;
     else if (cmd.state === 'engage') dest = view.enemy || view.goal;
@@ -6977,7 +7085,6 @@ class AICommander {
         case 'advance':  line = `Moving up — ${dest}!`; break;
         case 'flee':     line = `Taking fire — breaking off toward ${dest}!`; break;
         case 'pursue':   line = 'Lost visual — pushing to their last-known spot!'; break;
-        case 'retreat':  line = `I'm hit! Hull at ${hpPct}% — pulling back to patch up, cover me!`; break;
         case 'resupply': line = v.ammo <= 0 ? 'Winchester — outta ammo! Heading back to rearm!' : `Running low, fuel ${Math.round(v.fuel / v.maxFuel * 100)}% — RTB to refuel!`; break;
         case 'engage':   line = `Contact! Enemy ${view.enemy ? view.enemy.type : 'vehicle'} in sight — engaging!`; break;
         case 'suppress': {
@@ -7053,7 +7160,6 @@ class AICommander {
     // to the patrol/objective spot while it claims to be "grabbing a shield" and never gets there.
     else if (st === 'advance') dest = view.goal || this.strategy.objective(this);
     else if (st === 'pursue') dest = v.ai.lastSeen || this.strategy.objective(this);
-    else if (st === 'retreat') dest = this._home;          // heal at own base (only place HP regens)
     else if (st === 'resupply') dest = this._supply;       // nearest fuel/ammo (own base or a depot)
     else if (st === 'assault') { dest = this.strategy.objective(this); slack = (view.engageRange || 36) * 0.7 * 1.25; }
     // SUPPRESS far-travel: the trek TO a siege standoff can be 100u+ around terrain, and pure
@@ -7534,6 +7640,8 @@ class AICommander {
       // hqSwap ignores defenders), producing an abort↔re-arm deadlock: thousands of log lines,
       // a unit commanded only every other tick, and the stalemate-breaking Valkyrie never fielded.
       if (!threatened || this._recallForce) { this._driveHome(dt); return; }
+      recallAbortsTotal++;
+      if (this.strategy && this.strategy.step === 'flee') recallVsFleeTotal++;   // it was already going home
       this._recalling = false; this._stepAtDeploy = null;   // fall through to the brain to fight/flee
     }
     this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
@@ -7549,6 +7657,7 @@ class AICommander {
     const cmd = v.ai.think(view);
     const scanning = this._scanUpdate(v, view, cmd, dt);   // scan-on-transition: hold + sweep the surroundings before advancing
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
+    v._fleeing = this.strategy.step === 'flee';   // ...and that it has broken off for home (a rival reads this to press)
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
     v._resvNav = this._nav;   // next tick's reservation stamp reads this unit's current route
@@ -7703,7 +7812,7 @@ class AICommander {
     // Start one? a pending loud-finish event, this unit's off cooldown, and it's a travel lull
     // (not carrying the flag / fleeing / resupplying — those never dawdle).
     const runner = this.flag && this.flag() && this.flag().carrier === v;
-    const busy = cmd.state === 'capture' || cmd.state === 'retreat' || cmd.state === 'resupply' || cmd.state === 'exit' || cmd.state === 'flee';
+    const busy = cmd.state === 'capture' || cmd.state === 'resupply' || cmd.state === 'exit' || v._fleeing;
     if (this._scanPending && now - this._scanPending < 1000 && now > (this._scanCd || 0) && !runner && !busy) {
       this._scanPending = 0;
       v._scanT = 1; v._scanStart = now; v._scanSwept = 0; v._scanDir = 1;
@@ -8114,7 +8223,7 @@ class AICommander {
       }
       if (effR > 0 && d < effR * effR && d < nearestD && (flyer || hasLOS(px, pz, o.holder.position.x, o.holder.position.z))) {
         nearestD = d; enemy = { x: o.holder.position.x, y: o.holder.position.y, z: o.holder.position.z, type: o.type, shield: o.shield, vx: o._vx || 0, vz: o._vz || 0,
-          heading: o.heading, hpFrac: o.maxHp ? o.hp / o.maxHp : 1, retreating: o._aiState === 'retreat' || o._aiState === 'resupply' }; seen = o; seesEnemy = true;
+          heading: o.heading, hpFrac: o.maxHp ? o.hp / o.maxHp : 1, retreating: !!o._fleeing || o._aiState === 'resupply' }; seen = o; seesEnemy = true;
       }
     }
     // Remember WHERE the enemy was last seen (team-shared) so the Attack mission can recall
@@ -8369,7 +8478,7 @@ class AICommander {
     // waypoint, released, re-yanked every cooldown — the exit↔suppress two-master flap ("Rolling
     // out the gate" ↔ "Lining up on their HQ") that pinned a Lurcher at its own base.
     const exitFailing = this._stuckT > 1.2 || !(this._nav && this._nav.path && this._nav.path.length);
-    if (aiFobRearm && !this._exit && this._exitCoolT <= 0 && exitFailing && !v._move.ignoreWalls && fob && !v.ai._resup && !v.ai._hurt) {
+    if (aiFobRearm && !this._exit && this._exitCoolT <= 0 && exitFailing && !v._move.ignoreWalls && fob && !v.ai._resup && !v._fleeing) {
       const dFob2 = (px - fob.center.x) ** 2 + (pz - fob.center.z) ** 2;
       const obj = this.strategy.objective(this), homeB = this.homeBasePos();
       const objOffensive = (obj.x - fob.center.x) ** 2 + (obj.z - fob.center.z) ** 2 > 30 * 30
@@ -8899,6 +9008,13 @@ class AICommander {
       // the Firebrat's runnerFlee reflex so an ordered-to-engage Firebrat actually closes +
       // shoots instead of dodging the instant an enemy is near.
       runnerMode: this.strategy.step === 'capture' || this.strategy.step === 'scout',
+      // The Flee mission is running: drive the route, don't stop to fight. The decision to break
+      // off has already been taken; re-opening it on every sighting is the flap this replaced.
+      fleeing: this.strategy.step === 'flee',
+      // HOW BRAVE IS THIS RUNNER RIGHT NOW? 0 far from the flag, 1 on top of it — the heroic dash,
+      // weighted into fightScore rather than bolted on as an exception. Only on the way TO the
+      // flag: once carrying, the job is the trip home and picking fights is never right.
+      runnerNerve: this.runnerNerve(v),
       // ON INTERCEPT, GET TO THE DOOR — don't get drawn into a chase on the way. Nothing on the
       // field outruns a flag runner, so a pursuit is a race we lose while the carrier scores.
       intercepting: this.strategy.step === 'intercept',
@@ -8989,7 +9105,6 @@ function stateDetail(d, st) {
     }
     case 'assault':  return `storming the objective ${go}`;
     case 'pursue':   return `to their last-known spot ${go}`;
-    case 'retreat':  return `to base to heal ${go}`;
     case 'resupply': return `to top up ${go}`;
     case 'flee':     return d.foeT ? `from the ${d.foeT} ${d.foeD}u back` : `breaking contact ${go}`;
     case 'exit':     return 'through the gate';
@@ -9084,7 +9199,6 @@ function publishAILive(dt) {
       }
       if (d) {
         if (d.fof != null) { const f = `fightScore ${d.fof > 0 ? '+' : ''}${d.fof}`; M.engaging = f; M.underAttack = f; }
-        if (pu && pu.hp != null) M.hurtLatched = `hp ${pu.hp}%`;
         if (pu && pu.fuel != null) M.resupLatched = `fuel ${pu.fuel}% · ammo ${pu.ammo}%`;
         if (d.turD != null) M.threatened = `tower ${d.turD}u out`;
         if (d.foeD != null) M.pursuing = `contact ${d.foeD}u out`;
@@ -11092,7 +11206,7 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
-  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire }),
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
@@ -11367,7 +11481,7 @@ let navLines = null;   // Map<commander, {line, posAttr, wp, dest, label, cells}
 // state (combat engage/suppress, unstick) the unit ignores nav.path and steers by the behavior —
 // so the overlay must NOT draw the stale path (it points wherever the unit last navigated, e.g.
 // back to base) and must NOT label it "A* route". Keep this in sync with _navOverride's switch.
-const NAV_ASTAR_STATES = new Set(['exit', 'advance', 'pursue', 'retreat', 'resupply', 'assault']);
+const NAV_ASTAR_STATES = new Set(['exit', 'advance', 'pursue', 'resupply', 'assault']);
 // ?nav auto-probe: the first time a FIREBRAT is trying to navigate but its A* came back empty,
 // freeze the sim and open the A* visualizer ON THAT FIREBRAT'S OWN COST from its cell to its goal
 // — so you can see whether a route actually exists and why the nav didn't take it. Fires once per

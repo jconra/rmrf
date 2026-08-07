@@ -96,6 +96,13 @@ export const FOF_DEFAULT = {
   escape: 1.6,                       // can't outrun them → stand and trade
   facing: 1.0,                       // positional advantage (who has whose back)
   jotunFloor: 1,                     // a Jotun with ammo always fights (can't run)
+  // THE HEROIC DASH. A runner on its way to the flag has to be braver than its hull deserves, or
+  // it never gets there: a Firebrat is 90 hull and a light gun, so its honest answer to "would I
+  // lose this fight" is always yes, and that is not the question its mission is asking. Without
+  // this, being shot at on the approach reads as a lost exchange and the whole run is abandoned.
+  // Scaled by how close the prize is (see runnerNerve) rather than switched on — far out it stays
+  // sensible and avoids trouble; on the doorstep it goes through whatever is in the way.
+  nerve: 4,
 };
 
 // FIGHT-OR-FLIGHT WEIGHT — should this unit pick a fight with the rival it sees, or keep
@@ -109,6 +116,8 @@ function fightScore(v, p) {
   w += (p.aggression - W.aggrPivot) * W.aggr;
   w -= (p.defensiveness - W.defvPivot) * W.defv;
   if (s.type === 'firebrat') w -= W.fragile;
+  // ...but a runner closing on the flag presses on anyway — the nearer the prize, the braver.
+  if (v.runnerNerve) w += v.runnerNerve * W.nerve;
   // NUMBERS: our local headcount (this unit + nearby friendlies) vs nearby rivals. Even
   // odds is neutral; outnumbered tilts toward breaking off, having the numbers toward ganging
   // up. Only weighed when rivals are actually close (a far sighting isn't a brawl).
@@ -150,37 +159,18 @@ const CONDITIONS = {
   always:       () => true,
   mustGo:       (v) => !!v.mustGo,                         // still inside the gate
   capturing:    (v) => !!v.capturing,                      // final dash to a grabbable flag → take it, ignore the turrets
-  hurtLatched:  (v, m) => m._hurt,                         // pulled out to patch up
-  // Runner evasion: a Firebrat is too fragile to duel — when an enemy is close it flees
-  // (curving toward its goal) instead of engaging. Only firebrats; only a near threat; and
-  // only on a RUNNER mission (grabbing the flag / scouting). When the commander has sent it
-  // out to FIGHT (attack/siege/defend/intercept), it must NOT flee at the first sight of an
-  // enemy — that left it dodging out at 60u, never closing to its 24u gun range, so it never
-  // attacked. There it engages instead (see the 'engaging' transition below).
-  runnerFlee: (v) => {
-    if (v.self.type !== 'firebrat' || !v.runnerMode || !v.seesEnemy || !v.enemy) return false;
-    // ENDGAME COMMIT ("go for the flag, don't stop for anything"): with the flag GRABBABLE and
-    // the runner healthy, a mere SIGHTING doesn't turn it around — only real incoming fire.
-    // Seed 25's runner danced 150s at FULL health, breaking off 170-270u from the flag every
-    // time any enemy appeared within 60u, while the whole match hung on the grab. A hurt
-    // runner (or one actually being shot) still evades; the 85u capture commit owns the final
-    // dash regardless.
-    if (v.flagGrabbable && v.self.hpFrac > 0.5 && !v.underFire) return false;
-    const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
-    return dx * dx + dz * dz < 60 * 60;
-  },
-  // Flee is LATCHED (hysteresis) so a runner commits to escaping instead of dancing on the 60u
-  // line — trips via runnerFlee, and only clears once it's genuinely CLEAR of the danger (100u
-  // from the threat, seen or last-known). Without this it fled to 61u, dropped flee, turned back
-  // toward its goal (past the enemy), re-entered 60u, and repeated until it died.
-  fleeLatched: (v, m) => m._flee,
-  fleeClear: (v, m) => {
-    if (v.seesEnemy && v.enemy) { const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z; return dx * dx + dz * dz > 100 * 100; }
-    const f = m._fleeFrom; if (!f) return true;   // lost sight and no remembered threat → clear
-    const dx = v.self.x - f.x, dz = v.self.z - f.z; return dx * dx + dz * dz > 100 * 100;
-  },
+  // ON THE WAY HOME. The commander's Flee mission is running: the decision to break off has
+  // already been taken and the route is fixed, so this just drives it.
+  //
+  // What used to be here: `runnerFlee` (a Firebrat within 60u of an enemy flips to evade),
+  // `fleeLatched`/`fleeClear` (hysteresis so it committed instead of dancing on the 60u line),
+  // and `hurtLatched` (hull below bail → limp home). All three were per-tick tests on what the
+  // unit could SEE, and every one of them had to grow a latch to stop it flapping. The latch was
+  // the tell: a decision that needs hysteresis to survive is a decision being re-taken far too
+  // often. It is taken once now, by the mission layer, and it sticks until the unit is home.
+  fleeing:      (v) => !!v.fleeing,
   // (finishHim removed: "hurt but the rival's weaker → turn and finish" is now a term in
-  // fightScore + the engaging-before-retreat ordering, so it needs no special condition.)
+  // fightScore, so it needs no special condition.)
   resupLatched: (v, m) => m._resup,                        // heading home to rearm/refuel
   shootGoal:    (v) => !!v.shootGoal && v.self.type !== 'firebrat',   // the goal is a fortification — but a Firebrat NEVER assaults one (weak gun; it's the flag runner, not a sieger)
 
@@ -329,8 +319,6 @@ const CONDITIONS = {
        && v.self.hpFrac >= Math.min(cfg.topFull, (v.healCap ?? 1) - 0.01))
     : ((ammoFrac(v) >= cfg.ammoFull && v.self.fuelFrac >= cfg.fuelOK) ||
        (v.self.fuelFrac >= cfg.fuelFull && ammoFrac(v) >= cfg.ammoOK)),
-  hurtNeeded:  (v, m, p, cfg) => v.self.hpFrac < bailOf(p, cfg, v.self.type),
-  hurtDone:    (v, m, p, cfg) => v.self.hpFrac > Math.min(cfg.hurtClear, (v.healCap ?? 1) - 0.02),
 };
 
 // Resolve a transition's `target` key to a world point the behavior aims at.
@@ -708,7 +696,7 @@ const BEHAVIORS = {
     // ~12u), so use a tight arrival here — NOT the card's objective standoff, which
     // can be large (e.g. ScoutSnatch parks 30u out to scout) and would otherwise
     // leave a wounded unit frozen just outside its own supply, never healing.
-    const homeward = mode === 'retreat' || mode === 'resupply';
+    const homeward = mode === 'resupply';   // ('retreat' is gone — the Flee mission owns going home)
     const arrive = homeward ? 5 : (view.arriveDist || 8);
     // Heading home: the instant we're actually IN the base's heal/rearm zone, STOP — don't chase
     // the exact centre. A wide-turning unit (Lurcher) can't land on a 5u pinpoint and just orbits
@@ -726,7 +714,7 @@ const BEHAVIORS = {
     // ARRIVED (not fwd===0) so a homeward unit merely pivoting en route doesn't stop to fight.
     if (homeward && arrived) {
       const foe = view.enemy;                      // visible + LOS → can actually shoot it
-      const face = foe || mem._fleeFrom;           // else at least FACE where the trouble was
+      const face = foe;                            // nothing in sight → hold the heading we arrived on
       if (face) {
         const derr = wrapPi(Math.atan2(-(face.x - self.x), -(face.z - self.z)) - self.heading);
         let fire = false;
@@ -741,48 +729,6 @@ const BEHAVIORS = {
     }
     mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
     return { fwd, turn, strafe, fire: false, state: ctx.mode };
-  },
-
-  // RUNNER EVASION (ai_behavior Capture): a Firebrat doesn't trade shots — it flees to the
-  // OPPOSITE direction and carries on out over the water. The away-from-threat vector leads;
-  // the goal is folded in ONLY when it points somewhere safe (not back across the pursuer).
-  // The old version always blended the goal and let its weight grow as the unit pulled
-  // away, so it kept curving back toward a goal that sat past the enemy — orbiting it to
-  // death. Gating the goal pull on "does it lead me back toward the threat?" breaks that.
-  flee(ctx) {
-    const { view, mem, self } = ctx;
-    // Remember the freshest threat point so we keep fleeing even after we break line of sight
-    // (the latch holds; without a live enemy we'd otherwise have nothing to run from).
-    if (view.enemy) mem._fleeFrom = { x: view.enemy.x, z: view.enemy.z };
-    const f = mem._fleeFrom || view.goal || { x: self.x, z: self.z + 1 };
-    let ax = self.x - f.x, az = self.z - f.z;                       // straight AWAY from the danger — LEADS, dominant
-    const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
-    // Bias toward our OWN tower cover (safety) instead of the objective — a runner fleeing toward
-    // its capture goal curved back PAST the enemy and died (the "bad dance"). Fold safety in only
-    // when it doesn't point back at the threat; away always wins.
-    let sx = 0, sz = 0;
-    if (view.support) { sx = view.support.x - self.x; sz = view.support.z - self.z; const sl = Math.hypot(sx, sz) || 1; sx /= sl; sz /= sl; }
-    const sw = (sx * ax + sz * az) > -0.15 ? 0.6 : 0;
-    let fx = ax + sx * sw, fz = az + sz * sw;
-    // MAP-EDGE DEFLECTION: pure away-from-threat can pin the runner against the island bound
-    // (it fled into the world's corner and jolt-stormed there). Near the rim, if the escape
-    // still presses OUTWARD, bend it along the TANGENT — the side already matching the escape —
-    // with a slight inward ease, so it skirts the rim past the pursuer instead of grinding it.
-    if (view.worldR) {
-      const r = Math.hypot(self.x, self.z);
-      if (r > view.worldR - 24) {
-        const rx = self.x / (r || 1), rz = self.z / (r || 1);      // outward radial
-        if (fx * rx + fz * rz > 0) {
-          let tx = -rz, tz = rx;                                   // rim tangent
-          if (tx * fx + tz * fz < 0) { tx = -tx; tz = -tz; }
-          fx = tx - rx * 0.25; fz = tz - rz * 0.25;
-        }
-      }
-    }
-    const desired = Math.atan2(-fx, -fz);                          // model front is local -Z
-    const turn = clamp(wrapPi(desired - self.heading) * 2.8, -1, 1);   // snap onto the escape heading hard
-    mem._wantMove = true;
-    return { fwd: 1, turn, fire: false, state: ctx.mode };          // run flat out, hold fire
   },
 
   // Obstacle avoidance OVERLAY (not a standalone state): takes the behavior's intended
@@ -883,7 +829,10 @@ export const DEFAULT_BRAIN = {
     breakPatience: 2.4,  // max seconds a PATIENT brain skirts a destructible before it gives up and shoots it (triggerHappy scales this down toward 0)
     exitAlign: 0.30,     // |heading error| under which the exit state drives straight
     exitTurnGain: 2.2,   // steer gain while lining up on the gate
-    bailBase: 0.45,      // hp pull-out threshold = bailBase - aggression*bailAggr
+    bailBase: 0.30,      // hp pull-out threshold = bailBase - aggression*bailAggr. 0.45 sent a
+                         // 90-hull Firebrat home after one or two tower hits: 115/120 -> 118/120,
+                         // nav alarms 71 -> 33, swap loops 201 -> 152. Still one number for four
+                         // chassis, which is the real wrongness — see the per-chassis note in bailOf.
     bailAggr: 0.18,
     hurtClear: 0.8,      // hp fraction that clears the "hurt" retreat latch
     fuelLow: 0.18,       // fuel fraction that trips the resupply latch
@@ -899,15 +848,16 @@ export const DEFAULT_BRAIN = {
   },
   // Latched interrupts: once tripped they hold (hysteresis) until their clear
   // condition, and force the matching state via the transition table below.
+  // GOING HOME IS NOT THE BRAIN'S DECISION ANY MORE. `_hurt` (limp home to heal) and `_flee` (the
+  // Firebrat's escape reflex) both used to live here, and together with fofBail that made three
+  // separate mechanisms answering one question — "should I go home?" — which is the defect shape
+  // behind every flap this week. The Flee MISSION owns it now: one decision, taken once, that
+  // replaces the route and is then committed to. See AIStrategies' Flee.
   latches: [
     { flag: '_resup', trip: 'resupNeeded', clear: 'resupDone' },
-    { flag: '_hurt',  trip: 'hurtNeeded',  clear: 'hurtDone' },
-    { flag: '_flee',  trip: 'runnerFlee',  clear: 'fleeClear' },   // runner commits to escaping (hysteresis)
   ],
   states: {
     exit:     { behavior: 'exit', skipWhiskers: true },
-    flee:     { behavior: 'flee' },
-    retreat:  { behavior: 'seek' },
     resupply: { behavior: 'seek' },
     engage:   { behavior: 'combat' },
     suppress: { behavior: 'combat' },
@@ -925,7 +875,11 @@ export const DEFAULT_BRAIN = {
     // dies without the grab (the "worked an angle on the turret and shot the wall" bug). It's a
     // short, distance-gated dash (the flag's right there), so it's a commit, not a suicide charge.
     { when: 'capturing',    mode: 'advance',  target: 'goal' },
-    { when: 'fleeLatched',  mode: 'flee',     target: 'goal' },
+    // ON THE WAY HOME, GO HOME. While the Flee mission is running the unit drives its route and
+    // does not stop to fight — the decision to disengage has already been taken, and a unit that
+    // re-opens it every time something comes into view is the flapping this replaced. It sits
+    // above underAttack deliberately: being shot at is WHY we are leaving, not a reason to stop.
+    { when: 'fleeing',      mode: 'advance',  target: 'goal' },
     // IMMEDIATE VEHICLE THREAT leads everything below the gate/runner: an inescapable rival on
     // top of us gets answered NOW — never keep sieging or flee-to-heal with our back to it.
     { when: 'underAttack',  mode: 'engage',   target: 'enemy' },
@@ -937,7 +891,6 @@ export const DEFAULT_BRAIN = {
     // old ordering where a flat "I'm hurt" latch pre-empted the weighted decision (and the
     // finishHim patch that existed only to poke a hole in that override).
     { when: 'engaging',     mode: 'engage',   target: 'enemy' },
-    { when: 'hurtLatched',  mode: 'retreat',  target: 'home' },     // hurt AND no fight to be had → limp home to heal
     { when: 'resupLatched', mode: 'resupply', target: 'resupplyOrGoal' },
     { when: 'threatened',   mode: 'suppress', target: 'threat' },
     // SHOT BY SOMETHING WE CAN'T SEE — turn and find it. Sits below every state that already
@@ -1103,6 +1056,36 @@ export function runBrain(graph, view, mem) {
   // and a genuinely lost matchup, where it belongs.
   if (mem._fof != null && mem.state === 'engage') mem._fof += cfg.fofStick;
 
+  // "I AM DONE FIGHTING" — decided HERE, acted on by the mission layer (AIStrategies' Flee).
+  // It lives here because this is where the personality and its thresholds are; computing the
+  // same test again on the commander is exactly how two rulebooks for one judgement start, and
+  // that has been the defect behind every flap this week.
+  //
+  // Both halves are thresholds that were already tuned and are reused unchanged: the hull is
+  // below this chassis+persona's bail fraction, or the weighted fight-or-flight call has gone
+  // clearly against us. A JOTUN NEVER BAILS — it is far too slow to run and would only die with
+  // its back turned, so it stands and trades (bailOf already floors it at 0.12; this makes the
+  // rule explicit rather than emergent).
+  //
+  // ONE-WAY. Once the mission layer picks this up it commits, and nothing here can call it back:
+  // a flag that flips with perception is a plan that evaporates and returns, which is what turned
+  // a 15-second run home into 64 seconds of spinning on the spot.
+  // "Hurt" alone is NOT enough, and getting that wrong cost 43.7% of all unit-ticks to fleeing on
+  // the first run of this. The old transition table put `engaging` ABOVE `hurtLatched` precisely
+  // so a damaged unit with good odds finished its fight instead of turning its back; expressing
+  // the bail as bare hp threw that ordering away. Hurt AND no fight worth having — same rule the
+  // ladder used to encode by position, now stated once.
+  //
+  // AND THE FIGHT HAS TO BE REAL. Reading the fight-or-flight score off a mere SIGHTING sent
+  // every Firebrat home the moment it laid eyes on anything: a Firebrat's score against any
+  // other chassis is deeply negative by design — 90 hull and a light gun — so "would I lose this
+  // fight" is a question it always answers yes to, and it is not the question its mission asks.
+  // Seed 25 turned into 17 flee episodes out of 19 being runners abandoning the flag. Losing an
+  // exchange we are ACTUALLY IN is the event worth leaving over; seeing someone is not.
+  mem._bail = self.type !== 'jotun'
+    && ((self.hpFrac < bailOf(p, cfg, self.type) && !(mem._fof > 0))
+        || (view.underFire && mem._fof != null && mem._fof < (cfg.fofBail ?? -1.2)));
+
   // Pick the active state: first transition whose condition holds.
   let rule = graph.transitions[graph.transitions.length - 1];
   for (const t of graph.transitions) { if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; } }
@@ -1145,7 +1128,6 @@ export class Brain {
     this._dodgeClearT = 0;    // seconds the path ahead has been clear (forget the dodge after dodgeClear)
     this._dodgeEpisodeT = 0;  // seconds circling one way while still blocked (flip after dodgeFlip to escape a trap)
     this._resup = false;      // latched: heading home to rearm/refuel (don't dry-chase)
-    this._hurt = false;       // latched: badly damaged → fall back to base to patch up
     this._lx = null; this._lz = null;   // last position (anti-wedge movement check)
     this._stillT = 0;         // time spent trying to move but not moving
     this._wedgeT = 0;         // time PRESSED on an obstacle with no gain on the goal (sliding-along-a-wall wedge)
