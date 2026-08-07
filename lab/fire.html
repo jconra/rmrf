@@ -57,6 +57,7 @@
     <tr><td class="k">burning now</td><td id="livec">—</td></tr>
     <tr><td class="k">peak at once</td><td id="peak">—</td></tr>
     <tr><td class="k">draw calls</td><td id="calls">—</td></tr>
+    <tr><td class="k">throughput</td><td id="rps">—</td></tr>
     <tr><td class="k">triangles</td><td id="tris">—</td></tr>
     <tr><td class="k">renderer</td><td id="gpu" style="font-size:9px">—</td></tr>
   </table>
@@ -76,6 +77,10 @@ import * as THREE from 'three';
 import VolumetricFire from './fire/VolumetricFire.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+// info resets on every render() by default, so with REPEAT>1 the readout showed the LAST render
+// and could not tell you whether the repeat loop ran at all. Accumulate over the frame instead.
+renderer.info.autoReset = false;
+const gl = renderer.getContext();
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
@@ -368,8 +373,12 @@ function measure() {
   document.getElementById('livec').textContent = mode === 'burst' ? live.length : '—';
   document.getElementById('peak').textContent = mode === 'burst' ? peakLive + ' / ' + POOL : '—';
   const info = renderer.info.render;
-  document.getElementById('calls').textContent = info.calls;
+  document.getElementById('calls').textContent =
+    amplify > 1 ? `${info.calls.toLocaleString()}  (${Math.round(info.calls / amplify)}/render)` : info.calls;
   document.getElementById('tris').textContent = info.triangles.toLocaleString();
+  // If this does not scale with REPEAT, the repeat loop is not running and every timing below is
+  // meaningless. It is the first thing to check.
+  document.getElementById('rps').textContent = Math.round(amplify * 1000 / med) + ' renders/sec';
   const pinned = amplify === 1 && Math.abs(med - 16.67) < 0.9;
   if (baseline != null && count > 0 && !pinned) {
     const per = (med - baseline) / amplify / count;
@@ -416,7 +425,17 @@ function tick() {
   // Repeating the render pushes the work past the budget, and dividing by the repeat count gives
   // the honest per-frame cost. Jacob's 7900 XT reported "40 fires cost 0.00ms" — it could not have
   // known any different.
+  renderer.info.reset();                       // once per FRAME, not once per render
   for (let i = 0; i < amplify; i++) renderer.render(scene, camera);
+  // AND WAIT FOR THE GPU. This is the bit that makes the whole measurement work, and its absence
+  // is why every reading so far was 16.70ms on every machine — a 7900 XT and a software renderer
+  // alike. render() only SUBMITS commands; the GPU runs them asynchronously and the CPU returns
+  // immediately, so timing one animation frame to the next measures the PRESENTATION CADENCE and
+  // nothing else. Amplifying the work cannot fix that, because the CPU still never waits.
+  // finish() blocks until the GPU has actually drained the queue, which is what turns the frame
+  // delta into a real cost. It would be a terrible idea in a game and is exactly right in a
+  // measuring instrument.
+  gl.finish();
   measure();
 }
 
@@ -454,7 +473,6 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-const gl = renderer.getContext();
 const dbg = gl.getExtension('WEBGL_debug_renderer_info');
 document.getElementById('gpu').textContent =
   (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown').slice(0, 46);
