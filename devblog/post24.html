@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — what's actually in the way</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:24px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  a { color:var(--blue); }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  pre { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0;
+        overflow-x:auto; font-size:12px; line-height:1.5; }
+  pre .c { color:var(--dim); } pre .del { color:var(--bad); } pre .add { color:var(--good); }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); } td b.warn { color:var(--warn); }
+  .matrix td, .matrix th { text-align:center; }
+  .matrix td:first-child, .matrix th:first-child { text-align:left; color:var(--dim); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+
+  /* ── interactive furniture ─────────────────────────────────────── */
+  .demo { background:#0a0f16; border:1px solid #223041; border-radius:8px; margin:14px 0; padding:12px; }
+  .demo .hd { color:var(--accent); font-size:11px; letter-spacing:1px; margin-bottom:2px; }
+  .demo .hint { color:var(--dim); font-size:11px; margin-bottom:8px; }
+  .demo svg { width:100%; height:auto; display:block; touch-action:none; user-select:none; }
+  .btnrow { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 4px; }
+  .btnrow button { background:var(--card2); border:1px solid #2a3a4d; color:var(--ink);
+                   font-family:inherit; font-size:11px; padding:6px 9px; border-radius:6px; cursor:pointer;
+                   transition:background .15s, border-color .15s, color .15s; }
+  .btnrow button:hover { border-color:#3d5570; }
+  .btnrow button[aria-pressed="true"] { background:#1d2c3d; border-color:var(--accent); color:var(--accent); }
+  .readout { font-size:11.5px; line-height:1.7; margin-top:8px; }
+  .readout .row { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+                  border-bottom:1px solid #16202b; padding:3px 0; }
+  .readout .row span:last-child { text-align:right; }
+  .stat { min-width:0; }
+  /* On a phone the label and its figures will not sit side by side without pushing the page
+     wider than the screen — stack them instead. (Jacob reads these on his phone.) */
+  @media (max-width:560px) {
+    .readout .row { flex-direction:column; gap:1px; }
+    .readout .row span:last-child { text-align:left; }
+  }
+  .tag { display:inline-block; padding:1px 6px; border-radius:4px; font-size:10.5px; }
+  .tag.ok { background:#16351f; color:var(--good); } .tag.no { background:#3a1a17; color:var(--bad); }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle;
+            margin-right:4px; border:1px solid #33414f; }
+  .legend { font-size:10.5px; color:var(--dim); margin-top:8px; line-height:1.9; }
+
+  /* animated counters + bars */
+  .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+  .stat { flex:1 1 150px; background:#0a0f16; border:1px solid #223041; border-radius:8px; padding:10px 12px; }
+  .stat .n { font-size:23px; color:var(--accent); letter-spacing:1px; }
+  .stat .n.bad { color:var(--bad); } .stat .n.good { color:var(--good); }
+  .stat .l { font-size:10.5px; color:var(--dim); line-height:1.45; margin-top:2px; }
+  .barrow { margin:7px 0; font-size:11.5px; }
+  .barrow .lab { color:var(--dim); display:flex; justify-content:space-between; }
+  .bartrack { background:#0a0f16; border:1px solid #223041; border-radius:3px; height:11px; margin-top:3px; overflow:hidden; }
+  .barfill { height:100%; width:0; border-radius:2px; transition:width 1.1s cubic-bezier(.2,.8,.25,1); }
+  @media (prefers-reduced-motion: reduce) { .barfill { transition:none; } }
+</style>
+</head><body>
+<a class="navbtn" style="left:10px" href="post23.html">&#8249; previous</a>
+<a class="navbtn dis" style="right:10px" href="#">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 24 · what's actually in the way</div>
+</header>
+<main>
+
+<article>
+  <h2>&#8470;24 — WHAT'S ACTUALLY IN THE WAY</h2>
+  <div class="date">2026-08-06 · a function that knew the answer and threw it away, a veto that cost a thousand seconds, and both seed sets at 30/30</div>
+
+  <p>Seed 179. Red flattens all four of blue's towers, holds six Firebrats in reserve, and spends
+  the next twenty minutes cycling siege &#8594; refuel &#8594; siege. Blue's keep finishes the match
+  on a full <b>600hp</b>. Nothing is stopping red. Nothing at all.</p>
+
+  <p>The commander is not confused. It picks <code>siege 12.4</code> every time it is asked, which
+  is the right plan. It fields a Jotun, which is the right chassis. The Jotun drives to a firing
+  position that a later measurement confirms is a good one. And then this happens:</p>
+
+  <div class="stats" id="s179">
+    <div class="stat"><div class="n" data-to="12043">0</div>
+      <div class="l">siege decisions taken standing <em>at</em> the assigned firing position</div></div>
+    <div class="stat"><div class="n bad" data-to="236">0</div>
+      <div class="l">of those that resulted in a shot &mdash; 2%</div></div>
+    <div class="stat"><div class="n bad" data-to="11580">0</div>
+      <div class="l">planted, loaded, with nothing it could legally fire at</div></div>
+  </div>
+
+  <p>Not "missed". Not "out of ammo". <em>Nothing shootable.</em> The unit had arrived at a
+  correctly-solved firing position, and the thing it had decided to shoot was 49 units away with a
+  gun that reaches 42.</p>
+
+  <h3>THE FUNCTION THAT KNEW</h3>
+
+  <p>To decide whether a unit can see its target, the game walks the line and asks every wall
+  whether it straddles it. It has always done this. Here is what it did with the answer:</p>
+
+<pre><span class="c">// Line of sight: blocked if any wall obstacle straddles the segment a&#8594;b.</span>
+function hasLOS(ax, az, bx, bz) {
+  <span class="c">/* …walk the segment in 4u steps… */</span>
+      if (ox * ox + oz * oz &lt; o.r * o.r) <span class="del">return false;</span>   <span class="c">&#8592; it is holding `o`</span>
+}</pre>
+
+  <p>It finds the exact piece of wall that blocks the shot, and returns <code>false</code>. The
+  identity of the obstruction — the one thing a sieger needs in order to <em>do</em> something about
+  it — is discarded on the way out of the function.</p>
+
+  <p>So every caller that needed it went looking again, and what they all reached for was a guess:
+  <em>the nearest live wall in the target's camp</em>. Which is a different question with a
+  different answer.</p>
+
+  <div class="demo" id="d1">
+    <div class="hd">DRAG THE TANK</div>
+    <div class="hint">Both rules pick a wall to shell. Move around the fort and watch them disagree.
+    The circle is the Lurcher's 42u gun.</div>
+    <svg viewBox="0 0 420 300" role="img" aria-label="Interactive diagram: a tank outside a walled fort, showing which wall each rule selects"></svg>
+    <div class="readout" id="d1r"></div>
+    <div class="legend">
+      <span class="swatch" style="background:#ffa23a"></span>old rule: nearest wall to me &nbsp;
+      <span class="swatch" style="background:#58d17a"></span>new rule: first wall on the line &nbsp;
+      <span class="swatch" style="background:#6ab7ff"></span>the keep (the target)
+    </div>
+  </div>
+
+  <p>The nearest wall depends on where you happen to be standing relative to the ring. The blocking
+  wall is on the line <em>by construction</em> — so if the target is inside your reach, the blocker
+  is too, and breaking it <em>makes</em> the line. That is the entire siege-flatten rule, and it
+  needs no second algorithm to state it.</p>
+
+<pre><span class="add">function losBlocker(ax, az, bx, bz, skipTeam) {   <span class="c">// returns the obstacle, or null</span></span>
+      if (ox * ox + oz * oz &lt; o.r * o.r) <span class="add">return o;</span>
+}
+<span class="add">function hasLOS(ax, az, bx, bz) { return !losBlocker(ax, az, bx, bz); }</span></pre>
+
+  <p>One rule replaced three: the latched breach wall, the nearest-wall scan, and a special case for
+  the keep. That last one is worth a sentence, because it stopped being special. A sight-line to the
+  keep's centre dies inside the building's own obstacle circle, so line-of-sight can never come true
+  against it and a sieger would park and stare — but that was never an exception. It is the general
+  rule working: with every wall down, the first thing on the line to the keep <em>is</em> the keep.
+  Square onto it and shell it open.</p>
+
+  <div class="k">
+    Seed 179 — <b class="bad">1500s stalemate</b> &#8594; <b class="good">304s win</b>.
+    Shots fired from the firing position: <b class="bad">2%</b> &#8594; <b class="good">43%</b>.
+    Planted with nothing shootable: <b>11,580</b> &#8594; <b class="good">38</b>.
+  </div>
+
+  <h3>THE VETO THAT COST A THOUSAND SECONDS</h3>
+
+  <p>That fixed the units that arrived somewhere useful. It did nothing for the ones that were never
+  given anywhere to go.</p>
+
+  <p>Choosing a firing position is a ladder: try the comfortable spot, then a less comfortable one,
+  then — added earlier this week — a spot with no sight-line at all, on the reasoning that a unit
+  can make its own line by demolishing what's in front of it. Each rung gives up something. But one
+  test was never on the ladder at all. <b>Crossfire</b> — standing where a second tower can also
+  reach you — was an absolute veto, on every rung.</p>
+
+  <p>As a default that is exactly right; it is what a standoff is <em>for</em>. Held as a veto, it
+  answers "is this comfortable" when the question being asked is "can I shoot from anywhere at
+  all" — and it would rather return nothing than an ugly yes.</p>
+
+  <div class="demo" id="d2">
+    <div class="hd">THE RELAXATION LADDER</div>
+    <div class="hint">The shape of seed 25 &mdash; the target gun sits on the compound wall, so half its
+    firing band is inside the enemy ring where nothing can drive, and a second tower covers the open
+    ground. Step down the rungs; green cells are positions the solver would accept.</div>
+    <div class="btnrow" id="d2b"></div>
+    <svg viewBox="0 0 420 300" role="img" aria-label="Interactive diagram: candidate firing positions around a tower as each requirement is relaxed"></svg>
+    <div class="readout" id="d2r"></div>
+    <div class="legend">
+      <span class="swatch" style="background:#58d17a"></span>accepted &nbsp;
+      <span class="swatch" style="background:#6b6b6b"></span>can't drive there &nbsp;
+      <span class="swatch" style="background:#c87a2a"></span>no line to the target &nbsp;
+      <span class="swatch" style="background:#a8384a"></span>under a second gun
+    </div>
+  </div>
+
+  <p>On seed 25 that produced <b>508</b> candidate cells and <b>zero</b> answers, twenty-two times
+  over. A Lurcher sat for a thousand seconds while its commander re-picked siege, forever, and the
+  match was logged as a stalemate with both keeps untouched.</p>
+
+  <p>A Lurcher kills a tower in <b>3.2 seconds</b>. Standing under two guns for 3.2 seconds to
+  remove one of them is a trade a person makes without thinking about it. Sitting still for a
+  thousand seconds is not a trade at all.</p>
+
+  <p>So crossfire became the last rung instead of a veto, and nothing above it changed — a spot out
+  of the crossfire always wins, including one with no sight-line, because chewing through a wall is
+  slow but survivable and two arcs are neither. The rung only ever runs where the answer used to be
+  <em>nothing</em>.</p>
+
+  <div class="k">
+    Seed 25 — <b class="bad">1500s stalemate</b> &#8594; <b class="good">495s win</b>, on
+    <b>three</b> crossfire stands.<br>
+    Default set: no firing position <b class="bad">69</b> &#8594; <b class="good">4</b> ·
+    dry trips <b class="bad">48</b> &#8594; <b class="good">8</b> ·
+    nav alarms <b class="bad">52</b> &#8594; <b class="good">13</b>.
+  </div>
+
+  <h3>THE LANE NOBODY WAS CHARGED FOR</h3>
+
+  <p>Meanwhile, watching a live match: a Valkyrie cracks a keep, then the commander scores a
+  back-door capture at <b>+15.7</b> — with two live towers sitting on the back door. The breakdown
+  did not mention them. Not weighted lightly. <em>Absent.</em></p>
+
+<pre>capture-rear +15.7 (flag OPEN +4, spare FB +1.5, fleet F +0.6, rogue +3.2, rogue +6.4)
+siege-back   +11.9 (<span class="warn">rear towers standing +3</span>, opens rear capture +1, …)</pre>
+
+  <p>The capture term counted towers that were <em>dead</em> on that side and paid a bonus for each.
+  Live guns scored nothing — not a penalty, just an absent bonus. The same two towers <em>raised</em>
+  the siege plan and were invisible to the capture plan.</p>
+
+  <p>It was also blind to the enemy FOB, whose guns sit nowhere near the keep, belong to no side of
+  it, and shoot runners all the same. And it assumed a map <em>has</em> a tidy front and rear, which
+  a designed map need not.</p>
+
+  <p>The replacement asks the only question that survives all three problems: walk the waypoints the
+  runner will actually drive, and count the guns we know about that cover them.</p>
+
+  <div class="demo" id="d3">
+    <div class="hd">FOUR WAYS IN &mdash; SEED 179, BLUE, t150s</div>
+    <div class="hint">Tap a lane. Real exposure figures from the match.</div>
+    <div class="btnrow" id="d3b"></div>
+    <svg viewBox="0 0 420 300" role="img" aria-label="Interactive diagram: four approach routes to an enemy base and the guns covering each"></svg>
+    <div class="readout" id="d3r"></div>
+    <div class="btnrow" style="margin-top:10px">
+      <button id="d3floor" aria-pressed="false">subtract the common floor</button>
+    </div>
+    <div class="legend">
+      <span class="swatch" style="background:#ff6a5a"></span>gun covering the selected lane &nbsp;
+      <span class="swatch" style="background:#5a6a7a"></span>gun not covering it
+    </div>
+  </div>
+
+  <h3>THE MISTAKE INSIDE THE FIX</h3>
+
+  <p>The first weighting charged a flat penalty per gun. It measured worse: average match time up
+  about <b>10%</b> on both seed sets with resolution unchanged, and the four directions landing
+  within a point of each other. Both symptoms had one cause, and the button above is it.</p>
+
+  <p>Every route into a base converges on the keep, so the keep's own guns cover the final run-in
+  <em>whichever way you come</em>. That common floor is the price of capturing at all. Billing it to
+  each <em>direction</em> made capture globally timid <em>and</em> drowned the differences between
+  lanes in a shared constant.</p>
+
+  <div class="k">
+    a flat charge for going in at all, while guns are up<br>
+    + the <b>excess over the safest lane</b> &mdash; the part that actually picks a direction
+  </div>
+
+  <p>Which is what the toggle shows: four lanes at &#8722;11.8/&#8722;11.8/&#8722;16.8/&#8722;11.8
+  become &#8722;3.1/&#8722;3.5/&#8722;10.1/&#8722;4.5, and the lane that gets punished is the one
+  that drives past the FOB.</p>
+
+  <h3>A NUMBER THAT LIED</h3>
+
+  <p>One counter went the wrong way all day. Relaxing the crossfire veto took the default set's
+  empty solves from 69 to 4 — and the fresh set's from <b>202 to 265</b>. A relaxed test producing
+  more failures should be impossible.</p>
+
+  <p>It was a per-call counter. One hopeless target asked a hundred times read exactly like a hundred
+  hopeless targets. Measuring the reject reasons directly: four of five fresh seeds produced no
+  failures at all, and the entire count came from <b>one target, on one seed, asked 98 times</b>.</p>
+
+  <p>The loop behind it is a small comedy. The solver caches its <code>null</code> so it won't
+  re-search a hopeless tower — and the very next line advanced the plan's cursor, which ran it past
+  the end of the kill order, which rebuilt the plan, which allocated a fresh cache and threw away the
+  <code>null</code> written one line earlier. The other code path that does the same job had already
+  learned this and says so in its own comment. The two had disagreed ever since.</p>
+
+  <p>Both now leave the cursor alone, and the counter counts distinct targets. Removing the loop
+  changed no outcomes — the default set's results are identical seed for seed — which is the honest
+  result: it was a hundred pointless full-grid searches against a target that was unreachable either
+  way. What it buys is the work not done, and an alarm you can believe.</p>
+
+  <table class="matrix">
+    <tr><th>no firing position</th><th>default</th><th>fresh</th></tr>
+    <tr><td>counting calls</td><td>4</td><td><b class="bad">265</b></td></tr>
+    <tr><td>counting targets</td><td><b class="good">3</b></td><td><b class="good">5</b></td></tr>
+  </table>
+
+  <p class="fine">A number that rises when the thing it names gets better is worse than no number at
+  all. This one nearly sent a day's work chasing a phantom.</p>
+
+  <h3>THE NUMBERS</h3>
+
+  <p>Thirty seeds, two populations, same seeds throughout the day.</p>
+
+  <div id="bars"></div>
+
+  <table class="matrix">
+    <tr><th></th><th>morning</th><th>tonight</th></tr>
+    <tr><td>resolved &mdash; default</td><td>27 / 30</td><td><b class="good">30 / 30</b></td></tr>
+    <tr><td>resolved &mdash; fresh</td><td>29 / 30</td><td><b class="good">30 / 30</b></td></tr>
+    <tr><td>dry trips &mdash; default</td><td>10</td><td><b class="warn">8</b></td></tr>
+    <tr><td>nav alarms &mdash; default</td><td>23</td><td><b class="good">13</b></td></tr>
+    <tr><td>avg resolve &mdash; default</td><td>511s</td><td><b class="bad">425s</b>*</td></tr>
+    <tr><td>avg resolve &mdash; fresh</td><td>444s</td><td><b class="good">355s</b></td></tr>
+  </table>
+
+  <p class="fine">* faster than this morning, but slower than the midpoint — see below.</p>
+
+  <h3>WHAT IT COST</h3>
+
+  <p>The crossfire trade is not free, and the average hides it. Between the fix before it and the
+  fix after, the default set's average match went <b>357s &#8594; 425s</b> and swap loops rose from
+  34 to 38. Seed 116 went from 313 seconds to <b>973</b>.</p>
+
+  <p>That is what taking fire from two towers instead of standing idle looks like. Units drive into
+  positions they can be hurt in, and sometimes they lose the trade and have to be replaced. Zero
+  stalemates bought at the price of longer grinds — which is a judgement about how the game should
+  <em>feel</em>, not a bug, and the next thing to sit and watch rather than measure.</p>
+
+  <h3>THE PATTERN, AGAIN</h3>
+
+  <p>Post 23 ended on a rule that came out of three failed experiments: changes that <em>add a
+  decision</em> cost churn, changes that <em>fix what a search knows</em> win. Today did not
+  contradict it so much as sharpen it. Every fix that worked was a <b>deletion</b>:</p>
+
+  <table>
+    <tr><th>deleted</th><th>replaced by</th></tr>
+    <tr><td>the latched breach wall, the nearest-wall scan, the keep's special case, and the
+        <code>aiBreachCommit</code> knob</td>
+        <td>the first thing on the line</td></tr>
+    <tr><td>crossfire as an absolute veto</td><td>one more rung on a ladder that already existed</td></tr>
+    <tr><td><code>towersDownDir</code> &mdash; a side-count that couldn't see the FOB</td>
+        <td>the guns that cover the actual route</td></tr>
+    <tr><td>a cursor advance that discarded its own cache</td><td>nothing. It just goes.</td></tr>
+  </table>
+
+  <p>Four fixes, four things removed, and the codebase is smaller than it was this morning.</p>
+
+  <h3>WHAT'S STILL WRONG</h3>
+
+  <p><b>The Jotun never arrives.</b> On two of three seeds checked it reaches a firing position on
+  <em>zero</em> decisions, despite being handed a good one every time — median 45–79u against an 80u
+  gun, never once out of range, the solver never coming back empty. The gun is fine and the spot is
+  fine. Something in the commute isn't.</p>
+
+  <p><b>Unreachable-goal violations, ~61 a run on the default set</b>, unmoved by anything today.</p>
+
+  <p><b>The default set is the hard set.</b> Dry trips run about forty times higher there than on the
+  fresh seeds and nav alarms three to four times higher, stably, across every change. Different
+  island layouts. It is a standing reminder that a one-set result is not a verdict — which this
+  project has now learned twice.</p>
+
+  <p class="fine">Also on the record: mid-session I reported that the Jotun spends its life on
+  intercept duty. It doesn't. The probe kept sampling after the match ended, when the clock is frozen
+  and every unit holds its last pose, so six thousand identical ticks piled onto whatever the field
+  was doing in the final second. Its real mission mix is siege and defend. The harness has a comment
+  warning about exactly this, which I had read.</p>
+
+</article>
+
+</main>
+<script>
+(function () {
+  'use strict';
+  var RM = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  function el(n, a) { var e = document.createElementNS(SVGNS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
+  function clear(s) { while (s.firstChild) s.removeChild(s.firstChild); }
+
+  // ── count-up + bar reveal on scroll ───────────────────────────────
+  function countUp(node) {
+    var to = +node.dataset.to, t0 = null, dur = 1100;
+    if (RM) { node.textContent = to.toLocaleString(); return; }
+    function step(ts) {
+      if (t0 === null) t0 = ts;
+      var p = Math.min(1, (ts - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+      node.textContent = Math.round(to * e).toLocaleString();
+      if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+  var seen = new WeakSet();
+  var io = new IntersectionObserver(function (es) {
+    es.forEach(function (en) {
+      if (!en.isIntersecting || seen.has(en.target)) return;
+      seen.add(en.target);
+      if (en.target.dataset.to) countUp(en.target);
+      if (en.target.classList.contains('barfill')) en.target.style.width = en.target.dataset.w + '%';
+    });
+  }, { threshold: 0.35 });
+  document.querySelectorAll('[data-to]').forEach(function (n) { io.observe(n); });
+
+  // ── the before/after bars ─────────────────────────────────────────
+  var BARS = [
+    ['stalemates across both sets', 4, 0, 4],
+    ['sieges with no firing position (default)', 69, 4, 69],
+    ['dry trips (default)', 48, 8, 48],
+    ['nav alarms (default)', 52, 13, 52]
+  ];
+  var bw = document.getElementById('bars');
+  BARS.forEach(function (b) {
+    var name = b[0], before = b[1], after = b[2], max = b[3];
+    [['before', before, '#ff6a5a'], ['after', after, '#58d17a']].forEach(function (r) {
+      var d = document.createElement('div'); d.className = 'barrow';
+      d.innerHTML = '<div class="lab"><span>' + (r[0] === 'before' ? name : '&nbsp;') +
+        '</span><span>' + r[0] + ' ' + r[1] + '</span></div>' +
+        '<div class="bartrack"><div class="barfill" style="background:' + r[2] + '"></div></div>';
+      bw.appendChild(d);
+      var f = d.querySelector('.barfill');
+      f.dataset.w = max ? Math.max(1.5, (r[1] / max) * 100) : 0;
+      io.observe(f);
+    });
+  });
+
+  // ══ DEMO 1 — nearest wall vs. what's in the way ═══════════════════
+  (function () {
+    var wrap = document.getElementById('d1'), svg = wrap.querySelector('svg'), out = document.getElementById('d1r');
+    var CX = 250, CY = 150, R = 62, WR = 11, REACH = 74;   // REACH: 42 game-units, drawn to scale
+    var walls = [];
+    for (var i = 0; i < 14; i++) {                          // a ring with a gate gap
+      var a = (i / 14) * Math.PI * 2 - Math.PI / 2;
+      if (i === 3 || i === 4) continue;                     // the gap
+      walls.push({ x: CX + Math.cos(a) * R, y: CY + Math.sin(a) * R });
+    }
+    var keep = { x: CX, y: CY, r: 20 };
+    var unit = { x: 380, y: 150 };   // start lined up with the gate gap — where the rules disagree
+
+    function firstOnLine(from, to) {                        // losBlocker, in miniature
+      var dx = to.x - from.x, dy = to.y - from.y, len = Math.hypot(dx, dy) || 1;
+      var steps = Math.ceil(len / 3);
+      for (var s = 1; s < steps; s++) {
+        var t = s / steps, x = from.x + dx * t, y = from.y + dy * t;
+        for (var w = 0; w < walls.length; w++)
+          if ((x - walls[w].x) * (x - walls[w].x) + (y - walls[w].y) * (y - walls[w].y) < WR * WR) return walls[w];
+      }
+      return null;
+    }
+    function nearest(from) {
+      var best = null, bd = Infinity;
+      walls.forEach(function (w) {
+        var d = (w.x - from.x) * (w.x - from.x) + (w.y - from.y) * (w.y - from.y);
+        if (d < bd) { bd = d; best = w; }
+      });
+      return best;
+    }
+    function draw() {
+      clear(svg);
+      var blocker = firstOnLine(unit, keep), near = nearest(unit);
+      svg.appendChild(el('rect', { x: 0, y: 0, width: 420, height: 300, fill: '#0c1118' }));
+      svg.appendChild(el('circle', { cx: unit.x, cy: unit.y, r: REACH, fill: 'none',
+        stroke: '#2f4a63', 'stroke-width': 1, 'stroke-dasharray': '4 4' }));
+      var ln = el('line', { x1: unit.x, y1: unit.y, x2: keep.x, y2: keep.y,
+        stroke: blocker ? '#48607a' : '#58d17a', 'stroke-width': 1.5, 'stroke-dasharray': blocker ? '3 3' : '' });
+      svg.appendChild(ln);
+      svg.appendChild(el('rect', { x: keep.x - keep.r, y: keep.y - keep.r, width: keep.r * 2, height: keep.r * 2,
+        rx: 3, fill: '#1d3a52', stroke: '#6ab7ff', 'stroke-width': 1.5 }));
+      walls.forEach(function (w) {
+        var isB = blocker && w === blocker, isN = near && w === near;
+        var fill = '#2b3a4a', stroke = '#3d5163', sw = 1;
+        if (isN) { fill = '#5a3c17'; stroke = '#ffa23a'; sw = 2; }
+        if (isB) { fill = '#1c4429'; stroke = '#58d17a'; sw = 2; }
+        if (isB && isN) { fill = '#3f4a1c'; stroke = '#ffcf6a'; sw = 2.5; }
+        svg.appendChild(el('rect', { x: w.x - WR, y: w.y - WR, width: WR * 2, height: WR * 2, rx: 2,
+          fill: fill, stroke: stroke, 'stroke-width': sw }));
+      });
+      // the tank
+      var g = el('g', {});
+      g.appendChild(el('circle', { cx: unit.x, cy: unit.y, r: 11, fill: '#16202b', stroke: '#8fd3ff', 'stroke-width': 2 }));
+      g.appendChild(el('circle', { cx: unit.x, cy: unit.y, r: 3.5, fill: '#8fd3ff' }));
+      svg.appendChild(g);
+      // readout
+      function line(label, w, colour, isBlocker) {
+        var lead = '<div class="row"><span style="color:' + colour + '">' + label + '</span><span>';
+        if (!w) return lead + '<span class="tag ok">clear line &mdash; shoot the keep</span></span></div>';
+        var d = Math.hypot(w.x - unit.x, w.y - unit.y), gu = Math.round(d / REACH * 42);
+        if (d > REACH) return lead + gu + 'u &nbsp; <span class="tag no">OUT OF RANGE &mdash; no shot</span></span></div>';
+        // The question that matters is not "how far", it is "does breaking this open the shot".
+        var opens = isBlocker || (blocker && w === blocker);
+        return lead + gu + 'u &nbsp; ' + (opens
+          ? '<span class="tag ok">breaking it opens the shot</span>'
+          : '<span class="tag no">not in the way &mdash; changes nothing</span>') + '</span></div>';
+      }
+      out.innerHTML =
+        line('old &mdash; nearest wall to me', near, '#ffa23a', false) +
+        line('new &mdash; first wall on the line', blocker, '#58d17a', true);
+    }
+    function move(e) {
+      var r = svg.getBoundingClientRect();
+      var pt = (e.touches ? e.touches[0] : e);
+      var x = (pt.clientX - r.left) / r.width * 420, y = (pt.clientY - r.top) / r.height * 300;
+      var dx = x - CX, dy = y - CY, d = Math.hypot(dx, dy);
+      if (d < R + 26) { x = CX + dx / (d || 1) * (R + 26); y = CY + dy / (d || 1) * (R + 26); }  // stay outside
+      unit.x = Math.max(14, Math.min(406, x)); unit.y = Math.max(14, Math.min(286, y));
+      draw();
+    }
+    var dragging = false;
+    svg.addEventListener('pointerdown', function (e) { dragging = true; svg.setPointerCapture(e.pointerId); move(e); });
+    svg.addEventListener('pointermove', function (e) { if (dragging) { e.preventDefault(); move(e); } });
+    svg.addEventListener('pointerup', function () { dragging = false; });
+    svg.addEventListener('pointercancel', function () { dragging = false; });
+    draw();
+  })();
+
+  // ══ DEMO 2 — the relaxation ladder ════════════════════════════════
+  (function () {
+    var svg = document.getElementById('d2').querySelector('svg'), out = document.getElementById('d2r'),
+        bar = document.getElementById('d2b');
+    var CELL = 10;
+    // THE SHAPE OF SEED 25, not a decorative one: the target gun sits ON the compound wall, so
+    // roughly half its firing band lies INSIDE the enemy's own ring where no hull can drive, and a
+    // second tower's arc covers most of the open ground on the other side. That is what produced
+    // 508 candidate cells and no answer.
+    var COMP = { x: 150, y: 150, r: 62 };            // the enemy compound
+    var TX = COMP.x + COMP.r, TY = COMP.y;           // the target gun, on the wall
+    // The second gun sits on the same wall, and a tower's arc is FAR bigger than a Lurcher's 42u
+    // band — which is the whole reason the crossfire veto could rule out every candidate at once.
+    var gun2 = { x: 194, y: 198, r: 134 };
+    var TIERS = [
+      { n: 'ideal', los: 1, xf: 0, lo: 47, hi: 72, d: 'a comfortable spot, clear line, no second gun' },
+      { n: 'relaxed', los: 1, xf: 0, lo: 23, hi: 78, d: 'any range that still shoots, clear line, no second gun' },
+      { n: 'through the wall', los: 0, xf: 0, lo: 23, hi: 78, d: 'gives up the line &mdash; blast a path instead' },
+      { n: 'under their crossfire', los: 0, xf: 1, lo: 23, hi: 78, d: 'gives up standing clear of the other gun' }
+    ];
+    var tier = 0;
+    var ring = [];
+    for (var i = 0; i < 22; i++) {
+      var a = i / 22 * Math.PI * 2;
+      ring.push({ x: COMP.x + Math.cos(a) * COMP.r, y: COMP.y + Math.sin(a) * COMP.r });
+    }
+    function water(x, y) { return y > 268 || x < 26; }
+    function solid(x, y) { return ring.some(function (w) { return Math.hypot(w.x - x, w.y - y) < 9; }); }
+    function undrivable(x, y) { return Math.hypot(x - COMP.x, y - COMP.y) < COMP.r - 6; }   // inside their ring
+    function hasLine(x, y) {
+      var dx = TX - x, dy = TY - y, st = Math.ceil(Math.hypot(dx, dy) / 3);
+      for (var s = 1; s < st; s++) { var t = s / st; if (solid(x + dx * t, y + dy * t)) return false; }
+      return true;
+    }
+    function build() {
+      clear(svg); var T = TIERS[tier], acc = 0, rej = { water: 0, solid: 0, unreach: 0, los: 0, xf: 0 };
+      svg.appendChild(el('rect', { x: 0, y: 0, width: 420, height: 300, fill: '#0c1118' }));
+      svg.appendChild(el('rect', { x: 0, y: 268, width: 420, height: 32, fill: '#12324e' }));
+      svg.appendChild(el('rect', { x: 0, y: 0, width: 26, height: 300, fill: '#12324e' }));
+      svg.appendChild(el('circle', { cx: gun2.x, cy: gun2.y, r: gun2.r, fill: 'rgba(168,56,74,.13)',
+        stroke: '#a8384a', 'stroke-width': 1, 'stroke-dasharray': '5 4' }));
+      for (var x = 6; x < 416; x += CELL) for (var y = 6; y < 296; y += CELL) {
+        var d = Math.hypot(x - TX, y - TY);
+        var lo = T.lo, hi = T.hi;
+        if (d < lo || d > hi) continue;
+        var fill = null;
+        if (water(x, y)) { rej.water++; fill = '#12324e'; }
+        else if (solid(x, y)) { rej.solid++; fill = '#0d1218'; }
+        else if (undrivable(x, y)) { rej.unreach++; fill = '#6b6b6b'; }
+        else if (T.los && !hasLine(x, y)) { rej.los++; fill = '#c87a2a'; }
+        else if (!T.xf && Math.hypot(x - gun2.x, y - gun2.y) < gun2.r) { rej.xf++; fill = '#a8384a'; }
+        else { acc++; fill = '#58d17a'; }
+        var c = el('rect', { x: x - CELL / 2 + 1, y: y - CELL / 2 + 1, width: CELL - 2, height: CELL - 2, rx: 1.5,
+          fill: fill, opacity: fill === '#58d17a' ? 0.92 : 0.5 });
+        if (!RM) { c.style.opacity = 0; c.style.transition = 'opacity .35s'; setTimeout((function (n, o) {
+          return function () { n.style.opacity = o; }; })(c, fill === '#58d17a' ? 0.92 : 0.5), 10 + Math.random() * 220); }
+        svg.appendChild(c);
+      }
+      ring.forEach(function (w) { svg.appendChild(el('rect', { x: w.x - 5, y: w.y - 5, width: 10, height: 10, rx: 2,
+        fill: '#2b3a4a', stroke: '#3d5163' })); });
+      svg.appendChild(el('circle', { cx: TX, cy: TY, r: 8, fill: '#3a1f22', stroke: '#ff6a5a', 'stroke-width': 2.5 }));
+      svg.appendChild(el('circle', { cx: gun2.x, cy: gun2.y, r: 7, fill: '#3a1f22', stroke: '#a8384a', 'stroke-width': 2 }));
+      out.innerHTML =
+        '<div class="row"><span>' + T.d + '</span><span>' +
+        (acc ? '<span class="tag ok">' + acc + ' spots</span>' : '<span class="tag no">NO FIRING POSITION</span>') + '</span></div>' +
+        '<div class="row"><span>rejected</span><span>' + rej.unreach + ' undrivable &middot; ' + rej.water +
+        ' water &middot; ' + rej.solid + ' solid &middot; ' + rej.los + ' no line &middot; ' + rej.xf + ' second gun</span></div>';
+      Array.prototype.forEach.call(bar.children, function (b, i) { b.setAttribute('aria-pressed', i === tier); });
+    }
+    TIERS.forEach(function (t, i) {
+      var b = document.createElement('button'); b.textContent = (i + 1) + '. ' + t.n;
+      b.onclick = function () { tier = i; build(); }; bar.appendChild(b);
+    });
+    build();
+  })();
+
+  // ══ DEMO 3 — routeGuns ════════════════════════════════════════════
+  (function () {
+    var svg = document.getElementById('d3').querySelector('svg'), out = document.getElementById('d3r'),
+        bar = document.getElementById('d3b'), floorBtn = document.getElementById('d3floor');
+    var subtractFloor = false, pick = 0;
+    var KEEP = { x: 300, y: 120 }, HOME = { x: 40, y: 250 }, FOB = { x: 350, y: 240 };
+    // Real figures, seed 179 blue at t150s.
+    var LANES = [
+      { n: 'front', exposure: 217, guns: 4, worst: 0.73,
+        path: [HOME, { x: 200, y: 190 }, { x: 258, y: 148 }, KEEP] },
+      { n: 'left', exposure: 234, guns: 4, worst: 0.73,
+        path: [HOME, { x: 118, y: 96 }, { x: 240, y: 70 }, KEEP] },
+      { n: 'right', exposure: 499, guns: 7, worst: 0.73,
+        path: [HOME, { x: 190, y: 274 }, { x: 340, y: 250 }, { x: 356, y: 170 }, KEEP] },
+      { n: 'rear', exposure: 275, guns: 4, worst: 0.73,
+        path: [HOME, { x: 150, y: 40 }, { x: 300, y: 28 }, { x: 372, y: 84 }, KEEP] }
+    ];
+    var TOWERS = [
+      { x: 268, y: 88, r: 58, camp: 'main' }, { x: 336, y: 92, r: 58, camp: 'main' },
+      { x: 268, y: 154, r: 58, camp: 'main' }, { x: 336, y: 156, r: 58, camp: 'main' },
+      { x: 330, y: 236, r: 52, camp: 'fob' }, { x: 372, y: 232, r: 52, camp: 'fob' },
+      { x: 350, y: 268, r: 52, camp: 'fob' }
+    ];
+    function nearPath(t, path) {
+      for (var i = 0; i + 1 < path.length; i++) {
+        var a = path[i], b = path[i + 1], dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy || 1;
+        var u = Math.max(0, Math.min(1, ((t.x - a.x) * dx + (t.y - a.y) * dy) / L));
+        if (Math.hypot(t.x - (a.x + dx * u), t.y - (a.y + dy * u)) < t.r) return true;
+      }
+      return false;
+    }
+    function score(l) {
+      var floor = Math.min.apply(null, LANES.map(function (q) { return q.exposure; }));
+      return subtractFloor
+        ? -(2 + l.worst * 1.5 + Math.max(0, l.exposure - floor) / 40)
+        : -(l.guns * 2.5 + l.worst * 2.5);
+    }
+    function draw() {
+      clear(svg); var L = LANES[pick];
+      svg.appendChild(el('rect', { x: 0, y: 0, width: 420, height: 300, fill: '#0c1118' }));
+      TOWERS.forEach(function (t) {
+        var on = nearPath(t, L.path);
+        svg.appendChild(el('circle', { cx: t.x, cy: t.y, r: t.r, fill: on ? 'rgba(255,106,90,.10)' : 'rgba(90,106,122,.05)',
+          stroke: on ? '#ff6a5a' : '#3a4653', 'stroke-width': 1, 'stroke-dasharray': '4 4' }));
+      });
+      svg.appendChild(el('text', { x: FOB.x, y: FOB.y - 34, fill: '#8fa3b3', 'font-size': 9,
+        'font-family': 'Courier New, monospace', 'text-anchor': 'middle' })).textContent = 'their FOB';
+      LANES.forEach(function (l, i) {
+        var d = 'M' + l.path.map(function (p) { return p.x + ',' + p.y; }).join(' L');
+        svg.appendChild(el('path', { d: d, fill: 'none', stroke: i === pick ? '#ffcf6a' : '#2a3a4d',
+          'stroke-width': i === pick ? 2.4 : 1.2, 'stroke-linejoin': 'round',
+          'stroke-dasharray': i === pick ? '' : '3 5' }));
+      });
+      TOWERS.forEach(function (t) {
+        var on = nearPath(t, L.path);
+        svg.appendChild(el('circle', { cx: t.x, cy: t.y, r: 6, fill: '#3a1f22',
+          stroke: on ? '#ff6a5a' : '#5a6a7a', 'stroke-width': 2 }));
+      });
+      svg.appendChild(el('rect', { x: KEEP.x - 15, y: KEEP.y - 15, width: 30, height: 30, rx: 3,
+        fill: '#1d3a52', stroke: '#6ab7ff', 'stroke-width': 1.5 }));
+      svg.appendChild(el('circle', { cx: HOME.x, cy: HOME.y, r: 9, fill: '#16202b', stroke: '#8fd3ff', 'stroke-width': 2 }));
+      var rows = LANES.map(function (l, i) {
+        var s = score(l);
+        return '<div class="row" style="' + (i === pick ? 'color:var(--warn)' : 'color:var(--dim)') + '"><span>' +
+          l.n + (i === pick ? ' &#9664;' : '') + '</span><span>' + l.guns + ' guns &middot; ' + l.exposure +
+          'u under fire &nbsp; <b style="color:' + (s < -8 ? '#ff6a5a' : s < -4 ? '#ffcf6a' : '#58d17a') + '">' +
+          s.toFixed(1) + '</b></span></div>';
+      }).join('');
+      out.innerHTML = rows;
+      Array.prototype.forEach.call(bar.children, function (b, i) { b.setAttribute('aria-pressed', i === pick); });
+      floorBtn.setAttribute('aria-pressed', subtractFloor);
+      floorBtn.innerHTML = subtractFloor ? 'common floor removed &mdash; lanes differ' : 'subtract the common floor';
+    }
+    LANES.forEach(function (l, i) {
+      var b = document.createElement('button'); b.textContent = l.n;
+      b.onclick = function () { pick = i; draw(); }; bar.appendChild(b);
+    });
+    floorBtn.onclick = function () { subtractFloor = !subtractFloor; draw(); };
+    draw();
+  })();
+})();
+</script>
+</body></html>
