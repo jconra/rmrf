@@ -8447,7 +8447,26 @@ class AICommander {
       // from ANY mission (the threatened transition — a tower is shelling us), and the old gate
       // meant every non-siege case fell through to a raw global nearest-turret scan with no
       // hysteresis, so the target flipped as the unit drove and the goal jumped with it.
-      const k = this._planTarget();
+      // NO KILL ORDER. The plan used to name WHICH tower to attack, and every ordering tried made
+      // things worse: furthest-from-FOB first walked a Lurcher 94u past three live guns to a
+      // corner tower with no solvable firing position (seed 1193), and nearest-to-us first pulled
+      // sieges sideways onto flank guns — 30 seeds x2: nav alarms 33 -> 59, GOTO violations
+      // 70 -> 136, transit-stuck 250 -> 543, for no resolution gain.
+      //
+      // Jacob's model, and it needs no ordering at all: head for the flag HQ, and kill whatever
+      // threatens you on the way. The keep is the default target (PRIO.hq); a gun within our reach
+      // outranks it (PRIO.inReach) and so does one that is shooting at us (PRIO.shooting), both
+      // resolved by `promote` below. The FOB's towers are our problem only when they are in the
+      // way — which is exactly what "near enough to matter" means here.
+      //
+      // So the candidate is simply the nearest live gun we know about. The plan survives as the
+      // firing-spot cache (spots/spotReach) and the front/rear face choice; it no longer steers.
+      this._planTarget();   // side effect only: keeps _siegePlan built/fresh for its spot cache + face
+      let k = null, _kd = Infinity;
+      for (const q of this.plannableTowers()) {
+        const d2 = (q.x - px) ** 2 + (q.z - pz) ** 2;
+        if (d2 < _kd) { _kd = d2; k = q; }
+      }
       // PROXIMITY GATE (do not remove): the plan says WHICH tower we intend to kill — it does NOT
       // say we are currently under threat. `threat` feeds AI.js's `threatened` transition, which
       // has no distance test of its own, so an ungated plan target put units into `suppress` over
