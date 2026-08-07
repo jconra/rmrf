@@ -56,6 +56,40 @@
     border-left: 1px dashed rgba(255,255,255,0.12); }
   .layer { position: relative; padding: 4px 0 2px; }
   .lname { font-size: 9px; letter-spacing: 2px; opacity: 0.4; text-align: center; margin-bottom: 3px; }
+  /* ── the redesigned stack: board on top, triggers beside the missions ── */
+  .board { border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; margin: 8px 0 10px;
+           padding: 9px 11px; background: rgba(217,164,65,0.05); }
+  .board .lname { color: #d9a441; }
+  .board .rescore { color: #8fa3b3; font-size: 9.5px; letter-spacing: 0; margin-left: 6px; }
+  /* The board is 15 candidates deep with their term maths — left unbounded it pushes every other
+     section below the fold, which defeats the point of a single-screen console. Bound it and let
+     it scroll; the running mission is pinned at the top by the scorer's own sort anyway. */
+  .board .wboard { max-height: 215px; overflow-y: auto; padding-right: 4px; }
+  .board .wboard::-webkit-scrollbar { width: 6px; }
+  .board .wboard::-webkit-scrollbar-thumb { background: #2a3a4d; border-radius: 3px; }
+  .board .wrow { margin: 2px 0; }
+  .board .wterms { max-height: 2.7em; overflow: hidden; }
+  .mrow { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+  .trigcol { flex: 0 0 152px; min-width: 0; }
+  .misccol, .misscol { flex: 1; min-width: 0; }
+  .trigs { display: flex; flex-direction: column; gap: 3px; }
+  .trig { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #6b7c8c;
+          padding: 2px 5px; border-radius: 4px; border: 1px solid transparent; }
+  .trig i { width: 7px; height: 7px; border-radius: 50%; background: #2a3a4a; flex: none; }
+  .trig.on { color: #ffcf6a; background: rgba(255,207,106,0.09); border-color: rgba(255,207,106,0.3); }
+  .trig.on i { background: #ffcf6a; box-shadow: 0 0 6px #ffcf6a; }
+  .triglast { margin-top: 5px; font-size: 9.5px; color: #7dd3fc; }
+  .mcards { display: flex; flex-wrap: wrap; gap: 4px; }
+  .mcard { border: 1px solid rgba(255,255,255,0.12); border-left: 3px solid var(--c, #667);
+           border-radius: 5px; padding: 4px 7px; min-width: 96px; background: #111b26; opacity: .62; }
+  .mcard.on { opacity: 1; background: #17242f; border-color: var(--c); box-shadow: 0 0 9px -2px var(--c); }
+  .mcard .mk { font-size: 10px; color: #cfe0ee; }
+  .mcard .mv { font-size: 12px; color: #7fe0b8; font-variant-numeric: tabular-nums; }
+  .mcard .mrun { font-size: 8.5px; letter-spacing: 1px; color: var(--c); }
+  .mcard .mrun.best { color: #8fa3b3; }
+  .mnone { font-size: 10px; color: #8fa3b3; }
+  @media (max-width: 760px) { .mrow { flex-direction: column; } .trigcol { flex: none; width: 100%; }
+    .trigs { flex-direction: row; flex-wrap: wrap; } }
   .track { overflow-x: auto; white-space: nowrap; scroll-behavior: smooth;
     padding: 4px calc(50% - 86px); scrollbar-width: none; cursor: grab; }
   .track::-webkit-scrollbar { display: none; }

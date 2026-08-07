@@ -74,50 +74,6 @@ function topPanel(data) {
     </div>`;
 }
 
-// ---- L1 PERSONA -------------------------------------------------------------
-const PERSONA_CARDS = [
-  { a:'warrior', blurb:'ride out, rack up kills, then break the base' },
-  { a:'rogue',   blurb:'snatch before they know you’re there; avoids brawls' },
-  { a:'hunter',  blurb:'own the field, ambush the weak, then snatch' },
-  { a:'turtle',  blurb:'hold the wall, bleed them, then sortie' },
-];
-
-// ---- L2 DOCTRINE — shared universal rungs (keyed to AIStrategies fk) + persona choose --------
-const UNIVERSAL = [
-  { key:'flag_stolen',     cond:'Our flag stolen?', mission:'intercept', why:'run the thief down' },
-  { key:'flag_loose',      cond:'Our flag dropped\nin the field?', mission:'intercept', why:'touch it to snap it home' },
-  { key:'losing_attrition',cond:'Losing the attrition war?', mission:'defend', why:'preserve what we have left' },
-  { key:'home_under_fire', cond:'Home under fire?\n(persona dice)', mission:'defend', why:'get back and stop them' },
-  // THE DEFAULT BRAIN since 2026-07-18. Everything below this line is gated off behind
-  // `!missionWeightsOn(cmd)` in AIStrategies.js, and so is every persona choose() — with weights
-  // on, the commander does NOT walk the rest of this cascade. It scores all 13 candidates and
-  // takes the best. That is why the doctrine layer used to sit empty: the game reports the rung
-  // `weights`, and there was no card with that key for it to light.
-  { key:'weights', cond:'MISSIONSCORE\nscore every mission,\ntake the best', mission:'weights', why:'the live board is below', weights:true },
-  { key:'need_parts',      cond:'Can win by capture but\nno runner + no parts?', mission:'scavenge', why:'collect salvage to build one' },
-  { key:'towers_down',     cond:'Their towers down,\nflag not exposed?', mission:'siege', why:'crack the HQ while it’s open' },
-  { key:'gambit',          cond:'Stalemate gambit armed?', mission:'siege', why:'the rear-door Valkyrie gambit' },
-  { key:'clear_path',      cond:'Runner’s killer still alive?', mission:'attack', why:'clear the interceptor first' },
-  { key:'soften',          cond:'Towers keep killing runners?', mission:'siege', why:'silence the guns before retry' },
-  { key:'sapper',          cond:'Opening sapper rolled?', mission:'sap', why:'flank recon + mines' },
-  { key:'trap',            cond:'Hunter trap armed?', mission:'trap', why:'tend the bait trap' },
-];
-const PERSONA_CHOOSE = {
-  warrior: [ { cond:'Flag grabbable?', mission:'capture', why:'go take it' },
-    { cond:'Killed 2+ / enemy gone?', mission:'siege', why:'proved it — break the base' },
-    { cond:'Otherwise', mission:'attack', why:'ride out and fight' } ],
-  rogue: [ { cond:'Flag grabbable?', mission:'capture', why:'race in — it’s open' },
-    { cond:'Otherwise', mission:'siege', why:'quietly crack the HQ from range' } ],
-  hunter: [ { cond:'Flag grabbable?', mission:'capture', why:'go take it' },
-    { cond:'Enemy eliminated?', mission:'siege', why:'press the base' },
-    { cond:'Enemy unknown AND\nmap < 80% explored?', mission:'scout', why:'recon with the Valkyrie' },
-    { cond:'No contact / hugging base?', mission:'harass', why:'flush reveals' },
-    { cond:'Otherwise', mission:'attack', why:'hunt what roams' } ],
-  turtle: [ { cond:'Flag grabbable?', mission:'capture', why:'go take it' },
-    { cond:'2+ kills AND enemy weaker?', mission:'siege', why:'sortie from strength' },
-    { cond:'Otherwise', mission:'defend', why:'hold under tower cover' } ],
-};
-
 // ---- L3 MISSION SUB-BEHAVIOUR (branches inside objective()/label(); `m` matches the live label) --
 const CATCH = /.*/;
 const SUB = {
@@ -160,28 +116,12 @@ const BRAIN = [
   { when:'always',       cond:'Otherwise', mode:'advance', why:'advance to the objective' },
 ];
 
-// ---- card builders ----------------------------------------------------------
-function personaCard(c) {
-  const col = acol(c.a);
-  return `<div class="card" data-persona="${c.a}"><div class="big" style="color:${col}">${c.a}</div>
-    <span class="rwhy">${esc(c.blurb)}</span></div>`;
-}
-function doctrineCard(r, dkey) {
-  const c = r.weights ? '#7fe0b8' : mcol(r.mission);
-  // The weights card carries the live scored board in its metric slot (filled by fillWeights),
-  // so the layer shows WHY the pick won, not just that it won.
-  const extra = r.weights ? ' weights-card' : '';
-  return `<div class="card${extra}" data-dkey="${dkey}"><div class="cond">${esc(r.cond)}</div>
-    <div class="arrow"></div><span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}">${esc(r.mission)}</span>
-    <span class="rwhy">${esc(r.why)}</span><span class="metric"></span>
-    ${r.weights ? '<div class="wboard"></div>' : ''}</div>`;
-}
 
 // Render the live MissionScore board into the weights card: every candidate, best first, with a
 // bar for its score and the terms that earned it. `scores` is [key, total, terms][] straight from
 // cmd._missionScores (already sorted) — published by main.js on the same 2.5Hz throttle.
 function fillWeights(col, data) {
-  const el = col.querySelector('.weights-card .wboard');
+  const el = col.querySelector('.board .wboard');   // the board is its own section now, above the spine
   if (!el) return;
   const S = data.scores;
   if (!S || !S.length) { el.innerHTML = '<div class="wnone">weights off — the rungs below are live</div>'; return; }
@@ -231,23 +171,44 @@ function trackHTML(cardsHTML) { return `<div class="track">${cardsHTML}</div>`; 
 
 function buildColumn(i, label, archetype, mission) {
   const col = document.getElementById('col-' + i);
-  const persona = PERSONA_CARDS.map(personaCard).join('');
-  const doctrine = UNIVERSAL.map(r => doctrineCard(r, r.key)).join('')
-    + (PERSONA_CHOOSE[archetype] || PERSONA_CHOOSE.warrior).map(r => doctrineCard(r, 'choose:' + r.mission)).join('');
   const subs = (SUB[mission] || [{ label: mission, m: CATCH, why: '' }]).map(subCard).join('');
   const brain = BRAIN.map(brainCard).join('');
+  // TOP TO BOTTOM, THE ORDER THE DECISION IS ACTUALLY MADE IN:
+  //   the score board  → what every mission is worth right now
+  //   triggers         → whether the plan is even up for re-examination this tick
+  //   mission          → every candidate as a card, the running one lit
+  //   subtask          → what that mission is doing at this moment
+  //   unit brain       → the tactical mode the driver is in
+  //   driver           → the standing order, and the pedals
+  // The old PERSONA and DOCTRINE rows are gone: the doctrine cascade they drew was deleted from
+  // AIStrategies.js, and the persona now acts by tilting the scores (see commanders.html), not by
+  // walking a ladder of its own.
   col.innerHTML = `
     <div class="col-head"><span class="team-name">${esc(label)}</span>
       <span class="arch" style="color:${acol(archetype)}">${esc(archetype)}</span>
       <span class="miss"></span></div>
     <div class="top"></div>
+    <div class="board">
+      <div class="lname">MISSIONSCORE &middot; every candidate, best first
+        <span class="rescore"></span></div>
+      <div class="wboard"></div>
+    </div>
     <div class="spine">
-      <div class="layer"><div class="lname">PERSONA</div>${trackHTML(persona)}</div>
-      <div class="layer"><div class="lname">DOCTRINE &middot; which rung fired</div>${trackHTML(doctrine)}</div>
-      <div class="layer"><div class="lname">MISSION &middot; sub-behaviour</div>${trackHTML(subs)}</div>
+      <div class="mrow">
+        <div class="trigcol">
+          <div class="lname">TRIGGERS</div>
+          <div class="trigs"></div>
+        </div>
+        <div class="misscol">
+          <div class="lname">MISSION &middot; all candidates, running one lit</div>
+          <div class="mcards"></div>
+        </div>
+      </div>
+      <div class="layer"><div class="lname">SUBTASK &middot; what the mission is doing now</div>${trackHTML(subs)}</div>
       <div class="layer"><div class="lname">UNIT BRAIN &middot; tactical mode</div>${trackHTML(brain)}</div>
       <div class="layer"><div class="lname">THE DRIVER &middot; standing order &rarr; pedals</div>
         <div class="coc">
+          <div class="cl"><span class="ck">order:</span><span class="ord-v">&mdash;</span></div>
           <div class="cl"><span class="ck">maneuver:</span><span class="mnv-v">&mdash;</span></div>
           <div class="cl"><span class="ck">driver:</span><span class="drv-v">&mdash;</span></div>
         </div></div>
@@ -255,6 +216,39 @@ function buildColumn(i, label, archetype, mission) {
     <div class="log-wrap"><div class="sect-t">DECISION LOG &middot; most recent first</div><div class="log"></div></div>`;
   col.querySelectorAll('.track').forEach(addDrag);
   built[i] = { archetype, mission }; lastActive[i] = {}; logSig[i] = '';
+}
+
+// The re-think triggers, in the order the commander tests them. A lit chip means that edge is
+// TRUE right now; the named one is whichever last actually forced a re-score.
+const TRIGS = [
+  ['sees', 'enemy in view'], ['fire', 'taking fire'], ['flag', 'our flag taken'],
+  ['leg', 'waypoint reached / unreachable'],
+  ['lowfuel', 'fuel low'], ['lowammo', 'ammo low'], ['lowhp', 'hull low'], ['lowshield', 'shield low'],
+];
+function fillTriggers(col, d) {
+  const host = col.querySelector('.trigs'); if (!host) return;
+  const t = d.trig || {};
+  host.innerHTML = TRIGS.map(([k, lab]) =>
+    `<div class="trig${t[k] ? ' on' : ''}"><i></i>${esc(lab)}</div>`).join('')
+    + `<div class="triglast">${d.lastTrig ? '↻ ' + esc(d.lastTrig) : 'no re-score yet'}</div>`;
+}
+
+// Every candidate mission as a card, coloured by intent, the running one lit. Reads the same
+// published board as the score panel, so a mission cannot appear here that the scorer did not see.
+function fillMissionCards(col, d) {
+  const host = col.querySelector('.mcards'); if (!host) return;
+  const S = d.scores;
+  if (!S || !S.length) { host.innerHTML = '<div class="mnone">no score board published</div>'; return; }
+  const top = S[0][1];
+  host.innerHTML = S.map(([k, v]) => {
+    const running = k === d.msnKey || k === d.mission || k.split('-')[0] === d.mission;
+    const c = mcol(k.split('-')[0]);
+    return `<div class="mcard${running ? ' on' : ''}" style="--c:${c}">
+      <div class="mk">${esc(k)}</div>
+      <div class="mv">${v >= 0 ? '+' : ''}${v}</div>
+      ${running ? '<div class="mrun">RUNNING</div>' : (v === top ? '<div class="mrun best">BEST</div>' : '')}
+    </div>`;
+  }).join('');
 }
 
 function emptyColumn(i) {
@@ -273,48 +267,42 @@ function updateColumn(i, label, data, log) {
   if (!built[i] || built[i].archetype !== data.archetype) buildColumn(i, label, data.archetype, data.mission);
   else if (built[i].mission !== data.mission) {   // mission changed → the sub-behaviour row's cards change
     const col = document.getElementById('col-' + i);
-    const track = col.querySelectorAll('.layer')[2].querySelector('.track');
+    const track = col.querySelector('.spine .layer .track');
     track.innerHTML = (SUB[data.mission] || [{ label: data.mission, m: CATCH, why: '' }]).map(subCard).join('');
     addDrag(track); built[i].mission = data.mission; lastActive[i].sub = null;
   }
   const col = document.getElementById('col-' + i);
-  const tracks = [...col.querySelectorAll('.track')];   // [persona, doctrine, sub, brain]
+  const tracks = [...col.querySelectorAll('.track')];   // [sub, brain]
   const tn = col.querySelector('.team-name');
   if (data.color) { tn.style.color = data.color; tn.style.textShadow = `0 0 8px ${data.color}`; tn.style.opacity = 1; }
   col.querySelector('.miss').innerHTML = `<b style="color:${mcol(data.mission)}">${esc(data.mission)}</b>`
     + (data.sub ? ` &rsaquo; ${esc(data.sub)}` : '');
   col.querySelector('.top').innerHTML = topPanel(data);
 
-  // resolve the active card of each layer
   const primary = (data.units || [])[0];
   // During a recall / lift-rise the game bypasses the brain, so its state is stale — don't
   // highlight a frozen rung; label the layer instead.
   const recalled = primary && primary.ctrl && primary.ctrl !== 'brain';
-  const brainLname = col.querySelectorAll('.layer')[3].querySelector('.lname');
+  const layers = col.querySelectorAll('.spine .layer');
+  const brainLname = layers[1] && layers[1].querySelector('.lname');
   if (brainLname) brainLname.innerHTML = !recalled ? 'UNIT BRAIN &middot; tactical mode'
     : primary.ctrl === 'recall' ? 'UNIT BRAIN &middot; <span style="color:#e0b45a">paused — recalled to swap unit</span>'
     : 'UNIT BRAIN &middot; <span style="color:#5ad0e0">deploying (riding the lift up)</span>';
+
+  fillWeights(col, data);
+  fillTriggers(col, data);
+  fillMissionCards(col, data);
+  // How long since the plan was last re-examined. The commander only re-scores on a trigger AND
+  // a minimum interval, so "carrying on" is a decision too — this is the clock behind it.
+  const rs = col.querySelector('.rescore');
+  if (rs) rs.textContent = data.sinceScore != null ? `· ${data.sinceScore}s since the last re-score` : '';
+
   const active = {
-    persona: `[data-persona="${data.archetype}"]`,
-    doctrine: data.rung && data.rung !== 'benched'
-      ? `[data-dkey="${data.rung === 'choose' ? 'choose:' + data.mission : data.rung}"]` : null,
     sub: `[data-sub="${activeSubIndex(data.mission, data.sub)}"]`,
     brain: (primary && !recalled && primary.when) ? `[data-when="${primary.when}"]` : null,
   };
-  fillWeights(col, data);
-  // With weights on, the rungs BELOW the MissionScore card cannot fire at all (AIStrategies gates
-  // them behind !missionWeightsOn). Grey them out rather than leaving them looking live — a chart
-  // that shows unreachable branches as reachable is worse than no chart.
-  const gated = ['need_parts', 'towers_down', 'gambit', 'clear_path', 'soften', 'sapper', 'trap'];
-  const weightsOn = !!(data.scores && data.scores.length);
-  tracks[1].querySelectorAll('.card[data-dkey]').forEach(c => {
-    const k = c.dataset.dkey;
-    const off = weightsOn && (gated.includes(k) || k.startsWith('choose:'));
-    c.classList.toggle('gated', off);
-  });
-  const keys = ['persona', 'doctrine', 'sub', 'brain'];
-  keys.forEach((k, li) => {
-    const track = tracks[li];
+  ['sub', 'brain'].forEach((k, li) => {
+    const track = tracks[li]; if (!track) return;
     track.querySelectorAll('.card').forEach(c => c.classList.remove('on'));
     const sel = active[k]; if (!sel) return;
     const card = track.querySelector('.card' + sel);
@@ -328,6 +316,12 @@ function updateColumn(i, label, data, log) {
   // An alarm count means the driver has failed to move this unit — flag it loud.
   const coc = col.querySelector('.coc');
   if (coc) {
+    const o = data.drv;
+    const ordEl = coc.querySelector('.ord-v');
+    if (ordEl) ordEl.innerHTML = o
+      ? `${esc(o.type)} → (${o.x}, ${o.z})${o.arrive ? ` arrive ${o.arrive}u` : ''}` +
+        (o.violated ? ' <span class="alarm">· UNREACHABLE</span>' : '')
+      : '—';
     coc.querySelector('.mnv-v').innerHTML = esc((primary && primary.mnv) || '—')
       + (primary && primary.alarms ? ` <span class="alarm">· ${primary.alarms} ALARM${primary.alarms > 1 ? 'S' : ''}</span>` : '');
     coc.querySelector('.drv-v').textContent = (primary && primary.drv) || '—';

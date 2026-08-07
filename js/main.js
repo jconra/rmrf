@@ -38,7 +38,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setMissionWeights, setMissionWeightsTeam, missionWeightsOn, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
+import { makeDoctrine, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5557,24 +5557,6 @@ const ROLE_DECK = {
 // support slot redeploys and picks the role that tour should field. This slice only
 // COLLECTS training tours — (feature snapshot at deploy, role fielded, the mission
 // report card's outcome) — so a small net can be trained OFFLINE from headless matches;
-// in-game inference lands once trained weights exist. Slot 0 always fields the
-// commander's own archetype (the persona is the team's identity — the net assigns the
-// SUPPORT missions around it).
-//   'deck'    — today's behavior, static persona deck (default: zero gameplay change)
-//   'explore' — deck, but each support tour has missionEps odds of a random role
-//               (counterfactual coverage so training isn't blind off-policy)
-//   'nn'      — argmax of the loaded policy net (once weights are trained/loaded)
-// Every tour is LOGGED under every policy, so plain tournaments feed the dataset too.
-const MISSION_ROLES = ['warrior', 'turtle', 'hunter', 'rogue'];
-const MISSION_FEATS = ['clock', 'fielded', 'fleet', 'rosFirebrat', 'rosLurcher', 'rosValkyrie', 'rosJotun',
-  'scrap', 'myTowers', 'theirTowers', 'myFort', 'theirFort', 'ownFlagHome', 'enemyFlagHome',
-  'seenEnemies', 'losing', 'tilt', 'roleWarrior', 'roleTurtle', 'roleHunter', 'roleRogue',
-  'fortTrend', 'tiltTrend', 'recentAttrition', 'lastProgress', 'sinceFlagLost'];   // feature order — keep in sync with _missionFeatures  (tail 5 = HISTORY: motion/memory, not instantaneous)
-let missionPolicy = 'deck';
-let missionPolicyTeam = {};        // per-team override (head-to-head A/B: net vs deck in one match)
-let missionEps = 0.35;             // explore: odds a support tour fields a random role
-let missionNN = null;              // trained policy weights (loaded via RR.loadMissionNN)
-const aiTrainLog = [];             // one record per graded tour
 function freshSlot() {
   return {
     unit: null, respawnT: 0,
@@ -5612,24 +5594,6 @@ const SLOT_FIELDS = Object.keys(freshSlot());
 let aiUnitCap = null;   // debug override (RR.setUnitCap): force the per-team unit cap regardless of elevators
 
 // Forward pass for the trained mission net (1 hidden ReLU layer, tiny — weights are a
-// plain JSON of arrays loaded via RR.loadMissionNN). Returns the argmax role.
-function nnPickRole(feat, temp = 0) {
-  const { W1, b1, W2, b2 } = missionNN;
-  const h = W1.map((row, j) => Math.max(0, row.reduce((a, w, i) => a + w * feat[i], b1[j])));
-  const q = W2.map((row, j) => row.reduce((a, w, i) => a + w * h[i], b2[j]));
-  // temp = 0 → pure argmax. Otherwise SAMPLE from a softmax: mostly the best card,
-  // sometimes the second, rarely the wild one. Surprise can't be LEARNED from AI-vs-AI
-  // data (our commanders don't pattern-read, so unpredictability earns nothing in the
-  // dataset) — a human opponent DOES pattern-read, so the mix is designed in, and it
-  // also keeps army variety alive (no role gets argmax-benched over a hair of a gap).
-  let best = 0;
-  for (let i = 1; i < q.length; i++) if (q[i] > q[best]) best = i;
-  if (!temp) return MISSION_ROLES[best];
-  const w = q.map(v => Math.exp((v - q[best]) / temp));
-  let r = Math.random() * w.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) return MISSION_ROLES[i]; }
-  return MISSION_ROLES[best];
-}
 // ── L2 MISSION NET — the doctrine-level head (1v1's learned layer) ────────────────
 // Where the L1 net assigns support-slot ROLES (useless in 1v1 — no support slots), L2
 // picks the MISSION itself in place of the persona playbook's choose(): consulted by
@@ -5637,41 +5601,12 @@ function nnPickRole(feat, temp = 0) {
 // all stay hand-authored) and still subject to dwell + the report-card mission bans.
 // Same 26 features, same tiny-MLP shape — only the output head differs (6 missions).
 const L2_MISSIONS = ['attack', 'siege', 'capture', 'defend', 'scout', 'harass'];
-let missionL2 = null;   // {W1,b1,W2,b2} 26→H→6, loaded via RR.loadMissionL2
-function nnPickMission(cmd) {
-  const feat = cmd._missionFeatures();
-  const { W1, b1, W2, b2 } = missionL2;
-  const h = W1.map((row, j) => Math.max(0, row.reduce((a, w, i) => a + w * feat[i], b1[j])));
-  const q = W2.map((row, j) => row.reduce((a, w, i) => a + w * h[i], b2[j]));
-  // Legality mask: CAPTURE without a grabbable flag is a wasted runner — the decks gate
-  // it, so the net inherits the same rule rather than having to relearn it.
-  let best = -1;
-  for (let i = 0; i < q.length; i++) {
-    if (L2_MISSIONS[i] === 'capture' && !cmd.flagGrabbable()) continue;
-    if (best < 0 || q[i] > q[best]) best = i;
-  }
-  return best >= 0 ? L2_MISSIONS[best] : null;
-}
 
 // How erratic this commander's dealing is — a PERSONALITY trait (wanderlust: the same
 // appetite that wanders the map wanders the deck; rogues add a twist), overridable for
 // A/B via RR.setMissionTemp.
-let missionTemp = null;   // null = personality-driven
-function missionTempOf(cmd) {
-  if (missionTemp != null) return missionTemp;
-  const p = cmd.personality || {};
-  return 0.04 + (p.wanderlust || 0.5) * 0.10 + (cmd.archetype === 'rogue' ? 0.06 : 0);
-}
 
 // Close out every OPEN tour (units alive when the match ends) into the training log —
-// the harness calls this before reading RR.trainLog(), so surviving tours count too.
-function flushTourLog() {
-  for (const c of commanders) for (let i = 0; i < c._slots.length; i++) {
-    const sl = c._slots[i];
-    if (sl._mrec && sl._mrec.feat) { const r = c._tourRecord(sl._mrec, (!sl.unit || sl.unit.dead) ? 1 : 0, i); aiTrainLog.push(r); c._noteTour(r); sl._mrec = null; }
-  }
-  return aiTrainLog.length;
-}
 
 class AICommander {
   constructor(team, archetype = null) {
@@ -5944,16 +5879,6 @@ class AICommander {
   // Battlefield snapshot for the mission assigner, from THIS commander's view (own state
   // + the same reads the doctrines already make — nothing new is revealed). Normalized
   // HISTORY sampling — one light sample every ~4s so the mission features can carry
-  // MOTION (trends), not just the frozen instant. Called from update().
-  _sampleHistory() {
-    if (this._matchT < (this._histT || 0)) return;
-    this._histT = this._matchT + 4;
-    if (!this._fortBase) this._fortBase = { mine: fortHpOf(this.team) || 1, theirs: fortHpOf(this.targetTeam()) || 1 };
-    const fortFrac = Math.min(1, (fortHpOf(this.team) || 0) / this._fortBase.mine);
-    const tilt = Math.max(0, Math.min(1, 0.5 + (this.kills - this.deaths) / 12));
-    this._histBuf.push({ t: this._matchT, fortFrac, tilt });
-    while (this._histBuf.length && this._histBuf[0].t < this._matchT - 40) this._histBuf.shift();
-  }
   // Record a finished SUPPORT tour's outcome so the next deploy can react to how the last went.
   _noteTour(r) {
     if (!r || r.slot === 0) return;                                    // slot 0 = persona, not a learned pick
@@ -5961,74 +5886,15 @@ class AICommander {
     this._recentTours.push({ died: r.died ? 1 : 0, progress });
     if (this._recentTours.length > 4) this._recentTours.shift();       // remember the last 4
   }
-  // The 5 HISTORY features — order MUST match the MISSION_FEATS tail.
-  _historyFeats() {
-    const buf = this._histBuf;
-    let fortTrend = 0.5, tiltTrend = 0.5;
-    if (buf && buf.length >= 2) {
-      const now = buf[buf.length - 1], then = buf[0];
-      fortTrend = Math.max(0, Math.min(1, 0.5 + (now.fortFrac - then.fortFrac) * 2));
-      tiltTrend = Math.max(0, Math.min(1, 0.5 + (now.tilt - then.tilt) * 2));
-    }
-    const rt = this._recentTours || [];
-    const recentAttrition = rt.length ? rt.reduce((a, s) => a + s.died, 0) / rt.length : 0;
-    const lastProgress = rt.length ? rt[rt.length - 1].progress : 0.5;
-    const sinceFlagLost = Math.max(0, Math.min(1, (this._matchT - (this._lastFlagLostT || -1e9)) / 120));
-    return [fortTrend, tiltTrend, recentAttrition, lastProgress, sinceFlagLost];
-  }
-  // ~[0,1], order fixed by MISSION_FEATS. Keep it LEGIBLE — a bug here poisons training
-  // data silently.
-  _missionFeatures() {
-    if (!this._fortBase) this._fortBase = { mine: fortHpOf(this.team) || 1, theirs: fortHpOf(this.targetTeam()) || 1 };
-    const cap = this.unitCap();
-    const roles = { warrior: 0, turtle: 0, hunter: 0, rogue: 0 };
-    let fielded = 0;
-    for (const sl of this._slots) if (sl.unit && !sl.unit.dead) { fielded++; roles[sl._role || this.archetype]++; }
-    const tt = this.targetTeam();
-    let seen = 0;
-    for (const v of combatants) if (!v.dead && v.team === tt && !vehicleHidden(v)) seen++;
-    const own = flags.find(f => f.team === this.team), theirs = flags.find(f => f.team === tt);
-    return [
-      Math.min(1, (this._matchT || 0) / 900),                            // clock (0..15min)
-      fielded / Math.max(1, cap),                                        // fielded
-      Math.min(1, this.fleetLeft() / 13),                                // fleet
-      (this.roster.firebrat || 0) / (GARAGE_COUNTS.firebrat || 1),       // rosFirebrat
-      (this.roster.lurcher || 0) / (GARAGE_COUNTS.lurcher || 1),         // rosLurcher
-      (this.roster.valkyrie || 0) / (GARAGE_COUNTS.valkyrie || 1),       // rosValkyrie
-      (this.roster.jotun || 0) / (GARAGE_COUNTS.jotun || 1),             // rosJotun
-      Math.min(1, (teamScrap[this.team] || 0) / 15),                     // scrap
-      turretCountOf(this.team, 'main') / 4,                              // myTowers
-      turretCountOf(tt, 'main') / 4,                                     // theirTowers
-      Math.min(1, (fortHpOf(this.team) || 0) / this._fortBase.mine),     // myFort
-      Math.min(1, (fortHpOf(tt) || 0) / this._fortBase.theirs),          // theirFort
-      own && !own.carried ? 1 : 0,                                       // ownFlagHome
-      theirs && !theirs.carried ? 1 : 0,                                 // enemyFlagHome
-      Math.min(1, seen / 4),                                             // seenEnemies
-      this.losingBadly() ? 1 : 0,                                        // losing
-      Math.max(0, Math.min(1, 0.5 + (this.kills - this.deaths) / 12)),   // tilt
-      roles.warrior / Math.max(1, cap),                                  // roleWarrior
-      roles.turtle / Math.max(1, cap),                                   // roleTurtle
-      roles.hunter / Math.max(1, cap),                                   // roleHunter
-      roles.rogue / Math.max(1, cap),                                    // roleRogue
-      ...this._historyFeats(),                                          // 5 HISTORY dims (fortTrend,tiltTrend,recentAttrition,lastProgress,sinceFlagLost)
-    ];
-  }
-  // One graded tour → one training record. NOTE kills/fortDmg are the COMMANDER'S deltas
+  // One finished tour → one graded record for the report card. NOTE kills/fortDmg are the
+  // COMMANDER'S deltas
   // over the tour window (kills are credited at team level), so with multiple slots the
   // credit is noisy — the trainer sees it in expectation. Refine attribution later if the
   // signal proves too dilute.
   _tourRecord(rec, died, slotI) {
-    return { team: this.team, arch: this.archetype, slot: slotI, veh: rec.veh, role: rec.role, feat: rec.feat,
+    return { team: this.team, arch: this.archetype, slot: slotI, veh: rec.veh, role: rec.role,
       kills: this.kills - rec.kills0, fortDmg: Math.max(0, Math.round(rec.fort0 - fortHpOf(this.targetTeam()))),
-      flag: rec.flagTouched ? 1 : 0, died, dur: Math.round((performance.now() - rec.t0) / 1000),
-      // v2: what defense/recon produced on this watch (deltas of team-level tallies —
-      // same noisy-credit model as kills; the trainer sees it in expectation)
-      homeKills: this.homeKills - (rec.homeKills0 || 0),
-      carrierKills: this.carrierKills - (rec.carrierKills0 || 0),
-      mineKills: this.mineKills - (rec.mineKills0 || 0),
-      fortLost: Math.max(0, Math.round((rec.ownFort0 || 0) - fortHpOf(this.team))),
-      flagLost: (this.flagsLost - (rec.flagsLost0 || 0)) > 0 ? 1 : 0,
-      intelGain: +Math.max(0, (this.explore ? this.explore.fraction() : 0) - (rec.intel0 || 0)).toFixed(3) };
+      flag: rec.flagTouched ? 1 : 0, died, dur: Math.round((performance.now() - rec.t0) / 1000) };
   }
   // STALEMATE GAMBIT: the match has dragged on and we've made ZERO progress on the enemy base
   // (their towers still nearly all up) — we're just trading + healing in mid-field. Give up on
@@ -6394,12 +6260,6 @@ class AICommander {
     return aiKeepBreach ? this.turretsLive() <= FLAG_GRAB_TURRETS : this.fortDown();
   }
   // L2 mission pick: when this team's policy is 'l2' and weights are loaded, the net
-  // stands in for the persona playbook's choose() (see Doctrine.tick). Null = deck plays.
-  l2Pick() {
-    if (!missionL2) return null;
-    if ((missionPolicyTeam[this.team] || missionPolicy) !== 'l2') return null;
-    return nnPickMission(this);
-  }
   // The enemy flag is sealed inside its HQ until that building is rubble. The
   // runner can't grab it before then, so the heavy must finish the HQ first —
   // strategy cards gate the open→grab handoff on this.
@@ -6839,25 +6699,11 @@ class AICommander {
     // from a dead slot (which returns before its tick). Deciding here is what makes the
     // garage choice and the mission the same decision.
     if (this.strategy.garagePick) this.strategy.garagePick(this);
-    // NN mission assigner: under 'explore'/'nn' a SUPPORT slot re-picks its role card
-    // each tour from the battlefield state (slot 0 keeps the archetype — the persona).
-    // The pick runs BEFORE the vehicle choice below, since the card drives wantVehicle.
-    // Features are snapshotted for EVERY tour (any policy) — they ride _mrec into the
-    // report-card grading, where the tour becomes one training record.
-    this._tourFeat = this._missionFeatures();
-    const pol = missionPolicyTeam[this.team] || missionPolicy;
-    if (pol !== 'deck' && !this._lead) {
-      let role = this._slotRole(this._slotI);
-      if (pol === 'explore') {
-        if (Math.random() < missionEps) role = MISSION_ROLES[(Math.random() * MISSION_ROLES.length) | 0];
-      } else if (pol === 'nn' && missionNN) {
-        role = nnPickRole(this._tourFeat, missionTempOf(this));
-      }
-      if (role !== this._role) {
-        this._role = role;
-        this.strategy = this._makeCard(role);
-      }
-    }
+    // (The learned mission assigner lived here: a net re-picked a support slot's role card each
+    // tour from a 26-feature snapshot of the battlefield. It never beat the deck it was meant to
+    // replace and was abandoned; the whole apparatus — two nets, the feature vector, the history
+    // sampler, the training log and the policy switches — is gone. Slots take their role from
+    // ROLE_DECK, which is what every match has actually been doing.)
     const { rawWant, want } = this._wouldField(true);
     // REINFORCEMENT SPENDING (Jacob's rule: "if I had the scrap, I'd spend it"): a rich bank
     // plus running LOW on the wanted type builds a fresh one before picking — not just at
@@ -6959,12 +6805,7 @@ class AICommander {
     // TOTAL failure — two in a row on the same mission bans it (missionBanned) so the doctrine
     // tries something else instead of feeding identical units into the same guns.
     this._mrec = { veh: type, kills0: this.kills, fort0: fortHpOf(this.targetTeam()), flagTouched: false,
-      feat: this._tourFeat, role: this._role || this.archetype, t0: performance.now(),
-      // v2 scorecard baselines: defensive + intel products of the tour
-      ownFort0: fortHpOf(this.team), homeKills0: this.homeKills, carrierKills0: this.carrierKills,
-      mineKills0: this.mineKills, flagsLost0: this.flagsLost,
-      intel0: this.explore ? this.explore.fraction() : 0 };
-    this._tourFeat = null;
+      role: this._role || this.archetype, t0: performance.now() };
     // Ride up the FOB elevator like the player does — it can't leave (or shoot)
     // until the lift tops out, so neither side gets a head start (see update()).
     // Each slot prefers its OWN lift (slot i → the team's i-th elevator); if that
@@ -7532,7 +7373,6 @@ class AICommander {
 
   update(dt) {
     this._matchT += dt;
-    this._sampleHistory();
     this._runnerlessWatch(dt);
     // Notify once the moment the enemy fleet is wiped — instead of a unit silently
     // wandering off to "chase the last seen enemy" that no longer exists.
@@ -7582,7 +7422,7 @@ class AICommander {
         // (missionBanned → the doctrine's FAIL_ALT unblocker) so the commander stops making
         // the same bad decision over and over.
         const rec = this._mrec; this._mrec = null;
-        if (rec && rec.feat) { const r = this._tourRecord(rec, 1, this._slotI); aiTrainLog.push(r); this._noteTour(r); }
+        if (rec) this._noteTour(this._tourRecord(rec, 1, this._slotI));
         if (rec) {
           const step = this.strategy.step;
           // GRADE THE TOUR, DON'T PASS/FAIL IT. The old test forgave any tour that took 60hp off a
@@ -9227,7 +9067,17 @@ function publishAILive(dt) {
       // applies. ~13 entries, published on the same 2.5Hz throttle as everything else here.
       const scores = cmd._missionScores
         ? cmd._missionScores.map(([k, v, terms]) => [k, v, (terms || []).slice(0, 5)]) : null;
+      // THE RE-THINK TRIGGERS, live. `_msnTrig` already holds each edge's current on/off state and
+      // `_lastTrig` the one that last fired — the commander uses them every tick to decide whether
+      // the plan is even worth re-examining. Publishing them is what lets the console show WHY a
+      // re-score happened (or why one hasn't) instead of only its result.
+      const trig = cmd._msnTrig ? { ...cmd._msnTrig } : null;
+      // Where the driver is in its current order — the bottom of the console's stack.
+      const drv = cmd._driver && cmd._driver.o
+        ? { type: cmd._driver.o.type, x: Math.round(cmd._driver.o.x ?? 0), z: Math.round(cmd._driver.o.z ?? 0),
+            arrive: cmd._driver.o.arrive || null, violated: !!cmd._driver.o.violated } : null;
       teams[label] = { archetype: cmd.archetype, mission: s.step, rung: s._firedRung || '', sub, why: s._lastWhy || '', scores,
+        trig, lastTrig: s._lastTrig || '', sinceScore: +(s._scoreT || 0).toFixed(1), msnKey: cmd._msnKey || s.step, drv,
         fleet: mine, comp, color: teamColor(cmd.team),   // the ACTUAL in-game colour (the commander's pick), not a team-slot guess
         known: cmd._knownSummary ? cmd._knownSummary() : '', metrics: M, dbg, units };
     }
@@ -11103,18 +10953,8 @@ window.RR = {
   // Tower repair crews (prototype)
   setRepairs: (v) => { repairsOn = !!v; return repairsOn; },   // A/B: enable/disable jeep repair crews
   setAiUpgrades: (v) => { aiUpgradesOn = !!v; return aiUpgradesOn; },   // A/B: AI spends surplus scrap on tower upgrades
-  // ── NN mission assigner (training pipeline) ──
   setTurtleGuard: (v) => { turtleGuardOn = !!v; setTurtleGuard(!!v); return turtleGuardOn; },   // A/B: turtle v2 defender pack
-  setMissionTemp: (t) => { missionTemp = t == null ? null : Math.max(0, t); return missionTemp; },   // nn pick temperature (null = personality)
   setHunterHarass: (v) => { setHunterHarass(!!v); return !!v; },   // A/B: hunter disruption tours
-  setMissionPolicy: (mode = 'deck', eps) => { missionPolicy = mode; if (eps != null) missionEps = eps; return { missionPolicy, missionEps }; },
-  setMissionPolicyTeam: (team, mode) => { if (mode == null) delete missionPolicyTeam[team]; else missionPolicyTeam[team] = mode; return { ...missionPolicyTeam }; },
-  loadMissionNN: (w) => { missionNN = w || null; return !!missionNN; },
-  loadMissionL2: (w) => { missionL2 = w || null; return !!missionL2; },   // L2 doctrine head; enable via setMissionPolicy('l2') / setMissionPolicyTeam(team,'l2')
-  trainLog: () => aiTrainLog,                     // graded tours: {team, arch, slot, veh, role, feat[], kills, fortDmg, flag, died, dur}
-  flushTours: () => flushTourLog(),               // grade tours still open (match end) before reading
-  clearTrainLog: () => { const n = aiTrainLog.length; aiTrainLog.length = 0; return n; },
-  missionFeatNames: () => MISSION_FEATS,
   get matchWinner() { return lastWinner; },
   aiUpgradeStatus: () => { const per = {}; for (const c of camps) { let n = 0, m = 0; for (const w of c.walls) if (w.turret) { n += w.turret.upg || 0; m++; } (per[c.team] ??= []).push(n); } return { on: aiUpgradesOn, byCamp: per }; },   // total stars per camp
   orderRepair: (team = PLAYER_TEAM) => orderRepair(team),      // force a repair for a team (debug/testing)
@@ -11217,8 +11057,6 @@ window.RR = {
   setPadFight: on => { aiPadFight = !!on; return aiPadFight; },   // A/B: fight from under the elevator shield vs always drive out first
   setReverseCap: on => { aiReverseCap = !!on; return aiReverseCap; },   // half-throttle reverse doctrine (bisection knob)
   setRightOfWay: on => { aiRightOfWay = !!on; if (!aiRightOfWay) RESV.clear(); return aiRightOfWay; },   // friendly path-reservation yielding (A/B knob)
-  setMissionWeights: on => setMissionWeights(on),                       // MissionScore weighted picker vs the classic playbook (dual-brain A/B)
-  setMissionWeightsTeam: (team, on) => setMissionWeightsTeam(team, on), // per-team override → head-to-head: scorer vs classic in ONE match
   missionScores: () => commanders.map(c => ({ team: c.team, arch: c.archetype, step: c.strategy && c.strategy.step, scores: c._missionScores || [] })),   // live weight breakdown per team
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)

@@ -272,7 +272,7 @@ class Capture extends Mission {
     // MISSIONSCORE directional run: stage via the scored side's approach point, then grab —
     // same reach-latch as the rogue sneak (goals must not flip while the runner commits).
     // The 'front' direction stages on our own approach lane, so it latches almost instantly.
-    if (missionWeightsOn(cmd) && cmd._capDir && cmd.unit && cmd.enemyRoute) {
+    if (cmd._capDir && cmd.unit && cmd.enemyRoute) {
       const u = cmd.unit.holder.position;
       if (CAP_ROUTES) {
         // Multi-waypoint route (front direct / left-right doglegs / rear water arc). Latch the whole
@@ -601,7 +601,11 @@ export function missionGarageOK(key) { const M = MISSIONS[key]; return !(M && M.
 // which fire immediately. This is what makes missions complete/abort cleanly instead of
 // the old linear step machine that could never let go of a finished objective.
 const URGENT = new Set(['capture', 'intercept', 'sap']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
-const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch
+const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch (event re-decides)
+// How long a SCORED mission runs before a non-urgent re-think. Deliberately far calmer than the
+// old cascade's 1.5s: the incumbent bonus plus this dwell are what turn a score into a commitment
+// rather than an opinion re-formed twenty times a second. A decisive jump still switches at once.
+const MSN_DWELL = 8;
 // A floor and a ceiling on how often the plan is re-examined. The floor stops a trigger that
 // fires repeatedly (a threat flickering at the edge of vision) from becoming per-tick scoring
 // by another name — the very thing triggers exist to replace. The ceiling is a safety net for
@@ -624,7 +628,6 @@ const HOME_RESPONSE = { turtle: 1.0, warrior: 0.7, hunter: 0.55, rogue: 0.25 };
 // runners fed into live towers → SIEGE the towers first; siegers dying with no damage
 // dealt → the enemy fleet is on them, ATTACK it; attackers dying without kills → stop
 // brawling and hit structures from range. defend/intercept are reactive — never banned.
-const FAIL_ALT = { capture: 'siege', siege: 'attack', attack: 'siege', scout: 'attack', scavenge: 'attack' };
 
 // Cycle a battle-cry pool deterministically (per-commander counter, no RNG) so the log reads
 // like a commander giving orders instead of "scout → attack". Bumped once per mission switch.
@@ -690,26 +693,14 @@ export function setRearSneakGate(v) { REAR_SNEAK_GATE = !!v; }
 // top one. This is the same idea as fightScore() (combat), pointed at strategy — and the
 // hand-authored version of what the L2 mission net tried to learn. It REPLACES the persona
 // choose() cascade + the 2-strike report-card ban (the decaying `success` memory below is the
-// smooth anti-repeat: "never repeat a failing mission"). Behind RR.setMissionWeights — OFF by
+// smooth anti-repeat: "never repeat a failing mission"). This is THE brain now — the classic
 // default, so the classic playbook and this scorer both live in the build, knob-selectable.
 // Slice A1: scores the existing mission set (capture undirected). Directional capture,
 // Siege-back, and the fog-honest lane-clear land in A2.
-let MISSION_WEIGHTS = true;   // the DEFAULT brain since 2026-07-18 (verdict: equal-or-better on
                               // every axis, better by design on finish/reroute; the classic
                               // cascade stays selectable below as the A/B baseline)
-export function setMissionWeights(on) { MISSION_WEIGHTS = !!on; return MISSION_WEIGHTS; }
 // Per-team override (head-to-head A/B: scorer vs classic in ONE match, like the L2 net's
 // missionPolicyTeam). undefined = follow the global knob.
-const MISSION_WEIGHTS_TEAM = {};
-export function setMissionWeightsTeam(team, on) {
-  if (on == null) delete MISSION_WEIGHTS_TEAM[team]; else MISSION_WEIGHTS_TEAM[team] = !!on;
-  return MISSION_WEIGHTS_TEAM[team];
-}
-export function missionWeightsOn(cmd) {
-  const t = cmd && cmd.team;
-  if (t != null && t in MISSION_WEIGHTS_TEAM) return MISSION_WEIGHTS_TEAM[t];
-  return MISSION_WEIGHTS;
-}
 
 // fleet-comp: (a type's share of our remaining fleet − threshold) × 10, bonus-only. Play to
 // what we have — a Firebrat-heavy fleet leans capture, a Jotun-heavy one leans the front
@@ -753,7 +744,7 @@ const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
 
 // A/B for the last-runner term, set from main.js so both halves of the change — this and the
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
-// missionScore runs for all 13 candidates every decision, and the existing setMissionWeights
+// missionScore runs for all 13 candidates every decision, and the persona
 // pattern right here is the house way to pass a knob across this boundary.
 let SAVE_RUNNER = true;
 export function setSaveRunner(on) { SAVE_RUNNER = !!on; return SAVE_RUNNER; }
@@ -1072,7 +1063,6 @@ class Doctrine {
     // of trading the last of the army out in the open — UNLESS we can win right now by
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
     // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
-    if (!missionWeightsOn(cmd) && !next && cmd.losingBadly && cmd.losingBadly() && !cmd.flagGrabbable()) { next = 'defend'; why = 'losing the attrition war — preserving what we have left'; fk = 'losing_attrition'; }   // (weights: the 'losing +2' defend term carries this — a hard lock stalemated mirror matches)
     // HOME UNDER ATTACK (persona-weighted): enemy rounds are hitting our structures. The
     // tower's radio call used to be consumed only by a commander ALREADY in defend, so any
     // offense-minded persona simply never heard it: a Hunter idled at a stale mid-field goal
@@ -1097,29 +1087,22 @@ class Doctrine {
     // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
     // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
     // without a firebrat to actually grab the exposed flag).
-    if (!missionWeightsOn(cmd) && !next && cmd.needsPartsRun && cmd.needsPartsRun()) { next = 'scavenge'; why = 'no runner left and no parts to build one'; fk = 'need_parts'; }
     // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
     // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
     // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
     // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
-    if (!missionWeightsOn(cmd) && !next && cmd.fortDown && cmd.fortDown() && !cmd.flagExposed()) { next = 'siege'; why = 'their towers are down — crack the HQ while it is open'; fk = 'towers_down'; }
     // STALEMATE GAMBIT: the match dragged on with the enemy base untouched — stop grinding the
     // mid-field duel and commit to the "Valkyrie around the back" siege (the Siege mission reads
     // cmd._gambit to force the flyer + rear flank, and rushBase suppresses engaging en route).
-    if (!missionWeightsOn(cmd) && !next && cmd.gambitOn && cmd.gambitOn() && !cmd.flagGrabbable()) { next = 'siege'; why = 'stalemate — committing to the rear-door gambit'; fk = 'gambit'; }   // …but the instant the HQ's cracked and the flag's grabbable, let choose() send the runner to CAPTURE it
     // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
     // feeding another firebrat into it (timed, so it doesn't chase forever).
-    if (!missionWeightsOn(cmd) && !next && cmd._clearPathT > 0) { next = 'attack'; why = 'clearing the runner’s killer before the next attempt'; fk = 'clear_path'; }
     // Tower-soften window (see onRunnerLost): the towers keep shredding runners → hold SIEGE
     // until they're silenced, instead of rebuilding a firebrat into the same guns each lap.
-    if (!missionWeightsOn(cmd) && !next && cmd._softenT > 0) { next = 'siege'; why = 'towers keep killing the runner — silencing them before the next attempt'; fk = 'soften'; }
     // OPENING SAPPER (persona-rolled): a Firebrat out to a home flank — lay mines on the way back,
     // drop a pod, scout that side — then fall through to the persona's real playbook.
-    if (!missionWeightsOn(cmd) && !next && cmd._sapOn && !cmd._sapDone) { next = 'sap'; why = 'opening sapper — flank recon + mines'; fk = 'sapper'; }
     // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
-    if (!missionWeightsOn(cmd) && !next && cmd._trapMode && cmd._sapDone && !cmd._trapDone) { next = 'trap'; why = 'tending the mine trap — luring them in'; fk = 'trap'; }
     if (!next) {
-      if (missionWeightsOn(cmd)) {
+      {
         // MISSIONSCORE: the weighted picker owns the whole offensive/economy plan (the
         // fortDown/gambit/soften/clearPath/scavenge/sap/trap rungs above are gated off when
         // weights are on — the success memory + siege/scavenge terms subsume them, and killing
@@ -1138,32 +1121,21 @@ class Doctrine {
           this._scoreT = 0; this._lastTrig = trig;
           next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = `re-scored: ${trig}`; fk = 'weights';
         } else { next = runningKey ? this._applyKey(cmd, runningKey) : this.step; why = 'carrying on'; fk = 'weights'; }
-      } else {
-        // L2 mission net (opt-in policy): stands in for the persona playbook's choose() —
-        // the urgent/universal rungs above and the dwell + report-card bans below still apply.
-        const l2 = cmd.l2Pick ? cmd.l2Pick() : null;
-        if (l2) { next = l2; why = 'the L2 mission net'; }
-        else { next = this.choose(cmd); why = `the ${this.constructor.name} playbook`; }
-        fk = 'choose';
       }
     }
     // REPORT CARD: the picked mission just cost two units in a row with nothing to show —
     // don't repeat the bad decision; run its unblocker. Superseded by the success memory when
     // MissionScore is on, so skip it there.
-    if (!missionWeightsOn(cmd) && next && cmd.missionBanned && cmd.missionBanned(next)) {
-      const alt = FAIL_ALT[next];
-      if (alt && !cmd.missionBanned(alt)) { why = `${next} is benched — two units lost on it for nothing`; next = alt; fk = 'benched'; }
-    }
     this._firedRung = fk;   // ai-lab decision-path: which rung justified the current decision this tick
     // Switch on dwell, on an urgent mission, OR (weights) when a fresh event has spiked the
     // pick decisively past the running mission — so an exposed flag / lost unit re-decides now
     // instead of waiting out the dwell.
     const curKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;   // the RUNNING plan's full scored key
-    const decisive = missionWeightsOn(cmd) && next !== this.step && (cmd._missionTop != null) && (cmd._missionTop - (missionScore(cmd, curKey).total) >= 4);
+    const decisive = next !== this.step && (cmd._missionTop != null) && (cmd._missionTop - (missionScore(cmd, curKey).total) >= 4);
     // Weights re-think on a calmer clock (8s) than the classic cascade's 1.5s — the incumbent
     // bonus + this dwell kill the flapping; a DECISIVE score jump (an event spike: flag opened,
     // runner died) still switches immediately.
-    const dwell = missionWeightsOn(cmd) ? 8 : DWELL;
+    const dwell = MSN_DWELL;
     if (next && next !== this.step && (this.t > dwell || URGENT.has(next) || decisive)) this._switch(next, cmd, why);
   }
   // Emergencies that preempt any persona's plan: our flag's been lifted → run it down;
@@ -1230,7 +1202,6 @@ class Doctrine {
   // later and swapped. Called from deploy(); a fresh unit has no plan in progress to protect,
   // so this skips the dwell timer and the incumbent bonus and just asks what the board wants.
   garagePick(cmd) {
-    if (!missionWeightsOn(cmd)) return;
     this._rollOpening(cmd);
     const urg = this._urgent(cmd);
     const next = urg || this._applyKey(cmd, missionPick(cmd, null));
@@ -1247,50 +1218,49 @@ class Doctrine {
     // characterful line, the bracket names the transition and WHY it happened, so every
     // mission change in the log is auditable (from → to — reason).
     if (this.log) this.log(`${this.mission.cry(cmd)}   [${from} → ${key}${why ? ' — ' + why : ''}]`);
-    if (this.log && missionWeightsOn(cmd)) { const bd = missionScoreLog(cmd); if (bd) this.log(`  ↳ ${bd}`); }   // MissionScore troubleshooting breakdown
+    if (this.log) { const bd = missionScoreLog(cmd); if (bd) this.log(`  ↳ ${bd}`); }   // MissionScore troubleshooting breakdown
   }
   // Runner died storming the base → respond to WHY, instead of feeding another firebrat down
   // the same lane. Shot by an enemy VEHICLE → send an ATTACK to clear the interceptor first
   // (timed window). Shot by TOWERS on the approach → retry as a STEALTH capture: a wide rear
   // route around the hot zone (the flag's still grabbable, just not head-on).
   onRunnerLost(cmd, enemyHasUnits) {
-    if (missionWeightsOn(cmd)) {
-      // MISSIONSCORE: a dead runner is a FAILED capture. The penalty ESCALATES with each loss so
-      // the commander can't feed six runners into the same guns (Jacob: don't repeat a mistake).
-      if (!cmd._missionSuccess) cmd._missionSuccess = {};
-      const n = cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
-      const pen = -Math.min(16, 4 + 5 * n);   // −9, −14, −16… escalating (enough to unseat an OPEN-flag capture at +13.9)
-      const failedKey = (cmd._msnKey && cmd._msnKey.startsWith('capture-')) ? cmd._msnKey : 'capture-front';
-      if (enemyHasUnits) {
-        // A DEFENDER killed the runner on THIS lane. Bench only this lane and raise ATTACK, so the
-        // follow-up is a revenge sweep and the next grab can come straight down a different
-        // approach. (Was: bench ALL FOUR lanes until "they're gone" — but the resume clause was
-        // never written, so one death benched every approach for ~8 minutes of a 16-minute match.
-        // It was also OMNISCIENT: "are their defenders dead" is not something a commander can
-        // know — their reserves and scrap are fog, exactly like tower positions before
-        // knownTowers. Judging the lane we actually lost a runner on needs no such knowledge.)
-        cmd._missionSuccess[failedKey] = pen;
-        cmd._runnerInterceptT = cmd._matchT;
-      } else {
-        // Pure tower gauntlet → bench just THIS lane so the next runner tries a different route
-        // (the wide/rear arc), the other lanes keep their own records.
-        cmd._missionSuccess[failedKey] = pen;
-        // …and say WHY siege is now worth more, rather than leaving it to be inferred from
-        // capture getting worse. Towers killed our runner, so silencing towers is the thing that
-        // makes the next attempt survivable — the mirror of the `clear interceptors` term that
-        // already boosts ATTACK when a VEHICLE does the killing (Jacob: "if it gets killed by a
-        // tower that should incentivize siege"). Explicit beats implicit: it also shows up as a
-        // named term in the AI Lab's weights board instead of being invisible.
-        cmd._runnerTowerT = cmd._matchT;
-        cmd._runnerTowerN = (cmd._runnerTowerN || 0) + 1;
-      }
-      // VISIBILITY (Jacob): show the re-evaluation after EVERY runner death — the switch-log only
-      // fires on a mission CHANGE, so a commander re-deciding "capture again" was silent. Now the
-      // penalized scores print each death, so you can watch capture drop and attack climb.
-      if (cmd.strategy && cmd.strategy.log) { const bd = missionScoreLog(cmd); if (bd) cmd.strategy.log(`  ↳ runner lost (×${n}) — ${bd}`); }
-      this.t = DWELL + 1;   // let the very next tick re-decide (event: our runner just died)
-      return;
+    // MISSIONSCORE: a dead runner is a FAILED capture. The penalty ESCALATES with each loss so
+    // the commander can't feed six runners into the same guns (Jacob: don't repeat a mistake).
+    if (!cmd._missionSuccess) cmd._missionSuccess = {};
+    const n = cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
+    const pen = -Math.min(16, 4 + 5 * n);   // −9, −14, −16… escalating (enough to unseat an OPEN-flag capture at +13.9)
+    const failedKey = (cmd._msnKey && cmd._msnKey.startsWith('capture-')) ? cmd._msnKey : 'capture-front';
+    if (enemyHasUnits) {
+      // A DEFENDER killed the runner on THIS lane. Bench only this lane and raise ATTACK, so the
+      // follow-up is a revenge sweep and the next grab can come straight down a different
+      // approach. (Was: bench ALL FOUR lanes until "they're gone" — but the resume clause was
+      // never written, so one death benched every approach for ~8 minutes of a 16-minute match.
+      // It was also OMNISCIENT: "are their defenders dead" is not something a commander can
+      // know — their reserves and scrap are fog, exactly like tower positions before
+      // knownTowers. Judging the lane we actually lost a runner on needs no such knowledge.)
+      cmd._missionSuccess[failedKey] = pen;
+      cmd._runnerInterceptT = cmd._matchT;
+    } else {
+      // Pure tower gauntlet → bench just THIS lane so the next runner tries a different route
+      // (the wide/rear arc), the other lanes keep their own records.
+      cmd._missionSuccess[failedKey] = pen;
+      // …and say WHY siege is now worth more, rather than leaving it to be inferred from
+      // capture getting worse. Towers killed our runner, so silencing towers is the thing that
+      // makes the next attempt survivable — the mirror of the `clear interceptors` term that
+      // already boosts ATTACK when a VEHICLE does the killing (Jacob: "if it gets killed by a
+      // tower that should incentivize siege"). Explicit beats implicit: it also shows up as a
+      // named term in the AI Lab's weights board instead of being invisible.
+      cmd._runnerTowerT = cmd._matchT;
+      cmd._runnerTowerN = (cmd._runnerTowerN || 0) + 1;
     }
+    // VISIBILITY (Jacob): show the re-evaluation after EVERY runner death — the switch-log only
+    // fires on a mission CHANGE, so a commander re-deciding "capture again" was silent. Now the
+    // penalized scores print each death, so you can watch capture drop and attack climb.
+    if (cmd.strategy && cmd.strategy.log) { const bd = missionScoreLog(cmd); if (bd) cmd.strategy.log(`  ↳ runner lost (×${n}) — ${bd}`); }
+    this.t = DWELL + 1;   // let the very next tick re-decide (event: our runner just died)
+    return;
+    
     if (RUNNER_MODE === 'old') { this._switch(this.softenKey, cmd); return; }   // A/B baseline: blind re-siege
     // Defenders still alive → switch to ATTACK NOW (so the NEXT deploy is a fighter, not
     // another firebrat) and hold it there for a window to clear them, then resume the grab.
