@@ -5449,7 +5449,14 @@ function liveTurretNear(x, z, r = 8) {
   return false;
 }
 const navAlarms = [];                       // alarm autopsies this match (flight recordings)
-let standFails = 0;                         // RR.decisionAlarms() — sieges with no firing position at all
+// COUNT TARGETS, NOT CALLS. This was a raw per-call counter, so one hopeless target asked a
+// hundred times read the same as a hundred hopeless targets — it measured persistence, not
+// breadth. That is not a nitpick: it moved the OPPOSITE way to a fix that plainly worked
+// (relaxing the crossfire veto took the default set 69 -> 4 while the fresh set went 202 -> 265,
+// and the entire fresh figure turned out to be one target on one seed asked 98 times). A number
+// that rises when the thing it names gets better is worse than no number.
+const standFailSeen = new Set();            // team|target|chassis — one count per genuinely stuck solve
+let standFails = 0;                         // RR.decisionAlarms() — DISTINCT targets with no firing position at all
 // Not a failure — a deliberate ugly trade. Counted anyway, because "how often is the only
 // firing position under two guns" is a fact about the MAPS we should be able to see, and
 // because if this number is large the standoff doctrine is not buying what it costs.
@@ -8173,7 +8180,10 @@ class AICommander {
     // no longer "nowhere comfortable", it is "nowhere at all", and the only tests left that can
     // have rejected everything are physical ones — the cells cannot be driven to, are across
     // water, or are solid. If crossfire still dominates the tally below, the band itself is wrong.
-    standFails++;
+    // Keyed by chassis as well as target: "no spot for a 42u gun here" and "no spot for an 80u gun
+    // here" are different findings, and collapsing them would hide a real one.
+    const _sfKey = `${this.team}|${Math.round(T.x)},${Math.round(T.z)}|${v.type}`;
+    if (!standFailSeen.has(_sfKey)) { standFailSeen.add(_sfKey); standFails++; }
     this._standFail = { x: Math.round(T.x), z: Math.round(T.z), type: v.type, reach: Math.round(reach), ...why };
     if (!this._standFailAlarmed) {
       this._standFailAlarmed = true;
@@ -8645,10 +8655,19 @@ class AICommander {
           spot = this._standoffFor(v, k);
           this._siegePlan.spots.set(k.wall, spot);   // null is cached too: don't re-search a hopeless tower every tick
           this._siegePlan.spotReach.set(k.wall, myReach);
-          if (!spot) {
-            aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — moving to the next one.`);
-            this._siegePlan.idx++;                   // crossfire/terrain ruled it out — try another tower
-          }
+          // …AND THE CACHE ONLY HOLDS IF THE PLAN DOES. This used to advance the kill order on the
+          // first null, which looked harmless and was the opposite: idx runs past order.length,
+          // _planTarget rebuilds, _buildSiegePlan allocates a fresh `spots` Map, and the null we
+          // just cached is gone. Same tower, re-solved, forever. Measured on seed 1053: 98 failed
+          // solves against ONE distinct target, which is most of a whole seed set's standFails.
+          //
+          // _resolveStand already learned this and says so in its own comment — "a failed SOLVE is
+          // not the same as a failed TOWER", measured at resolution 19/20 -> 16/20 when it skipped
+          // on the first null. It waits for its attempt counter. This path did not, and the two
+          // have disagreed ever since. Now neither advances on a null: the cached null is what
+          // stops the re-search, and _resolveStand's counter is what eventually gives up on the
+          // tower. One rule, in one place.
+          if (!spot) aiLog(this.team, `${this.cname}: There's not a good spot to shoot the tower at (${Math.round(k.x)}, ${Math.round(k.z)}) — leaving it cached as hopeless for now.`);
         }
         if (spot) {
           const ty = map.heightAt(k.x, k.z) + 5;
