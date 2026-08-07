@@ -25,6 +25,30 @@ const HOLD = 0.42;         // fraction of life at full size before it sags away
 
 let pool = [], live = [], scene = null, camera = null, ready = false;
 
+// ── EVERY FIRE ITS OWN ───────────────────────────────────────────────────────
+// Out of the box every fire is the SAME fire. VolumetricFire memoises one material in a closure
+// and hands it to every instance, so they all share a single `time` uniform — and since the noise
+// field scrolls with time, every flame samples the same noise at the same phase, from an
+// identically sized box, through an identical profile. Not merely similar: mathematically
+// identical, differing only in where it stands. Eight of them read as eight copies of one flame.
+//
+// Three variations, none touching the shader and none costing anything per frame. Every fire
+// already owns its draw call and re-uploads three buffers each frame; this adds uniform VALUES on
+// top of that, and three still compiles ONE program because it caches by shader source.
+//   PHASE  its own material, so its own clock, then an offset — a different phase into the
+//          scrolling noise is a different flame shape at any instant. This is the big one.
+//   YAW    the noise is read in the box's own space and the slicing runs against mesh.matrixWorld,
+//          so turning the box turns the noise field AND changes which cross-section is cut. Safe
+//          at any angle: the profile is already black outside radius 1, so the corners never
+//          showed flame.
+//   GIRTH  jitter on width and height — some burn tall and thin, others squat.
+//
+// Seeded rather than Math.random. Fire is drawn, never simulated (the headless harness has no
+// document and stands the whole system down), so this cannot reach a match result — but a
+// screenshot should still reproduce, and the house rule is that nothing rolls dice unseeded.
+let _fseed = 0x9e3779b9;
+const frnd = () => ((_fseed = (_fseed * 1664525 + 1013904223) >>> 0) / 4294967296);
+
 // ── textures, generated rather than shipped ──────────────────────────────────
 // RMRF has no image files anywhere and it would be a poor trade to start for a gradient and some
 // noise. Both are derived from what the shader actually asks for — see lab/fire.html, where the
@@ -102,8 +126,9 @@ export function initFire(sc, cam) {
       fire.mesh.visible = false;
       fire.mesh.renderOrder = 20;             // additive, drawn after the solid world
       fire.mesh.frustumCulled = false;        // the slice geometry's bounds are rebuilt every frame
+      fire.mesh.material = fire.mesh.material.clone();   // its own uniforms; textures stay shared by reference
       scene.add(fire.mesh);
-      pool.push({ fire, busy: false, t: 0, scale: 1 });
+      pool.push({ fire, busy: false, t: 0, scale: 1, phase: 0, jw: 1, jh: 1 });
     }
     ready = true;
   } catch (e) { ready = false; }              // no WebGL / no canvas → fires are simply off
@@ -116,7 +141,12 @@ export function fireBurst(x, y, z, scale = 1) {
   const slot = pool.find(s => !s.busy);
   if (!slot) return false;                    // pool exhausted — deliberately, see the note above
   slot.busy = true; slot.t = 0; slot.scale = scale;
-  slot.fire.mesh.position.set(x, y + 6 * 0.32 * scale, z);
+  // RE-ROLLED ON EVERY LIGHT, not once per slot: a pool of eight reused all match would otherwise
+  // become the same eight recurring flames, which is the clone problem again wearing a hat.
+  slot.phase = frnd() * 40; slot.jw = 0.82 + frnd() * 0.36; slot.jh = 0.85 + frnd() * 0.3;
+  // the height jitter goes into the base offset too, or a taller flame lifts off the wreck
+  slot.fire.mesh.position.set(x, y + 6 * 0.32 * scale * slot.jh, z);
+  slot.fire.mesh.rotation.set(0, frnd() * Math.PI * 2, 0);
   slot.fire.mesh.visible = true;
   live.push(slot);
   return true;
@@ -143,9 +173,16 @@ export function drawFire(elapsed) {
     const grow = Math.min(1, s.t / GROW);
     const fall = u < HOLD ? 1 : 1 - (u - HOLD) / (1 - HOLD);
     const k = s.scale * grow * Math.pow(Math.max(0, fall), 0.7);
-    s.fire.mesh.scale.set(k, k, k);
-    s.fire.update(elapsed);
+    s.fire.mesh.scale.set(k * s.jw, k * s.jh, k * s.jw);
+    s.fire.update(elapsed + s.phase);   // its own clock — see the note on PHASE above
   }
 }
 
-export function fireStatus() { return { ready, live: live.length, pool: POOL }; }
+export function fireStatus() {
+  return {
+    ready, live: live.length, pool: POOL,
+    mats: new Set(pool.map(s => s.fire && s.fire.mesh.material.uuid)).size,   // 1 = they are all the same fire
+    looks: live.map(s => ({ phase: +s.phase.toFixed(1), yaw: +s.fire.mesh.rotation.y.toFixed(2),
+                            jw: +s.jw.toFixed(2), jh: +s.jh.toFixed(2) })),
+  };
+}
