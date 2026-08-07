@@ -1433,8 +1433,6 @@ const PRIO = {
   hq: 10,        // the win condition: crack it and the flag is exposed
   tower: 6,      // dangerous, but only worth it when it is the thing hurting us
   wall: 2,       // low on its own — rises when it stands between us and something better
-  shooting: 10,  // this structure is hitting us RIGHT NOW → jumps above the keep (6+10 > 10)
-  recent: 6,     // …and fades over THREAT_FADE rather than switching off (gradual weights)
   inReach: 5,    // …and a gun we can shoot FROM HERE also outranks it (6+5 > 10) — see below
 };
 // WHY "IN REACH" AND NOT JUST "SHOOTING AT US" (Jacob: "shouldn't the keep have higher priority
@@ -1447,21 +1445,9 @@ const PRIO = {
 // A target we can physically shoot right now beats one we cannot, whatever the win condition says;
 // for a ground hull the keep is not a target at all until the fort comes down. "Can I hit it from
 // here" is a fact rather than a spectrum, which is why this is a step and not a curve.
-const THREAT_FADE = 15;   // seconds for "it shot at me" to decay from PRIO.recent to nothing
 const INTERCEPT_GUN_CLEAR = 8;      // u of daylight past a tower's reach when picking the ambush spot
 const INTERCEPT_PUSH_MAX = 140;     // u — furthest we walk outward looking for cover-free ground
 const INTERCEPT_GATE_STANDOFF = 14; // u in front of the gate mouth once the front guns are down
-const HQ_YIELD_FRESH = 2000;   // ms — a turret hit this recent still counts as "it is shooting us" (see _tgtStillValid)
-// How much extra a structure at (x,z) is worth because it has been shooting at us. Reads the
-// turret hit-marker damageVehicle already records, so this needs no new plumbing.
-function turretThreatBonus(v, x, z) {
-  const h = v && v._hitByTurret; if (!h) return 0;
-  const age = (performance.now() - h.t) / 1000;
-  if (age > THREAT_FADE) return 0;
-  if ((h.x - x) ** 2 + (h.z - z) ** 2 > 26 * 26) return 0;   // a different tower hit us, not this one
-  const fresh = age < 2 ? 1 : 0;                              // still under fire
-  return fresh * PRIO.shooting + PRIO.recent * (1 - age / THREAT_FADE);
-}
 // Lurcher engage/hold pulled INSIDE its 42u reach (was 50/46) so it plants close enough to
 // actually connect instead of raining rounds down short of the tower.
 const ENGAGE_RANGE = { lurcher: 40, firebrat: 24, valkyrie: 50, jotun: 70 };
@@ -7878,20 +7864,26 @@ class AICommander {
   // also why seed 116's keeps died but its TOWERS never did, and nine runners then fed into guns
   // a committed sieger would have removed.
   //
-  // THE FLAP HAS TWO STABLE ANSWERS AND ONLY ONE OF THEM IS RIGHT. Letting the gun win whenever it
-  // is in reach also stops the keep ever being shot — a sieger nearly always has SOME gun in reach,
-  // and the keep is what exposes the flag. Measured: seed 116 went from a 973s win to a STALEMATE.
-  // So the contradiction is resolved the conservative way. The incumbency bonus stands, the keep
-  // stays the default target, and the RELEASE is what yields: a gun ends the keep lock only when it
-  // genuinely outscores the keep, which in practice means it is shooting at us. That is a fact
-  // worth switching for; merely being within range is not.
+  // ONE RULE, AND IT IS THE WHOLE SIEGE TARGETING POLICY (Jacob's, and it is much simpler than
+  // what it replaces):
+  //
+  //   a gun inside our own reach outranks the keep — and if it is in our reach we may as well
+  //   assume it is shooting at us, so there is nothing to remember about who fired last
+  //
+  // What that deletes: turretThreatBonus and its fade timer, PRIO.shooting, PRIO.recent, the
+  // whole _hitByTurret targeting memory, and the keep-release clause in the target lock. Four
+  // mechanisms whose only job was to answer a question this asks directly.
+  //
+  // The objection to it was mine and it was WRONG. I argued a sieger always has some gun in reach,
+  // so the keep would never be shot and the flag never exposed — and an earlier attempt did
+  // stalemate seed 116. But the geometry says otherwise: the tower ring sits ~28u from the keep,
+  // so from a keep standoff a 42u gun reaches ONE tower and the survivors sit at 53-68u. Measured
+  // across seeds 116/179/25: 1-2 towers in reach, never all four. The phase ends by itself —
+  // kill the near guns, the far ones are out of range, the keep is what is left. Which is exactly
+  // how Jacob described approaching a base, and the reason no extra clause is needed to end it.
   _keepOutranks(v, gx, gz, px, pz) {
     const d = Math.hypot(gx - px, gz - pz);
-    const inReach = d <= (SHOT_REACH[v.type] || 42) ? PRIO.inReach : 0;
-    const towerScore = PRIO.tower + turretThreatBonus(v, gx, gz) + inReach;
-    const cHq  = this._prioTarget === 'hq'    ? PRIO.hq * 0.15 : 0;
-    const cTwr = this._prioTarget === 'tower' ? PRIO.tower * 0.15 : 0;
-    return (PRIO.hq + cHq) > (towerScore + cTwr);
+    return d > (SHOT_REACH[v.type] || 42);   // out of our reach → it is not our problem yet
   }
   _tgtStillValid(lock) {
     if (!lock || !this.unit || this.unit.dead) return false;
@@ -7911,32 +7903,28 @@ class AICommander {
     // shoot from EXACTLY WHERE WE STAND — no new route, no travel, nothing for the driver to fail
     // at. If it is out of reach we keep the keep and keep driving, which is the same answer the
     // old code gave and cost nothing to reach.
-    if (lock.hq) {
-      const c = lock.camp;
-      if (!(c && c.flagHQ && !c.flagHQ.dead)) return false;
-      const p = this.unit.holder.position;
-      const reach = SHOT_REACH[this.unit.type] || 42;
-      const inReach = (x, z) => (x - p.x) ** 2 + (z - p.z) ** 2 <= reach * reach;
-      // A GUN WE CAN SHOOT FROM HERE ends the keep lock — it does not have to be shooting first.
-      // PRIO scores it above the keep for exactly this reason (see PRIO.inReach), but the lock held
-      // the target so the scorer was never asked, and the priority change alone changed nothing.
-      // Still no travel involved: the tower is inside our reach by construction, so this cannot
-      // send the unit hunting a new firing position — which is what made the first version of this
-      // release cost 18 scuttles.
-      // Only release for a gun that the selection below will ACTUALLY take. Asking the same
-      // question in both places is what stops the release/re-promote loop.
-      const gun = this.plannableTowers().find(k => inReach(k.x, k.z)
-        && !this._keepOutranks(this.unit, k.x, k.z, p.x, p.z));
-      if (gun) {
-        aiLog(this.team, `${this.cname}: Tower in reach — forget the keep, put it down first!`);
-        return false;
-      }
-      const h = this.unit._hitByTurret, now = performance.now();
-      if (!h || now - h.t >= HQ_YIELD_FRESH) return true;             // nothing is shooting us either
-      if (!inReach(h.x, h.z)) return true;                            // …and we can't hit back from here
-      aiLog(this.team, `${this.cname}: That tower's got our range and we've got its — leave the keep, kill the gun!`);
-      return false;
-    }
+    // THE LOCK HOLDS FACTS, NOT OPINIONS. It used to carry a whole keep policy — release when a
+    // gun is in reach, release when one has hit us recently and we can hit back — which is a
+    // PRIORITY judgement, the exact thing the weights above decide, written a second time in
+    // different words. Two hand-written copies of one judgement drift, and these drifted half a
+    // point apart: the lock let go, the scorer put the keep straight back, twenty-nine times in a
+    // second. (Jacob, from the symptom: "I don't really understand why there is a keep release. I
+    // thought we had a system that used priority weights.")
+    //
+    // So the lock now only answers "is this target still a thing" — the keep is gone when the keep
+    // is rubble — and _keepOutranks decides every tick what to shoot. The stickiness the lock was
+    // invented for is not lost: the target is still committed between ticks, it is simply the
+    // scorer that ends the commitment rather than a private rulebook.
+    // THE KEEP IS NEVER LOCKED. A lock exists to stop a committed target being dropped on a
+    // hair's-breadth change, and the keep needs no such protection: under the rule above it is
+    // simply what we shoot whenever no gun is inside our reach, which is a fact about geometry and
+    // does not flicker. Locking it was what required a release clause, and the release clause was
+    // what disagreed with the scorer. No lock, no release, no disagreement.
+    //
+    // TOWERS still lock (below), and that is what "one at a time" means — a gun we have started
+    // on stays the target until it is rubble, rather than swapping to whichever is nearest as we
+    // drift around the ring.
+    if (lock.hq) return false;
     if (lock.wall) { const t = lock.wall.turret; return !!(t && !t.dead && !t.falling); }
     return liveTurretNear(lock.x, lock.z);   // no object handle (a jeep, a raw point) — ask the board
   }
@@ -8415,7 +8403,7 @@ class AICommander {
     // the plan is a flank. SIEGE-BACK is folded into the plan's `mode`, so the old per-tick
     // rear-only filter is gone along with the raw nearest-turret scan it used to feed.
     let _tgtWhy = 'none';   // WHICH code path chose the target — for the re-selection autopsy
-    const _br = { plan: false, inSense: false, promote: false, hitBack: false, jeep: false };   // which branches were LIVE this tick
+    const _br = { plan: false, inSense: false, promote: false };   // which branches were LIVE this tick
     let stand2 = null, stand2Ref = null;
     let hqThreat = false;
     let _tgtWall = null;   // the live wall/turret this target IS, for the are-you-still-there test
@@ -8453,8 +8441,8 @@ class AICommander {
       //
       // Jacob's model, and it needs no ordering at all: head for the flag HQ, and kill whatever
       // threatens you on the way. The keep is the default target (PRIO.hq); a gun within our reach
-      // outranks it (PRIO.inReach) and so does one that is shooting at us (PRIO.shooting), both
-      // resolved by `promote` below. The FOB's towers are our problem only when they are in the
+      // outranks it (PRIO.inReach), which under the current rule is the whole of it: a gun inside
+      // our reach is assumed to be shooting at us, so there is nothing else to weigh. The FOB's towers are our problem only when they are in the
       // way — which is exactly what "near enough to matter" means here.
       //
       // So the candidate is simply the nearest live gun we know about. The plan survives as the
@@ -8660,19 +8648,22 @@ class AICommander {
     // recent hit" changes with every incoming round, and the firing position moves with the
     // target. The symptom it was added for — grinding a gunless tower under repair while a live
     // gun kills you — is now covered by the target being COMMITTED to a chosen tower and by
-    // turretThreatBonus preferring a gun that is actually shooting when the choice is first made.
+    // the target being COMMITTED to a chosen tower until that tower is rubble.
     // Being shot is a reason to re-examine the plan (the brain's `threatened`/`ambushed` rungs
     // still respond, and taking fire is a re-score trigger); it is not a reason to silently
     // rewrite what we are shooting at.
-    const hitBack = false;
-    // Tower under ACTIVE repair → shoot the crew's JEEP instead (cancels the heal); the
-    // tower itself is a sponge that soaks fire while its neighbours shoot back. (Unless
-    // we're being SHOT — then the gun firing at us stays the target.)
-    if (threat && !hqThreat && !hitBack && !_locked) {
-      const jp = enemyRepairJeepNear(this.team, threat.x, threat.z);
-      if (jp) { threat = jp; _tgtWhy = 'the repair jeep'; _br.jeep = true; if (!this._healHuntOn) { this._healHuntOn = true; aiLog(this.team, `${this.cname} ${this.unit.type}: “That tower's got a repair crew — kill the jeep, kill the fix!”`); } }
-      else this._healHuntOn = false;
-    }
+    // (A REPAIR JEEP NEVER STEALS THE TARGET FROM A GUN. This used to swap onto the crew whenever
+    // one was servicing the tower we were shooting, on the theory that killing the fix beats
+    // out-damaging it. But by the time this runs the target is always a LIVE GUN — plannableTowers
+    // only returns armed ones — so the swap traded the thing that is shooting us for a soft-skin
+    // support vehicle, and walked the unit deeper into the base to chase it. Jacob: "I wouldn't
+    // want a unit moving into a flagbase trying to get a jeep and taking fire from 3 guns... even
+    // if the jeep is repairing a tower we can ignore it and take on the real danger."
+    //
+    // The distinction that makes this safe already exists: a TOWER is a structure and harmless, a
+    // GUN is the danger, and only guns are ever planned against. A crew rebuilding bare rubble is
+    // rebuilding something we were never going to shoot. And a gun being repaired while we shell
+    // it is not a race we lose — RepairCrew abandons the job the moment the body hits zero again.)
     // COMMIT. Whatever the selection above landed on becomes the standing target, together with
     // the firing spot and the live object we can ask "are you still there?".
     if (!_locked) {
