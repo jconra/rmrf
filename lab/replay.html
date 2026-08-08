@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF · replay lab</title>
+<script src="../oops.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:#0c1118; font-family:'Courier New',monospace; }
+  canvas { display:block; }
+
+  /* The game's own HUD nodes are present but hidden. main.js looks these up by id and does not
+     guard every access; stubbing them is cheaper and far less fragile than guarding ~30 lookups
+     in a 12,000-line file we do not want to fork. Nothing here is styled — it never shows. */
+  #hud, #player-bars, #perf, #touch-joystick, #touch-aim, #fire-btn, #fire-btn-l { display:none !important; }
+
+  /* ── the lab's own UI ───────────────────────────────────────────────────── */
+  #lab-ui { position:fixed; inset:0; pointer-events:none; z-index:10000; }
+  #lab-ui > * { pointer-events:auto; }
+
+  #replay-bar {
+    position:fixed; left:50%; transform:translateX(-50%); bottom:14px;
+    display:flex; gap:6px; align-items:center; padding:8px 12px; border-radius:10px;
+    background:rgba(10,16,22,0.92); border:1px solid rgba(90,209,255,0.35);
+    font-size:12px; color:#dfe8ef; box-shadow:0 6px 24px rgba(0,0,0,0.5);
+  }
+  #replay-bar button {
+    background:rgba(90,209,255,0.12); border:1px solid rgba(90,209,255,0.4); color:#dfe8ef;
+    border-radius:6px; padding:5px 10px; cursor:pointer; font:12px 'Courier New',monospace;
+  }
+  #replay-bar button:hover { background:rgba(90,209,255,0.28); }
+  #replay-bar button.on { background:rgba(90,209,255,0.5); }
+  #replay-status { margin-left:8px; color:#8fa3b3; min-width:210px; }
+
+  #replay-panel {
+    position:fixed; right:12px; top:14px; width:310px; padding:11px 13px; border-radius:10px;
+    background:rgba(10,16,22,0.92); border:1px solid rgba(255,138,61,0.4);
+    font-size:11px; line-height:1.6; color:#dfe8ef; white-space:pre-wrap; display:none;
+    box-shadow:0 6px 24px rgba(0,0,0,0.5);
+  }
+
+  /* Launcher — shown until a match is loaded. */
+  #launch {
+    position:fixed; inset:0; z-index:10001; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:16px;
+    background:radial-gradient(circle at 50% 40%, #16202b 0%, #0c1118 70%); color:#dfe8ef;
+  }
+  #launch h1 { font-size:20px; letter-spacing:6px; font-weight:bold; color:#5ad1ff; }
+  #launch p { font-size:12px; color:#8fa3b3; max-width:430px; text-align:center; line-height:1.7; }
+  #launch .row { display:flex; gap:8px; align-items:center; }
+  #launch input {
+    background:rgba(255,255,255,0.06); border:1px solid rgba(90,209,255,0.4); color:#dfe8ef;
+    border-radius:6px; padding:7px 10px; font:13px 'Courier New',monospace; width:110px;
+  }
+  #launch button {
+    background:rgba(90,209,255,0.16); border:1px solid rgba(90,209,255,0.5); color:#dfe8ef;
+    border-radius:6px; padding:8px 14px; cursor:pointer; font:13px 'Courier New',monospace;
+  }
+  #launch button:hover { background:rgba(90,209,255,0.34); }
+  #launch .hint { font-size:11px; color:#5f7382; }
+</style>
+</head>
+<body>
+
+<!-- The game's HUD stubs (hidden). See the note in the stylesheet. -->
+<div id="hud"></div>
+<div id="player-bars">
+  <span id="hp-fill"></span><span id="fuel-fill"></span><span id="ammo-fill"></span>
+  <span id="ammo-txt"></span><span id="shield-row"><span id="shield-fill"></span></span>
+</div>
+<div id="perf"></div>
+<div id="touch-joystick"><div id="touch-knob"></div></div>
+<div id="fire-btn-l"></div><div id="fire-btn"></div>
+<div id="touch-aim"><div id="aim-arc"></div><div id="aim-knob"></div><span id="aim-hint"></span></div>
+
+<div id="lab-ui"></div>
+
+<div id="launch">
+  <h1>REPLAY LAB</h1>
+  <p>Loads a real match from its seed and rolls forward to the moment something goes wrong.
+     Matches are bit-identical from a seed, so this is the game itself — not a recording.</p>
+  <div class="row">
+    <input id="seed" value="3369" inputmode="numeric" aria-label="seed">
+    <button id="go-stuck">find the first stuck unit</button>
+    <button id="go-watch">just watch</button>
+  </div>
+  <div class="row"><span class="hint">space = pause · . = one tick · the bar sets speed</span></div>
+</div>
+
+<script>
+  // main.js calls this after its first frame; the lab has no splash of its own.
+  window.__rmrfHideSplash = function () {};
+</script>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+  // THE WHOLE POINT: import the REAL game. Not a stripped copy — main.js is 12,000 lines and
+  // contains the nav, the driver and the AI, which is exactly the code this lab exists to watch.
+  // A fork would drift and then quietly show us a bug we had already fixed.
+  const qs = new URLSearchParams(location.search);
+
+  // Nothing to replay yet → show the launcher and wait.
+  if (!qs.has('seed')) {
+    const go = (extra) => {
+      const s = (document.getElementById('seed').value || '3369').trim();
+      const u = new URL(location.href);
+      u.search = `?aivsai&replay&nav&seed=${s}&dseed=${s}&rngseed=${s}${extra}`;
+      location.href = u.toString();
+    };
+    document.getElementById('go-stuck').onclick = () => go('&find=stuck');
+    document.getElementById('go-watch').onclick = () => go('');
+  } else {
+    document.getElementById('launch').remove();
+    // The game reads its own configuration off location.search, which already carries what the
+    // launcher put there (aivsai + the seeds), so it boots straight onto the field.
+    await import('../js/main.js?v=427');
+    await new Promise(r => {
+      (function wait() { (window.RR && window.RR.setTimeScale && window.RR.commanders && window.RR.commanders.length >= 2) ? r() : setTimeout(wait, 40); })();
+    });
+    const { initReplay } = await import('../js/replay.js?v=2');
+    initReplay(window.RR, qs, document.getElementById('lab-ui'));
+  }
+</script>
+</body>
+</html>

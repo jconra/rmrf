@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, FOF_DEFAULT } from './AI.js?v=109';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT } from './AI.js?v=109';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -1512,6 +1512,7 @@ let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a 
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
 let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
+let aiFordHalo = QS.has('fordhalo');      // judge WATER clearance by the hull's own footing (1u) instead of its wall-clearance radius (3u) — off pending its gate
 let aiMineAvoid = !QS.has('nomineavoid'); // soft-steer AI ground units around mines their team has spotted
 let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
 
@@ -5125,7 +5126,137 @@ let _astarFrameNodes = 0;
 // than several cheap inconclusive ones (the siege standoff solver — see _standoffFor). A search
 // that runs out of nodes proves nothing either way, so a caller that must get a real answer is
 // better off paying for it once.
+// ── ROUTE SMOOTHING (string-pull) ────────────────────────────────────────────
+// A* returns one waypoint PER GRID CELL, so every route is a staircase: to cross an empty
+// field a unit is handed forty waypoints describing a diagonal it could have driven in one
+// straight line. That staircase is what makes routes look robotic, and it is what pins a hull
+// on corners — each waypoint is a small course correction the chassis has to square up to.
+//
+// The fix is Jacob's: walk the route and, whenever the straight line from waypoint i to
+// waypoint i+2 is clear, delete the middle one. Generalised here to reach as far ahead as the
+// straight line stays clear, which collapses a whole diagonal run to its two endpoints.
+//
+// THE RULE THAT KEEPS IT HONEST: a shortcut is taken only if it COSTS NO MORE than the stretch
+// it replaces, priced with the same cost function A* used. A* does not merely avoid impassable
+// ground — it prices terrain (deep-ish water is 35 to a sinker, forest is 30 to a Firebrat, a
+// road is 0.5), and a naive "is the line blocked?" test would happily straighten a Jotun's
+// careful dry route into a bog, or cut a road-follower off its road.
+//
+// Comparing TOTALS rather than per-cell worsts matters: a per-cell rule lets one expensive
+// waypoint at the far end raise the ceiling for the whole shortcut, which is exactly how a route
+// that forded one cell of water would get straightened into a twenty-cell wade. Since a straight
+// line is the shortest distance between two points, on uniform ground the shortcut always wins
+// and the staircase collapses completely; where the pathfinder paid for something — a road, dry
+// land — the detour it bought is cheaper than the line, and the corner stays.
+// Walk EVERY grid cell a segment passes through, in order, handing back the length of segment
+// spent inside each (grid traversal, Amanatides–Woo). Exact where sampling is approximate: a line
+// that clips the corner of one cell visits that cell here and can be missed by any fixed sample
+// spacing. Cells are centred on multiples of `cell`, so cell i spans [(i-0.5)c, (i+0.5)c) — the
+// +0.5 shift below moves that onto integer boundaries where the traversal maths is standard.
+// The callback returning false stops the walk early (used to bail on the first blocked cell).
+function walkCells(ax, az, bx, bz, cb) {
+  const c = grid.cell;
+  let ux = ax / c + 0.5, uz = az / c + 0.5;
+  const vx = bx / c + 0.5, vz = bz / c + 0.5;
+  const dx = vx - ux, dz = vz - uz;
+  const total = Math.hypot(bx - ax, bz - az);
+  let i = Math.floor(ux), j = Math.floor(uz);
+  const stepI = dx > 0 ? 1 : dx < 0 ? -1 : 0, stepJ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+  const tDX = dx !== 0 ? 1 / Math.abs(dx) : Infinity, tDZ = dz !== 0 ? 1 / Math.abs(dz) : Infinity;
+  let tMX = dx !== 0 ? (stepI > 0 ? i + 1 - ux : ux - i) / Math.abs(dx) : Infinity;
+  let tMZ = dz !== 0 ? (stepJ > 0 ? j + 1 - uz : uz - j) / Math.abs(dz) : Infinity;
+  let t = 0;
+  for (let guard = 0; guard < 4096; guard++) {
+    const tNext = Math.min(tMX, tMZ, 1);
+    if (cb(i, j, (tNext - t) * total) === false) return false;
+    if (tNext >= 1) return true;
+    t = tNext;
+    if (tMX < tMZ) { i += stepI; tMX += tDX; } else { j += stepJ; tMZ += tDZ; }
+  }
+  return true;
+}
+
+const SMOOTH_LOOKAHEAD = 24;   // cells to try to reach ahead — bounds the pass at O(n·k)
+let aiSmoothPath = !QS.has('nosmooth');   // string-pull A* routes (RR.setSmooth) — A/B knob
+let smoothClear = !QS.has('nosmoothclear');  // a shortcut must keep a clear ring around it (RR.setSmoothClear)
+let smoothCut = 0, smoothKept = 0;        // waypoints removed / kept, so the pass can prove it works
+const _smooth = (v, pts) => {
+  if (!aiSmoothPath) return pts;
+  const out = smoothPath(v, pts);
+  smoothCut += pts.length - out.length; smoothKept += out.length;
+  return out;
+};
+function smoothPath(v, pts) {
+  if (!pts || pts.length < 3) return pts;
+  const c = grid.cell;
+  const costAt = (x, z) => vehCellCost(v, Math.round(x / c), Math.round(z / c));
+  // What the straight line a→b costs, priced the way A* prices ground. Infinity if it is blocked
+  // anywhere along the way, so an impassable line can never win the comparison.
+  //
+  // This walks the EXACT cells the segment passes through (grid traversal) rather than sampling
+  // points along it. Sampling — even twice per cell — steps over a cell the line only clips at a
+  // corner, and the first version of this pass did exactly that: it produced one route straight
+  // through blocked ground out of 35. A shortcut test that is merely usually right is worse than
+  // none, because every route it waves through is one the pathfinder already declined.
+  const lineCost = (a, b) => {
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    if (len < 1e-6) return 0;
+    let sum = 0;
+    const ok = walkCells(a.x, a.z, b.x, b.z, (i, j, seg) => {
+      const cc = vehCellCost(v, i, j);
+      if (!isFinite(cc)) return false;                   // blocked: stop the walk, reject the line
+      sum += cc * seg;
+      return true;
+    });
+    return ok ? sum : Infinity;
+  };
+  // CLEARANCE, asked SEPARATELY from cost — and the separation is the whole point. "Is every cell
+  // passable?" is a question about CELLS; driving is a question about a HULL, and this one is 3u
+  // wide. A line can thread legally between two blocked cells and scrape both: measured, the
+  // first version cut the margin to blocked ground from a full cell down to 0.5u. In the open
+  // that is harmless (transit-stuck in `advance` went DOWN, 940 -> 857); in the tight ground
+  // around a base it is not (`suppress` 93 -> 307, scuttles 8 -> 18, nav alarms 49 -> 89).
+  //
+  // The first attempt at this fix folded the check INTO lineCost, which was much worse and worth
+  // recording: lineCost also prices the ORIGINAL legs, A* legitimately routes through gaps with
+  // no clearance, so those legs became Infinity too — and `Infinity <= Infinity` is true, so
+  // every shortcut passed. A test that returns "impossible" for both sides of a comparison
+  // silently approves everything.
+  //
+  // Note this does not change what A* may route through: a one-cell corridor stays navigable, it
+  // just keeps its staircase. Only the SHORTCUT has to earn the room.
+  const hasRoom = (a, b) => smoothClear ? walkCells(a.x, a.z, b.x, b.z, (i, j) => {
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++)
+      if ((di || dj) && cellBlocked(v, i + di, j + dj)) return false;
+    return true;
+  }) : true;
+  const out = [pts[0]];
+  let i = 0;
+  while (i < pts.length - 1) {
+    let best = i + 1, walked = 0;
+    const far = Math.min(pts.length - 1, i + SMOOTH_LOOKAHEAD);
+    for (let j = i + 1; j <= far; j++) {
+      // Price the original stretch one leg at a time, with the same function used on the
+      // shortcut, so the comparison is like for like rather than two approximations.
+      walked += lineCost(pts[j - 1], pts[j]);
+      if (j <= i + 1 || !isFinite(walked)) continue;
+      const cand = lineCost(pts[i], pts[j]);
+      // Finite AND no dearer AND with room for the hull. isFinite is not redundant: without it an
+      // unreachable candidate compared against an unreachable original would compare equal.
+      if (isFinite(cand) && cand <= walked + 1e-6 && hasRoom(pts[i], pts[j])) best = j;
+    }
+    out.push(pts[best]);
+    i = best;
+  }
+  return out;
+}
+
 function planPath(v, dest, opts = {}) {
+  // A FLYER'S ROUTE IS THE STRAIGHT LINE. The Valkyrie ignores walls, crosses water and flies
+  // over trees, so nothing on the map can block it and the smoothing pass above would collapse
+  // any route it found back to exactly this. Skipping the search is not a special case sneaking
+  // navigation back out — it is the answer the search would return, for free.
+  if (v._move && v._move.ignoreWalls) return [{ x: dest.x, z: dest.z }];
   _planFrame++; const _byK = opts.by || 'nav';
   _planBy[_byK] = (_planBy[_byK] || 0) + 1;
   _planByAll[_byK] = (_planByAll[_byK] || 0) + 1;   // unconditional: the panel's copy resets, this one does not
@@ -5158,11 +5289,13 @@ function planPath(v, dest, opts = {}) {
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
       const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
-      if (p2 && p2.length >= 1) { _astarFrameNodes += p2.nodes || 0; const o2 = detourMines(v, p2.map(n => ({ x: n.i * c, z: n.j * c }))); o2.budgetHit = !!p2.budgetHit; return o2; }
+      if (p2 && p2.length >= 1) { _astarFrameNodes += p2.nodes || 0; const o2 = detourMines(v, _smooth(v, p2.map(n => ({ x: n.i * c, z: n.j * c })))); o2.budgetHit = !!p2.budgetHit; return o2; }
     }
     return null;
   }
-  const out = detourMines(v, path.map(n => ({ x: n.i * c, z: n.j * c })));
+  // Smooth BEFORE the mine detour: detourMines bends the route around spotted mines, and that
+  // avoidance must survive into the final shape rather than be straightened back out of it.
+  const out = detourMines(v, _smooth(v, path.map(n => ({ x: n.i * c, z: n.j * c }))));
   out.budgetHit = !!path.budgetHit;   // carried through the transforms: "partial because FAR" ≠ "partial because UNREACHABLE"
   return out;
 }
@@ -5529,6 +5662,19 @@ let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire re
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
 let aiLandmass = !QS.has('nolandmass');   // reject destinations on ground the unit can't drive to (see buildNavComp). RR.setLandmass
 let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
+let aiStandRoute = !QS.has('nostandroute');    // route the WHOLE way to a firing position instead of handing the last 26u back to direct steer (RR.setStandRoute)
+let aiFlyerRoute = !QS.has('noflyerroute');    // give the Valkyrie a real GOTO (a straight line) instead of no order at all (RR.setFlyerRoute)
+// DRIVE ONTO THE SOLVED FIRING POSITION rather than stopping 14u short. The reasoning was sound —
+// the standoff solver vets the spot (in range, not too close, on land, out of crossfire, path
+// checked), so throwing that away 14u out wastes it — but the 240-seed gate says no, decisively:
+//   with it:     239/240 resolved, 1 stalemate, transit-stuck in suppress 254
+//   without it:  240/240 resolved, 0 stalemates, transit-stuck in suppress 4
+// Everything else in the batch held constant. So the spot is fine and the APPROACH to it is not:
+// the last 14u into a firing position is tight, contested ground, and hulls grind there. That is a
+// real finding the change earned — it is left in, defaulted OFF, and `?standarrive` turns it back
+// on for whoever fixes the approach. Not deleted: the argument for it is still right.
+let aiStandArrive = QS.has('standarrive');
+const STAND_ARRIVE = 5;                        // u — close enough to be standing on the spot the solver vetted
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
 // How many times ONE tower's firing spot may be re-solved before we stop trying and move down the
 // kill order. Without this the escape hatches re-solved forever: each solve returns a slightly
@@ -5720,6 +5866,7 @@ function freshSlot() {
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
     _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
+    _navBail: null, _bailWhy: null, _bailT: 0, _bailX: null, _bailZ: null, _bailV: null,   // nav ledger: why this slot got no order, for how long, and from where
     _lastFlip: null,                                   // log anti-bounce
     _patrolI: 0,                                       // position on the (shared) patrol route
     _patrolHoldT: 0,                                   // guard-the-shield dwell timer (gen patrol node)
@@ -7328,10 +7475,42 @@ class AICommander {
   // home to resupply/retreat, close to siege standoff). Combat (engage/suppress),
   // the gate exit, and the unstick reflex keep their own tuned steering. Flyers go
   // straight. Falls back to the brain's seek when there's no route.
+  // Stand here on purpose. Issues a real HOLD order so the driver owns the tick and the nav
+  // ledger stays honest — the behaviour still supplies the pedals, exactly as it did under DIRECT.
+  _hold(cmd, why) {
+    // A maneuver outranks standing still: if the brain picked ORBIT/KITE/JOUST this tick, let the
+    // caller issue it rather than pinning the unit here. Returning false hands the tick back
+    // unchanged, so this can never take motion away from a behaviour that wanted it.
+    if (cmd.mnv) return false;
+    this._navBail = null;
+    this._driver.order({ type: 'HOLD', by: cmd.state, why });
+    // No tick() — a HOLD produces no pedals by design; the behaviour's own output stands.
+    return true;
+  }
+
+  // The reverse-pivot, as an order. The pedals are the ones the reflex already computed — this
+  // only puts a name on the tick so the ledger's remaining entries are all genuine defects.
+  _jolt(cmd, by) {
+    this._navBail = null;
+    this._driver.order({ type: 'JOLT', by, side: (cmd.turn || 1) > 0 ? 1 : -1 });
+    return true;
+  }
+
   _navOverride(v, view, cmd, dt) {
     this._destIsStand = false;   // set by the suppress branch below; reset every tick so it can't leak across states
-    if (v._move.ignoreWalls) return;
-    if (cmd.breakAim) return;     // brain is squaring up to shoot a blocker — don't steer it around
+    // WHY DID THIS TICK NOT GET A ROUTE? Every bail below names itself. 40% of all driving was
+    // running under DIRECT — "the behavior steers itself" — and two thirds of that was a unit
+    // travelling to something 40u+ away with no route at all. "It fell through to DIRECT" is not
+    // a diagnosis, so each exit is tagged and the tally is reported with the nav alarms.
+    this._navBail = null;
+    // A FLYER NAVIGATES TOO — it just navigates in straight lines. This used to return here, which
+    // left the Valkyrie permanently order-less: half of all order-less driving, and the one class
+    // of unit the driver's stall watchdog, flight recorder and unreachable-goal contract never
+    // covered. Nothing on the map blocks it, so planPath hands back the straight line without
+    // searching; the point of coming through here is that the result is a real GOTO somebody owns.
+    const flyer = v._move.ignoreWalls;
+    if (flyer && !aiFlyerRoute) { this._navBail = 'flyer'; return; }
+    if (cmd.breakAim) return this._hold(cmd, 'lining up a shot on a blocker');
     const st = cmd.state;
     // RELEASE VALVE: a sieger holding a target it is sitting OUTSIDE its own weapon range of
     // is doing nothing but waiting to be shot — it cannot fire from here, so no amount of
@@ -7376,8 +7555,16 @@ class AICommander {
     // (richwatch: stagnant 30s+ at gd 75-185 in suppress). Path-follow with A* until close,
     // then hand the final approach + the fire ladder back to the behavior. NAV_ASTAR_STATES
     // stays without 'suppress' — the nav overlay treats the close-in fight as combat-steered.
+    // THE 26u HANDBACK IS GONE (aiStandRoute). The route used to stop 26u short and hand the last
+    // leg to direct steer + dodge feelers — and that last leg is the whole point of a firing
+    // position. Measured over six seeds, 7425 driving ticks fell through here with no order at
+    // all, 52% of them still 14u+ out; it is the single biggest hole in the nav ledger after the
+    // Valkyrie (which needs no route). It is also the same bug as the 70u split deleted from this
+    // very branch: a bare distance test that swaps WHO IS DRIVING mid-journey. The fire ladder
+    // never needed this — the brain keeps cmd.fire regardless of who owns the pedals.
     else if (st === 'suppress' && view.threatStand
-             && (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2 > 26 * 26) {
+             && (aiStandRoute
+                 || (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2 > 26 * 26)) {
       // ONE DESTINATION, ONE ROUTE. There used to be a 70u split here: beyond it the unit drove
       // to the MISSION OBJECTIVE, inside it to the firing spot. Two stable destinations far apart,
       // chosen by a bare distance test recomputed every tick — so a unit hovering at the boundary
@@ -7394,7 +7581,17 @@ class AICommander {
       // under it. The destination changes on new INFORMATION — a tower seen, a tower shooting at
       // us, the target re-scored — never on how far we have driven.
       const d2s = (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2;
-      dest = view.threatStand; slack = 14;
+      // ARRIVE ON THE SPOT, NOT NEAR IT (Jacob). The standoff solver does real work to pick this
+      // point — in range but not needlessly close, on land, out of crossfire, and vetted with an
+      // actual path check. Handing back 14u short throws that away: 14u is a third of a Jotun's
+      // reach, enough to sit outside the range the spot was chosen for, or inside the danger band
+      // it was chosen to avoid. If the position is worth solving for, it is worth driving to.
+      //
+      // This costs nothing in settling behaviour, which was the original reason for a wide radius:
+      // the driver already clamps its final leg to 2u regardless of what the order asks for, so
+      // the hull eases in the same way it always did. All this number decides is how close the
+      // unit gets before navigation hands the pedals back to the firing footwork.
+      dest = view.threatStand; slack = aiStandArrive ? STAND_ARRIVE : 14;
       this._destIsStand = true;
       dlog(`suppressStand:${this.team}`, { unit: v.type, distU: +Math.sqrt(d2s).toFixed(0) },
         `${this.cname} ${v.type}: routing to its firing position, ${Math.round(Math.sqrt(d2s))}u out.`);
@@ -7412,9 +7609,18 @@ class AICommander {
           v.ai._unstickN = 0;
         }
       }
+      // Suppress is the biggest hole in the ledger, so name WHICH of its two ways of falling
+      // through happened: no firing position to drive to at all, or one we're already near.
+      if (st === 'suppress') {
+        const ts = view.threatStand;
+        const dS = ts ? Math.hypot(ts.x - v.holder.position.x, ts.z - v.holder.position.z) : -1;
+        this._navBail = !ts ? 'suppress:nostand'
+          : dS < 6 ? 'suppress:d<6' : dS < 14 ? 'suppress:d6-14' : dS < 20 ? 'suppress:d14-20' : 'suppress:d20-26';
+      } else if (st === 'unstick') return this._jolt(cmd, st);   // the reverse-pivot IS the order
+      else this._navBail = 'nobranch:' + st;
       return;   // engage/suppress: steer as-is
     }
-    if (!dest) return;
+    if (!dest) { this._navBail = 'nodest:' + st; return; }
     // Every dest above is a raw coordinate out of a mission or a memory, and none of that code
     // ever asked whether this hull could stand there. Snap it onto ground the unit can actually
     // reach (nearestDrivable). One place rather than per-mission: the missions all have the same
@@ -7422,12 +7628,19 @@ class AICommander {
     // the bug for months. A no-op on a single connected landmass — which is the normal case —
     // it earns its keep on the goal over open water or on an islet, where the unit used to drive
     // at the sea and grind on the beach until the watchdog scuttled it.
-    dest = nearestDrivable(v, dest.x, dest.z);
-    // …then off any cell this hull could never occupy. Landmass first (which island), structures
-    // second (where on it), so the answer that comes out is standable.
-    dest = standableGoal(v, dest.x, dest.z);
+    // …but NOT for a flyer. Both of these snap a goal onto ground a hull can stand on, which is
+    // exactly wrong for a unit that hovers: it would drag a Valkyrie's goal ashore off the water
+    // or off the wall it is perfectly entitled to sit above. "Reachable" for a flyer is anywhere.
+    if (!flyer) {
+      dest = nearestDrivable(v, dest.x, dest.z);
+      // …then off any cell this hull could never occupy. Landmass first (which island), structures
+      // second (where on it), so the answer that comes out is standable.
+      dest = standableGoal(v, dest.x, dest.z);
+    }
     const d2 = (dest.x - v.holder.position.x) ** 2 + (dest.z - v.holder.position.z) ** 2;
-    if (d2 < slack * slack) return;                 // close enough — hand back to the behavior
+    // ARRIVED. Not a fall-through: the unit is where the order sent it, and standing there is
+    // the point. An explicit hold says so, and keeps 'no order' meaning 'bug'.
+    if (d2 < slack * slack) return this._hold(cmd, 'arrived — ' + st);
     // ESCALATION: when a unit has been genuinely stuck a long time (the local jolt + the
     // routine replan didn't break it), the PATH itself is the problem — it keeps routing
     // back into the same spot. So mark that spot impassable for a few seconds and replan
@@ -7452,7 +7665,7 @@ class AICommander {
       this._joltT -= dt;
       cmd.fwd = -0.8; cmd.turn = this._joltSide || 1;
       if (v.ai) v.ai._wantMove = true;
-      return;
+      return this._jolt(cmd, st);
     }
     // The DRIVER takes it from here: the state's resolved destination becomes a standing
     // GOTO order; the driver route-follows it (same A* cache) and reports the contract
@@ -7484,6 +7697,7 @@ class AICommander {
         v.ai.noReach = { x: v.ai.lastSeen.x, z: v.ai.lastSeen.z, t: v.ai.t };
         v.ai.lastSeen = null;
         aiLog(this.team, `${this.cname}: Can't reach that last contact — writing it off, back to the plan.`);
+        this._navBail = 'unreach:pursue';
         return;
       }
       if (isStand && this._siegePlan) {
@@ -7514,7 +7728,7 @@ class AICommander {
         }
       }
     }
-    if (!s) return;                                 // no route — keep the brain's command
+    if (!s) { this._navBail = 'noroute:' + st; return; }   // no route — keep the brain's command
     cmd.fwd = s.fwd; cmd.turn = s.turn; cmd.strafe = s.strafe || 0;   // nav owns the motion (omni chassis translate immediately)
     v.ai._wantMove = s.fwd > 0.3 || Math.abs(s.strafe || 0) > 0.3;    // keep the anti-wedge motion check honest
     return true;
@@ -7720,7 +7934,25 @@ class AICommander {
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
     v._resvNav = this._nav;   // next tick's reservation stamp reads this unit's current route
-    const routed = !scanning && this._navOverride(v, view, cmd, dt);   // route travel states with A* (skipped mid-scan so it holds still)
+    // Scanning is a DELIBERATE stop — hold position and sweep before advancing — so it gets a real
+    // HOLD order rather than being skipped past the nav entirely and landing in the DIRECT bucket.
+    const routed = scanning ? this._hold(cmd, 'holding to scan the surroundings')
+                            : this._navOverride(v, view, cmd, dt);
+    if (scanning && !routed) this._navBail = 'scan';
+    const bailWhy = (!routed && !cmd.mnv) ? (this._navBail || '?') : null;
+    if (bailWhy) navBail[bailWhy] = (navBail[bailWhy] || 0) + 1;
+    // Episode clock: how long has this unit been driving with no order for THIS reason, unbroken?
+    // AN EPISODE BELONGS TO A VEHICLE, not to a slot. The clock lives in the slot record, so
+    // without this check a Valkyrie's episode stayed open across its own death and was closed out
+    // stamped with the firebrat that replaced it — "186s, 0u net, firebrat, flyer", a duration and
+    // a distance measured between two different vehicles. Same reset the Driver does on bind().
+    if (v !== this._bailV) { this._bailV = v; this._bailWhy = null; this._bailT = 0; this._bailX = null; }
+    if (bailWhy && bailWhy === this._bailWhy) this._bailT = (this._bailT || 0) + dt;
+    else {
+      noteBailEpisode(this._bailWhy, this._bailT || 0, v, this._bailX, this._bailZ);
+      this._bailWhy = bailWhy; this._bailT = 0;
+      this._bailX = v.holder.position.x; this._bailZ = v.holder.position.z;
+    }
     if (!routed) {
       if (cmd.mnv) {
         // The brain picked a COMBAT MANEUVER (ORBIT/KITE — slice 3): hand the order to the
@@ -9882,7 +10114,29 @@ function buildNavStatic() {
   navStaticHalf = iMax; navStaticN = iMax * 2 + 1;
   navStatic = new Uint8Array(navStaticN * navStaticN);
   const halfW = map.worldW / 2 + 24, halfH = map.worldH / 2 + 24;
-  const rSoft = VEH_R * 0.85, rHard = VEH_R;
+  // WATER CLEARANCE IS NOT COLLISION CLEARANCE. This used VEH_R, the radius a hull needs to keep
+  // clear of walls and trees — and borrowing it for water asks the wrong question. You cannot clip
+  // the corner of a wall; you absolutely can carry a tread over slightly deeper water, which is
+  // most of what giant treads and six legs are FOR.
+  //
+  // At 3.0 the effect was to delete the shallow fringe from the map wholesale: on a natural
+  // shoreline shallow grades into deep over a few units, so nearly every fordable cell had deep
+  // water within 3u of one of its eight samples, diagonals included. The cell a unit would stand
+  // in was never the thing being tested. Jotuns and Lurchers routed the long way around water they
+  // would have waded straight through — and they are the only two chassis this can affect, since
+  // the Firebrat hovers and the Valkyrie flies (VEH_MOVE water: 'cross').
+  //
+  // 1.0 keeps the honest part of the test — the body's own footing has to be sound — and drops the
+  // rest. Depth itself is unchanged: FORD_DEPTH still says what a hull can wade.
+  //
+  // OFF BY DEFAULT, pending its own gate (?fordhalo). It does what it says — measured over four
+  // maps, wadeable-and-navigable shoreline went 71.8% -> 87.8%, 863 cells handed back, with match
+  // outcomes identical — but the last run of it moved near-water transit-stuck +34% while inland
+  // IMPROVED. Opening the fringe was correct; what mishandles a unit standing in the fringe was
+  // not established, and the prime suspect (aiAntiGrind, which cuts a sinker's throttle near deep
+  // water — exactly the condition a 1u halo creates) has never been measured against it.
+  const FORD_CLEAR = 1.0;
+  const rSoft = VEH_R * 0.85, rHard = aiFordHalo ? FORD_CLEAR : VEH_R;
   for (let i = -iMax; i <= iMax; i++) for (let j = -iMax; j <= iMax; j++) {
     const x = i * c, z = j * c;
     let f = 0;
@@ -10013,6 +10267,29 @@ function nearestDrivable(v, x, z, maxR = 60) {
 const GOAL_SNAP_R = 26;      // u — beyond this the goal isn't "on a structure", it's somewhere else
 const GOAL_SNAP_TTL = 500;   // ms to trust a cached snap (gates and lift decks change what's blocked)
 let goalSnaps = 0;           // how often an impossible goal had to be rescued — RR.navAlarmStats
+// Every driving tick that ends up with NO order — neither a route nor a maneuver — filed under the
+// reason it fell through. This is the DIRECT ledger: the list of places navigation still isn't.
+const navBail = {};
+// …and the same thing measured in TIME, which is the measure that can tell a bug from a pause.
+// A tick count cannot: settling into a firing position for half a second and standing at an
+// objective for three minutes both read as "arrived". Only sustained EPISODES are evidence, so
+// count runs longer than BAIL_EPISODE and keep the worst one.
+const BAIL_EPISODE = 5;   // s — below this a no-order run is a settle, not a stall
+const navBailEp = {};     // reason -> { n, totalS, maxS, movedS (episodes that covered real ground) }
+const navBailWorst = [];  // the longest few, with enough detail to tell flying from parked
+function noteBailEpisode(why, secs, v, x0, z0) {
+  if (!why || secs < BAIL_EPISODE) return;
+  const e = navBailEp[why] || (navBailEp[why] = { n: 0, totalS: 0, maxS: 0, moving: 0 });
+  e.n++; e.totalS += secs; e.maxS = Math.max(e.maxS, secs);
+  // GROUND COVERED IS THE WHOLE VERDICT. A unit with no order that flew 200u was travelling and
+  // never needed a route; one that sat still had nobody driving it. Same ledger line, opposite bugs.
+  const net = (v && x0 != null) ? Math.hypot(v.holder.position.x - x0, v.holder.position.z - z0) : 0;
+  if (net > secs * 1.5) e.moving++;
+  navBailWorst.push({ why, secs: +secs.toFixed(1), net: Math.round(net),
+                      type: v && v.type, state: v && v._aiState });
+  navBailWorst.sort((a, b) => b.secs - a.secs);
+  if (navBailWorst.length > 20) navBailWorst.length = 20;
+}
 function standableGoal(v, x, z) {
   if (!v || !v._blocked) return { x, z };
   const memo = v.__goalSnap;
@@ -11093,6 +11370,15 @@ window.RR = {
   THREE, scene, camera, map,
   planPath: (v, dest, opts) => planPath(v, dest, opts),          // nav benchmark / path probes
   cellBlocked: (v, i, j) => cellBlocked(v, i, j),
+  // What a route costs priced the way A* prices ground — so a probe can check that smoothing
+  // never made a route dearer, rather than taking the pass's word for it.
+  pathCost: (v, pts) => {
+    let sum = 0;
+    for (let i = 1; i < pts.length; i++)
+      walkCells(pts[i-1].x, pts[i-1].z, pts[i].x, pts[i].z, (ci, cj, seg) => { sum += vehCellCost(v, ci, cj) * seg; });
+    return sum;
+  },
+  walkCells: (ax, az, bx, bz, cb) => walkCells(ax, az, bx, bz, cb),   // exact cell traversal, for probes
   vehCellCost: (v, i, j) => vehCellCost(v, i, j),                // nav benchmark: equivalence checking
   navStats: () => ({ obstacles: obstacles.length, gates: gates.length, cell: grid.cell,
     cells: Math.ceil(map.worldW / grid.cell) * Math.ceil(map.worldH / grid.cell) }),
@@ -11177,6 +11463,15 @@ window.RR = {
   frame: () => frameMap(),
   look: (x, z, dist, pitch, yaw) => { orbit.target.set(x, 0, z); orbit.dist = dist; if (pitch != null) orbit.pitch = pitch; if (yaw != null) orbit.yaw = yaw; updateCamera(); },
   freeCam: () => { spectateFree = true; },   // debug/shot: stop the spectate follow so a rig can pin the camera
+  // Match clock in seconds — what a replay link's `at=` is measured in. Taken from a commander's
+  // own match timer rather than wall clock, so it means the same thing headless and on screen.
+  matchTime: () => (commanders[0] && commanders[0]._matchT) || 0,
+  // Hooks the replay lab drives the game through (lab/replay.html). Deliberately tiny and
+  // general — a time scale and "point the camera at this unit" are things a game may as well
+  // have; none of the lab's own logic lives in here.
+  setTimeScale: (x) => { timeScale = Math.max(0, Math.min(8, x)); return timeScale; },
+  watch: (v) => { spectateTarget = v || null; spectateFree = !v; },
+  watched: () => spectateTarget,
   scatterFoliage: () => scatterFoliage(),    // debug/shot: re-scatter foliage on demand
   setGrassDensity: (m) => { grassDensityMul = Math.max(0, +m); scatterFoliage(); return grassDensityMul; },   // re-scatters
   setSurf: (patch) => setSurf(patch),   // shoreline surf/wave tuning, live — the knobs lab/surf.html drives
@@ -11216,7 +11511,7 @@ window.RR = {
   tgtEvents: () => tgtEvents,                                  // target-decision trace (was the old target still alive when we left it?)
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
-  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
   decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
@@ -11229,6 +11524,7 @@ window.RR = {
   setRightOfWay: on => { aiRightOfWay = !!on; if (!aiRightOfWay) RESV.clear(); return aiRightOfWay; },   // friendly path-reservation yielding (A/B knob)
   missionScores: () => commanders.map(c => ({ team: c.team, arch: c.archetype, step: c.strategy && c.strategy.step, scores: c._missionScores || [] })),   // live weight breakdown per team
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
+  setAlign: on => setAlign(on),                                         // duel footwork as an ALIGN order vs steering itself (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setGateBand: on => { aiGateBand = !!on; return aiGateBand; },         // nav mirrors the shut-gate physics slab (A/B the gate-band-hug fix)
   setStandHold: on => { aiStandHold = !!on; return aiStandHold; },      // hysteretic siege sense — hold a committed stand past the enter ring (A/B the suppress/advance strobe fix)
@@ -11254,6 +11550,12 @@ window.RR = {
     return { components: size.size, cells, water, biggest: [...size.values()].sort((a, b) => b - a).slice(0, 6) };
   },
   setStandRelease: on => { aiStandRelease = !!on; return aiStandRelease; },// give up a firing position held outside our own weapon range (A/B)
+  setStandRoute: on => { aiStandRoute = !!on; return aiStandRoute; },      // route the whole way to a firing position (A/B)
+  setFlyerRoute: on => { aiFlyerRoute = !!on; return aiFlyerRoute; },      // route flyers as GOTO straight lines (A/B)
+  setStandArrive: on => { aiStandArrive = !!on; return aiStandArrive; },   // arrive ON the firing position vs 14u short (A/B)
+  setSmooth: on => { aiSmoothPath = !!on; return aiSmoothPath; },          // string-pull A* routes (A/B)
+  setSmoothClear: on => { smoothClear = !!on; return smoothClear; },        // require hull clearance on a shortcut (A/B)
+  smoothStats: () => ({ cut: smoothCut, kept: smoothKept }),               // waypoints the smoothing pass removed vs kept
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
   getDeepLog: () => aiDeepLog,
   setCapRoutes: on => { setCapRoutes(!!on); return !!on; },                // multi-waypoint capture routes vs single staging (A/B)
@@ -11948,6 +12250,11 @@ function drawSensorContacts(g, W, H) {
   }
 }
 
+// WORLD CLOCK SCALE. 1 in a normal game. The replay lab (lab/replay.html + js/replay.js) turns it
+// down for slow motion and to 0 to freeze, then steps the sim itself. Everything downstream takes
+// dt, so scaling here slows the whole world together — fire, water and treads, not just the hulls.
+// This is the ONLY thing the replay lab needs from the game; all of its logic lives in its own files.
+let timeScale = 1;
 let _splashHidden = false;
 function animate() {
   requestAnimationFrame(animate);
@@ -11955,7 +12262,7 @@ function animate() {
   // readout must not inherit that clamp — reading 1/dt off it floors the display at 20fps and
   // over-reports exactly when the frame rate is worst. Keep the raw delta for the meter.
   const rawDt = clock.getDelta();
-  const dt = Math.min(0.05, rawDt);
+  const dt = Math.min(0.05, rawDt) * timeScale;   // timeScale is 1 unless the replay lab is driving
   updateAerialPan(dt);   // WASD pans the build/upgrade aerial across the map (fixed angle/height)
   const _pfStart = PERF ? performance.now() : 0;
   const fade = document.getElementById('deployfade');
@@ -12079,3 +12386,4 @@ function animate() {
 updateCamera();
 ensureVolumeControl();
 animate();
+

@@ -671,6 +671,23 @@ const BEHAVIORS = {
       }
     }
     mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
+    // ALIGN — the plain nose-on-the-target footwork, as an ORDER. This is what every fight falls
+    // back on when there is no orbit / kite / joust to run: a chassis that cannot strafe, or
+    // anyone still hunting for a clean shot. It was the last motion in the game steering itself.
+    // The pedals above are kept as the fallback, so if the driver declines the order nothing
+    // changes; what the driver adds is a blocked clock, which this footwork never had.
+    // `!strafe` alone was wrong here: a Jotun DOES get a strafe value (the duel table sets one
+    // before anything checks the chassis) — it is zeroed downstream at the drive boundary because
+    // treads cannot sidestep. So the hull that actually moves on fwd/turn alone, and therefore the
+    // one that most needs this order, would have been the one excluded. Ask the chassis, not the number.
+    // ENGAGE ONLY. This return is shared with `suppress`, where the target is the THREAT and `err`
+    // is measured to it — so aiming an ALIGN at view.enemy there would point the hull at the wrong
+    // thing. Worse, a maneuver order outranks the arrival HOLD, so it would take the siege
+    // footwork off its solved firing position. Duel footwork is duel footwork; sieges have their own.
+    if (AI_ALIGN && mode === 'engage' && view.enemy && !view.lure && (!strafe || !view.canStrafe)) {
+      return { fwd, turn, fire, strafe, state: mode,
+        mnv: { type: 'ALIGN', tx: view.enemy.x, tz: view.enemy.z, range, los, faceOff: wrapPi(steer - err) } };
+    }
     return { fwd, turn, fire, strafe, state: mode };
   },
 
@@ -939,6 +956,8 @@ export function recActive() { return REC_ON; }
 // a copy of the whole config so the harness can snapshot/restore it.
 export function setBrainConfig(k, v) { if (k in DEFAULT_BRAIN.config) DEFAULT_BRAIN.config[k] = v; return DEFAULT_BRAIN.config[k]; }
 let AI_JOUST = true;   // the Valkyrie's jousting attack runs (off → legacy hover-strafe duel; A/B knob)
+let AI_ALIGN = true;   // plain duel footwork issued as an ALIGN order instead of steering itself (A/B knob)
+export function setAlign(on) { AI_ALIGN = !!on; return AI_ALIGN; }
 export function setJoust(on) { AI_JOUST = !!on; return AI_JOUST; }
 export function getBrainConfig(k) { return k ? DEFAULT_BRAIN.config[k] : { ...DEFAULT_BRAIN.config }; }
 function maybeRecord(view, mem, reason, state, out) {

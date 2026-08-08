@@ -87,7 +87,7 @@ export class Driver {
   // goal each frame) folds into the standing order: a GOTO whose goal only drifted keeps
   // its metadata and its violation latch; a genuinely NEW order (type changed, goal jumped,
   // different issuer/state) replaces it and is logged.
-  //   o = { type:'GOTO', x, z, arrive, by, why } | { type:'DIRECT', by }
+  //   o = { type:'GOTO', x, z, arrive, by, why } | { type:'HOLD', by, why } | { type:'DIRECT', by }
   order(o) {
     const cur = this.o;
     let same = cur && cur.type === o.type && cur.by === o.by
@@ -97,6 +97,9 @@ export class Driver {
     // is a genuinely new order.
     if (same && o.type === 'ORBIT') same = cur.dir === o.dir && Math.abs(cur.cx - o.cx) < 6 && Math.abs(cur.cz - o.cz) < 6;
     if (same && o.type === 'KITE') same = Math.abs(cur.toward.x - o.toward.x) < 6 && Math.abs(cur.toward.z - o.toward.z) < 6;
+    // ALIGN tracks a moving fight: the same target folds in (params refresh below) so the blocked
+    // clock survives, which is the whole point of it — a fresh order every tick would reset it.
+    if (same && o.type === 'ALIGN') same = Math.abs(cur.tx - o.tx) < 25 && Math.abs(cur.tz - o.tz) < 25;
     if (same && o.type === 'JOUST') {
       if (!cur.done) return cur;                       // mid-pass: the plotted run line stands
       // pass complete + the issuer still wants jousting → a FRESH pass on the OTHER side
@@ -108,6 +111,8 @@ export class Driver {
       if (o.type === 'GOTO') { cur.x = o.x; cur.z = o.z; cur.arrive = o.arrive; }   // goal drift
       else if (o.type === 'ORBIT') { cur.cx = o.cx; cur.cz = o.cz; cur.radius = o.radius; cur.face = o.face; }
       else if (o.type === 'KITE') { cur.tx = o.tx; cur.tz = o.tz; cur.toward = o.toward; }
+      else if (o.type === 'HOLD') cur.why = o.why;   // same hold, refreshed reason
+      else if (o.type === 'ALIGN') { cur.tx = o.tx; cur.tz = o.tz; cur.range = o.range; cur.los = o.los; cur.faceOff = o.faceOff; }
       return cur;
     }
     o.t0 = 0;                   // order age (ticks up in note())
@@ -239,6 +244,46 @@ export class Driver {
         { x: p.x, z: p.z, heading: v.heading, omni: !!v._move.omni },
         { goto: { x: gx, z: gz }, arrive: 4 });   // nose on the run line, full speed
     }
+    // JOLT — the reverse-pivot that backs a wedged hull off whatever it is ground against. The
+    // reflex itself lives upstairs (it owns the escalation: blacklist the snag, then replan around
+    // it); this exists so the tick is an ORDER rather than a hole in the ledger. The issuer keeps
+    // the pedals it already computed, so nothing about the manoeuvre itself changes.
+    if (o.type === 'JOLT') return null;
+    if (o.type === 'ALIGN') {
+      // ALIGN — nose on the target, manage the range band. This is the plain duel footwork every
+      // fight falls back on when there is no orbit, kite or joust to run: a chassis that cannot
+      // strafe (the Jotun's treads), or anyone with no clean shot yet. It was the last thing still
+      // steering itself under DIRECT.
+      //
+      // The pedals are deliberately the same ones the behaviour computed inline, so moving it
+      // here changes no decision. What it ADDS is the competence the other maneuvers already
+      // have: a blocked clock. A Jotun closing on an enemy through a wall stub used to push
+      // straight into it for as long as the fight lasted, because nothing was watching. Now the
+      // hull works around the obstruction the same way an orbiting unit reverses its circle.
+      const p = v.holder.position;
+      this._blkClock(o, p, v, dt);
+      const d = Math.hypot(o.tx - p.x, o.tz - p.z);
+      const r = o.range || 36;
+      const fwd = !o.los ? 0.6                       // no clean shot → circle in to find one
+        : d < r * 0.6 ? -0.5                         // inside the danger band → back out
+        : d < r * 0.95 ? 0                           // in the band → hold and pour fire
+        : 1;                                         // close to range
+      const bearing = Math.atan2(-(o.tx - p.x), -(o.tz - p.z)) + (o.faceOff || 0);
+      let turn = Math.max(-1, Math.min(1, wrapPi(bearing - v.heading) * 2.0));
+      // Blocked while trying to close: lean the nose off the target, alternating sides and
+      // widening, so the hull walks around whatever is in the lane instead of grinding it.
+      if (o._blkT > 1.2 && fwd > 0.05) {
+        if (o._side == null) o._side = 1; else if (o._blkT > 2.6) { o._side = -o._side; o._blkT = 1.3; }
+        turn = Math.max(-1, Math.min(1, turn + o._side * 0.7));
+      }
+      return { fwd, turn, strafe: 0, arrived: false };
+    }
+    // HOLD — "stand here on purpose". The behaviour keeps the pedals (it is aiming, settling into
+    // a firing position, scanning, or squaring up to shoot a blocker), exactly as under DIRECT.
+    // The difference is not mechanical, it is that the order EXISTS: DIRECT meant both "I am
+    // deliberately stationary" and "nobody gave me a route", and one of those is a bug. Split
+    // apart, every remaining tick with no order at all is a defect by definition.
+    if (o.type === 'HOLD') return null;
     if (o.type !== 'GOTO') return null;
     const dest = { x: o.x, z: o.z };
     const wp = this.hooks.navWaypoint(this.nav, v, dest, dt);
@@ -418,6 +463,12 @@ export class Driver {
     if (o.type === 'JOUST') {
       const p = this.v.holder.position;
       return `JOUST ${o.side > 0 ? 'stbd' : 'port'} pass · tgt ${Math.round(Math.hypot(o.tx - p.x, o.tz - p.z))}u ${o.done ? '· EXTENDED' : ''}`;
+    }
+    if (o.type === 'HOLD') return `HOLD · ${o.why || 'standing by'} (${o.by || 'combat'})`;
+    if (o.type === 'JOLT') return `JOLT · backing out of a wedge (${o.by || 'unstick'})`;
+    if (o.type === 'ALIGN') {
+      const p = this.v.holder.position;
+      return `ALIGN on target · ${Math.round(Math.hypot(o.tx - p.x, o.tz - p.z))}u${o.los ? '' : ' · no shot yet'} (${o.by || 'duel'})`;
     }
     return `DIRECT (${o.by || 'combat'})`;
   }
