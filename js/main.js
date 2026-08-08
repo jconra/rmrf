@@ -6487,6 +6487,38 @@ class AICommander {
   //   1 BREAK AWAY   — square off the line between us and them, on the side we are already on
   //   2 STAGE BEHIND — out the far side of our own FOB from them
   //   3 IN THE BACK  — the gate nearest that staging point, then home
+  // Pull a waypoint onto ground THIS hull can actually reach, searching outward in rings.
+  //
+  // WHY A ROUTE NEEDS THIS AT ALL. A* runs partial, so an unreachable goal comes back as a route
+  // to the closest reachable cell — which is the sane behaviour and exactly what you want while
+  // travelling. But a LEG is only ever finished by getting within FLEE_REACH (14u) of the waypoint
+  // itself, and the partial route only ever promises to deliver you to the closest point it could
+  // find. Those two facts are reconciled nowhere: a waypoint 43u out in the sea leaves the unit
+  // standing on the shore at the end of a perfectly good partial path, still 43u short, with the
+  // leg counter refusing to advance. Flee is terminal by design, so nothing rescues it.
+  // MEASURED on seed 3355: a Lurcher spent 1453s — the entire match — walking south into open
+  // water toward waypoint 1 of 4, while its base sat 190u north.
+  // Reachability, not just land: the Lurcher sinks, the Valkyrie flies, and they do not agree on
+  // what counts as ground.
+  _reachableWp(v, x, z) {
+    const c = grid.cell, F = reachFrom(v);
+    const ok = (px, pz) => { const k = navIdx(Math.round(px / c), Math.round(pz / c)); return k >= 0 && !!F[k]; };
+    if (ok(x, z)) return { x, z };
+    for (let r = c; r <= 80; r += c) {
+      let best = null, bd = Infinity;
+      for (let a = 0; a < 16; a++) {
+        const th = a * Math.PI / 8, px = x + Math.cos(th) * r, pz = z + Math.sin(th) * r;
+        if (!ok(px, pz)) continue;
+        // Prefer the candidate nearest the ORIGINAL point, so the leg keeps the shape it was
+        // drawn for — a break-contact leg pulled back to the beach is still a break-contact leg.
+        const d = (px - x) ** 2 + (pz - z) ** 2;
+        if (d < bd) { bd = d; best = { x: px, z: pz }; }
+      }
+      if (best) return best;
+    }
+    return null;   // nowhere within 80u this hull can stand — caller drops the leg
+  }
+
   planFleeRoute(from) {
     const v = this.unit; if (!v) return null;
     const p = v.holder.position, g = this.homePos();
@@ -6514,7 +6546,16 @@ class AICommander {
       if (best) wp.push({ x: best.gx + best.nx * FLEE_GATE_OUT, z: best.gz + best.nz * FLEE_GATE_OUT });
     }
     wp.push({ x: g.x, z: g.z });
-    return wp;
+    // Snap the whole route, not just leg 1. The staging point behind the base and the gate mouth
+    // are built the same geometric way and can land in the same kind of nowhere; the home point is
+    // left as authored because a base you cannot reach is a different problem entirely.
+    const out = [];
+    for (let i = 0; i < wp.length; i++) {
+      if (i === wp.length - 1) { out.push(wp[i]); break; }
+      const fixed = this._reachableWp(v, wp[i].x, wp[i].z);
+      if (fixed) out.push(fixed);                       // dropped entirely if nowhere near works
+    }
+    return out.length ? out : [{ x: g.x, z: g.z }];
   }
 
   // Nearest KNOWN, live shield generator to (x,z) — only POIs this team has discovered
