@@ -144,8 +144,13 @@ export function fireBurst(x, y, z, scale = 1) {
   // RE-ROLLED ON EVERY LIGHT, not once per slot: a pool of eight reused all match would otherwise
   // become the same eight recurring flames, which is the clone problem again wearing a hat.
   slot.phase = frnd() * 40; slot.jw = 0.82 + frnd() * 0.36; slot.jh = 0.85 + frnd() * 0.3;
-  // the height jitter goes into the base offset too, or a taller flame lifts off the wreck
-  slot.fire.mesh.position.set(x, y + 6 * 0.32 * scale * slot.jh, z);
+  // KEEP THE GROUND, NOT THE OFFSET. The volume is a box CENTRED on the mesh, so its base sits
+  // half its height below the origin — and the height is animated (grow in, sag out) while this
+  // offset was computed once at spawn. Small flame, fixed offset, so during the whole grow and
+  // the whole sag it floats above the wreck instead of sitting on it: Jacob's "small and it seems
+  // like it is hovering". Remember the ground and re-seat it every frame in drawFire.
+  slot.baseY = y;
+  slot.fire.mesh.position.set(x, y, z);
   slot.fire.mesh.rotation.set(0, frnd() * Math.PI * 2, 0);
   slot.fire.mesh.visible = true;
   live.push(slot);
@@ -174,6 +179,8 @@ export function drawFire(elapsed) {
     const fall = u < HOLD ? 1 : 1 - (u - HOLD) / (1 - HOLD);
     const k = s.scale * grow * Math.pow(Math.max(0, fall), 0.7);
     s.fire.mesh.scale.set(k * s.jw, k * s.jh, k * s.jw);
+    // half of the 6-tall box, at THIS frame's size — the base then stays planted at every size
+    s.fire.mesh.position.y = s.baseY + 3 * k * s.jh;
     s.fire.update(elapsed + s.phase);   // its own clock — see the note on PHASE above
   }
 }

@@ -3313,6 +3313,17 @@ function bisectorSite(reach) {
 }
 
 const RESUPPLY_MAKE = { fuel: makeFuelTank, ammo: makeAmmoDepot, shield: makeShieldGenerator };
+// WHAT HAPPENS WHEN A DUMP GOES UP — shared, because there are TWO places that build resupply
+// points (authored map assets and the procedural placement) and only one of them had the fire.
+// On a generated map — every normal game — a fuel dump blew up in silence. Two builders of the
+// same thing, one of them quietly missing a behaviour, is the same defect shape as everything
+// else: give them one callback and it cannot drift again.
+function resupplyDestroyed(rp, kind) {
+  rp.dead = true;
+  // A fuel or diesel dump is the one that should really go up. Same fire for now, just a bigger
+  // one; giving fuel a longer burn than a vehicle is the obvious next refinement.
+  fireBurst(rp.pos.x, rp.pos.y, rp.pos.z, kind === 'fuel' ? 1.9 : 1.5);
+}
 const RESUPPLY_HP = { fuel: 130, ammo: 150, shield: 110 };
 // Build one resupply POI at a world site and register it (shared by auto + placed).
 function addResupply(kind, site) {
@@ -3323,12 +3334,7 @@ function addResupply(kind, site) {
   const rp = { kind, group: g, pos: new THREE.Vector3(site.x, gy, site.z), radius: grid.cell * 2.2, dead: false };
   applyStaging(g, kind);   // authored fallAt/dmgStyle (if any) before the Destructible reads them
   destructibles.add(new Destructible(g, { type: 'structure', hp: RESUPPLY_HP[kind] || 130, blocks: true, staged: true,
-    onDestroyed: () => {
-      rp.dead = true;
-      // A fuel or diesel dump is the one that should really go up. Same fire for now, just a
-      // bigger one; giving fuel a longer burn than a vehicle is the obvious next refinement.
-      fireBurst(rp.pos.x, rp.pos.y, rp.pos.z, kind === 'fuel' ? 1.9 : 1.5);
-    } }));
+    onDestroyed: () => resupplyDestroyed(rp, kind) }));
   resupplies.push(rp);
   return rp;
 }
@@ -3367,7 +3373,7 @@ function placeResupplies() {
     const rp = { kind: sp.kind, group: g, pos: new THREE.Vector3(site.x, gy, site.z), radius: cell * 2.2, dead: false };
     applyStaging(g, sp.kind);   // authored fallAt/dmgStyle (if any) before the Destructible reads them
     destructibles.add(new Destructible(g, { type: 'structure', hp: sp.hp, blocks: true, staged: true,
-      onDestroyed: () => { rp.dead = true; } }));
+      onDestroyed: () => resupplyDestroyed(rp, sp.kind) }));
     resupplies.push(rp);
   }
   scene.updateMatrixWorld(true);   // position before measuring bounds (worldCenter trap)
