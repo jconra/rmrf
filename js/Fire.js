@@ -33,6 +33,11 @@ const HOLD = 0.55;         // fraction of life at full size before it sags away
 // wreck read as a campfire sitting on it. Multiplied into `k` in drawFire so the base-planting
 // maths below stays in terms of the mesh's actual current scale.
 const SIZE = 1.6;
+// Half-width of a fire's box on the ground, in world units, at full growth. The box is 3 wide at
+// mesh scale 1, so half of it is 1.5. Slightly generous — the flame profile fades before the box
+// edge — which is what you want when it is being used to keep two fires apart.
+const fireRadius = (scale, jw) => 1.5 * SIZE * scale * jw;
+const JW_MAX = 1.18;   // the widest girth fireBurst can roll; plan spacing against the worst case
 
 let pool = [], live = [], scene = null, camera = null, ready = false;
 
@@ -167,7 +172,9 @@ export function fireBurst(x, y, z, scale = 1, lifeMul = 1) {
   slot.fire.mesh.rotation.set(0, frnd() * Math.PI * 2, 0);
   slot.fire.mesh.visible = true;
   live.push(slot);
-  return true;
+  // Hand back the footprint rather than a bare true: whoever lights the NEXT one needs to know how
+  // much room this one takes up (see fireWreck). Still truthy, so existing callers are unaffected.
+  return fireRadius(scale, slot.jw);
 }
 
 // ── A WRECK IS NOT A CAMPFIRE ─────────────────────────────────────────────────
@@ -182,20 +189,32 @@ export function fireBurst(x, y, z, scale = 1, lifeMul = 1) {
 // every wreck gets all three; in a melee the extras quietly stop and each wreck still burns.
 const WRECK_SATS = 2;       // extra small fires on a wreck, budget permitting
 const WRECK_RESERVE = 4;    // slots kept free for OTHER wrecks before a satellite may be lit
-const WRECK_SPREAD = 3.4;   // how far the small fires scatter from the main one
+// Breathing space between two flames that are not supposed to be touching.
+const WRECK_GAP = 0.7;
 
 export function fireWreck(x, y, z, scale = 1, groundAt = null) {
-  if (!fireBurst(x, y, z, scale)) return 0;   // no slot at all — nothing else to try
+  const r0 = fireBurst(x, y, z, scale);       // …and how wide it turned out to be
+  if (!r0) return 0;                          // no slot at all — nothing else to try
   let n = 1;
+  // SPOT FIRES STAND CLEAR OF THE MAIN ONE. Scattering them 1.7-3.4u from the centre put every
+  // one of them INSIDE a main fire whose own radius is about 2.4u, and two volumetric flames
+  // occupying the same space do not read as a bigger fire — they read as one smeared one, because
+  // the slices interleave and the additive blend doubles up through the middle.
+  // Place each at (main radius + its own radius + a gap) instead, on alternating sides so the
+  // satellites clear each OTHER too. Spacing is computed against the widest girth fireBurst can
+  // roll, so the gap holds whatever this particular flame turns out to be.
+  const base = frnd() * Math.PI * 2;
   for (let i = 0; i < WRECK_SATS; i++) {
     if (pool.length - live.length - 1 < WRECK_RESERVE) break;   // leave the reserve alone
-    const a = frnd() * Math.PI * 2, r = WRECK_SPREAD * (0.5 + frnd() * 0.5);
-    const sx = x + Math.cos(a) * r, sz = z + Math.sin(a) * r;
+    const sc = scale * (0.36 + frnd() * 0.22);
+    const d = r0 + fireRadius(sc, JW_MAX) + WRECK_GAP;
+    const a = base + i * Math.PI + (frnd() - 0.5) * 0.9;        // opposite sides, loosely
+    const sx = x + Math.cos(a) * d, sz = z + Math.sin(a) * d;
     let sy = groundAt ? groundAt(sx, sz) : y;
     // An AIR kill (a Valkyrie shot down before it falls) leaves the terrain far below the wreck;
     // seating the spot fires on the ground there would strand them under a fire hanging in the sky.
     if (Math.abs(sy - y) > 4) sy = y;
-    if (fireBurst(sx, sy, sz, scale * (0.36 + frnd() * 0.22), 0.5 + frnd() * 0.25)) n++;
+    if (fireBurst(sx, sy, sz, sc, 0.5 + frnd() * 0.25)) n++;
   }
   return n;
 }
