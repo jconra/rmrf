@@ -147,11 +147,13 @@ export function initFire(sc, cam) {
 }
 
 // Light something up. `scale` sizes it against a vehicle (1 = a vehicle-sized fire).
-export function fireBurst(x, y, z, scale = 1) {
+// `lifeMul` shortens or lengthens this one's burn against LIFE — a spot fire in the debris should
+// gutter out well before the main blaze does, rather than the two ending in lockstep.
+export function fireBurst(x, y, z, scale = 1, lifeMul = 1) {
   if (!ready) return false;
   const slot = pool.find(s => !s.busy);
   if (!slot) return false;                    // pool exhausted — deliberately, see the note above
-  slot.busy = true; slot.t = 0; slot.scale = scale;
+  slot.busy = true; slot.t = 0; slot.scale = scale; slot.life = LIFE * lifeMul;
   // RE-ROLLED ON EVERY LIGHT, not once per slot: a pool of eight reused all match would otherwise
   // become the same eight recurring flames, which is the clone problem again wearing a hat.
   slot.phase = frnd() * 40; slot.jw = 0.82 + frnd() * 0.36; slot.jh = 0.85 + frnd() * 0.3;
@@ -168,6 +170,36 @@ export function fireBurst(x, y, z, scale = 1) {
   return true;
 }
 
+// ── A WRECK IS NOT A CAMPFIRE ─────────────────────────────────────────────────
+// One flame on a destroyed vehicle reads as a candle standing on it. A kill gets a main fire plus
+// a couple of smaller ones scattered across the debris, which is what a burning machine looks like.
+//
+// THE MAIN ONE IS GUARANTEED; THE SMALL ONES ARE OPPORTUNISTIC. This is the whole design. The pool
+// is fixed and small (see POOL), so a wreck that greedily claimed three slots every time would let
+// the first two kills of a 3v3 exchange drain it and leave every later wreck with NOTHING burning
+// — far more noticeable than a wreck with fewer spot fires. So a satellite is only lit while
+// enough slots remain for somebody else's kill. At a quiet 1v1 that reserve is never in play and
+// every wreck gets all three; in a melee the extras quietly stop and each wreck still burns.
+const WRECK_SATS = 2;       // extra small fires on a wreck, budget permitting
+const WRECK_RESERVE = 4;    // slots kept free for OTHER wrecks before a satellite may be lit
+const WRECK_SPREAD = 3.4;   // how far the small fires scatter from the main one
+
+export function fireWreck(x, y, z, scale = 1, groundAt = null) {
+  if (!fireBurst(x, y, z, scale)) return 0;   // no slot at all — nothing else to try
+  let n = 1;
+  for (let i = 0; i < WRECK_SATS; i++) {
+    if (pool.length - live.length - 1 < WRECK_RESERVE) break;   // leave the reserve alone
+    const a = frnd() * Math.PI * 2, r = WRECK_SPREAD * (0.5 + frnd() * 0.5);
+    const sx = x + Math.cos(a) * r, sz = z + Math.sin(a) * r;
+    let sy = groundAt ? groundAt(sx, sz) : y;
+    // An AIR kill (a Valkyrie shot down before it falls) leaves the terrain far below the wreck;
+    // seating the spot fires on the ground there would strand them under a fire hanging in the sky.
+    if (Math.abs(sy - y) > 4) sy = y;
+    if (fireBurst(sx, sy, sz, scale * (0.36 + frnd() * 0.22), 0.5 + frnd() * 0.25)) n++;
+  }
+  return n;
+}
+
 // THE LIFECYCLE TICKS EVEN WHEN NOTHING IS DRAWN. The headless harness steps the world without
 // rendering, and if the clock only advanced during a render the pool would fill on the first eight
 // explosions of a tournament match and never release. (The same trap the blood marks and crushable
@@ -177,7 +209,7 @@ export function tickFire(dt) {
   for (let i = live.length - 1; i >= 0; i--) {
     const s = live[i];
     s.t += dt;
-    if (s.t >= LIFE) { s.busy = false; s.fire.mesh.visible = false; live.splice(i, 1); }
+    if (s.t >= s.life) { s.busy = false; s.fire.mesh.visible = false; live.splice(i, 1); }
   }
 }
 
@@ -185,7 +217,7 @@ export function tickFire(dt) {
 export function drawFire(elapsed) {
   if (!ready || !live.length) return;
   for (const s of live) {
-    const u = s.t / LIFE;
+    const u = s.t / s.life;
     const grow = Math.min(1, s.t / GROW);
     const fall = u < HOLD ? 1 : 1 - (u - HOLD) / (1 - HOLD);
     const k = SIZE * s.scale * grow * Math.pow(Math.max(0, fall), 0.7);

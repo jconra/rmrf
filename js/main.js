@@ -38,7 +38,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { initFire, fireBurst, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
+import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
 import { makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
@@ -2688,8 +2688,9 @@ function destroyVehicle(veh, cause, killer = null) {
   spawnExplosion(veh.holder.position, veh.type === 'jotun');
   // …and it burns for a few seconds afterwards. A Jotun is a bigger machine and gets a bigger
   // fire; everything else is one size for now (Jacob: "keep it all the same for now").
-  if (cause !== 'sank') fireBurst(veh.holder.position.x, veh.holder.position.y, veh.holder.position.z,
-                                  veh.type === 'jotun' ? 1.35 : 1);
+  if (cause !== 'sank') fireWreck(veh.holder.position.x, veh.holder.position.y, veh.holder.position.z,
+                                  veh.type === 'jotun' ? 1.35 : 1,
+                                  (gx, gz) => { const r = roadDeckY(gx, gz); return r != null ? r : map.heightAt(gx, gz); });
   creditKill(killer, veh);   // credit the firing unit's commander (drives Warrior/Hunter doctrine + kill feed)
   { const bank = rankBankFor(veh); if (bank) bank[veh.type] = 0; }   // the decorated individual is gone — rank dies with it
   if (veh._rankGrp) { scene.remove(veh._rankGrp); veh._rankGrp = null; veh._rankSpr = null; }
@@ -11085,6 +11086,10 @@ window.RR = {
                           : new THREE.Vector3(x, 0, z);
     return fireBurst(p.x, map ? map.heightAt(p.x, p.z) : 0, p.z, scale);
   },
+  // A whole wreck's worth (main + spot fires), so the pool budget can be exercised without
+  // having to stage the kills. Returns how many actually lit.
+  testWreck: (x, z, scale = 1) => fireWreck(x, map ? map.heightAt(x, z) : 0, z, scale,
+                                            (gx, gz) => (map ? map.heightAt(gx, gz) : 0)),
   fxCounts: () => ({ blood: bloodMarks.length, tents: crushables.length, crushed: crushables.filter(c => c.crushed).length, bloodPos: bloodMarks.slice(0, 5).map(m => ({ x: +m.position.x.toFixed(0), y: +m.position.y.toFixed(2), z: +m.position.z.toFixed(0), vis: m.visible, scl: +m.scale.x.toFixed(1) })) }),   // debug: blood marks + squishable-tent state
   killTowerGun: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.turretDest.damage(1e9); return !!h; },   // debug: shoot a tower's gun off (test gun purchase)
   destroyTower: (team) => { const h = findWoundedTowerAny(team); if (h) h.wall.body.damage(1e9); return !!h; },         // debug: flatten a tower (test rubble rebuild)
