@@ -531,6 +531,62 @@ const fracOf = (cmd, what) => {
   if (what === 'hp') return v.maxHp ? v.hp / v.maxHp : 1;
   return v.maxShield ? v.shield / v.maxShield : 1;
 };
+// SWAP — drive home and change vehicle. Formerly "the recall", which steered the unit itself via
+// _driveHome and so bypassed the mission layer entirely: a second owner of the steering wheel that
+// no mission could see and none could outrank. Jacob: "I don't like having things bypass the
+// missions."
+//
+// What it cost as a bypass, measured over 240 seeds: 237 recalls armed and then gave up, and 212
+// of those (89%) interrupted a unit that was already driving home on Flee. The collision is almost
+// entirely on the default seed set — which is exactly the set where Flee underperforms, while the
+// fresh set (3 collisions) came out FASTER than baseline. One seed showed a firebrat covering 128u
+// in 40 seconds and finishing 0.8u from where it started, burning a whole tank, because its two
+// owners pointed it opposite ways about once a second.
+//
+// The absurdity underneath: _wouldField substitutes an available chassis when the wanted one is
+// out of stock, so a fleeing Firebrat with none left in the garage "wants" to be a Lurcher — and
+// got recalled mid-escape to be swapped for one. As a mission this cannot happen: Swap runs only
+// when the INCOMING mission asks for a different chassis, and a mission that says "keep what I am
+// driving" is simply believed.
+class Swap extends Mission {
+  get key() { return 'swap'; }
+  get garageOK() { return true; }            // the whole point is to reach the lift and change
+  wantVehicle(cmd) { return this.want || (cmd.unit ? cmd.unit.type : 'lurcher'); }
+  objective(cmd) { return cmd.homePos(); }
+  shoot(cmd) { return false; }
+  arriveDist(cmd) { return 6; }
+  // Home, dead, or PROVEN UNABLE TO GET HOME. The last one is not a fallback — it is the event
+  // the codebase already models as "waypoint proven unreachable", and `_driveHome` carried its own
+  // version of it (RECALL_STALL) which I deleted with the rest of the recall and had to put back:
+  // without it a unit that cannot reach the pad sits in `swap` forever. Seed 669 showed a single
+  // swap lasting 547 seconds. A unit gets as long as it needs while it is still making ground —
+  // a slow Jotun crawling across the map is fine, that is the game — and only zero progress for
+  // SWAP_STALL counts as stuck. Any new closest-to-home resets the clock.
+  tick(cmd, dt) {
+    super.tick(cmd, dt);
+    const v = cmd.unit; if (!v || v.dead) return;
+    const p = v.holder.position, h = cmd.homePos();
+    const d = Math.hypot(p.x - h.x, p.z - h.z);
+    if (this.bestD == null || d < this.bestD - 0.5) { this.bestD = d; this.stallT = 0; }
+    else this.stallT = (this.stallT || 0) + dt;
+  }
+  done(cmd) {
+    const v = cmd.unit;
+    if (!v || v.dead || cmd.atHomeBase()) return true;
+    if ((this.stallT || 0) > SWAP_STALL) {
+      if (this.doc && this.doc.log) this.doc.log(`${v.type} can't get home to swap — it's hung up. Ditching it.`);
+      return true;   // completeSwap retires it where it stands; deploy rolls out the one we wanted
+    }
+    return false;
+  }
+  label(cmd) { return `heading in to swap for a ${this.want || 'different vehicle'}`; }
+  cry(cmd) { return pickCry(cmd, [
+    `Wrong tool for this job — bringing it in for a ${this.want}!`,
+    `Pulling back to the pad, we need a ${this.want} out here!`,
+    `This isn't the vehicle for it. Coming home to switch!`,
+  ]); }
+}
+
 // FLEE — the one way home, and the only mission that is never re-scored.
 //
 // Jacob's ruling (2026-08-07): a unit that loses the fight-or-flight call is by definition in no
@@ -594,6 +650,7 @@ class Flee extends Mission {
   ]); }
 }
 const FLEE_REACH = 14;   // u — close enough to call a leg done and start the next
+const SWAP_STALL = 10;   // s of ZERO progress toward home before a swap gives up on the trip
 
 class Supply extends Mission {
   get what() { return 'fuel'; }
@@ -653,11 +710,21 @@ class ArmourUp extends Supply {
 }
 
 const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass,
-  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp, flee: Flee };
+  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp, flee: Flee, swap: Swap };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // Is this mission one a commander may buy a chassis for at the lift? (Top-ups are decisions a
 // unit already in the field makes; letting one reach the garage would deploy the wrong vehicle.)
 export function missionGarageOK(key) { const M = MISSIONS[key]; return !(M && M.prototype.garageOK === false); }
+// What chassis does mission `key` ask for? Asked by the commander when a mission change is about
+// to happen, so it can send the unit home to change vehicles FIRST (see Commander.swapWanted).
+// Built fresh rather than cached: it is called on a mission change, not per tick, and a mission's
+// answer can depend on the board. A mission that names its own current vehicle is telling us it
+// does not care — that answer is honoured exactly as given, no stock substitution.
+export function missionWants(key, cmd) {
+  const M = MISSIONS[key]; if (!M) return null;
+  const m = new M(); m.doc = cmd.strategy;      // wantVehicle may fall through to doc.role(key)
+  try { return m.wantVehicle(cmd) || null; } catch (e) { return null; }
+}
 
 // ---- DOCTRINE — a persona running one mission at a time ------------------------------
 // Re-evaluates choose() every tick. A change only takes effect once the current mission
@@ -1123,6 +1190,17 @@ class Doctrine {
       this._switch(this._applyKey(cmd, missionPick(cmd, null)) || 'attack', cmd, 'made it home — picking up the next job');
       return;
     }
+    // SWAP is terminal for the same reason Flee is: it is a trip, and a trip half-taken is worse
+    // than either end of it. Home → hand the chassis change to the commander (it owns despawn and
+    // re-deploy) → run the job we were switching to when we noticed we were in the wrong vehicle.
+    if (this.step === 'swap') {
+      if (!this.mission.done(cmd)) return;
+      const then = this._swapThen || 'attack';
+      this._swapThen = null;
+      cmd.completeSwap(this.mission.want);
+      this._switch(then, cmd, 'swapped at the pad — getting on with it');
+      return;
+    }
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
     let next = this._urgent(cmd);
@@ -1286,6 +1364,27 @@ class Doctrine {
   }
   _switch(key, cmd, why = null) {
     if (!key || key === this.step) { this.t = 0; return; }
+    // WRONG VEHICLE FOR THE NEW JOB? Go and change it FIRST, as a mission, then run the job.
+    // Every mission change already funnels through here, so this is the one place that needs to
+    // know — which is the entire reason the recall could be deleted rather than fixed.
+    // Skipped when we are already swapping (no recursion), when nothing is fielded (deploy will
+    // simply pick the right chassis), and while a rival is close: driving home to change vehicles
+    // with your back turned is how a slow hull dies. Deferring here is safe in a way the recall's
+    // version was not — we just carry on with the current mission and get asked again, instead of
+    // arming something that then has to abort.
+    if (key !== 'swap' && cmd.unit && !cmd.unit.dead) {
+      const want = cmd.swapWanted(key);
+      if (want) {
+        this._swapThen = key;
+        this.mission = makeMission('swap');
+        this.mission.want = want;
+        this.mission.enter(cmd, this);
+        this.step = 'swap'; this.t = 0;
+        this._lastWhy = why || 'wrong vehicle for the next job';
+        if (this.log) this.log(`${this.mission.cry(cmd)}   [${this.step} → swap → ${key}${why ? ' — ' + why : ''}]`);
+        return;
+      }
+    }
     const from = this.step;
     this.mission = makeMission(key);
     this.mission.enter(cmd, this);
