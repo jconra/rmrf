@@ -1470,6 +1470,7 @@ const ENGAGE_RANGE = { lurcher: 40, firebrat: 24, valkyrie: 50, jotun: 70 };
 const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 38, firebrat: 26 };
 let ROAD_SPEED_MUL = 1.25;   // ground vehicles drive this much faster on a road cell (RR.setRoadSpeed to tune)
 let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
+const INTERCEPT_HOLD_R = 16;   // u — inside this of the camp we are STANDING IN THE DOOR: watch the lane home, and pursue is back on
 const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie if a ground unit is within this of our FOB — else chase with what we've got
 // ONE radius for "a rival is too close to go and change vehicles". The recall had two — 52u to
 // refuse to start and 46u to give up once started — and the band between them was a place where a
@@ -3427,6 +3428,20 @@ function nearOwnSupply(v, vx, vz) {
 // can't sit at the elevator mouth and farm it. Active while it's ON the pad AND within the time
 // cap after surfacing (whichever ends first) — so it can't park behind the shield to camp.
 const ELEV_SHIELD_MS = 5000;
+// Is an enemy close enough that the elevator shield is worth standing in? Measured against OUR
+// OWN reach: if we can shoot it, it can very likely shoot us, and the doorway is the right place
+// to trade from. Vehicles only — the pad sits inside our own base, so an enemy gun is not what
+// keeps a unit on the lift.
+function padThreatNear(v) {
+  const reach = SHOT_REACH[v.type] || 42;
+  const p = v.holder.position;
+  for (const o of combatants) {
+    if (o.dead || o.team === v.team || vehicleHidden(o)) continue;
+    const dx = o.holder.position.x - p.x, dz = o.holder.position.z - p.z;
+    if (dx * dx + dz * dz < reach * reach) return true;
+  }
+  return false;
+}
 function elevShieldOn(v) {
   return !!(v && v._elevShieldUntil && performance.now() < v._elevShieldUntil
     && elevatorPadAt(v.holder.position.x, v.holder.position.z));
@@ -5376,7 +5391,14 @@ function driveChassis(v, out, dt, omniTravel) {
   // then drive out of it. The combat behaviours press, orbit and strafe toward their target; here
   // we keep the turn (aim) and drop the translation, so it fights from the doorway for the few
   // seconds the shield lasts and leaves under its own power afterwards.
-  if (aiPadFight && v.ammo > 0 && elevShieldOn(v)) { out.fwd = 0; out.strafe = 0; }
+  // ...BUT ONLY IF THERE IS SOMETHING TO FIGHT. The rule above says a unit that has "chosen to
+  // fight from cover" must not drive out of it — except nothing ever checked that it chose to
+  // fight. Every vehicle rolled off the lift and stood still for the whole shield timer, and
+  // because the hold zeroes the throttle it cannot drive off the pad to end it early: it waited
+  // out all five seconds even on an empty map. MEASURED: 5.77s of sitting after the lift tops, on
+  // 65 of 82 deploys with no enemy within 80u. Cover is worth standing in when a rival can shoot
+  // you and worth nothing when one cannot, so ask.
+  if (aiPadFight && v.ammo > 0 && elevShieldOn(v) && padThreatNear(v)) { out.fwd = 0; out.strafe = 0; }
   // REVERSE CAP (doctrine): every chassis backs up at HALF throttle — reverse is a
   // maneuver tool (kite, reverse-arc, backing out of a notch), never a fast way to
   // travel; a unit that wants to go the other way turns around. The omni Lurcher is
@@ -5583,7 +5605,6 @@ function freshSlot() {
     _role: null,                                       // the role name that card fields (deck default; a mission policy may re-pick per tour)
     _failStep: null, _failN: 0, _failT: 0, _failSnap: null,   // per-mission total-failure bans (per slot — each card banks its own lessons)
     _rising: false, _elev: null,                       // FOB-lift deploy state
-    _exit: null, _exitT: 0, _exitCoolT: 0,             // post-deploy gate-exit waypoint
     _nav: { path: null, idx: 0, t: 0, dx: null, dz: null, epoch: 0 },   // A* path cache (epoch: world state it was planned under)
     _supply: null, _supplyHeals: false, _home: null,   // resolved resupply/heal points (set per tick in _view)
     _mrec: null,                                       // mission report card for the unit in the field
@@ -5999,8 +6020,18 @@ class AICommander {
   }
   // ── Hunter trap (Mode B) — the Lurcher tends a mine kill-zone (cmd._trap) ──
   // Ambush anchor: just home-side of the trap, where the bait Lurcher waits.
+  // MIDFIELD IS THE FALLBACK, NOT HOME. Both of these used to answer "we have no trap" with
+  // homePos(), so a hunter that reached the trap mission before the sap had laid its mines set its
+  // ambush inside its own FOB — and then, since a signal shot is aimed 30u toward the enemy base
+  // from wherever the unit stands, it spent the signal phase shooting its own gate. An ambush with
+  // no mines is still an ambush: stand where the lanes cross and wait. Measured on HEAD: 234 of
+  // 234 signal-phase ticks were fired from inside the unit's own base.
+  trapMidfield() {
+    const h = this.homeBasePos(), e = this.enemyBasePos();
+    return { x: (h.x + e.x) / 2, z: (h.z + e.z) / 2 };
+  }
   trapAnchor() {
-    const t = this._trap; if (!t) return this.homePos();
+    const t = this._trap; if (!t) return this.trapMidfield();
     const home = this.homeBasePos();
     let dx = home.x - t.x, dz = home.z - t.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
     return { x: t.x + dx * 15, z: t.z + dz * 15 };
@@ -6010,7 +6041,7 @@ class AICommander {
   // (enemy came in on our side, so "opposite them" is across the kill-zone), detour via a flank
   // waypoint on our own side — the bait circles AROUND its mines, never over them.
   trapShield() {
-    const t = this._trap; if (!t) return this.homePos();
+    const t = this._trap; if (!t) return this.trapMidfield();
     const e = this.lastEnemyPos() || this.enemyBasePos();
     let dx = t.x - e.x, dz = t.z - e.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
     const spot = { x: t.x + dx * 16, z: t.z + dz * 16 };
@@ -6311,9 +6342,14 @@ class AICommander {
     return want;
   }
   // At the pad: retire the hull we brought home so deploy() rolls out the one the job asked for.
-  completeSwap(want) {
+  // ONE EVENT, ONE MESSAGE, AND IT HAS TO BE TRUE. This always announced "is home" — including
+  // when the mission had just given up on the trip — so the log carried both "can't get home,
+  // ditching it" and "is home" in the same second for the same vehicle.
+  completeSwap(want, ditched) {
     const v = this.unit; if (!v) return;
-    aiLog(this.team, `${this.cname}: ${v.type} is home — swapping it out for a ${want}.`);
+    aiLog(this.team, ditched
+      ? `${this.cname}: ${v.type} couldn't get home to swap — ditching it and rolling out a ${want}.`
+      : `${this.cname}: ${v.type} is home — swapping it out for a ${want}.`);
     this._swapFrom = v.type; this._swapWant = want;   // SWAP-LOOP alarm reads these at the next deploy
     this._endTour(v);
     removeCombatant(v); scene.remove(v.group); this.unit = null; this.respawnT = 1.0;
@@ -7015,19 +7051,6 @@ class AICommander {
     const dx = best.x - fob.center.x, dz = best.z - fob.center.z, m = Math.hypot(dx, dz) || 1;
     return { x: best.x + dx / m * 16, z: best.z + dz / m * 16 };
   }
-  _planExit() {
-    // A unit that rose on a SATELLITE pad (outside the FOB wall ring) has no gate to
-    // thread — driving to a gate waypoint from out there would loop it back INTO the base.
-    const fob = teamCamp(this.team, 'fob');
-    if (fob && this._elev) {
-      const wallR = (FOB_SIZE / 2) * grid.cell + 2;
-      const d2 = (this._elev.center.x - fob.center.x) ** 2 + (this._elev.center.z - fob.center.z) ** 2;
-      if (d2 > wallR * wallR) { this._exit = null; this._exitT = 0; return; }
-    }
-    this._exit = this._computeExit(); this._exitT = this._exit ? 8 : 0;
-  }
-
-  // Snapshot for the AI log overlay + an event when the unit changes its mind.
   _logTick(v, view, cmd) {
     const fob = teamCenter(this.team, 'fob');
     const prev = this._dbg && this._dbg.state;
@@ -7075,8 +7098,7 @@ class AICommander {
     // state, not just the mission goal (a resupplying unit heads to fuel, not its objective). This
     // is what makes the log honest about "where is it trying to get to" (Jacob's ask).
     let dest = view.goal;
-    if (cmd.state === 'exit') dest = this._exit || view.goal;
-    else if (cmd.state === 'resupply') dest = this._supply || view.goal;
+    if (cmd.state === 'resupply') dest = this._supply || view.goal;
     else if (cmd.state === 'pursue') dest = (v.ai && v.ai.lastSeen) || view.goal;
     else if (cmd.state === 'engage') dest = view.enemy || view.goal;
     else if (cmd.state === 'suppress') dest = view.threatStand || view.threat || view.goal;
@@ -7129,7 +7151,6 @@ class AICommander {
       // base") or a gerund ("levelling the undefended base"), so no "sieging hunting" collisions.
       let line;
       switch (cmd.state) {
-        case 'exit':     line = `Rolling out the gate — ${dest}!`; break;
         case 'advance':  line = `Moving up — ${dest}!`; break;
         case 'flee':     line = `Taking fire — breaking off toward ${dest}!`; break;
         case 'pursue':   line = 'Lost visual — pushing to their last-known spot!'; break;
@@ -7202,11 +7223,10 @@ class AICommander {
       }
     } else if (v._oorT) v._oorT = 0;
     let dest = null, slack = 9;
-    if (st === 'exit') { dest = this._exit || this.strategy.objective(this); slack = 5; }   // thread the gate via A*
     // Use the RESOLVED goal the brain is acting on (view.goal already folds in the shield-grab
     // and intercept detours), not the raw mission objective — else a ground unit's A* steers it
     // to the patrol/objective spot while it claims to be "grabbing a shield" and never gets there.
-    else if (st === 'advance') dest = view.goal || this.strategy.objective(this);
+    if (st === 'advance') dest = view.goal || this.strategy.objective(this);
     else if (st === 'pursue') dest = v.ai.lastSeen || this.strategy.objective(this);
     else if (st === 'resupply') dest = this._supply;       // nearest fuel/ammo (own base or a depot)
     else if (st === 'assault') { dest = this.strategy.objective(this); slack = (view.engageRange || 36) * 0.7 * 1.25; }
@@ -7520,7 +7540,28 @@ class AICommander {
       if (this._elev && this._elev.rider === this.unit && this._elev.phase === 'top') {
         this._elev.rider = null; this._rising = false;
         this.unit._elevShieldUntil = performance.now() + ELEV_SHIELD_MS;   // anti-camp cover while it clears the mouth
-        this._planExit();   // ground units must aim at a GATE and drive out before pursuing
+        // POINT IT AT THE GATE AS IT ARRIVES (Jacob). The original problem was heavies "dancing on
+        // the elevator" — topping out facing a wall, then grinding through a turn inside a walled
+        // ring barely wider than their turning circle. The answer to that is to arrive already
+        // lined up, not to bolt a forced exit waypoint onto the top of the priority ladder above
+        // combat. Aligned, the unit just follows its A* route out like any other leg, and an enemy
+        // camping the pad is answered by `engaging` like any other enemy.
+        // ...but only when there IS a gate to thread. A unit that rose on a SATELLITE pad is
+        // already outside the wall ring, so aiming it at a gate turns it back INTO the base.
+        // `_planExit` carried this check and I dropped it when I deleted the forced exit.
+        const fobC = teamCamp(this.team, 'fob');
+        let ringed = true;
+        if (fobC && this._elev) {
+          const wallR = (FOB_SIZE / 2) * grid.cell + 2;
+          const dd = (this._elev.center.x - fobC.center.x) ** 2 + (this._elev.center.z - fobC.center.z) ** 2;
+          ringed = dd <= wallR * wallR;
+        }
+        const ex = ringed ? this._computeExit() : null;
+        if (ex) {
+          const v0 = this.unit, p0 = v0.holder.position;
+          v0.heading = Math.atan2(-(ex.x - p0.x), -(ex.z - p0.z));   // model front is local -Z
+          v0.holder.rotation.y = v0.heading;
+        }
       } else { return; }
     }
     this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
@@ -7689,7 +7730,7 @@ class AICommander {
     // Start one? a pending loud-finish event, this unit's off cooldown, and it's a travel lull
     // (not carrying the flag / fleeing / resupplying — those never dawdle).
     const runner = this.flag && this.flag() && this.flag().carrier === v;
-    const busy = cmd.state === 'capture' || cmd.state === 'resupply' || cmd.state === 'exit' || v._fleeing;
+    const busy = cmd.state === 'capture' || cmd.state === 'resupply' || v._fleeing;
     if (this._scanPending && now - this._scanPending < 1000 && now > (this._scanCd || 0) && !runner && !busy) {
       this._scanPending = 0;
       v._scanT = 1; v._scanStart = now; v._scanSwept = 0; v._scanDir = 1;
@@ -8338,70 +8379,6 @@ class AICommander {
     if (fob) considerHome(fob.center.x, fob.center.z);
     if (home && flagBaseAlive(this.team)) considerHome(home.center.x, home.center.z);   // can't heal at a destroyed flag base
     this._home = healHome;
-    // RE-ARM THE GATE EXIT (anti-elevator-circle). A ground unit that's drifted back inside its
-    // own FOB and can't thread the gate on its own ends up circling on the elevator (the unstick
-    // reflex spins it in place — the "dancing on the elevator" bug). Hand it the same DETERMINISTIC
-    // gate-exit it gets on deploy: rotate to the throat, drive straight out.
-    //   Fires ONLY when the unit truly wants to be OUT and heading to the FIELD. Critically it must
-    // NOT fire while the brain is latched to resupply/heal (`_resup`/`_hurt`): forcing the exit
-    // ejects it mid-top-off, so `_resup` (which only clears at a FULL 99% base top-off) never
-    // clears — it turns around, gets ejected again, and yo-yos in/out the gate forever (RTB-to-
-    // refuel↔roll-out at 85% fuel). And the objective must be OFFENSIVE (far from BOTH friendly
-    // bases), so a DEFEND/Turtle whose whole job is the rear flag↔elevator corridor isn't ejected.
-    if (this._exitCoolT > 0) this._exitCoolT -= dt;
-    // …and ONLY when the unit is actually FAILING to leave (grinding, no headway). The re-arm
-    // exists for a unit that can't thread the gate on its own — but it used to hijack a HEALTHY
-    // traveler too: a sieger path-following out through the fob ring got yanked to the gate
-    // waypoint, released, re-yanked every cooldown — the exit↔suppress two-master flap ("Rolling
-    // out the gate" ↔ "Lining up on their HQ") that pinned a Lurcher at its own base.
-    const exitFailing = this._stuckT > 1.2 || !(this._nav && this._nav.path && this._nav.path.length);
-    if (aiFobRearm && !this._exit && this._exitCoolT <= 0 && exitFailing && !v._move.ignoreWalls && fob && !v.ai._resup && !v._fleeing) {
-      const dFob2 = (px - fob.center.x) ** 2 + (pz - fob.center.z) ** 2;
-      const obj = this.strategy.objective(this), homeB = this.homeBasePos();
-      const objOffensive = (obj.x - fob.center.x) ** 2 + (obj.z - fob.center.z) ** 2 > 30 * 30
-        && (obj.x - homeB.x) ** 2 + (obj.z - homeB.z) ** 2 > 40 * 40;   // out on the field, not a rear/home patrol
-      const wantsOut = !needAmmo && !needFuel && v.hp > v.maxHp * 0.9;
-      if (dFob2 < 18 * 18 && wantsOut && objOffensive) {
-        // Two-goal spin guard: a unit standing 8-9u from the gate waypoint but still <18u of the
-        // fob used to flap — re-arm rotates it TO the gate point, the 8u clear fires instantly,
-        // advance rotates it BACK to the objective, re-arm fires again (the ~150° back-and-forth
-        // between two paths). Only arm an exit that's genuinely somewhere to GO, and cool down
-        // between evaluations either way so a cleared exit gets a free run at the field.
-        const e = this._computeExit();
-        if (e && (px - e.x) ** 2 + (pz - e.z) ** 2 > 10 * 10) { this._exit = e; this._exitT = 20; }
-        this._exitCoolT = 6;
-      }
-    }
-    // Post-deploy: drive OUT through the gate first. mustGo forces the brain to head
-    // straight for the exit waypoint (no engaging/firing) until it clears the gate.
-    let mustGo = false;
-    if (this._exit) {
-      this._exitT -= dt;
-      const dd = (px - this._exit.x) ** 2 + (pz - this._exit.z) ** 2;
-      if (dd < 8 * 8 || this._exitT <= 0) { this._exit = null; this._exitCoolT = 6; }   // cleared the gate (or timed out) — cool the re-arm so advance gets a clean run
-      else mustGo = true;
-    }
-    // FIGHT FROM UNDER THE ELEVATOR SHIELD (Jacob). A unit that tops out gets 5s of total
-    // invulnerability — but ONLY while it stands on the pad — and an exit waypoint in the same
-    // breath. mustGo is the TOP rung of the ladder, above every combat state, so with an enemy in
-    // its face it drove for the gate and spent its invulnerability travelling. Yielding here (as
-    // opposed to reordering the ladder) is deliberate: the exit route is gate-threading with
-    // skipWhiskers, and combat modes have no such route, so promoting them generally would drive
-    // units at enemies THROUGH their own base walls. This yields only while the shield is
-    // actually up and something is actually in reach — at most those 5 seconds.
-    if (mustGo && elevShieldOn(v) && aiPadFight) {
-      const foeR = (ENGAGE_RANGE[v.type] || 36) * 1.1;
-      for (const o of combatants) {
-        if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
-        const dx = o.holder.position.x - px, dz = o.holder.position.z - pz;
-        if (dx * dx + dz * dz > foeR * foeR) continue;
-        if (v.ammo <= 0) break;                       // nothing to shoot with — take the gate
-        mustGo = false;                               // let the ladder fall through to engage
-        if (!v._padFightLogged) { v._padFightLogged = true;
-          aiLog(this.team, `${this.cname}: Contact right off the pad — holding the shield and fighting from here.`); }
-        break;
-      }
-    }
     // The nearest LIVE enemy wall-turret this unit can actually SHOOT — sensed wide
     // (TURRET_SENSE) so heavies snipe from outside the towers' own range, but ONLY
     // counted if there's a clear line to it. That LOS gate is the key: a unit no
@@ -8818,6 +8795,14 @@ class AICommander {
       }
       if (best) breakTarget = { x: best.x, y: map.heightAt(best.x, best.z) + ty, z: best.z, tree: ty === 3.0 };   // tree vs wall — a Firebrat may blast a tree but never a structure
     }
+    // Standing in the door on an intercept, and the lane to watch from it (see the view fields).
+    let atCamp = false, watch = null;
+    if (this.strategy.step === 'intercept') {
+      const icamp = this.interceptCampSpot();
+      atCamp = !!(icamp && (icamp.x - px) ** 2 + (icamp.z - pz) ** 2 < INTERCEPT_HOLD_R * INTERCEPT_HOLD_R);
+      const of = this.ourFlag();
+      watch = of ? { x: of.home.x, z: of.home.z } : this.homeBasePos();
+    }
     return {
       dt,
       self: { x: px, z: pz, heading: h, type: v.type, shield: v.shield, hpFrac: v.hp / v.maxHp, fuelFrac: v.fuel / v.maxFuel, ammoFrac: v.ammo / v.maxAmmo },
@@ -8846,8 +8831,7 @@ class AICommander {
       shotReach: SHOT_REACH[v.type] || 999,   // hard cap on firing distance — a round physically dies past this (see SHOT_REACH)
       fofW: fofFor(this.team),   // this team's fight-or-flight weight set (tunable / A/B)
       hqThreat,   // the suppress target is the enemy KEEP (not a tower) — for logs/recorder
-      goal: mustGo ? this._exit : goal,
-      mustGo,
+      goal,
       resupply: supply ? { x: supply.center.x, z: supply.center.z } : goal,
       supplyHeals,   // the chosen resupply point is an own base → hold until ammo+fuel+hp are all maxed
       home: healHome || goal,
@@ -8895,6 +8879,12 @@ class AICommander {
       // ON INTERCEPT, GET TO THE DOOR — don't get drawn into a chase on the way. Nothing on the
       // field outruns a flag runner, so a pursuit is a race we lose while the carrier scores.
       intercepting: this.strategy.step === 'intercept',
+      // ...BUT ONCE WE ARE STANDING IN IT, a chase stops being a foot race: we are the thing
+      // between the runner and the only place it can score, so closing is geometry.
+      atCamp,
+      // WHERE THE RUNNER WILL COME FROM: our own flag's home. A unit that drove out to the camp
+      // arrives pointing at the enemy base — away from the only lane it is there to watch.
+      watch,
       flagGrabbable: this.strategy.step === 'capture' && this.flagGrabbable(),   // endgame: sightings alone don't turn the runner around (runnerFlee)
       blockedAhead,
       blockedLeft: feeler(lx, lz),
@@ -8984,7 +8974,6 @@ function stateDetail(d, st) {
     case 'pursue':   return `to their last-known spot ${go}`;
     case 'resupply': return `to top up ${go}`;
     case 'flee':     return d.foeT ? `from the ${d.foeT} ${d.foeD}u back` : `breaking contact ${go}`;
-    case 'exit':     return 'through the gate';
     case 'unstick':  return d.stuckWhy || 'jolting free';
     default:         return '';
   }
@@ -11358,7 +11347,7 @@ let navLines = null;   // Map<commander, {line, posAttr, wp, dest, label, cells}
 // state (combat engage/suppress, unstick) the unit ignores nav.path and steers by the behavior —
 // so the overlay must NOT draw the stale path (it points wherever the unit last navigated, e.g.
 // back to base) and must NOT label it "A* route". Keep this in sync with _navOverride's switch.
-const NAV_ASTAR_STATES = new Set(['exit', 'advance', 'pursue', 'resupply', 'assault']);
+const NAV_ASTAR_STATES = new Set(['advance', 'pursue', 'resupply', 'assault']);
 // ?nav auto-probe: the first time a FIREBRAT is trying to navigate but its A* came back empty,
 // freeze the sim and open the A* visualizer ON THAT FIREBRAT'S OWN COST from its cell to its goal
 // — so you can see whether a route actually exists and why the nav didn't take it. Fires once per

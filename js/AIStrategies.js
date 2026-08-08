@@ -95,6 +95,8 @@ class Sap extends Mission {
 //            KITE: circle the cluster (trapShield skirts it, never crosses), firing whenever the
 //            gun bears, so a tunnel-visioned pursuer (target-fixation: slimmer mine-spot roll)
 //            chases us straight across the kill-zone.
+const TRAP_SET_R = 20;    // u from the anchor that counts as ACTUALLY in ambush — the clock and the
+                          // signal shots both wait for this, so neither runs from inside our own base
 const TRAP_QUIET = 10;    // s parked silent in ambush before signalling
 const TRAP_SIGNAL = 14;   // s of signal shots before giving up on a no-show
 const TRAP_LURE_R = 55;   // u from the trap centroid within which the bait kites (beyond it: normal engage)
@@ -110,6 +112,17 @@ class Trap extends Mission {
     // would restart the whole wait each time (the tender then never times out).
     if (sees) { cmd._trapIdleT = 0; this._phase = 'lure'; }
     else {
+      // THE NO-SHOW CLOCK ONLY RUNS ONCE THE AMBUSH EXISTS. It used to start with the mission, so
+      // a hunter still inside its own FOB reached the `signal` phase without ever taking up
+      // position — and a signal shot is aimed 30u toward the enemy base from wherever the unit
+      // happens to stand, which from inside your own walls is your own gate. Jacob watched one do
+      // exactly that: "Rolling out the gate — set in ambush behind the trap!" and then shooting
+      // its own wall. "Nobody came" is a statement about a trap that is SET, not about time
+      // passing, and the signal is bait that only means anything from the kill zone.
+      const v = cmd.unit, a = cmd.trapAnchor && cmd.trapAnchor();
+      const set = !!(v && !v.dead && a
+        && (v.holder.position.x - a.x) ** 2 + (v.holder.position.z - a.z) ** 2 < TRAP_SET_R * TRAP_SET_R);
+      if (!set) { this._phase = 'anchor'; return; }   // still on our way — go and set it first
       cmd._trapIdleT = (cmd._trapIdleT || 0) + dt;
       this._phase = cmd._trapIdleT > TRAP_QUIET ? 'signal' : 'anchor';
       // Signalled long enough with no takers → stop tending; the doctrine falls through to
@@ -565,6 +578,13 @@ class Swap extends Mission {
   tick(cmd, dt) {
     super.tick(cmd, dt);
     const v = cmd.unit; if (!v || v.dead) return;
+    // THE CLOCK ONLY RUNS WHILE WE ARE ACTUALLY TRYING TO TRAVEL. `engaging` outranks `advance`,
+    // so a unit that meets a rival on the way home stops closing on the pad — and a stall clock
+    // that cannot tell STUCK from BUSY ditched a valkyrie mid-fight ten seconds after it switched
+    // ("Working an angle on their turret" one second, gone the next). Fighting is a choice the
+    // ladder made, not a failure of the trip: hold the clock while it lasts.
+    const st = v._aiState;
+    if (st === 'engage' || st === 'suppress' || st === 'pursue') { this.stallT = 0; return; }
     const p = v.holder.position, h = cmd.homePos();
     const d = Math.hypot(p.x - h.x, p.z - h.z);
     if (this.bestD == null || d < this.bestD - 0.5) { this.bestD = d; this.stallT = 0; }
@@ -573,10 +593,7 @@ class Swap extends Mission {
   done(cmd) {
     const v = cmd.unit;
     if (!v || v.dead || cmd.atHomeBase()) return true;
-    if ((this.stallT || 0) > SWAP_STALL) {
-      if (this.doc && this.doc.log) this.doc.log(`${v.type} can't get home to swap — it's hung up. Ditching it.`);
-      return true;   // completeSwap retires it where it stands; deploy rolls out the one we wanted
-    }
+    if ((this.stallT || 0) > SWAP_STALL) { this.ditched = true; return true; }
     return false;
   }
   label(cmd) { return `heading in to swap for a ${this.want || 'different vehicle'}`; }
@@ -1004,7 +1021,13 @@ export function missionScore(cmd, key, running = null) {
     case 'sap':
       if (earlyB >= 0.1 && spareFB >= 0.5) add('opening sap', earlyB); break;
     case 'trap':
-      if (arch === 'hunter' && cmd._trapMode && !cmd._trapDone) add('trap ready', 2); break;
+      // "READY" HAS TO MEAN THE TRAP EXISTS. This scored on _trapMode — the INTENT, rolled once at
+      // the opening — while `_trap` (the mine cluster's centroid) is only set when the sap sortie
+      // actually lays them. Picked before that, trapAnchor() falls back to homePos(), so the
+      // hunter "sets its ambush" inside its own FOB, the no-show clock runs down, and it starts
+      // lobbing signal shots 30u toward the enemy base — into its own gate. Measured: 234 of 234
+      // signal-phase ticks were fired from inside the unit's own base.
+      if (arch === 'hunter' && cmd._trapMode && cmd._trap && !cmd._trapDone) add('trap ready', 2); break;
     // SUPPLY MISSIONS. Two terms, and the split between them is the whole point. "how empty" is
     // GRADUAL — it rises as the tank drains rather than stepping on at a line — and "finish the
     // job" only applies while this IS the running mission, holding the score up until FULL. That
@@ -1197,7 +1220,7 @@ class Doctrine {
       if (!this.mission.done(cmd)) return;
       const then = this._swapThen || 'attack';
       this._swapThen = null;
-      cmd.completeSwap(this.mission.want);
+      cmd.completeSwap(this.mission.want, this.mission.ditched);
       this._switch(then, cmd, 'swapped at the pad — getting on with it');
       return;
     }

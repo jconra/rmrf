@@ -157,7 +157,6 @@ function fightScore(v, p) {
 // pick the active state in the transition table.
 const CONDITIONS = {
   always:       () => true,
-  mustGo:       (v) => !!v.mustGo,                         // still inside the gate
   capturing:    (v) => !!v.capturing,                      // final dash to a grabbable flag → take it, ignore the turrets
   // ON THE WAY HOME. The commander's Flee mission is running: the decision to break off has
   // already been taken and the route is fixed, so this just drives it.
@@ -253,13 +252,18 @@ const CONDITIONS = {
   // the enemy fleet is gone (the commander redirects to the base instead of wasting time).
   pursuing: (v, m, p) => {
     if (v.enemyGone) return false;
-    // NEVER CHASE WHILE INTERCEPTING. The carrier is faster than anything that could catch it, so
-    // a pursuit is a foot race we lose while it walks the flag in — and it was the biggest single
-    // source of wasted driving measured: an interceptor covered 100.3u in ten seconds for 1.0u of
-    // net progress, seven times in one match, because "the last place I saw them" moves every
-    // tick. Get to the door instead (interceptCampSpot). An enemy actually in range is still
-    // fought — `engaging` sits above this rung and answers that case.
-    if (v.intercepting) return false;
+    // NEVER CHASE ON THE WAY TO THE DOOR. The carrier is faster than anything that could catch
+    // it, so a pursuit started from behind is a foot race we lose while it walks the flag in —
+    // and it was the biggest single source of wasted driving measured: an interceptor covered
+    // 100.3u in ten seconds for 1.0u of net progress, seven times in one match, because "the last
+    // place I saw them" moves every tick. Get to the door instead (interceptCampSpot).
+    //
+    // ONCE WE ARE STANDING IN IT, PURSUE. On the camp we are between the runner and the only
+    // place it can score, so closing is geometry rather than a race — and refusing there is pure
+    // waste: seed 669's camped Valkyrie saw the carrier on 16.4% of ticks across a whole match and
+    // acted on none of them. Chase from behind, never; close from in front, always.
+    // (A rival in weapons range is a separate case — `engaging` sits above this rung.)
+    if (v.intercepting && !v.atCamp) return false;
     // DON'T RE-CHASE A CONTACT WE ALREADY KNOW WE CANNOT REACH. When the driver refuses a pursue
     // goal the issuer clears lastSeen — but if we can still SEE the enemy (across water, across a
     // wall), perception rewrites lastSeen on the very next tick, pursue re-triggers, the driver
@@ -706,15 +710,23 @@ const BEHAVIORS = {
       { goto: target ? { x: target.x, z: target.z } : null, arrive });
     const arrived = (homeward && view.atHome) || lo.arrived;
     const turn = lo.turn, fwd = arrived ? 0 : lo.fwd, strafe = arrived ? 0 : (lo.strafe || 0);
-    // FIGHT FROM THE PAD: a unit parked at base topping up used to sit BLIND, facing the
-    // base — a chaser (a Lurcher on a healing Valkyrie) out-damages the heal and the unit
-    // died waiting. Healing doesn't disarm the gun: pivot to face the pursuer (any rival
-    // in sight, else the last threat we fled from) and return fire while the base tops us
-    // up. Stays parked — leaving the heal radius to duel is what gets it killed. Gated on
-    // ARRIVED (not fwd===0) so a homeward unit merely pivoting en route doesn't stop to fight.
-    if (homeward && arrived) {
+    // PARKED IS NOT BLIND. Two places a unit holds a position instead of driving, and it has to
+    // keep watching from both:
+    //   FIGHT FROM THE PAD — topping up at base used to sit facing the base, so a chaser (a
+    //     Lurcher on a healing Valkyrie) out-damaged the heal and the unit died waiting. Healing
+    //     doesn't disarm the gun: pivot to the pursuer and return fire while the base tops us up.
+    //   WATCH THE LANE — an interceptor standing in the door held whatever heading it arrived on,
+    //     which is the heading it drove OUT on: pointing at the enemy base, away from the lane the
+    //     runner must come up. Measured on seed 669: 84 degrees off, constant, for a whole match.
+    //     That costs it most of its eyes — a Valkyrie spots a Firebrat at 71u dead ahead but only
+    //     35u out to the side — and it saw the carrier on just 16.4% of ticks.
+    // Both stay parked: leaving the spot to duel loses the heal, or opens the door. Gated on
+    // ARRIVED (not fwd===0) so a unit merely pivoting en route doesn't stop.
+    const camped = view.atCamp && mode === 'advance';   // holding the door, not off pursuing from it
+    if (arrived && (homeward || camped)) {
       const foe = view.enemy;                      // visible + LOS → can actually shoot it
-      const face = foe;                            // nothing in sight → hold the heading we arrived on
+      // A rival in sight wins; otherwise face the lane we are here to watch.
+      const face = foe || (camped ? view.watch : null);
       if (face) {
         const derr = wrapPi(Math.atan2(-(face.x - self.x), -(face.z - self.z)) - self.heading);
         let fire = false;
@@ -857,7 +869,6 @@ export const DEFAULT_BRAIN = {
     { flag: '_resup', trip: 'resupNeeded', clear: 'resupDone' },
   ],
   states: {
-    exit:     { behavior: 'exit', skipWhiskers: true },
     resupply: { behavior: 'seek' },
     engage:   { behavior: 'combat' },
     suppress: { behavior: 'combat' },
@@ -869,7 +880,6 @@ export const DEFAULT_BRAIN = {
   // Priority ladder: clear the gate first, then self-preservation, then fighting,
   // then the objective. `target` says what the chosen behavior aims at.
   transitions: [
-    { when: 'mustGo',       mode: 'exit',     target: 'goal' },
     // TAKE THE FLAG: on the final approach to a grabbable flag, the runner COMMITS — beeline it and
     // ignore the turrets. A runner that stops to trade with the last tower next to the flag just
     // dies without the grab (the "worked an angle on the turret and shot the wall" bug). It's a
@@ -990,10 +1000,11 @@ export function runBrain(graph, view, mem) {
     if (mem._bestGoalD == null || gd < mem._bestGoalD - cfg.wedgeGain) { mem._bestGoalD = gd; mem._wedgeT = 0; }
     else mem._wedgeT += view.dt;
   } else { mem._bestGoalD = gd; mem._wedgeT = 0; }
-  // Don't fire the reverse-pivot while the deterministic gate-exit is driving (view.mustGo):
-  // the exit behavior owns the motion — rotate to the throat, drive straight out — and the
-  // reverse-and-turn jolt is exactly the "dancing on the elevator" the exit path replaces.
-  if (!view.mustGo && (mem._stillT > cfg.stillLimit || mem._wedgeT > cfg.wedgeLimit)) {
+  // ANTI-WEDGE REFLEX. This used to stand down while the forced gate-exit was driving, because
+  // that exit outranked everything and a jolt would have fought it. The exit is gone — a unit now
+  // leaves through the gate on its A* route like any other leg — so the reflex applies everywhere,
+  // including at its own doorway, which is where it was most often needed and least often allowed.
+  if (mem._stillT > cfg.stillLimit || mem._wedgeT > cfg.wedgeLimit) {
     mem._unstick = cfg.unstickDur; mem._unstickTurn = mem.rng() < 0.5 ? -1 : 1;
     mem._stillT = 0; mem._wedgeT = 0; mem._bestGoalD = null;
     // Escalation counter: jolts within ~8s of each other are the SAME stuck episode. The
@@ -1144,7 +1155,7 @@ export class Brain {
   // view: {
   //   dt, self:{x,z,heading,hpFrac,fuelFrac,ammoFrac},
   //   seesEnemy:bool, enemy:{x,z}|null, threat:{x,z}|null, threatLOS:bool, flankSide:±1,
-  //   goal:{x,z}, resupply:{x,z}|null, shootGoal:bool, mustGo:bool,
+  //   goal:{x,z}, resupply:{x,z}|null, shootGoal:bool,
   //   arriveDist:number, engageRange:number,
   //   blockedAhead:bool, blockedLeft:bool, blockedRight:bool
   // }
