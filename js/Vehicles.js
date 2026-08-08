@@ -22,16 +22,31 @@ import { getCamoTextures } from './CamoTexture.js';
 // stat = the 1-5 dot ratings shown on the hangar HUD (ported from the designer);
 // role = the one-line blurb. (speed/turn below are the gameplay movement values.)
 // soundIndex = the SoundManager engine-patch index (designer vehicle order).
+// `accel` = how hard the chassis can change its forward speed, in world units/s². null means
+// INSTANT — the throttle command IS the speed, which is how every vehicle in this game behaved
+// before this existed. Divide speed by accel for the feel; seconds to full pelt is the number
+// that matters:
+//   lurcher   instant  — six legs push off the ground, there is no drivetrain to spin up, and
+//                        going exactly where you point it with no turning circle is its identity
+//   firebrat   0.7s    — nimble and light
+//   valkyrie   2.4s    — winds up slowly, then out-runs everything on the map including the scout
+//   jotun      2.5s    — a rolling fortress should visibly heave itself into motion
 export const VEHICLE_TYPES = {
-  lurcher:  { Class: Lurcher,  label: 'Lurcher',  scale: 3.6,  speed: 14, turn: 2.2, soundIndex: 0,
+  lurcher:  { Class: Lurcher,  label: 'Lurcher',  scale: 3.6,  speed: 14, turn: 2.2, accel: null, soundIndex: 0,
     stat: { speed: 2, armor: 4, firepower: 4 }, role: 'Six-leg spider chassis. Brutal firepower, all-terrain footing.' },
-  firebrat: { Class: Firebrat, label: 'Firebrat', scale: 3.4,  speed: 20, turn: 3.0, soundIndex: 1,
+  firebrat: { Class: Firebrat, label: 'Firebrat', scale: 3.4,  speed: 20, turn: 3.0, accel: 30, soundIndex: 1,
     stat: { speed: 5, armor: 1, firepower: 2 }, role: 'Lightning-fast scout. Built to capture the flag and run.' },
-  valkyrie: { Class: Valkyrie, label: 'Valkyrie', scale: 3.4,  speed: 16, turn: 2.0, soundIndex: 2,
+  valkyrie: { Class: Valkyrie, label: 'Valkyrie', scale: 3.4,  speed: 22, turn: 2.0, accel: 9, soundIndex: 2,
     stat: { speed: 4, armor: 2, firepower: 3 }, role: 'Ducted-rotor assault craft. Ignores all terrain.' },
-  jotun:    { Class: Jotun,    label: 'Jotun',    scale: 4.1,  speed: 8,  turn: 1.2, soundIndex: 3,
+  jotun:    { Class: Jotun,    label: 'Jotun',    scale: 4.1,  speed: 8,  turn: 1.2, accel: 3.2, soundIndex: 3,
     stat: { speed: 1, armor: 5, firepower: 5 }, role: 'Rolling fortress. Devastating at long range. Nearly indestructible.' },
 };
+
+// Slowing is easier than speeding up — brakes and reverse thrust beat engine thrust — and every
+// arrival radius in the game (siege stands, camp spots, the elevator pad, locomote's settle
+// distance) was written when a vehicle could stop dead in a single frame. Braking at a multiple of
+// accel keeps momentum something you feel setting off without turning every arrival into a skid.
+const BRAKE_MUL = 2.5;
 
 // Sideways (strafe) speed as a fraction of forward speed — slower, so driving forward
 // is still the quick way around and strafing is for fine repositioning.
@@ -56,6 +71,8 @@ export class Vehicle {
     this.heading = 0;        // yaw (radians)
     this.speed = def.speed;
     this.turnRate = def.turn;
+    this.accel = def.accel ?? null;   // null = instant (see VEHICLE_TYPES)
+    this.vel = 0;                     // CURRENT forward speed, world units/s — the momentum state
     this.scaleMult = 1;
     this.seat();             // drop the model so its lowest point rests on the floor
   }
@@ -84,6 +101,7 @@ export class Vehicle {
     this.holder.position.set(x, y, z);
     this.heading = heading;
     this.holder.rotation.y = heading;
+    this.vel = 0;   // teleported (spawn, lift, re-centre on the pad) — it is not still rolling
   }
 
   // forward/turn in [-1,1]. groundFn: terrain height under the new position.
@@ -99,8 +117,22 @@ export class Vehicle {
     const fx = -Math.sin(h), fz = -Math.cos(h);   // forward (local -Z)
     const rx =  Math.cos(h), rz = -Math.sin(h);   // right   (local +X)
     const eff = this.speed * (this.speedMul || 1);   // speedMul = terrain modifier (e.g. a road boost), set per-frame by the game
-    const d = forward * eff * dt;
-    const s = strafe * eff * STRAFE_FRAC * dt;
+    // MOMENTUM. `forward` is a throttle COMMAND, not a speed. Ease the real speed toward what was
+    // asked at the chassis' own accel, so a heavy machine leans into it and a light one darts off.
+    // Instant types (accel null) assign straight through — bit-for-bit the behaviour every vehicle
+    // had before this existed, which is why the Lurcher is untouched by any of it.
+    const want = forward * eff;
+    if (this.accel == null) this.vel = want;
+    else {
+      // Only speeding up in the direction you are ALREADY going is slow; slowing, stopping and
+      // reversing all get the brake rate. The sign test carries its weight: a unit doing +8 that
+      // is asked for -8 has to brake through zero first, however the magnitudes compare.
+      const rate = (this.vel * want >= 0 && Math.abs(want) > Math.abs(this.vel)) ? this.accel : this.accel * BRAKE_MUL;
+      const step = rate * dt;
+      this.vel += Math.max(-step, Math.min(step, want - this.vel));
+    }
+    const d = this.vel * dt;
+    const s = strafe * eff * STRAFE_FRAC * dt;   // strafe stays instant: fine positioning, not travel
     const dx = fx * d + rx * s;
     const dz = fz * d + rz * s;
     const px = this.holder.position.x, pz = this.holder.position.z;
@@ -108,11 +140,15 @@ export class Vehicle {
     if (blockedFn && blockedFn(nx, nz)) {
       nx = blockedFn(px + dx, pz) ? px : px + dx;   // slide on whichever axis is clear
       nz = blockedFn(px, pz + dz) ? pz : pz + dz;
+      if (nx === px && nz === pz) this.vel = 0;     // ran into something solid: it stopped, so it has to spool up again
     }
     this.holder.position.x = nx;
     this.holder.position.z = nz;
     if (groundFn) this.holder.position.y = groundFn(nx, nz);
-    this.model.update(dt, forward, turn);
+    // Drive the ANIMATION off real speed rather than the command, so treads and gaits match what
+    // the machine is doing — without this a spooling-up Jotun scrolls its tracks at full tilt
+    // while barely moving. Identical to `forward` for instant chassis.
+    this.model.update(dt, eff ? this.vel / eff : forward, turn);
   }
 
   // OMNI-directional drive (the Lurcher under player control): move along an arbitrary
