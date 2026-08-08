@@ -57,6 +57,22 @@ function _nearestStage(stages, pos) {
   return best;
 }
 
+// NO WHITE HIT-FLASH ON FORTIFICATIONS. The flash could never be localized the way a base needs:
+// a corner tower is ONE structure of about eleven meshes, so a shell landing anywhere on it lights
+// the whole tower, and a base taking fire from several directions strobes.
+//
+// It was also already inconsistent, which is the part that settles it. MEASURED, one hit each:
+//   straight wall (EW/NS)  0 meshes lit   — they draw from shared InstancedMesh courses, so their
+//                                           Destructible holds only an invisible proxy, and a
+//                                           MeshBasicMaterial has no emissive to set in the first place
+//   corner tower          11 meshes lit
+//   gate                   5 meshes lit
+// Most of an 84-segment ring therefore never flashed at all, while the towers and gates blazed. A
+// damage cue that fires on a fraction of a wall and ignores the rest reads as a rendering glitch
+// rather than feedback. Battle damage on these is carried by the scorch-and-crack wear instead,
+// which is per-segment, cumulative, and doesn't lie about where the shell landed.
+const NO_FLASH = new Set(['wall', 'gun']);
+
 export class Destructible {
   // mesh: the intact THREE.Object3D (already positioned in its parent).
   // opts.hp        — hit points
@@ -110,7 +126,7 @@ export class Destructible {
   damage(amount, point) {
     if (this.dead || amount <= 0) return;
     this.hp -= amount;
-    this._flash = 1;        // white-hot flash on hit
+    if (!NO_FLASH.has(this.type)) this._flash = 1;   // white-hot flash on hit (see NO_FLASH)
     this._applyWear();      // deepen scorch + cracks for the new HP level
     if (this.staged) this._restageFall();   // shed any pieces whose threshold the hit crossed
     if (this.onDamage) this.onDamage(this);
