@@ -3241,6 +3241,13 @@ function updateFlags(dt) {
       f.group.position.y = f.home.y + DROP_FROM * (1 - e * e);
     }
     if (f.carried && f.carrier) {
+      // …and did the run get abandoned for fuel? Latched per carrier, so a refuel that lasts a
+      // hundred ticks counts once. This is the failure the alarm exists for: a working flag run
+      // goes home FIRST, and the tank is a timer, not a range.
+      { const oc = commanders.find(c => c.ownsUnit && c.ownsUnit(f.carrier));
+        const step = oc && oc.strategy ? oc.strategy.step : null;
+        if (step === 'refuel') { if (!f.carrier._refuelCounted) { f.carrier._refuelCounted = 1; carrierRefuelsTotal++; } }
+        else if (f.carrier._refuelCounted) f.carrier._refuelCounted = 0; }
       if (f.carrier.dead) {
         // Carrier killed (anywhere — including on the lift) → the flag drops where
         // it fell and STAYS there until a Firebrat re-grabs it (no auto-return).
@@ -3282,7 +3289,8 @@ function updateFlags(dt) {
         } else {
           // Stealing (carrying it off) stays FIREBRAT-only — it's the runner class.
           if (v.type !== 'firebrat') continue;
-          f.carried = true; f.carrier = v; showBanner(`${flagColorName(f)} FLAG TAKEN`, { color: '#' + f.cloth.material.color.getHexString() });
+          f.carried = true; f.carrier = v; flagCarriesTotal++;
+          showBanner(`${flagColorName(f)} FLAG TAKEN`, { color: '#' + f.cloth.material.color.getHexString() });
           const oc = commanders.find(c => c.team === f.team);   // scorecard: the owners lost their flag on somebody's watch
           if (oc) { oc.flagsLost = (oc.flagsLost || 0) + 1; oc._lastFlagLostT = oc._matchT; }
         }
@@ -5597,6 +5605,13 @@ const DRY_TRIP_ALARM = 3;     // trips to the enemy base without firing a shot, 
 const DRY_TRIP_R = 110;       // u — inside this of the enemy base counts as "it got there"
 const SWAP_LOOP_ALARM = 8;    // CONSECUTIVE recalls answered by re-fielding the very type we recalled (a run, not a tally — see deploy)
 let dryTripsTotal = 0;        // RR.decisionAlarms() — tournament summary
+// FLAG RUNS. The tournament harness has printed "FLAG RUNS: 0 started · 0 STOPPED FOR FUEL" on
+// every run for weeks, because it reads two keys off decisionAlarms() that were specified when the
+// carrier-fuel alarm was written and never survived its revert. A line that always reads zero is
+// worse than no line: it says the failure never happens, and the win condition is CAPTURE ONLY, so
+// a flag run is the single most important thing in the game to be able to count.
+let flagCarriesTotal = 0;     // flags picked up (a run STARTED)
+let carrierRefuelsTotal = 0;  // …and the carrier broke off to go and refuel
 let swapLoopsTotal = 0;
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
@@ -11162,7 +11177,7 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps }),   // match-wide driver counters (goalSnaps = impossible goals rescued)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
-  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal }),
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
