@@ -585,6 +585,31 @@ export class IslandMap {
     return Math.max(0, this.tileH[ci]);
   }
 
+  // The HIGHEST drawn ground within `r` of a point — what anything laid FLAT on the terrain has to
+  // clear in order not to bury itself in the slope it is lying on.
+  //
+  // heightAt() is not that number and is not trying to be. It answers "how high is this spot",
+  // one height per tile (the average of the tile's four corners), which is what gameplay wants
+  // because a tile is one nav cell. A decal is not a spot: a vehicle's shadow is a flat quad
+  // several tiles wide, so on any slope the ground under its uphill half runs ABOVE the height of
+  // its centre and swallows it — which no amount of nudging the centre up can fix, because the
+  // gap grows with the decal's width. Reads the vertex heights the mesh is actually built from.
+  surfaceTopAt(x, z, r = 0) {
+    const H = this._H;
+    if (!H) return this.heightAt(x, z);
+    const p = this.params, VX = p.cols + 1, VZ = p.rows + 1;
+    const gx0 = Math.max(0, Math.min(VX - 1, Math.floor((x - r + this.worldW / 2) / p.tile)));
+    const gx1 = Math.max(0, Math.min(VX - 1, Math.ceil((x + r + this.worldW / 2) / p.tile)));
+    const gz0 = Math.max(0, Math.min(VZ - 1, Math.floor((z - r + this.worldH / 2) / p.tile)));
+    const gz1 = Math.max(0, Math.min(VZ - 1, Math.ceil((z + r + this.worldH / 2) / p.tile)));
+    let top = -Infinity;
+    for (let gz = gz0; gz <= gz1; gz++) {
+      const row = gz * VX;
+      for (let gx = gx0; gx <= gx1; gx++) if (H[row + gx] > top) top = H[row + gx];
+    }
+    return top === -Infinity ? this.heightAt(x, z) : Math.max(0, top);
+  }
+
   // Grass-texture splat mask at a world point (0..1) — reproduces TerrainMaterial's fragment
   // shader so callers can place grass tufts EXACTLY where the grass texture shows, not by the
   // coarser tile class. Same inputs as the shader: the macro grassiness stored in the aGrass

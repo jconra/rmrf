@@ -134,7 +134,17 @@ export class Vehicle {
       // slew could recover — the gun visibly swung away and crawled back on every
       // direction change). Counter-rotate the mount by the hull's turn in the same
       // frame so the gun holds its WORLD bearing while the body walks any which way.
-      if (dh && this.model.turretGroup && this.model.autoScan === false) {
+      // ONLY WHILE THERE IS A BEARING WORTH HOLDING. This counter-rotation exists so the hull's
+      // cosmetic facing can't drag the gun off a target — but nothing checked that a target
+      // existed, so a unit merely WALKING somewhere had its turret pinned to whatever direction it
+      // last happened to face, and every course change shoved the aim further from where it was
+      // going. MEASURED across 15,818 moving AI Lurcher ticks: hull 12° off its travel direction
+      // (i.e. the body faced the right way) while the turret sat 54° off it, more than 90° off a
+      // quarter of the time, and 78% of those ticks were not tracking anything at all. With the
+      // test below it is 22° off travel, and past 90° on 8%.
+      // The player is exempt: their turret is re-derived from the world cursor every frame, so
+      // without the compensation the gun visibly lags and crawls back on every direction change.
+      if (dh && this.model.turretGroup && this.model.autoScan === false && (this.isPlayer || this._aimHold > 0)) {
         const wrap = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
         this.model.aimYaw = wrap((this.model.aimYaw || 0) - dh);
         this.model.turretGroup.rotation.y = wrap(this.model.turretGroup.rotation.y - dh);

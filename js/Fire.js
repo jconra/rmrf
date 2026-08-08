@@ -7,21 +7,32 @@
 // The effect is yomotsu's volumetric fire (see VolumetricFire.js), which is a draw call and a
 // buffer upload PER FIRE PER FRAME and cannot be instanced. That is affordable here only because
 // the fires are brief, so the count at any moment is small. Measured in lab/fire.html on an
-// S24 Ultra — the weakest device in play — at under 0.03ms a fire, so a pool of 8 costs about
-// 0.2ms of a 16.7ms frame.
+// S24 Ultra — the weakest device in play — at under 0.03ms a fire, so a pool of 12 costs about
+// 0.35ms of a 16.7ms frame.
 //
-// THE POOL IS THE BUDGET. Eight instances, built once, reused forever. Constructing a
+// THE POOL IS THE BUDGET. Twelve instances, built once, reused forever. Constructing a
 // VolumetricFire allocates slice buffers and builds geometry, which is not something to do in the
 // middle of a firefight, and a fixed pool means a chain reaction cannot open an unbounded number
-// of them. When they are all busy the ninth explosion simply does not get a fire, which is far
-// better than a frame spike.
+// of them. When they are all busy the thirteenth explosion simply does not get a fire, which is
+// far better than a frame spike.
+//
+// The pool grew from 8 with LIFE, and for that reason: at a given kill rate, doubling how long a
+// fire burns doubles how many are alight at once, and a pool that no longer covers a busy minute
+// shows up as wrecks that inexplicably don't burn. Twelve is the only number here that costs
+// anything, so it is the first knob to turn back if a phone ever hitches — SIZE is the second,
+// since bigger flames are more transparent overdraw even though they are not more draw calls.
 import * as THREE from 'three';
 import VolumetricFire from './VolumetricFire.js';
 
-const POOL = 8;
-const LIFE = 3.2;          // seconds, whole burn
-const GROW = 0.18;         // seconds to reach full size
-const HOLD = 0.42;         // fraction of life at full size before it sags away
+const POOL = 12;
+const LIFE = 7.0;          // seconds, whole burn
+const GROW = 0.25;         // seconds to reach full size
+const HOLD = 0.55;         // fraction of life at full size before it sags away
+// World scale of a `scale:1` (vehicle-sized) fire. The box is built 3×6×3, and the profile fades
+// out toward its top, so the FLAME you see is roughly two-thirds of the box — at 1.0 a burning
+// wreck read as a campfire sitting on it. Multiplied into `k` in drawFire so the base-planting
+// maths below stays in terms of the mesh's actual current scale.
+const SIZE = 1.6;
 
 let pool = [], live = [], scene = null, camera = null, ready = false;
 
@@ -177,7 +188,7 @@ export function drawFire(elapsed) {
     const u = s.t / LIFE;
     const grow = Math.min(1, s.t / GROW);
     const fall = u < HOLD ? 1 : 1 - (u - HOLD) / (1 - HOLD);
-    const k = s.scale * grow * Math.pow(Math.max(0, fall), 0.7);
+    const k = SIZE * s.scale * grow * Math.pow(Math.max(0, fall), 0.7);
     s.fire.mesh.scale.set(k * s.jw, k * s.jh, k * s.jw);
     // half of the 6-tall box, at THIS frame's size — the base then stays planted at every size
     s.fire.mesh.position.y = s.baseY + 3 * k * s.jh;

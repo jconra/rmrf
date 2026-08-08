@@ -485,7 +485,18 @@ const doctrineRng = QS.has('dseed') ? mulberry32((+QS.get('dseed') >>> 0) || 1) 
 // ?perf — on-device profiler: per-frame CPU time BROKEN DOWN by system, so a stutter's cause
 // is visible without DevTools (esp. on the phone, where there's no console). Off unless enabled.
 // Accepts common spellings/typos (perf / pref / performance / preformance) so it just works.
-const PERF = ['perf', 'pref', 'performance', 'preformance'].some(k => QS.has(k));
+//
+// TWO FLAGS, because there are two questions. PERF is "are the section timers RUNNING" — _pfT is
+// a no-op without it, so the per-system split is not merely hidden when it's off, it is never
+// measured, which is why the corner readout's [+] has to be able to switch it on rather than just
+// reveal something. PERF_PANEL is "draw the full top-right firehose", and stays query-string-only
+// so ?perf behaves exactly as it always has.
+//
+// Turning collection on at runtime is safe: _pfT costs two performance.now() calls per section per
+// frame, a few dozen a frame all told, well under the resolution of what it's measuring.
+let PERF = ['perf', 'pref', 'performance', 'preformance'].some(k => QS.has(k));
+const PERF_PANEL = PERF;
+let perfExpanded = false;      // the corner readout's [+] tier (replans / fx / scene / top sections)
 const _pfAcc = {};                                     // section → ms accumulated over the window
 const _pfFrameAcc = {};                                // section → ms for THIS frame alone (feeds the hitch log)
 let _pfFrames = 0, _pfWork = 0, _planCount = 0, _pfShownAt = 0;
@@ -578,9 +589,22 @@ function _pfRender() {
   if (win < 300 || !_pfFrames) return;
   _pfShownAt = now;
   const fps = _pfFrames / (win / 1000), work = _pfWork / _pfFrames, rep = _planCount / (win / 1000);
+  const secs = Object.entries(_pfAcc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k.padEnd(11)}${(v / _pfFrames).toFixed(1)}ms`);
+
+  // THE CORNER TIER — what the [+] opens. Deliberately the short list (the four numbers that say
+  // whether the field or the frame is the problem, plus the three systems eating the most of it)
+  // rather than the panel below, which is a firehose you want when hunting and not while playing.
+  const more = document.getElementById('perf-more');
+  if (more) {
+    more.innerHTML = perfExpanded
+      ? `REPLANS/S: ${rep.toFixed(0)}<br>UNITS: ${combatants.length}&nbsp; FX: ${fx.length}<br>SCENE: ${scene.children.length}<br>`
+        + (secs.length ? secs.slice(0, 3).map(s => s.replace(/\s+/g, ' ').toUpperCase()).join('<br>') : 'SECTIONS: (warming up)')
+      : '';
+  }
+  if (!PERF_PANEL) { for (const k in _pfAcc) _pfAcc[k] = 0; for (const k in _pfWhy) delete _pfWhy[k]; for (const k in _planBy) delete _planBy[k]; _pfFrames = 0; _pfWork = 0; _planCount = 0; return; }
+
   let el = document.getElementById('perfhud');
   if (!el) { el = document.createElement('div'); el.id = 'perfhud'; el.style.cssText = 'position:fixed;top:46px;right:8px;z-index:99;font:11px/1.35 monospace;color:#7fffb8;background:rgba(0,0,0,0.72);padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none'; document.body.appendChild(el); }
-  const secs = Object.entries(_pfAcc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k.padEnd(11)}${(v / _pfFrames).toFixed(1)}ms`);
   if (now - _dcAt > 1000) { _dcAt = now; try { _dcBreakdown(); } catch (e) { _dcLines = ''; } }
   // WHY those replans happened — the aggregate count alone never said which subsystem was moving
   // a goal. Top triggers, each tagged with the AI state that asked for it.
@@ -892,6 +916,11 @@ let aiKillLoot = true;         // killers collect the wreck of what they just de
 const GIB_GRAV = 42;           // gravity on flying debris pieces (world units/s^2)
 const GIB_HOT_MS = 1500;       // debris is airborne/uncollectable this long after death
 const MAX_WRECKS = 10;         // cap persistent wreck piles on the field; oldest fades when exceeded
+// How many pieces of an INSTANCED part survive being blown apart (see gibVehicle). Every survivor
+// is its own draw call on a wreck that persists, and MAX_WRECKS of them can be on the field, so
+// this is a budget and not a fidelity dial — a track that came apart does not need every link.
+const GIB_INSTANCE_KEEP = 8;
+const _gibM4 = new THREE.Matrix4();
 const BUILD_COST = { jotun: 5, valkyrie: 5, lurcher: 3, firebrat: 2 };   // scrap to build one (garage, slice 2)
 let onField = false;  // true while the island is on screen (false = hangar view)
 let fieldBuilt = false; // the island is generated once, then reused across deploys
@@ -1562,6 +1591,14 @@ const WALKER_SHADOW = new Set(['lurcher']);
 // Per-vehicle shadow tweaks: hide (Jotun rides the ground + its turret shadow can't rotate),
 // scale (footprint multiplier), dark (opacity multiplier).
 const SHADOW_CFG = { jotun: { hide: true }, lurcher: { scale: 0.5, dark: 1.5 } };
+// How far into its own footprint a shadow looks for the ground it has to clear. Deliberately not
+// the full half-width: the decal is a SQUARE of the model's LONGEST side, so a long hull leaves
+// the corners fully transparent, and hunting for high ground out there would lift the shadow clear
+// of terrain that nothing is actually drawn over.
+const SHADOW_REACH = 0.6;
+// …and the ceiling on that lift. A flat quad on a steep enough slope cannot both clear the uphill
+// side and stay in contact with the downhill one; past this, floating reads worse than clipping.
+const SHADOW_LIFT_MAX = 1.0;
 function updateShadows() {
   for (const v of combatants) {
     if (!v.model) continue;
@@ -1573,7 +1610,9 @@ function updateShadows() {
         v._shadowR = rec.size * 0.5;                                       // blob radius ≈ footprint
         v._shadow = makeBlobShadow(v._shadowR, true);                      // clone material so we can fade per-frame
       } else {
-        v._shadow = makeVehicleShadow(vehicleSilhouette(renderer, v.type, v.model.group));
+        const rec = vehicleSilhouette(renderer, v.type, v.model.group);
+        v._shadowSize = rec.size;                                          // world side of the decal at scale 1
+        v._shadow = makeVehicleShadow(rec);
       }
       vehShadows.add(v._shadow);
     }
@@ -1585,11 +1624,18 @@ function updateShadows() {
     const alt = Math.max(0, v.holder.position.y - gy);
     const f = 1 / (1 + alt * 0.14);   // 1 on the ground → fainter/smaller as it climbs
     s.visible = true;
-    s.position.set(x, gy + 0.2, z);   // lifted so the flat decal doesn't cut into sloped shore terrain
     s.rotation.y = v.holder.rotation.y;
     const scl = cfg && cfg.scale ? cfg.scale : 1;
-    if (v._shadowR) { const d = v._shadowR * 2 * (0.7 + 0.3 * f) * scl; s.scale.set(d, 1, d); }
-    else s.scale.setScalar((0.7 + 0.3 * f) * scl);
+    let ext;                                             // world half-width of the decal THIS frame
+    if (v._shadowR) { const d = v._shadowR * 2 * (0.7 + 0.3 * f) * scl; s.scale.set(d, 1, d); ext = d * 0.5; }
+    else { const k = (0.7 + 0.3 * f) * scl; s.scale.setScalar(k); ext = (v._shadowSize || 0) * k * 0.5; }
+    // SIT ON THE HIGHEST GROUND THE DECAL COVERS, not on the ground under its centre. A fixed nudge
+    // off the centre (what this used to do) can't work: the gap the uphill half has to clear scales
+    // with the decal's own width, which is why the two WIDEST silhouettes — Valkyrie and Firebrat —
+    // were the two that kept sinking into slopes. A road slab is flat, so there it's just the deck.
+    const lift = roadY != null ? 0
+      : Math.min(SHADOW_LIFT_MAX, Math.max(0, map.surfaceTopAt(x, z, ext * SHADOW_REACH) - gy));
+    s.position.set(x, gy + lift + 0.12, z);
     s.material.opacity = Math.min(1, 0.5 * f * (cfg && cfg.dark ? cfg.dark : 1));
   }
 }
@@ -3554,7 +3600,11 @@ function bloodTexture() {
   const ctx = cv.getContext('2d');
   // SOLID splat — no soft gradients (they read as fuzzy). A hard-edged irregular main pool
   // (a wobbly polygon) + a few solid droplets. Only the shapes' own antialiased rims are soft.
-  ctx.fillStyle = '#8f0f0f';
+  // DARK on purpose, and darker than the value you'd pick off a colour picker: the material is
+  // unlit (MeshBasicMaterial), so this exact value is what draws, while the terrain around it is
+  // lit and lands well below its own albedo. A "correct" blood red rendered flat-out read as
+  // bright paint sitting on top of the ground rather than soaking into it.
+  ctx.fillStyle = '#560a0a';
   ctx.beginPath();
   const lobes = 11;
   for (let i = 0; i <= lobes; i++) {
@@ -3563,7 +3613,7 @@ function bloodTexture() {
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   }
   ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#6e0a0a';
+  ctx.fillStyle = '#380606';
   for (let i = 0; i < 9; i++) {                             // solid scattered droplets
     const a = Math.random() * 7, d = S * (0.28 + Math.random() * 0.18), r = S * (0.02 + Math.random() * 0.05);
     ctx.beginPath(); ctx.arc(S / 2 + Math.cos(a) * d, S / 2 + Math.sin(a) * d, r, 0, 7); ctx.fill();
@@ -3666,6 +3716,34 @@ function gibVehicle(veh, impact) {
   scene.add(wreck);
   const meshes = [];
   model.traverse(o => { if (o.isMesh) meshes.push(o); });
+
+  // AN INSTANCED MESH IS ONE OBJECT, and death is where that stops being a bargain. The Jotun's
+  // track belt is a single InstancedMesh holding every link of BOTH tracks, so it satisfied
+  // `isMesh`, went into the list as one chunk, and tumbled away as an intact rigid ring — the most
+  // solid-looking thing in a pile of wreckage that was supposed to read as shredded.
+  // Scatter a few real links instead and drop the rest. A track that came apart doesn't need every
+  // link present, and each survivor costs a draw call for as long as the wreck stands (hence
+  // GIB_INSTANCE_KEEP). The links share the source geometry and material, so this allocates no
+  // buffers — it spends draws, not memory.
+  for (let i = meshes.length - 1; i >= 0; i--) {
+    const im = meshes[i];
+    if (!im.isInstancedMesh || !im.parent) continue;
+    meshes.splice(i, 1);
+    const keep = Math.min(GIB_INSTANCE_KEEP, im.count);
+    for (let k = 0; k < keep; k++) {
+      const link = new THREE.Mesh(im.geometry, im.material);
+      im.getMatrixAt(Math.floor(k * (im.count / keep)), _gibM4);
+      // Spread across the belt rather than taking the first N, which would all come off one spot.
+      // Local transform = the instance's place within the part, times the part's own — added to
+      // the SAME parent, so the world position it lands on is the link's real one.
+      _gibM4.premultiply(im.matrix);
+      _gibM4.decompose(link.position, link.quaternion, link.scale);
+      im.parent.add(link);
+      meshes.push(link);
+    }
+    im.parent.remove(im);
+  }
+
   const now = performance.now();
   for (const m of meshes) {
     wreck.attach(m);                         // reparent, preserving world position/rotation/scale
@@ -11331,6 +11409,33 @@ window.addEventListener('resize', () => {
 // Perf readout (bottom-right). DRAW = draw calls — drops as chunks cull.
 const perfEl = document.getElementById('perf');
 let fpsEma = 60, perfTick = 0;
+// The corner readout, in three pieces so the [+] survives the 3Hz innerHTML rewrite of the stats
+// (one blob would wipe the button every update). #perf is pinned by its BOTTOM edge, so the panel
+// grows upward and the button stays put in the corner where your thumb already is.
+const perfBaseEl = document.createElement('div');
+{
+  const more = document.createElement('div'); more.id = 'perf-more';
+  const btn = document.createElement('button'); btn.id = 'perf-more-btn'; btn.textContent = '+';
+  // #perf is pointer-events:none so the readout never eats a tap meant for the world; the button
+  // opts back in for itself. 30px so it's a real touch target on a phone.
+  btn.style.cssText = 'pointer-events:auto;margin-top:3px;width:30px;height:30px;line-height:1;'
+    + 'font:16px/1 "Courier New",monospace;color:#1d2b33;background:rgba(255,255,255,0.45);'
+    + 'border:1px solid rgba(29,43,51,0.45);border-radius:6px;cursor:pointer;padding:0;';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    perfExpanded = !perfExpanded;
+    btn.textContent = perfExpanded ? '–' : '+';
+    // Collection follows the panel — but never switch it OFF under ?perf, which owns it.
+    PERF = PERF_PANEL || perfExpanded;
+    // Start a fresh window. Without this the first sample divides a handful of frames by however
+    // many minutes have passed since the last render, and opens on an invented 0 fps.
+    _pfShownAt = performance.now();
+    for (const k in _pfAcc) _pfAcc[k] = 0;
+    _pfFrames = 0; _pfWork = 0; _planCount = 0;
+    if (!perfExpanded) more.innerHTML = '';
+  });
+  if (perfEl) { perfEl.appendChild(more); perfEl.appendChild(perfBaseEl); perfEl.appendChild(btn); }
+}
 
 const clock = new THREE.Clock();
 // --- A* path overlay (?nav) -------------------------------------------
@@ -11890,7 +11995,9 @@ function animate() {
   }
 
   if (PERF) {
-    const _fms = performance.now() - _pfStart;
+    // _pfStart is 0 on a frame that began with collection off (the [+] can switch it on between
+    // frames) — measuring from 0 would bank the whole page uptime as one colossal fake hitch.
+    const _fms = _pfStart ? performance.now() - _pfStart : 0;
     _pfWork += _fms; _pfFrames++;
     if (_fms >= PF_HITCH_MS) _pfNoteHitch(_fms, clock.elapsedTime);
     for (const k in _pfFrameAcc) delete _pfFrameAcc[k];
@@ -11900,7 +12007,7 @@ function animate() {
   perfTick++;
   fpsEma += (1 / Math.max(rawDt, 0.0001) - fpsEma) * 0.08;   // RAW delta: the clamped dt floors this at 20
   if (perfEl && perfTick % 20 === 0) {
-    perfEl.innerHTML =
+    perfBaseEl.innerHTML =
       `FPS: ${Math.round(fpsEma)}<br>` +
       `MS: ${(rawDt * 1000).toFixed(1)}<br>` +
       `DRAW: ${renderer.info.render.calls}<br>` +
