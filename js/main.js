@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
-import { makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -11096,6 +11096,7 @@ window.RR = {
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
   repairStats: () => JSON.parse(JSON.stringify(repairStats)),   // cumulative per-match repair telemetry (sorties/heals/guns/jeep fates)
   // Multi-unit slots (elevator = one fielded unit)
+  setSupplyW: (team, w) => setSupplyW(team, w),   // A/B: per-team repair weights (hpUrge, nearMax, nearFar)
   setUnitCap: (n) => { aiUnitCap = n == null ? null : Math.max(1, n | 0); return aiUnitCap; },   // A/B: force the per-team unit cap (null = back to counting elevators)
   unitCap: (i = 0) => { const c = commanders[i]; return c ? c.unitCap() : null; },
   slots: (i = 0) => { const c = commanders[i]; return c ? c._slots.map(s => ({ type: s.unit ? s.unit.type : null, dead: s.unit ? !!s.unit.dead : null, respawnT: +s.respawnT.toFixed(1), rising: s._rising, swapping: s.strategy ? s.strategy.step === 'swap' : false, state: s._dbg ? s._dbg.state : null, px: s._dbg ? s._dbg.px : null, pz: s._dbg ? s._dbg.pz : null, card: s.strategy ? (s.strategy.constructor.name || '') : null, step: s.strategy ? s.strategy.step : null })) : null; },   // debug: per-slot fielded unit + its role card

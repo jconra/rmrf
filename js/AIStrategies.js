@@ -530,13 +530,40 @@ export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   /
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
 // merely a weak one. Armour is the softest — worth a detour, never worth a crisis.
-const SUPPLY_URGE = { fuel: 9, ammo: 6, hp: 6, shield: 3 };
+// hp: 10 and NEAR_MAX 4 come from a 1200-match head-to-head over a 4x range of both knobs
+// (2026-08-07). The honest result was a NULL one — every config landed inside 48.6%-51.6%, which
+// at ~400 games each is noise, so win rate cannot pick between them. These are chosen on BEHAVIOUR
+// instead: the strongest near/far contrast, which is the design goal (heal to full standing at the
+// fob; do not cross the map for it until genuinely low). Do not read the numbers as tuned optima.
+const SUPPLY_URGE = { fuel: 9, ammo: 6, hp: 10, shield: 3 };
 // The curve. A plain linear ramp from the low line is nearly zero just under it, so the mission
 // could never get STARTED — it would only become winnable once the unit was already in trouble,
 // and "finish the job" only applies to a mission already running. The square root bites early
 // and screams late: ~30% of full urge as soon as we dip under the line, all of it at empty. No
 // step at the threshold, which is the house rule.
 const supplyUrge = (frac, low, urge) => urge * Math.sqrt(Math.max(0, 1 - frac / low));
+// 1 at NEAR_FAR or beyond, rising to NEAR_MAX standing on the base. Gradual on purpose — the
+// house rule is that a term scales with how true its condition is rather than stepping at a line.
+const NEAR_MAX = 4, NEAR_FAR = 140;
+// PER-TEAM OVERRIDES, so one weight set can be played against another IN THE SAME MATCH and then
+// the sides flipped — which is the only way to see which is actually better rather than which does
+// better against a fixed opponent. Same shape as RR.setFof for the fight-or-flight weights.
+const teamSupplyW = {};
+export function setSupplyW(team, w) {
+  teamSupplyW[team] = { ...(teamSupplyW[team] || {}), ...w };
+  return teamSupplyW[team];
+}
+export function supplyWOf(team) { return teamSupplyW[team] || null; }
+function supplyNearness(cmd) {
+  const v = cmd.unit; if (!v || v.dead || !cmd._home) return 1;
+  const w = teamSupplyW[cmd.team] || null;
+  const nearMax = w && w.nearMax != null ? w.nearMax : NEAR_MAX;
+  const nearFar = w && w.nearFar != null ? w.nearFar : NEAR_FAR;
+  const p = v.holder.position;
+  const d = Math.hypot(p.x - cmd._home.x, p.z - cmd._home.z);
+  const t = Math.max(0, 1 - d / nearFar);
+  return 1 + (nearMax - 1) * t;
+}
 const fracOf = (cmd, what) => {
   const v = cmd.unit; if (!v || v.dead) return 1;
   if (what === 'fuel') return v.maxFuel ? v.fuel / v.maxFuel : 1;
@@ -884,11 +911,13 @@ export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_
 const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
   'capture-front', 'capture-left', 'capture-right', 'capture-rear',
   'defend', 'intercept', 'scavenge', 'sap', 'trap',
-  // The supply missions (see the Supply classes above). `repair` and `armour` are DEFINED but
-  // deliberately not candidates yet: a mission that wins the slot without driving the unit is a
-  // new disagreement between the layers, which is the disease being cured. They join once their
-  // rungs (hurtLatched / shieldRun) are wired to them the way resupLatched now is for these two.
-  'refuel', 'rearm'];
+  // The supply missions (see the Supply classes above). `repair` JOINED once the rung it was
+  // waiting on — `hurtLatched` — was replaced by the Flee mission: Flee gets a hurt unit HOME, and
+  // repair is what keeps it there until the hull is actually patched. Without it a unit arrived,
+  // MissionScore had no "stay and heal" to choose, so it took a fighting job and drove straight
+  // back out at 30% hull. `armour` stays out: its pull is 3 against attack's 9-15, so it can never
+  // be picked, and raising it flat would make armour worth abandoning a fight for. See task #40.
+  'refuel', 'rearm', 'repair'];
 
 // A/B for the last-runner term, set from main.js so both halves of the change — this and the
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
@@ -1043,7 +1072,17 @@ export function missionScore(cmd, key, running = null) {
           && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no armour to fetch
       if (key === 'repair' && !cmd._home) break;                      // only an own base patches a hull
       const frac = fracOf(cmd, what), low = SUPPLY_LOW[what];
-      add('low ' + what, supplyUrge(frac, low, SUPPLY_URGE[what]));
+      // HOW MUCH IT PULLS DEPENDS ON HOW FAR THE CURE IS (Jacob). A flat number has to be two
+      // contradictory things at once — worth crossing the map for, and not worth abandoning a
+      // fight for — and it cannot be both, which is exactly why `armour` at a flat 3 was
+      // unpickable while the detour it replaced would travel 208u. Healing is CHEAP when you are
+      // standing on the pad and EXPENSIVE from the far side of the island, so the score says so:
+      // strong enough at home to beat attacking and finish the job, small enough far away that
+      // nobody walks home over a scratch.
+      const nearMul = key === 'repair' ? supplyNearness(cmd) : 1;
+      const tw = teamSupplyW[cmd.team];
+      const urgeW = (tw && key === 'repair' && tw.hpUrge != null) ? tw.hpUrge : SUPPLY_URGE[what];
+      add('low ' + what, supplyUrge(frac, low, urgeW) * nearMul);
       // CANNOT DO THE JOB AT ALL. A dry unit is not a weak unit, it is furniture: it parks at the
       // siege standoff with nothing to fire and sits there until the watchdog destroys it. This
       // term is why. As a ladder RUNG, resupply used to override the mission outright; as a
