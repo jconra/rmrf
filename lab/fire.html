@@ -49,6 +49,12 @@
   <div class="row" id="vphase"></div>
   <div class="row" id="vyaw"></div>
   <div class="row" id="vgirth"></div>
+  <div class="lab">DEATH TRANSITION &middot; flames swallow the screen, then the respawn</div>
+  <div class="row" id="tplay"></div>
+  <div class="row" id="tdur"></div>
+  <div class="row" id="tcount"></div>
+  <div class="row" id="tstyle"></div>
+
   <div class="lab">TEXTURES &middot; volumetric only</div>
   <div class="row" id="tex"></div>
   <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
@@ -339,6 +345,140 @@ function stepBursts(dt, t) {
   }
 }
 
+// ── DEATH TRANSITION ─────────────────────────────────────────────────────────
+// The player is killed and fire swallows the screen before it cuts back to the hangar.
+//
+// It is the SAME volumetric fire the wrecks burn with, not a screen-space overlay, and that is
+// the whole idea: these flames are camera-facing slice geometry, so standing a row of them a few
+// metres in front of the lens genuinely fills the frame with the fire the game already owns. A
+// shader curtain would have been cheaper and would have looked like it came from another game.
+//
+// Positioned in CAMERA space — a row along the bottom edge, starting just off screen, licking up
+// and swelling — but rotated to WORLD up, so the flames stand vertically no matter where the
+// camera is pointed (RMRF's is tilted well down, which would otherwise lay them over sideways).
+// Own instances rather than the wreck pool: this is the one moment that must never be starved by
+// whatever else happens to be burning.
+const TRANS_MAX = 7;
+const TRANS_DIST = 13;        // how far in front of the lens the wall of flame stands
+let transPool = [], trans = null, transDur = 1.4, transN = 5, transStyle = 'swell';
+
+// THE GLOW. Flames alone cannot consume a screen and it is not worth spending draw calls
+// pretending otherwise. MEASURED: five flames covering 95% of the viewport by bounding box lit
+// only 34% of the pixels, and going to seven across two ranks bought 38% — the profile is a
+// hollow shell that is transparent through its middle and tapers away at top and bottom, because
+// it was authored to look like a flame standing against a background, not like an opaque curtain.
+// So the flames do what they are good at — motion, shape, the licking up — and a gradient field
+// rising behind them carries the coverage. One quad, no per-instance cost, and it can actually
+// reach opaque. Lives IN THE SCENE rather than as a DOM overlay so it composites into the
+// framebuffer the same way the game will use it, and so a probe reading pixels can see it at all.
+let glowMesh = null;
+function initGlow() {
+  if (glowMesh) { scene.remove(glowMesh); glowMesh.geometry.dispose(); glowMesh.material.dispose(); }
+  glowMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: { rise: { value: 0 }, amt: { value: 0 } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: `
+      varying vec2 vUv; uniform float rise; uniform float amt;
+      void main() {
+        // How far up the screen the fire has reached; soft edge so it licks rather than wipes.
+        float edge = smoothstep(rise, rise - 0.42, vUv.y);
+        // Hot and pale low down, deep red higher up — a fire is not one colour.
+        vec3 col = mix(vec3(0.62, 0.11, 0.01), vec3(1.0, 0.72, 0.28), pow(1.0 - vUv.y, 1.7));
+        gl_FragColor = vec4(col, edge * amt);
+      }`,
+  }));
+  glowMesh.frustumCulled = false;
+  glowMesh.renderOrder = 29;      // under the flames (30), over the world
+  glowMesh.visible = false;
+  scene.add(glowMesh);
+}
+
+function initTrans() {
+  for (const f of transPool) { scene.remove(f.mesh); f.mesh.geometry.dispose(); }
+  transPool = [];
+  for (let i = 0; i < TRANS_MAX; i++) {
+    const fire = new VolumetricFire(3, 6, 3, spacing, camera);
+    individualise(fire);                 // its own material, so each has its own clock
+    fire.mesh.visible = false;
+    fire.mesh.renderOrder = 30;          // this is a curtain coming down — it draws over everything
+    fire.mesh.frustumCulled = false;     // slice bounds are rebuilt every frame; never cull it
+    scene.add(fire.mesh);
+    transPool.push(fire);
+  }
+}
+
+function playTransition() {
+  trans = { t: 0, seeds: [] };
+  for (let i = 0; i < transN; i++)
+    trans.seeds.push({
+      phase: Math.random() * 40, yaw: Math.random() * Math.PI * 2,
+      jw: 0.80 + Math.random() * 0.45, jh: 0.85 + Math.random() * 0.40,
+      // STAGGER. Flames rising in perfect unison read as one object sliding up the screen; a
+      // little lag each turns the same motion into fire catching along a line.
+      lag: Math.random() * 0.22, drift: (Math.random() - 0.5) * 0.5,
+    });
+  for (let i = 0; i < TRANS_MAX; i++) transPool[i].mesh.visible = i < transN;
+}
+
+const _tv = new THREE.Vector3(), _td = new THREE.Vector3();
+function stepTransition(dt, t) {
+  if (!trans) return;
+  trans.t += dt;
+  const u = trans.t / transDur;
+  if (u >= 1.3) {                        // hold on full fire for a beat, then it is the cut's job
+    for (const f of transPool) f.mesh.visible = false;
+    if (glowMesh) glowMesh.visible = false;
+    trans = null; return;
+  }
+  // The frame, measured where the flames actually stand.
+  const halfH = TRANS_DIST * Math.tan(camera.fov * Math.PI / 360);
+  const halfW = halfH * camera.aspect;
+  // Scale at which transN flames cover that frame. The box is 3 wide and 6 tall at scale 1, hence
+  // the divisors — and the overlap factor is large because a flame does NOT fill its own box. The
+  // profile is a hollow shell that peaks near its outer radius, tapers to nothing at the very top
+  // and bottom, and is largely transparent through the middle. MEASURED: a row of five flames
+  // spanning 95% of the viewport by bounding box put fire on only 34% of the PIXELS. Boxes are not
+  // the thing to fit; overlapping, accumulating flame is.
+  const fullX = (2 * halfW / transN) * 2.9 / 3;
+  const fullY = (2 * halfH) * 1.55 / 6;
+  camera.getWorldDirection(_td);
+  const camYaw = Math.atan2(-_td.x, -_td.z);
+  // The glow runs slightly AHEAD of the flames, so the screen is already heating up as they climb
+  // rather than the colour arriving after the fire has.
+  if (glowMesh) {
+    const gu = Math.min(1, u * 1.12), ge = transStyle === 'swell' ? gu * gu : Math.pow(gu, 0.75);
+    glowMesh.visible = true;
+    glowMesh.material.uniforms.rise.value = -0.15 + ge * 1.5;   // sweeps the soft edge up the frame
+    glowMesh.material.uniforms.amt.value = Math.min(1, ge * 1.3);
+  }
+  for (let i = 0; i < transN; i++) {
+    const s = trans.seeds[i], m = transPool[i].mesh;
+    const e = Math.max(0, Math.min(1, (u - s.lag) / (1 - s.lag)));
+    // 'swell' holds low then rushes; 'rush' comes up hard and early.
+    const g = transStyle === 'swell' ? e * e : Math.pow(e, 0.75);
+    const k = 0.10 + g * 0.90;
+    // TWO RANKS, half a column apart. The additive blend means a flame standing behind the seam
+    // between two others fills it in, and staggering the depth also stops the wall reading as a
+    // flat cut-out row. Odd flames stand nearer the lens and slightly wider apart.
+    const near = i & 1;
+    const dist = TRANS_DIST * (near ? 0.72 : 1);
+    const lx = ((i + 0.5) / transN * 2 - 1) * halfW * (near ? 1.12 : 0.94) * (1 + s.drift * 0.1);
+    // The flame's BASE stays at or below the bottom edge for the whole run, and the growth alone
+    // carries it up the screen. Letting the base RISE instead was the obvious-looking version and
+    // it is wrong: MEASURED, ending the base at -0.6 of the half-height left the bottom 40% of the
+    // frame with no fire in it and coverage stuck at 79%. It starts well under the edge, comes up
+    // to just below it (that early travel is the "licking up"), and stops there.
+    // The box is centred on its origin, so half its current height is added back to plant the foot.
+    const ly = -halfH * (1.50 - g * 0.45) + 3 * fullY * k * s.jh;
+    _tv.set(lx, ly, -dist).applyQuaternion(camera.quaternion).add(camera.position);
+    m.position.copy(_tv);
+    m.rotation.set(0, camYaw + s.yaw, 0);
+    m.scale.set(fullX * k * s.jw, fullY * k * s.jh, fullX * k * s.jw);
+    transPool[i].update(t + s.phase);
+  }
+}
+
 // ── state ────────────────────────────────────────────────────────────────────
 let mode = 'volumetric', count = 5, spacing = 0.5;
 let fires = [], billboard = null;
@@ -459,6 +599,33 @@ function measure() {
 // Debug hook, same purpose as __makeFireProfile above: the fires live in module scope, so a probe
 // outside the module cannot see them and reports "no fires" whatever the truth is.
 window.__fires = () => ({ grid: fires, pool });
+// Same reason: the transition's state is module-scope, so a probe outside cannot see whether the
+// flames actually covered the screen and would have to take the effect's word for it.
+window.__THREE = THREE;
+window.__playTransition = () => playTransition();
+window.__transState = () => ({ live: !!trans, t: trans ? trans.t : 0, camera,
+                               meshes: transPool.map(f => f.mesh) });
+// PIXELS, NOT BOUNDING BOXES. Whether the fire "consumed the screen" cannot be answered from the
+// flames' geometry: the profile fades out toward the top of its box and is transparent outside
+// radius 1, so a box covering the viewport is nowhere near a viewport covering in fire. Read the
+// framebuffer instead — and read it in the SAME tick as the render, because the drawing buffer is
+// not preserved and a screenshot taken any later comes back black.
+let _grabWant = false, _grabCb = null;
+window.__grab = () => new Promise(r => { _grabWant = true; _grabCb = r; });
+function _doGrab() {
+  _grabWant = false;
+  const w = renderer.domElement.width, h = renderer.domElement.height;
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let warm = 0, bright = 0;
+  const n = w * h;
+  for (let i = 0; i < n; i++) {
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+    if (r > 70 && r > b + 25) warm++;              // fire-coloured: strongly red/orange biased
+    if (r + g + b > 150) bright++;                 // lit at all, whatever the hue
+  }
+  _grabCb({ warm: warm / n, bright: bright / n, w, h });
+}
 
 function tick() {
   requestAnimationFrame(tick);
@@ -478,6 +645,10 @@ function tick() {
   billboardMat.uniforms.time.value = t;
   camera.position.x = Math.sin(t * 0.08) * 14;
   camera.lookAt(0, 3, 0);
+  // AFTER the camera has moved for this frame — the flames are placed in camera space, so reading
+  // a stale matrix would leave the wall lagging a frame behind the view it is supposed to fill.
+  camera.updateMatrixWorld();
+  stepTransition(dt, t);
   // VSYNC MAKES THIS UNMEASURABLE AT amplify=1. The GPU finishes early and waits for vblank, so a
   // frame with 40 fires and a frame with none both read exactly 16.70ms and everything looks free.
   // Repeating the render pushes the work past the budget, and dividing by the repeat count gives
@@ -494,6 +665,7 @@ function tick() {
   // delta into a real cost. It would be a terrible idea in a game and is exactly right in a
   // measuring instrument.
   gl.finish();
+  if (_grabWant) _doGrab();   // same tick as the render — see __grab
   measure();
 }
 
@@ -516,6 +688,25 @@ buttons('amp', [['1', '1'], ['10', '10'], ['30', '30'], ['60', '60']],
       baseline = q.length ? q[q.length >> 1] : 16.7; count = keep; rebuild(); }, 1600); });
 buttons('mode', [['volumetric', 'volumetric'], ['billboard', 'billboard'], ['bursts', 'burst']],
   () => mode, v => mode = v);
+// The transition controls must NOT rebuild the scene — buttons() calls rebuild() on every click,
+// which would tear down the grid mid-play. Wire these by hand so a click only sets its value.
+(() => {
+  const play = document.getElementById('tplay');
+  play.innerHTML = '<button style="flex:2">&#9654; PLAY TRANSITION</button>';
+  play.querySelector('button').addEventListener('click', () => playTransition());
+  const plain = (host, opts, get, set) => {
+    const el = document.getElementById(host);
+    el.innerHTML = opts.map(o => `<button data-v="${o[1]}">${o[0]}</button>`).join('');
+    const sync = () => el.querySelectorAll('button').forEach(b =>
+      b.setAttribute('aria-pressed', String(get()) === b.dataset.v));
+    el.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+      set(b.dataset.v); sync(); playTransition(); });   // re-play so a tweak is felt immediately
+    sync();
+  };
+  plain('tdur', [['0.9s', '0.9'], ['1.4s', '1.4'], ['2.2s', '2.2']], () => transDur, v => transDur = +v);
+  plain('tcount', [['3 flames', '3'], ['5 flames', '5'], ['7 flames', '7']], () => transN, v => transN = +v);
+  plain('tstyle', [['swell', 'swell'], ['rush', 'rush']], () => transStyle, v => transStyle = v);
+})();
 buttons('rate', [['calm 2.5s', '2.5'], ['busy 1.2s', '1.2'], ['chaos 0.35s', '0.35']],
   () => burstEvery, v => burstEvery = +v);
 buttons('count', [['0', '0'], ['1', '1'], ['5', '5'], ['10', '10'], ['20', '20'], ['40', '40']],
@@ -543,7 +734,7 @@ document.getElementById('gpu').textContent =
 
 // Establish the empty-scene cost first, so every later number is the fire ALONE rather than the
 // scene plus the fire. Without this the readout mostly measures vsync.
-count = 0; rebuild(); tick();
+count = 0; rebuild(); initTrans(); initGlow(); tick();
 setTimeout(() => {
   const s = [...samples].sort((a, b) => a - b);
   baseline = s.length ? s[s.length >> 1] : 16.7;
