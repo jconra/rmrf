@@ -146,7 +146,7 @@
     document.getElementById('launch').remove();
     // The game reads its own configuration off location.search, which already carries what the
     // launcher put there (aivsai + the seeds), so it boots straight onto the field.
-    await import('../js/main.js?v=427');
+    await import('../js/main.js?v=428');
     await new Promise(r => {
       (function wait() { (window.RR && window.RR.setTimeScale && window.RR.commanders && window.RR.commanders.length >= 2) ? r() : setTimeout(wait, 40); })();
     });

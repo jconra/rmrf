@@ -464,13 +464,19 @@ function stepTransition(dt, t) {
     const near = i & 1;
     const dist = TRANS_DIST * (near ? 0.72 : 1);
     const lx = ((i + 0.5) / transN * 2 - 1) * halfW * (near ? 1.12 : 0.94) * (1 + s.drift * 0.1);
-    // The flame's BASE stays at or below the bottom edge for the whole run, and the growth alone
-    // carries it up the screen. Letting the base RISE instead was the obvious-looking version and
-    // it is wrong: MEASURED, ending the base at -0.6 of the half-height left the bottom 40% of the
-    // frame with no fire in it and coverage stuck at 79%. It starts well under the edge, comes up
-    // to just below it (that early travel is the "licking up"), and stops there.
+    // The flame's BASE stays BELOW the bottom edge for the whole run, and the growth alone carries
+    // it up the screen. Letting the base RISE into frame was the obvious-looking version and it is
+    // wrong twice over: MEASURED, ending it at -0.6 of the half-height left the bottom 40% of the
+    // frame with no fire and coverage stuck at 79%; and ending it at -1.05 — only 5% of a half
+    // frame under the edge — put each flame's TAPER, where the profile fades to nothing, right on
+    // the frame line, so you could see where the effect stopped.
+    //
+    // It now ends at -1.35, with the same amount of travel (that early rise is the "licking up").
+    // Depth here is nearly free: at full growth a flame stands about 3.1 half-heights tall, so its
+    // top is still around twice the frame height above the middle — there is a lot of headroom to
+    // spend and nothing above the screen to look at.
     // The box is centred on its origin, so half its current height is added back to plant the foot.
-    const ly = -halfH * (1.50 - g * 0.45) + 3 * fullY * k * s.jh;
+    const ly = -halfH * (1.80 - g * 0.45) + 3 * fullY * k * s.jh;
     _tv.set(lx, ly, -dist).applyQuaternion(camera.quaternion).add(camera.position);
     m.position.copy(_tv);
     m.rotation.set(0, camYaw + s.yaw, 0);
@@ -617,14 +623,34 @@ function _doGrab() {
   const w = renderer.domElement.width, h = renderer.domElement.height;
   const px = new Uint8Array(w * h * 4);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
-  let warm = 0, bright = 0;
+  let warm = 0, bright = 0, warmBot = 0;
   const n = w * h;
+  // readPixels' origin is BOTTOM-left, so the first rows are the bottom of the screen. Coverage
+  // there is the direct measure of "can I see where the flames end" — a visible bottom edge shows
+  // up as the bottom band being markedly emptier than the frame as a whole.
+  const botRows = Math.round(h * 0.15), botN = botRows * w;
   for (let i = 0; i < n; i++) {
     const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
-    if (r > 70 && r > b + 25) warm++;              // fire-coloured: strongly red/orange biased
-    if (r + g + b > 150) bright++;                 // lit at all, whatever the hue
+    const isWarm = r > 70 && r > b + 25;
+    if (isWarm) { warm++; if (i < botN) warmBot++; }   // fire-coloured: strongly red/orange biased
+    if (r + g + b > 150) bright++;                     // lit at all, whatever the hue
   }
-  _grabCb({ warm: warm / n, bright: bright / n, w, h });
+  // A VISIBLE EDGE IS A STEP, NOT A GAP. Coverage cannot see one: the bottom band can be 100%
+  // fire-coloured and still show a hard line where the billboards stop. So walk up the lower half
+  // of the frame measuring how much mean luminance changes from one row to the next — a soft flame
+  // gradient moves a little per row, a cut-off edge spikes. Reports the worst step and its height.
+  const rowL = new Float64Array(h);
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; sum += px[i] * 0.30 + px[i+1] * 0.59 + px[i+2] * 0.11; }
+    rowL[y] = sum / w;
+  }
+  let edgeMax = 0, edgeAt = 0;
+  for (let y = 1; y < Math.round(h * 0.5); y++) {
+    const d = Math.abs(rowL[y] - rowL[y-1]);
+    if (d > edgeMax) { edgeMax = d; edgeAt = y / h; }
+  }
+  _grabCb({ warm: warm / n, bright: bright / n, warmBot: warmBot / botN, edgeMax, edgeAt, w, h });
 }
 
 function tick() {
