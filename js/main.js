@@ -1511,8 +1511,7 @@ let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with 
 let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a firing tower jumps) instead of walking a queue — RR.setTargetPrio
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
-let aiAntiGrind = !QS.has('noantigrind');  // cut a sinker's throttle when it'd grind deep water it can't cross
-let aiFordHalo = QS.has('fordhalo');      // judge WATER clearance by the hull's own footing (1u) instead of its wall-clearance radius (3u) — off pending its gate
+let aiFordHalo = !QS.has('nofordhalo');   // judge WATER clearance by the hull's own footing (1u) instead of its wall-clearance radius (3u)
 let aiMineAvoid = !QS.has('nomineavoid'); // soft-steer AI ground units around mines their team has spotted
 let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
 
@@ -7979,18 +7978,14 @@ class AICommander {
     }
     this._logTick(v, view, cmd);
     const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn, strafe: cmd.strafe || 0 }, dt);
-    // ANTI-SHORE-GRIND: a sinker commanded FORWARD into DEEP water it can't cross (a last leg past
-    // an inlet with no A* route) otherwise grinds the waterline forever — and the anti-wedge reflex
-    // spins it in place: the "dancing on the shore". Deep water is a hard wall for a sinker, so cut
-    // the forward throttle — it PLANTS at the shore instead of grinding. Turn is preserved, so it
-    // can still rotate to aim/fire from there, and as it turns to a clear heading forward returns
-    // (it skirts). Only OFF-ROAD deep water triggers this: shallow fords and bridges are unaffected
-    // (isDeepWater reads the floor even under a bridge, so the road-cell check must come first).
-    if (aiAntiGrind && v._move.water === 'sink' && out.fwd > 0.05) {
-      const ahx = v.holder.position.x - Math.sin(v.heading) * (VEH_R + 2);
-      const ahz = v.holder.position.z - Math.cos(v.heading) * (VEH_R + 2);
-      if (map.isDeepWater(ahx, ahz) && roadDeckY(ahx, ahz) == null) { out.fwd = 0; v.ai._wantMove = false; }
-    }
+    // (The anti-shore-grind reflex lived here and is gone. It cut a sinker's forward throttle when
+    // it was pointed at deep water it could not cross — a guard against grinding the waterline,
+    // written before the nav could be trusted to stop issuing goals across water. Jacob called it
+    // a band-aid: "the solution isn't how to stop it from grinding, the solution is how to stop it
+    // from being commanded into deep water." Gated over 240 seeds and he was right — removing it
+    // is free: 240/240 resolved and 0 stalemates either way, nav alarms 46 both, scuttles 13 -> 12,
+    // and transit-stuck 822 -> 559. It also fought the water-clearance halo, which deliberately
+    // routes sinkers along the shallow fringe: exactly the condition it watched for.)
     const mineTurn = mineAvoidNudge(v);   // soft-steer around a spotted mine dead ahead (no A* block)
     if (mineTurn) out.turn = Math.max(-1, Math.min(1, out.turn + mineTurn));
     // CHASSIS GATE: treads don't sidestep. The Jotun was strafing in combat (the blocked-shot
@@ -10129,12 +10124,16 @@ function buildNavStatic() {
   // 1.0 keeps the honest part of the test — the body's own footing has to be sound — and drops the
   // rest. Depth itself is unchanged: FORD_DEPTH still says what a hull can wade.
   //
-  // OFF BY DEFAULT, pending its own gate (?fordhalo). It does what it says — measured over four
-  // maps, wadeable-and-navigable shoreline went 71.8% -> 87.8%, 863 cells handed back, with match
-  // outcomes identical — but the last run of it moved near-water transit-stuck +34% while inland
-  // IMPROVED. Opening the fringe was correct; what mishandles a unit standing in the fringe was
-  // not established, and the prime suspect (aiAntiGrind, which cuts a sinker's throttle near deep
-  // water — exactly the condition a 1u halo creates) has never been measured against it.
+  // GATED AND KEPT. Wadeable-and-navigable shoreline goes 71.8% -> 87.8% across four maps, and
+  // units use it: shoreline traffic +45%. The near-water stuck count rises with it, which read as
+  // a regression for a while and is not one — it is the DENOMINATOR moving. Measured as a rate,
+  // a unit near water is stuck 9.61% of its time there before and 9.60% after: identical. It is
+  // not coping worse, it is simply wading instead of walking around. Totals improve — transit
+  // stuck 822 -> 718, inland 627 -> 439 — with nav alarms and scuttles unchanged.
+  //
+  // The anti-shore-grind reflex was removed alongside this: it cut a sinker's throttle near deep
+  // water, which is exactly the ground this halo opens up, and leaving the two together cost
+  // alarms 46 -> 65 and scuttles 13 -> 16 for nothing.
   const FORD_CLEAR = 1.0;
   const rSoft = VEH_R * 0.85, rHard = aiFordHalo ? FORD_CLEAR : VEH_R;
   for (let i = -iMax; i <= iMax; i++) for (let j = -iMax; j <= iMax; j++) {
