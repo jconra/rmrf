@@ -171,6 +171,11 @@ function makeOscEngine(ctx, noiseBuffer, cfg) {
   am.connect(out);
 
   function apply(t) {
+    // A NaN throttle must never reach the audio graph: every setTargetAtTime below would throw
+    // "the provided float value is non-finite". It arrives when dt is 0 — a paused frame in the
+    // replay lab computes speed/dt as 0/0 — but the guard belongs here regardless, since one bad
+    // frame otherwise throws a dozen times per engine per tick.
+    t = Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0;
     const now = ctx.currentTime, k = 0.08;
     const f = lerp(cfg.idleFreq, cfg.revFreq, t);
     for (const o of oscs) {
@@ -259,6 +264,11 @@ function makeNoiseEngine(ctx, noiseBuffer, cfg) {
   pulse.connect(out);
 
   function apply(t) {
+    // A NaN throttle must never reach the audio graph: every setTargetAtTime below would throw
+    // "the provided float value is non-finite". It arrives when dt is 0 — a paused frame in the
+    // replay lab computes speed/dt as 0/0 — but the guard belongs here regardless, since one bad
+    // frame otherwise throws a dozen times per engine per tick.
+    t = Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0;
     const now = ctx.currentTime, k = 0.08;
     bodyLP.frequency.setTargetAtTime(lerp(cfg.bodyFreqIdle, cfg.bodyFreqRev, t), now, k);
     bodyGain.gain.setTargetAtTime(cfg.bodyLevel, now, k);

@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>RMRF · replay lab</title>
-<script src="../oops.js"></script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { height:100%; overflow:hidden; background:#0c1118; font-family:'Courier New',monospace; }
@@ -91,6 +90,33 @@
 <script>
   // main.js calls this after its first frame; the lab has no splash of its own.
   window.__rmrfHideSplash = function () {};
+
+  // ── THE LAB OWNS THE CLOCK ────────────────────────────────────────────────
+  // This must run BEFORE main.js loads, and it is the difference between the lab reproducing
+  // what the tournament measured and quietly showing a different match.
+  //
+  // The headless harness freezes performance.now() and advances it 50ms per simulated tick. A
+  // browser does not: it reports real wall-clock. During a seek the simulation runs at roughly a
+  // thousand times wall speed, so every performance.now()-based timer in the game — nav-avoid
+  // expiry, elevator shields, fire cooldowns, the commanders' own decision clocks — sees sim time
+  // and "now" drifting apart by three orders of magnitude. Measured: the same seed that the
+  // tournament reported a stuck Jotun on resolved cleanly here instead, with nothing stuck.
+  //
+  // So the clock becomes ours. During a seek it advances exactly 50ms per tick, matching the
+  // harness. During playback it advances with real elapsed time SCALED by the play speed, so the
+  // game's wall-clock timers keep step with its simulated time at 0.1x and at 2x alike, and stop
+  // dead when paused.
+  window.__labClock = { t: 0, rate: 1 };
+  performance.now = function () { return window.__labClock.t; };
+  (function pump() {
+    var last = Date.now();
+    (function frame() {
+      var now = Date.now();
+      window.__labClock.t += (now - last) * window.__labClock.rate;
+      last = now;
+      requestAnimationFrame(frame);
+    })();
+  })();
 </script>
 
 <script type="importmap">

@@ -11628,6 +11628,12 @@ window.RR = {
       destructibles.update(dt);
       updateResupplies(dt); updateScrap(dt); updateGibs(dt); updateWallTurrets(dt); updateTowerUpgrades(); updateCrushables(); updateLock(dt);
       tickFire(dt);   // lifecycle only — nothing is drawn here, but the pool must still recycle
+      // FX LIFECYCLE belongs here too. updateFx only ages, removes and disposes — nothing about
+      // it needs a frame. Without it, every spark and explosion raised while the renderer is idle
+      // piled up forever: a headless tournament accumulated them for a whole 30,000-tick match,
+      // and the replay lab's seek made it visible — a hundred queued shots all flushing on the
+      // first drawn frame, which looked like a unit firing ten rounds at once.
+      updateFx(dt);
       if (soldiers) soldiers.update(dt, combatants);
       updateGadgets(dt);
       updateRepairs(dt);
