@@ -1143,6 +1143,24 @@ let SAVE_RUNNER = true;
 export function setSaveRunner(on) { SAVE_RUNNER = !!on; return SAVE_RUNNER; }
 let REQ_VEHICLE = false;   // A/B knob (?reqveh / RR.setReqVehicle) — score whether the fleet can crew each plan
 export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
+// ONE RUNNING PLAN, ONE NAME (?msnkeyfix). _msnKey is written only by _applyKey, but three forced
+// transitions switch by bare literal and never touch it, so it goes on naming the mission the unit
+// ABANDONED. That is not only the ai-lab lighting two cards: incumbentBonus() reads _msnKey
+// UNGUARDED and pays the travel bonus to the abandoned plan, measured against that plan's
+// objective. See NOTE_2026-08-09_stale_msnkey.txt.
+let MSNKEY_FIX = false;
+export function setMsnKeyFix(on) { MSNKEY_FIX = !!on; return MSNKEY_FIX; }
+// KEEP LOOKING WHILE PREEMPTED (?trigfix). _triggers holds a LEVEL memory per edge, and it is
+// called only inside `if (!next)` — so an _urgent preempt skips it, and the terminal guards for
+// flee/swap/fight return before reaching it at all. For the whole duration of a flee, a swap or a
+// duel, every edge memory is frozen at whatever the board looked like when the unit last decided.
+// This refreshes the memories every tick; the DECISION stays exactly where it was.
+let TRIG_FIX = false;
+export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
+// …and the same freeze on the re-score clock (?scoreclock). _scoreT accumulates only inside that
+// same block, so time spent in a duel does not count toward "it has been a while, look again".
+let SCORE_CLOCK = false;
+export function setScoreClock(on) { SCORE_CLOCK = !!on; return SCORE_CLOCK; }
 
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
 export function missionScore(cmd, key, running = null) {
@@ -1495,6 +1513,12 @@ class Doctrine {
   tick(cmd, dt) {
     this.t += dt;
     this.mission.tick(cmd, dt);
+    // OBSERVE FIRST, DECIDE SECOND. Everything below can return early — the fight/flee/swap guards
+    // do, and an _urgent preempt skips the block that used to be the ONLY caller of _triggers. So
+    // run the observation here, above every early exit, and let the decision consult the answer
+    // where it always did. Nothing about the ranking or the re-score gate changes.
+    this._trigNow = TRIG_FIX ? this._triggers(cmd, dt) : null;
+    if (SCORE_CLOCK) this._scoreT = (this._scoreT || 0) + dt;   // the same freeze, on the re-score clock
     this._rollOpening(cmd);
     if (this.step === 'sap' && this.mission.t > SAP_BUDGET) cmd._sapDone = true;   // sortie ran long — move on
     // The trap ends when its mines are spent (blew/cleared) or after a budget → resume normal play.
@@ -1628,8 +1652,10 @@ class Doctrine {
         // changed enough that the plan is worth re-examining, and calls the scorer. Between
         // triggers the mission simply runs, which is what makes it a commitment rather than an
         // opinion re-formed 20 times a second. See devblog/2026-08-05-one-mission-layer.md.
-        const trig = this._triggers(cmd, dt);
-        this._scoreT = (this._scoreT || 0) + dt;
+        // Already computed at the top of tick() when TRIG_FIX is on — reuse it rather than
+        // running the edge pass twice (a second pass would consume its own rises).
+        const trig = TRIG_FIX ? this._trigNow : this._triggers(cmd, dt);
+        if (!SCORE_CLOCK) this._scoreT = (this._scoreT || 0) + dt;
         if (trig && this._scoreT >= MSN_RESCORE_MIN) {
           this._scoreT = 0; this._lastTrig = trig;
           next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = `re-scored: ${trig}`; fk = 'weights';
@@ -1783,9 +1809,19 @@ class Doctrine {
       }
     }
     const from = this.step;
+    // Coming OFF a support mission back onto the real job: the route and firing position the job
+    // left behind were solved for where the unit stood before the errand, and the errand is what
+    // moved it. Ask the slot to re-plan from where it actually is. Gated — see replanOnResume(),
+    // which decides from `from` which support missions this should apply to.
+    if (isSupportMission(from) && !isSupportMission(key) && cmd.replanOnResume) cmd.replanOnResume(from);
     this.mission = makeMission(key);
     this.mission.enter(cmd, this);
     this.step = key; this.t = 0;
+    // ONE NAME for the running plan. _applyKey writes the full scored key (siege-back, capture-*),
+    // but the forced transitions arrive here with a bare literal and leave _msnKey stale. Reconcile
+    // at the one point every mission change funnels through: keep the directional key when it still
+    // describes this step, adopt the step when it does not.
+    if (MSNKEY_FIX && (!cmd._msnKey || cmd._msnKey.split('-')[0] !== key)) cmd._msnKey = key;
     if (why) this._lastWhy = why;   // keep the last meaningful reason (for the ai-lab live overlay)
     // Radio-chatter order + a machine-readable decision trail: the cry() supplies the
     // characterful line, the bracket names the transition and WHY it happened, so every

@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=96';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=97';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5613,6 +5613,21 @@ const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retrie
 setSaveRunnerScore(aiSaveRunner);   // keep the scorer's copy in step with the deploy guard
 setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
 setFightMission(aiFightMission);    // …and for the Fight mission joining the candidate list
+// MEASURED 2026-08-10, three independent 240-seed sets each. See
+// VERDICT_2026-08-10_overnight_summary.txt.
+// SHIPPED: resolution 237 -> 237 exactly, every stuck column within 7 samples, against a baseline
+// measured as deterministic. Kept for CORRECTNESS (incumbentBonus was pricing the abandoned plan),
+// and the tournament's only job was to prove it free. ?nomsnkeyfix restores the old behaviour.
+setMsnKeyFix(!QS.has('nomsnkeyfix'));
+// NOT SHIPPED. Looked like the best result of the night on one seed set and did not replicate:
+// resolved +2 / -1 / +1 across seeds 11+, 5011+, 9011+. The SIGN FLIPS, so there is no reliable
+// effect — the frozen level-memories are real (see setTrigFix) but do not cost enough matches to
+// measure. Left opt-in rather than deleted: the diagnosis is sound and may matter once something
+// else raises its exposure.
+setTrigFix(QS.has('trigfix'));
+// NOT SHIPPED. Every movement column improved and matches ran 7s faster, but resolution 237 -> 236
+// — and a -1 is REAL here, not noise. No reason to buy it while trigfix, its only partner, is dead.
+setScoreClock(QS.has('scoreclock'));
 setFleeScore(aiFleeScore);          // …and for Flee joining it too
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
@@ -5920,6 +5935,19 @@ let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab i
 let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
 let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
 let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
+// Drop cached routing state when a SUPPORT mission hands back to the primary — see
+// replanOnResume(). THREE forms, because the combined one was measured and REJECTED (240 seeds:
+// inland transit-stuck +276%, stuck/resupply 7 -> 88). It fired after every top-up, which is the
+// frequent transition that barely moves a unit, rather than the rare one that moves it a long way.
+//   'all'   — every support mission, route AND standoff commitment. The rejected form; kept only
+//             so the failure can be reproduced.
+//   'fight' — duels only. The transition the FIGHT5 evidence actually named.
+//   'route' — every support mission, but clears the ROUTE ONLY and never _stand2. Isolates the
+//             prime suspect: _stand2 is the field main.js:6140 already carries a scar about
+//             ("two siege slots shared one commit and ping-ponged goals every tick").
+const REPLAN_MODE = QS.has('replanfight') ? 'fight'
+  : QS.has('replanroute') ? 'route'
+  : QS.has('replanresume') ? 'all' : '';
 let aiLandmass = !QS.has('nolandmass');   // reject destinations on ground the unit can't drive to (see buildNavComp). RR.setLandmass
 let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
 let aiStandRoute = !QS.has('nostandroute');    // route the WHOLE way to a firing position instead of handing the last 26u back to direct steer (RR.setStandRoute)
@@ -5933,6 +5961,15 @@ let aiFlyerRoute = !QS.has('noflyerroute');    // give the Valkyrie a real GOTO 
 // the last 14u into a firing position is tight, contested ground, and hulls grind there. That is a
 // real finding the change earned — it is left in, defaulted OFF, and `?standarrive` turns it back
 // on for whoever fixes the approach. Not deleted: the argument for it is still right.
+// RE-MEASURED 2026-08-10, three independent 240-seed sets, and the picture INVERTED from the
+// 2026-08-08 verdict that turned it off. Resolution is now consistently BETTER — +2 / +1 / +1,
+// sign never flips, 711 -> 715 over 720 matches — and suppress-stuck IMPROVED (36 -> 32) where it
+// used to be the whole regression (254 vs 4). The nav retry and the parked-unit fix both landed in
+// between and both act on exactly the ground that was blamed.
+// STILL OFF, deliberately, and this is a judgement call rather than a number: the resolution gain
+// is bought with 2-3x the transit-stuck (near-water +190% and +206% on the two fresh sets,
+// stuck/advance +97% and +239%) and matches 18-26s slower. More units standing around is worse to
+// WATCH, and that is what this game is for. Jacob's call if he wants the trade — ?standarrive.
 let aiStandArrive = QS.has('standarrive');
 const STAND_ARRIVE = 5;                        // u — close enough to be standing on the spot the solver vetted
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
@@ -8531,6 +8568,26 @@ class AICommander {
       p.idx++;                                             // we've seen it die — next on the list
     }
     return null;
+  }
+  // RE-PLAN ON RESUME. A support mission MOVES the unit: a duel drags it off its line, a refuel
+  // trip sends it across the map. The primary mission it hands back to is unchanged and correct —
+  // but the route and the firing-position commitment it left behind were both solved for a spot
+  // the unit is no longer standing on, and they survive the mission switch because they live on
+  // the slot rather than on the mission object.
+  //
+  // This is the FIGHT5 finding stated as code. Fight's cost was never its duration; five gates
+  // measured it and the damage was displacement — assault-stuck 271 vs 26, and the worst offender
+  // was a lurcher resuming a siege it had walked away from. Nothing was wrong with the plan; it
+  // was being resumed with stale directions.
+  //
+  // Clearing _stand2 does NOT re-solve the tower (no _resolveStand call, so no attempt counted
+  // against SIEGE_RESOLVE_MAX): the plan's solved spot stays in plan.spots, and the slot simply
+  // re-commits to it and routes there from where it actually is.
+  replanOnResume(from) {
+    if (!REPLAN_MODE) return;
+    if (REPLAN_MODE === 'fight' && from !== 'fight') return;
+    if (this._nav) { this._nav.path = null; this._nav.t = 0; }
+    if (REPLAN_MODE !== 'route') this._stand2 = null;
   }
   // A firing spot for ONE specific tower, with Jacob's relaxation ladder: try the ideal band, then
   // accept a longer shot (damage falloff, still inside shotReach), then a closer one (eat more
