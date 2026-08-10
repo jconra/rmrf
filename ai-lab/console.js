@@ -12,7 +12,12 @@
 
 // ---- palettes ---------------------------------------------------------------
 const MCOLOR = { intercept:'#c0392b', attack:'#c0392b', harass:'#cf6f3a', siege:'#cf6f3a',
-  defend:'#caa23a', scavenge:'#caa23a', capture:'#3a8f6f', scout:'#2e8fb0', sap:'#8e44ad', trap:'#8e44ad' };
+  defend:'#caa23a', scavenge:'#caa23a', capture:'#3a8f6f', scout:'#2e8fb0', sap:'#8e44ad', trap:'#8e44ad',
+  // The flattened errands and the duel. These reach the board through the SCORER (fillMissionCards
+  // reads the published list, so a mission cannot show up here that the scorer did not see) — but
+  // an unknown key falls back to grey, which made the newest missions the hardest ones to read.
+  fight:'#e0645a', flee:'#e0c65a', swap:'#7a8a99', refuel:'#caa23a', rearm:'#caa23a',
+  repair:'#3a8f6f', armour:'#2e8fb0' };
 const STATE_COLOR = { engage:'#e0645a', suppress:'#e0645a', assault:'#e0645a', pursue:'#e0975a',
   advance:'#5a9fe0', exit:'#5a9fe0', flee:'#e0c65a', retreat:'#e0c65a', resupply:'#e0c65a' };
 const ACOLOR = { warrior:'#c0392b', rogue:'#8e44ad', hunter:'#2e8fb0', turtle:'#caa23a' };

@@ -9913,7 +9913,7 @@ function ensureAiLogEl() {
   el = document.createElement('div'); el.id = 'ai-log';
   el.innerHTML =
     `<div id="ai-log-head"><span id="ai-log-title">AI LOG · ${AI_LOG_TAG}</span>` +
-    '<span id="ai-log-btns"><a class="lg-link" href="/ai-lab/" target="_blank" rel="noopener" title="Open the AI Lab live console (split A|B + full log)">LAB ↗</a>' +
+    '<span id="ai-log-btns"><a class="lg-link" href="ai-lab/" target="_blank" rel="noopener" title="Open the AI Lab live console (split A|B + full log)">LAB ↗</a>' +
     '<span class="lg-btn" data-act="export" title="Copy a snapshot to share">⧉</span>' +
     '<span class="lg-btn" data-act="minus">–</span>' +
     '<span class="lg-btn" data-act="plus">+</span></span></div>' +
