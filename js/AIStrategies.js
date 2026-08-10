@@ -1678,13 +1678,27 @@ class Doctrine {
     const v = cmd.unit, S = cmd._msnTrig || (cmd._msnTrig = {});
     const edge = (name, now, label) => { const was = S[name]; S[name] = now; return now && !was ? label : null; };
     // 1-3: the reflexes. Self-preservation, then our flag, in the order Jacob set out.
-    const sees  = edge('sees',  !!(cmd.lastEnemyPos && cmd.lastEnemyPos()), 'enemy in view');
+    // EVERY EDGE IS EVALUATED EVERY CALL, before any of them is allowed to win. `S` holds a LEVEL
+    // memory per edge — the `was` a rise is measured against — so an early return does not merely
+    // skip a trigger, it freezes every state below it, and a latched-true state can never rise
+    // again (`now && !was` = true && !true = nothing).
+    //
+    // HONEST NOTE ON WHAT THIS DOES AND DOES NOT FIX. It was written to explain the ai-lab showing
+    // "hull low" against 100% hp, and MEASURED OVER 3 SEEDS IT CHANGED NOTHING: 112 vs 114 stale
+    // samples out of 4180, byte-identical match outcomes. The early returns are not where the
+    // states go stale. The real cause is one level up — `_triggers` is called inside `if (!next)`,
+    // so ANY _urgent preemption skips it, and the terminal guards for flee/swap/fight return
+    // before reaching that block at all. For the whole duration of a flee, a swap or a duel, every
+    // level memory is frozen at whatever it was when the unit last ran the block.
+    // Kept anyway because evaluating all of them is the correct shape and it costs nothing, but
+    // the fix for the stale panel is to REFRESH the memories every tick regardless of preemption
+    // and leave only the re-score DECISION gated. That is a behaviour change (edges would stop
+    // accumulating a backlog across a flee) and wants its own flag and its own 240.
+    // Priority below is unchanged; only the point at which we stop LOOKING has moved.
+    const sees  = edge('sees',  !!(cmd.lastEnemyPos && cmd.lastEnemyPos()), 'a contact within 12s (seen, heard, or shot at)');
     const fire  = edge('fire',  !!(v && v._incomingFire), 'taking fire');
     const flag  = edge('flag',  !!(cmd.ourFlagStolen && cmd.ourFlagStolen()), 'our flag taken');
-    if (sees || fire || flag) return sees || fire || flag;
-    // 4: the mission says it is finished (the supply missions know when they are full).
-    if (this.mission && this.mission.done && this.mission.done(cmd)) return 'mission complete';
-    // 5: a LEG ended — arrived at the current waypoint, or the driver proved it can't be reached.
+    // a LEG ended — arrived at the current waypoint, or the driver proved it can't be reached.
     // The unreachable case matters as much as the arrival: without it a unit grinds at an
     // impossible goal until the watchdog destroys it, which is the failure this whole
     // investigation started from. Either way the leg is over and the plan gets another look.
@@ -1695,12 +1709,18 @@ class Doctrine {
       legLabel = edge('leg', d <= (o.arrive || 6) + 2 || !!o.violated,
         o.violated ? 'waypoint proven unreachable' : 'reached the waypoint');
     } else S.leg = false;
-    if (legLabel) return legLabel;
-    // 6: a supply crossed its low mark (the thing that starts a top-up).
+    // a supply crossed its low mark (the thing that starts a top-up). ALL of them, always.
+    let lowLabel = null;
     for (const what in SUPPLY_LOW) {
       const t = edge('low' + what, fracOf(cmd, what) < SUPPLY_LOW[what], `${what} is low`);
-      if (t) return t;
+      if (t && !lowLabel) lowLabel = t;
     }
+    // …now rank them. 1-3 are the reflexes: self-preservation, then our flag, in the order set out.
+    if (sees || fire || flag) return sees || fire || flag;
+    // 4: the mission says it is finished (the supply missions know when they are full).
+    if (this.mission && this.mission.done && this.mission.done(cmd)) return 'mission complete';
+    if (legLabel) return legLabel;
+    if (lowLabel) return lowLabel;
     // BACKSTOP, not part of the design: a standing mission with no legs (attack aims at a single
     // point) could otherwise ride a stale plan indefinitely. Defining legs for attack is the open
     // item that retires this — until then, a slow heartbeat is cheaper than a stuck commander.

@@ -225,8 +225,12 @@ function buildColumn(i, label, archetype, mission) {
 
 // The re-think triggers, in the order the commander tests them. A lit chip means that edge is
 // TRUE right now; the named one is whichever last actually forced a re-score.
+// LABELS MUST SAY WHAT THE TEST ACTUALLY IS. 'sees' reads lastEnemyPos(), which is written by
+// sight, by HEARING and by being SHOT AT, and remembers for 12s — so it lights with nothing in
+// view, next to a readout that correctly says "no contact". Two true statements that look like a
+// contradiction is worse than no panel.
 const TRIGS = [
-  ['sees', 'enemy in view'], ['fire', 'taking fire'], ['flag', 'our flag taken'],
+  ['sees', 'contact within 12s (seen/heard/shot at)'], ['fire', 'taking fire'], ['flag', 'our flag taken'],
   ['leg', 'waypoint reached / unreachable'],
   ['lowfuel', 'fuel low'], ['lowammo', 'ammo low'], ['lowhp', 'hull low'], ['lowshield', 'shield low'],
 ];
@@ -246,7 +250,11 @@ function fillMissionCards(col, d) {
   if (!S || !S.length) { host.innerHTML = '<div class="mnone">no score board published</div>'; return; }
   const top = S[0][1];
   host.innerHTML = S.map(([k, v]) => {
-    const running = k === d.msnKey || k === d.mission || k.split('-')[0] === d.mission;
+    // EXACTLY ONE CARD RUNS. This used to OR in `k.split('-')[0] === d.mission`, which lit every
+    // directional sibling of the running base — siege AND siege-back, capture-front AND -rear —
+    // so the panel claimed a unit was executing two plans at once. The scored key is the answer;
+    // the bare step is only a fallback for a mission with no directional variants.
+    const running = d.msnKey ? k === d.msnKey : k === d.mission;
     const c = mcol(k.split('-')[0]);
     return `<div class="mcard${running ? ' on' : ''}" style="--c:${c}">
       <div class="mk">${esc(k)}</div>

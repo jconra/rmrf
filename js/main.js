@@ -1765,6 +1765,11 @@ function removeCombatant(veh) {
   if (veh._engineId != null && sound) { sound.dropSpatialEngine(veh._engineId); veh._engineId = null; }
   if (veh._shieldFx) { releaseFancyShield(veh); veh.holder.remove(veh._shieldFx); veh._shieldFx.geometry.dispose(); if (veh._shieldFx.userData.cheapMat) veh._shieldFx.userData.cheapMat.dispose(); veh._shieldFx = null; }
   if (veh._shadow) { vehShadows.remove(veh._shadow); veh._shadow.geometry.dispose(); veh._shadow.material.dispose(); veh._shadow = null; }
+  if (veh._statusLight) {
+    const L = veh._statusLight; veh.holder.remove(L.grp);
+    L.bulb.geometry.dispose(); L.mat.dispose(); L.halomat.dispose();   // the halo TEXTURE is shared — never disposed here
+    veh._statusLight = null;
+  }
 }
 
 // Fire a vehicle's gun: sound (player only), muzzle flash + recoil, and a damaging
@@ -2948,6 +2953,140 @@ function updateHealthBars() {
     if (v._rankGrp) v._rankGrp.position.set(v.holder.position.x, v.holder.position.y + 8, v.holder.position.z);   // player stars (no bar group)
     if (!v.bar) continue;
     v.bar.group.position.set(v.holder.position.x, v.holder.position.y + 7, v.holder.position.z);
+  }
+  updateStatusLights();
+}
+
+// ── STATUS LIGHT ─────────────────────────────────────────────────────────────
+// A lamp on the hull that says what this unit is DOING, so the field can be read without
+// the ai-lab open in another window.
+//
+// TWO CHANNELS, because "does it see the enemy" is a different question from "what is it up to":
+//   COLOUR  = the job (attacking / shelling / running / resupplying / carrying / travelling)
+//   PULSING = it has an enemy in LIVE line of sight right now
+// That split is the whole point. A unit can be nose-on to a rival with the contact remembered
+// but no line of sight — behind a tree, or outside its sight cone — and that is exactly the
+// "it's looking right at it and not shooting" case. Steady red = attacking from memory;
+// pulsing red = it can actually see the thing. Nothing else distinguishes those two at a glance.
+//
+// The lamp rides in v.holder (unscaled, so it inherits hull position AND heading) and is UNLIT
+// (MeshBasicMaterial) so it reads the same in shadow, at night, and against a bright sea.
+const STATUS_COLORS = {
+  attack:   0xff3b30,   // red    — fighting another vehicle
+  siege:    0xff9500,   // orange — shelling a tower or the keep
+  flee:     0x2f7bff,   // blue   — broken off, heading home
+  supply:   0x34c759,   // green  — refuelling / rearming / repairing / shielding
+  carry:    0xffffff,   // white  — carrying the flag (the only thing that wins)
+  travel:   0x8899a6,   // grey   — driving, nothing tactical
+};
+// The mission steps that mean "I am at/heading to a depot". Kept as a set because the mission
+// layer names four separate errands that all read the same from outside the vehicle.
+const SUPPLY_STEPS = new Set(['refuel', 'rearm', 'repair', 'armour', 'resupply']);
+const aiStatusLights = !QS.has('nolights');
+let _haloTex = null;
+function haloTexture() {
+  if (_haloTex) return _haloTex;
+  const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+  const c = cv.getContext('2d');
+  const g = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.55)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 64, 64);
+  _haloTex = new THREE.CanvasTexture(cv);
+  return _haloTex;
+}
+// Which of the six a unit is in. Read in priority order: carrying the flag outranks everything
+// (it is the win condition), then running, then what it is shooting at, then errands.
+function statusKeyFor(v) {
+  for (const f of flags) if (f.carried && f.carrier === v) return 'carry';
+  if (v._fleeing) return 'flee';
+  const step = v._msnStep;
+  if (step === 'flee') return 'flee';
+  const st = v._aiState;
+  if (st === 'engage') return 'attack';
+  if (st === 'suppress' || st === 'assault') return 'siege';
+  if (st === 'resupply' || SUPPLY_STEPS.has(step)) return 'supply';
+  return 'travel';
+}
+function ensureStatusLight(v) {
+  if (v._statusLight) return v._statusLight;
+  // Sit the lamp just clear of the tallest point of THIS hull rather than at a guessed height —
+  // the four chassis differ by ~3u and a fixed offset either buries it in a Jotun's turret or
+  // floats it over a Firebrat. Measured once, at attach time, the same way Vehicle.seat() does it:
+  // setFromObject gives a WORLD box, and seatGroup has already been shifted so the model's feet
+  // rest on the holder's ground plane — so the hull's height above that plane is max.y - min.y,
+  // NOT max.y (which carries the vehicle's world elevation and would put the lamp in the sky).
+  let top = 3.2;
+  if (v.model && v.model.group) {
+    v.model.group.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(v.model.group);
+    if (isFinite(box.max.y) && isFinite(box.min.y)) top = box.max.y - box.min.y;
+  }
+  const grp = new THREE.Group();
+  const bulb = new THREE.Mesh(
+    new THREE.SphereGeometry(0.6, 10, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }));
+  // depthTest off on the HALO only: the glow should still be findable when the hull is behind a
+  // dune or a wall (that is the moment you most want to know what it is doing), while the bulb
+  // stays properly occluded so the lamp still reads as a thing bolted to the vehicle.
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: haloTexture(), color: 0xffffff, transparent: true, depthWrite: false, depthTest: false,
+    blending: THREE.AdditiveBlending, toneMapped: false }));
+  halo.scale.set(5, 5, 1);
+  grp.add(bulb); grp.add(halo);
+  // Slightly BEHIND the hull centre so it never hides inside a turret or gun mantlet, and high
+  // enough to clear the deck. Local -Z is the model's front, so +Z is aft.
+  grp.position.set(0, top + 0.7, v.hitR * 0.35);
+  v.holder.add(grp);
+  v._statusLight = { grp, bulb, halo, mat: bulb.material, halomat: halo.material };
+  return v._statusLight;
+}
+// A key for the six colours, small and bottom-left, only while watching AI-vs-AI. Six colours is
+// past the point where you can hold them in your head on day one, and the whole feature exists so
+// nothing has to be looked up in another window.
+let _lightKey = null;
+function ensureLightKey() {
+  if (_lightKey) return;
+  _lightKey = document.createElement('div');
+  _lightKey.id = 'light-key';
+  _lightKey.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:57;pointer-events:none;'
+    + 'font:11px "Courier New",monospace;letter-spacing:0.5px;color:#cfdae4;'
+    + 'background:rgba(12,18,24,0.55);border:1px solid rgba(120,150,180,0.25);border-radius:8px;'
+    + 'padding:7px 9px;line-height:1.55;text-shadow:0 1px 2px rgba(0,0,0,0.7);';
+  const rows = [
+    ['#ff3b30', 'fighting a vehicle'],
+    ['#ff9500', 'shelling a tower / keep'],
+    ['#2f7bff', 'broken off, heading home'],
+    ['#34c759', 'fuel / ammo / repair'],
+    ['#ffffff', 'carrying the flag'],
+    ['#8899a6', 'on the move'],
+  ].map(([c, t]) => `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;`
+    + `background:${c};box-shadow:0 0 6px ${c};margin-right:7px;vertical-align:middle"></span>${t}</div>`).join('');
+  _lightKey.innerHTML = rows + '<div style="margin-top:4px;opacity:0.65">pulsing = enemy in sight</div>';
+  document.body.appendChild(_lightKey);
+}
+function updateStatusLights() {
+  if (!aiStatusLights) return;
+  if (onField && TEAM_CTRL[PLAYER_TEAM] !== 'human') { ensureLightKey(); _lightKey.style.display = ''; }
+  else if (_lightKey) _lightKey.style.display = 'none';
+  const now = performance.now();
+  for (const v of combatants) {
+    if (v.dead || v.isPlayer) continue;       // the human already knows what they are doing
+    if (vehicleHidden(v)) { if (v._statusLight) v._statusLight.grp.visible = false; continue; }
+    const L = ensureStatusLight(v);
+    L.grp.visible = true;
+    const col = STATUS_COLORS[statusKeyFor(v)] || STATUS_COLORS.travel;
+    L.mat.color.setHex(col);
+    L.halomat.color.setHex(col);
+    // PULSE = live line of sight. _seesEnemy is the sight test that gates firing, NOT the 12s
+    // contact memory (which hearing and incoming fire also write) — so a pulsing lamp means the
+    // unit can shoot at something right now, and a steady one means it is working from memory.
+    const seen = !!v._seesEnemy;
+    const k = seen ? 0.55 + 0.45 * Math.abs(Math.sin(now * 0.006)) : 0.7;
+    L.halomat.opacity = k;
+    const s = seen ? 5.4 + k * 2.6 : 4.4;
+    L.halo.scale.set(s, s, 1);
   }
 }
 
@@ -8127,6 +8266,8 @@ class AICommander {
     const scanning = this._scanUpdate(v, view, cmd, dt);   // scan-on-transition: hold + sweep the surroundings before advancing
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     v._fleeing = this.strategy.step === 'flee';   // ...and that it has broken off for home (a rival reads this to press)
+    v._msnStep = this.strategy.step;        // the mission behind the state — the status lamp needs the errand, not just the mode
+    v._seesEnemy = !!view.seesEnemy;        // LIVE line of sight (the firing gate), not the 12s contact memory — the lamp pulses on this
     if (!this._driver) this._driver = new Driver(driverHooks);
     this._driver.bind(v, this._nav, this.team, this.cname);
     v._resvNav = this._nav;   // next tick's reservation stamp reads this unit's current route
