@@ -55,7 +55,7 @@ export function initReplay(RR, QS, host) {
         if (say) say(`seeking… ${Math.round((done + n) * 0.05)}s of ${Math.round(seconds)}s`);
         await new Promise(r => setTimeout(r, 0));
       }
-    } finally { seeking = false; RR.setTimeScale(paused ? 0 : playSpeed); setRate(paused ? 0 : playSpeed); }
+    } finally { seeking = false; RR.setTimeScale(paused ? 0 : 1); setRate(paused ? 0 : playSpeed); }
   }
 
   // Roll forward until a unit stops making progress toward a goal it is still far from — exactly
@@ -85,7 +85,7 @@ export function initReplay(RR, QS, host) {
         if (t % 10 === 0) { if (say) say(`scanning for a stuck unit… t=${Math.round(RR.matchTime())}s`); await new Promise(r => setTimeout(r, 0)); }
       }
       return null;
-    } finally { seeking = false; RR.setTimeScale(paused ? 0 : playSpeed); setRate(paused ? 0 : playSpeed); }
+    } finally { seeking = false; RR.setTimeScale(paused ? 0 : 1); setRate(paused ? 0 : playSpeed); }
   }
 
   // ── controls ───────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ export function initReplay(RR, QS, host) {
   };
   const setPaused = (on) => {
     paused = on;
-    if (!seeking) { RR.setTimeScale(on ? 0 : playSpeed); setRate(on ? 0 : playSpeed); }
+    if (!seeking) { RR.setTimeScale(on ? 0 : 1); setRate(on ? 0 : playSpeed); }
     playBtn.textContent = on ? '▶' : '❚❚';
   };
   const oneTick = () => { setPaused(true); clk.t += 50; RR.stepField(0.05, 1); RR.tickFlags && RR.tickFlags(0.05); };
@@ -111,7 +111,7 @@ export function initReplay(RR, QS, host) {
   const speeds = [];
   for (const sp of [0.1, 0.25, 0.5, 1, 2]) {
     const b = btn(sp + '×', `run at ${sp}× speed`, () => {
-      playSpeed = sp; if (!paused && !seeking) { RR.setTimeScale(sp); setRate(sp); }
+      playSpeed = sp; if (!paused && !seeking) { RR.setTimeScale(1); setRate(sp); }
       speeds.forEach(o => o.classList.toggle('on', o === b));
     });
     speeds.push(b); if (sp === 1) b.classList.add('on');

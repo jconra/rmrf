@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=93';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=96';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -112,7 +112,7 @@ _skySrc.dispose(); _pmrem.dispose();
 // (~40° up, afternoon) so light rakes across the vehicles' sides and catches
 // highlights — a high midday sun just lit their tops and left the flanks dark.
 const sun = new THREE.DirectionalLight('#fff3d6', 2.1);
-sun.position.set(0, 202, -25);   // bro's chosen specular angle (overridden per-map by scaleScene)
+sun.position.set(0, 202, -25);   // hand-picked specular angle (overridden per-map by scaleScene)
 scene.add(sun);
 const hemi = new THREE.HemisphereLight('#dff1ff', '#c2a86a', 0.95);
 scene.add(hemi);
@@ -906,6 +906,11 @@ const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvag
 let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
 let aiScrapTightArrive = true;   // salvage-detouring units close to within the pickup radius instead of halting at mission arriveDist (A/B via RR.setScrapTightArrive)
+let aiSwapBuild = QS.has('swapbuild');   // let a recall proceed when the roster is empty but the bank can BUILD the wanted chassis (A/B knob — see swapWanted)
+let aiMsnAttrib = QS.has('msnattrib');   // grade a death against the PRIMARY mission (the job) instead of strategy.step (the errand it died on) — A/B knob, see _applyKey/_primaryKey
+let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the fleet can actually CREW each plan (A/B knob — see requiredVehicle)
+let aiFleeScore = QS.has('fleescore');   // flee becomes a SCORED candidate instead of a hard preempt (A/B knob — selection only, the terminal commitment stays)
+let aiFightMission = QS.has('fightmsn'); // a vehicle-vs-vehicle duel becomes a MISSION that starts and ends (A/B knob — see the Fight class)
 let aiPostKillMoveOn = true;   // on a kill, drop the killer's engage-afterglow ghost so it doesn't linger "searching" the corpse (A/B via RR.setPostKillMoveOn)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
@@ -1506,6 +1511,10 @@ const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie i
 // unit could arm a trip it would then abandon. Deferring now costs nothing (we simply carry on
 // with the current mission and get asked again next change), so there is no second number.
 const SWAP_DEFER_R = 52;
+// Clearing a contact off a kill: matched to _noteContact's own 15u merge radius, because that is
+// the distance at which the notebook already considers two sightings to be the same vehicle.
+const CONTACT_CLEAR_R = 15;
+let aiContactClear = !QS.has('nocontactclear');   // a destroyed vehicle stops blocking lanes (A/B: ?nocontactclear)
 let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
 let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a firing tower jumps) instead of walking a queue — RR.setTargetPrio
@@ -2600,10 +2609,22 @@ function dropTowerScrap(w, upg) {
   const n = Math.min(6, Math.ceil(upg / 2));
   const p = w.group.position;
   for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 + Math.random() * 0.6;
-    const r = grid.cell * (0.9 + Math.random() * 0.8);
-    const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
-    if (map.isLand(x, z)) addScrapPile(x, z, 'parts');
+    // A GUN TOWER STANDS ON THE WALL RING. Throwing a pallet blindly around one lands it ON the
+    // wall, INSIDE the compound, or in the pinch between the ring and the shoreline: visible,
+    // counted as salvage, and impossible for any hull to collect. Every other scrap spawn tests
+    // blockedAt; this path tested only isLand, and it is the one that fires most often — six
+    // pallets per tower death, and a contested base loses every tower it has.
+    // Walk outward for ground a hull could actually stand on, and DROP the pallet rather than
+    // leave a prize nobody can reach. One fewer pallet costs a point of scrap; an unreachable
+    // one costs a unit that drives at it and grinds.
+    for (let t = 0; t < 8; t++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.6 + t * 0.9;
+      const r = grid.cell * (0.9 + Math.random() * 0.8) + t * grid.cell * 0.5;
+      const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
+      if (!map.isLand(x, z) || blockedAt(x, z)) continue;
+      addScrapPile(x, z, 'parts');
+      break;
+    }
   }
 }
 // Watch every gun tower for the death→rebuild cycle: on DESTRUCTION, spill the treasure box and
@@ -2692,6 +2713,18 @@ function destroyVehicle(veh, cause, killer = null) {
                                   veh.type === 'jotun' ? 1.35 : 1,
                                   (gx, gz) => { const r = roadDeckY(gx, gz); return r != null ? r : map.heightAt(gx, gz); });
   creditKill(killer, veh);   // credit the firing unit's commander (drives Warrior/Hunter doctrine + kill feed)
+  // A CORPSE IS NOT A ROADBLOCK. The contact notebook (_noteContact) is fed by sightings, sounds
+  // and shot-from stamps, and until now nothing ever removed an entry — laneIntel only skipped
+  // them once they aged out at 25s, and the timestamp is REFRESHED every tick the enemy is
+  // visible, so the clock started at the moment of the kill. Seed 3362: a blue Firebrat won a
+  // duel at t474 and its own lane still scored `lane blocked -2` for the next 25 seconds, which
+  // is a 3-point swing against the capture it had just cleared the way for. It died at t484,
+  // fifteen seconds inside a block posted by a unit it had already destroyed.
+  if (aiContactClear) for (const c of commanders) {
+    if (!c._contacts || c.team === veh.team) continue;   // only the ENEMY's notebook held this contact
+    const p = veh.holder.position;
+    c._contacts = c._contacts.filter(k => (k.x - p.x) ** 2 + (k.z - p.z) ** 2 >= CONTACT_CLEAR_R * CONTACT_CLEAR_R);
+  }
   { const bank = rankBankFor(veh); if (bank) bank[veh.type] = 0; }   // the decorated individual is gone — rank dies with it
   if (veh._rankGrp) { scene.remove(veh._rankGrp); veh._rankGrp = null; veh._rankSpr = null; }
   if (cause !== 'sank') {     // units lost at sea sink whole — no wreckage
@@ -3247,12 +3280,36 @@ function updateFlags(dt) {
       { const oc = commanders.find(c => c.ownsUnit && c.ownsUnit(f.carrier));
         const step = oc && oc.strategy ? oc.strategy.step : null;
         if (step === 'refuel') { if (!f.carrier._refuelCounted) { f.carrier._refuelCounted = 1; carrierRefuelsTotal++; } }
-        else if (f.carrier._refuelCounted) f.carrier._refuelCounted = 0; }
+        else if (f.carrier._refuelCounted) f.carrier._refuelCounted = 0;
+        // THE RUN LEDGER. Distance is measured to homePos() — the FOB — because that is what
+        // Capture.objective actually hands the driver, and it is a scoring point (CAP_FOB). The
+        // flag STAND is not the target and measuring to it reports a winning run as finishing
+        // 143u short, which is how that mistake announces itself.
+        if (oc && !f.carrier.dead) {
+          const p = f.carrier.holder.position, h = oc.homePos();
+          const d = Math.hypot(p.x - h.x, p.z - h.z), now = oc._matchT || 0;
+          const run = f.carrier._carryRun || (f.carrier._carryRun = { t0: now, d0: d, best: d, bestT: now, alarmed: false });
+          // Only real ground counts as progress, so a runner jittering on the spot cannot keep
+          // resetting the clock by shaving a tenth of a unit off its best.
+          if (d < run.best - CARRY_STALL_D) { run.best = d; run.bestT = now; }
+          if (!run.alarmed && now - run.bestT > CARRY_STALL_S) {
+            run.alarmed = true; flagRunStalls++;
+            const o = oc._driver && oc._driver.o;
+            const ord = o ? `${o.by || '?'}:${o.type}${o.x != null ? ` → (${Math.round(o.x)},${Math.round(o.z)})` : ''}${o.violated ? ' [ORDER VIOLATED]' : ''} — ${o.why || 'no reason given'}` : 'NO ORDER AT ALL';
+            flagRunStallList.push({ t: Math.round(now), team: f.carrier.team, type: f.carrier.type,
+              px: Math.round(p.x), pz: Math.round(p.z), toFob: Math.round(d), d0: Math.round(run.d0),
+              held: Math.round(now - run.t0), state: oc._dbg ? oc._dbg.state : null,
+              mission: oc.strategy ? oc.strategy.step : null, primary: oc._primaryKey || null, ord });
+            aiLog(f.carrier.team, `[FLAG RUN STALLED] ${oc.cname}: carrying for ${Math.round(now - run.t0)}s and no closer to home — `
+              + `${Math.round(d)}u out (grabbed at ${Math.round(run.d0)}u, best ${Math.round(run.best)}u). Order: ${ord}`);
+          }
+        } }
       if (f.carrier.dead) {
         // Carrier killed (anywhere — including on the lift) → the flag drops where
         // it fell and STAYS there until a Firebrat re-grabs it (no auto-return).
         const c = f.carrier.holder.position;
         f.group.position.set(c.x, map.heightAt(c.x, c.z) + 0.2, c.z);
+        flagRunsRunnerDied++; f.carrier._carryRun = null;
         f.carried = false; f.carrier = null;
       } else {
         const c = f.carrier.holder.position, hd = f.carrier.heading || 0;
@@ -3301,6 +3358,8 @@ function updateFlags(dt) {
 }
 // Carrying a rival flag home to your main base WINS the match.
 function onCapture(team, f) {
+  flagRunsScored++;
+  if (f.carrier) f.carrier._carryRun = null;
   f.carried = false; f.carrier = null; f.returnT = 0;
   f.group.position.set(f.home.x, f.home.y, f.home.z);
   endMatch(team);
@@ -3325,15 +3384,28 @@ function roadUnderFootprint(x, z, worldR) {
   return false;
 }
 
+const DEPOT_BODY_R = grid.cell * 2.6;   // the depot's own footprint — the radius the road test uses
+const SCRAP_HQ_CLEAR = 100;             // u — beached salvage stays this far off a FLAG HQ (Jacob)
+// HOW FAR A DEPOT MUST SIT FROM A BASE, and this used to be a flat 28u measured CENTRE TO CENTRE,
+// which is the same mistake `roadUnderFootprint` above exists to fix: it ignores the depot's own
+// body. A main camp is CAMP_SIZE(9) x 5u = 45u across, so its wall ring is 22.5u out; a depot
+// centred at the old legal minimum of 28u has a 13u body running from 15u to 41u — straight
+// THROUGH the wall. The result is a supply stack half-buried in the ring, pinched between the wall
+// and whatever is behind it, that no hull can reach: it looks placed, it is scored as a known
+// supply, and units route to it and grind. Measure both footprints and leave driving room.
+function campClearance(c) {
+  const half = ((c.role === 'main' ? CAMP_SIZE : FOB_SIZE) / 2) * grid.cell;
+  return half + DEPOT_BODY_R + grid.cell * 2;   // camp footprint + depot body + a lane to drive round it
+}
 function neutralSite(targetR) {
   for (let t = 0; t < 240; t++) {
     const ang = Math.random() * Math.PI * 2;
     const r = targetR * (0.78 + Math.random() * 0.44);
     const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
     if (!map.isLand(x, z) || blockedAt(x, z)) continue;
-    if (roadUnderFootprint(x, z, grid.cell * 2.6)) continue;   // keep the whole depot BODY off roads/bridges, not just its centre cell
+    if (roadUnderFootprint(x, z, DEPOT_BODY_R)) continue;   // keep the whole depot BODY off roads/bridges, not just its centre cell
     let ok = true;
-    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 28) { ok = false; break; }
+    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < campClearance(c)) { ok = false; break; }
     if (ok) for (const rp of resupplies) if (Math.hypot(x - rp.pos.x, z - rp.pos.z) < 24) { ok = false; break; }
     if (ok) return { x, z };
   }
@@ -3358,9 +3430,9 @@ function bisectorSite(reach) {
     const off = baseOff * (1 - (t / 80) * 0.75) * (0.9 + Math.random() * 0.2);
     const x = mx + px * off * sign, z = mz + pz * off * sign;
     if (!map.isLand(x, z) || blockedAt(x, z)) continue;
-    if (roadUnderFootprint(x, z, grid.cell * 2.6)) continue;   // keep the whole depot BODY off roads/bridges, not just its centre cell
+    if (roadUnderFootprint(x, z, DEPOT_BODY_R)) continue;   // keep the whole depot BODY off roads/bridges, not just its centre cell
     let ok = true;
-    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 28) { ok = false; break; }
+    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < campClearance(c)) { ok = false; break; }
     if (ok) for (const rp of resupplies) if (Math.hypot(x - rp.pos.x, z - rp.pos.z) < 24) { ok = false; break; }
     if (ok) return { x, z };
   }
@@ -3820,12 +3892,25 @@ function scatterScrap() {
   if (QS.has('noscrap') || configBases) return;   // custom maps place their own (slice 2)
   const span = Math.min(map.worldW, map.worldH) / 2;
   let placed = 0, tries = 0;
-  while (placed < 8 && tries++ < 400) {
+  // TRY HARDER, because the flag-HQ exclusion below shrinks the legal rim considerably and this
+  // loop used to give up at 400 and leave the map short (measured: 8.0 pallets/map -> 5.9, with
+  // seeds landing 2 and 3). This runs ONCE at map creation, so the budget is free.
+  while (placed < 8 && tries++ < 4000) {
     const ang = Math.random() * Math.PI * 2, r = span * (0.6 + Math.random() * 0.34);   // out toward the rim
     const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
     if (!map.isLand(x, z) || blockedAt(x, z)) continue;
     let ok = true;
-    for (const c of camps) if (Math.hypot(x - c.center.x, z - c.center.z) < 26) { ok = false; break; }
+    // KEEP THE BEACHED SALVAGE WELL CLEAR OF THE FLAG BASES. These are meant to read as cargo
+    // washed ashore, so they are scattered out toward the RIM — which is also where the bases
+    // are, so the two collide by construction. The old guard was a flat 26u from a camp CENTRE,
+    // and a main camp's wall ring is already 22.5u out: that permitted a pallet ~3.5u off the
+    // wall, wedged between the ring and the shore where no hull can get at it. Salvage is a
+    // SCORED objective, so units route to one and grind rather than simply ignoring it.
+    // A flag HQ gets a wide berth; a FOB only needs its own footprint plus room to drive round.
+    for (const c of camps) {
+      const clear = c.role === 'main' ? SCRAP_HQ_CLEAR : campClearance(c);
+      if (Math.hypot(x - c.center.x, z - c.center.z) < clear) { ok = false; break; }
+    }
     if (ok) for (const p of scrapPiles) if (Math.hypot(x - p.pos.x, z - p.pos.z) < 14) { ok = false; break; }
     if (ok) { addScrapPile(x, z, 'parts'); placed++; }
   }
@@ -5387,13 +5472,27 @@ let aiSaveRunner = !QS.has('nosaverunner');
 let aiReachArrive = !QS.has('noreacharrive');
 const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
 setSaveRunnerScore(aiSaveRunner);   // keep the scorer's copy in step with the deploy guard
+setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
+setFightMission(aiFightMission);    // …and for the Fight mission joining the candidate list
+setFleeScore(aiFleeScore);          // …and for Flee joining it too
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
 Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → routes opened/closed
 
+// A route cut short by the SEARCH BUDGET is not a finished journey — it is a job to pick back up.
+// Retries are spaced and escalate the node budget, then stop: an impossible goal must not re-search
+// every frame (that was the perf sawtooth failT exists to stop), and it must not retry forever
+// either. After the last try the route is handed on with budgetHit CLEARED, which lets the driver's
+// contract convict the order and the mission re-score — a loud failure instead of a silent park.
+const NAV_PARTIAL_RETRY = 0.5;   // s between retries of a budget-truncated route
+const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
+// Default ON: this closes a SILENT deadlock (no alarm, no stuck sample, no re-score), and a silent
+// failure that the harness cannot see is the worst kind to leave switched off. ?nonavretry for the A/B.
+const aiNavRetry = !QS.has('nonavretry');
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
+  if (nav.retryT > 0) nav.retryT -= dt;
   const moved2 = nav.dx == null ? Infinity : (dest.x - nav.dx) ** 2 + (dest.z - nav.dz) ** 2;
   const c = grid.cell;
   // A FAILED plan (no route — unreachable/blocked goal) used to leave nav.path null, so the
@@ -5423,7 +5522,12 @@ function navWaypoint(nav, v, dest, dt) {
       _pfWhyAll[w] = (_pfWhyAll[w] || 0) + 1;
       _pfWhyAll[k] = (_pfWhyAll[k] || 0) + 1;
       const _s = performance.now();
-      nav.path = planPath(v, dest); nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
+      // Escalate the search on a retry: the previous attempt ran out of nodes, so repeating it with
+      // the same budget would return the same truncated route. On the LAST try, clear budgetHit so
+      // "we don't know" becomes "we could not get there" and the contract is allowed to speak.
+      nav.path = planPath(v, dest, nav.retryN ? { nodeMul: 1 + nav.retryN } : undefined);
+      if (nav.path && nav.retryN > NAV_PARTIAL_TRIES) nav.path.budgetHit = false;
+      nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
       nav.epoch = _navEpoch;
       _astarFrameMs += performance.now() - _s;
       nav.failT = nav.path ? 0 : 0.6;   // no route → don't re-run the search for 0.6s
@@ -5446,6 +5550,24 @@ function navWaypoint(nav, v, dest, dt) {
     if ((nx.x - px) ** 2 + (nx.z - pz) ** 2 < dCur) { nav.idx++; continue; }   // driven past it (nearer the next)
     break;
   }
+  // PARKED ON THE END OF A TRUNCATED ROUTE — the deadlock this whole block exists to break.
+  // The loop above stops at length-1, so the FINAL waypoint is never consumed and nav.idx never
+  // reaches nav.path.length: the 'consumed' replan never fires. The unit is not stuck either (it
+  // is sitting on its waypoint, so every stuck clock reads zero), and the driver's contract stays
+  // quiet because budgetHit means "the search ran out of nodes", which proves nothing. Net result,
+  // observed live on 2026-08-09: a lurcher at full hp/ammo/fuel parked in its own base for
+  // thousands of seconds with its order still reading GOTO 20u away, and not one alarm anywhere.
+  // Silent, so it contributes NOTHING to any tournament number — which is why the harness could
+  // never find it.
+  if (aiNavRetry && nav.path.budgetHit && nav.idx >= nav.path.length - 1) {
+    const slack = Math.max(grid.cell * 1.2, 9);
+    if ((dest.x - px) ** 2 + (dest.z - pz) ** 2 > slack * slack && !(nav.retryT > 0)) {
+      nav.retryN = (nav.retryN || 0) + 1;
+      nav.retryT = NAV_PARTIAL_RETRY;   // spaced: an impossible goal must not re-search every frame
+      nav.path = null; nav.t = 0;       // …and pick it back up on the next call, with more budget
+      return null;
+    }
+  } else if (nav.retryN) { nav.retryN = 0; }   // got somewhere real — the escalation resets
   return nav.path[nav.idx];
 }
 // Steer a vehicle toward a world point — now a thin wrapper over the ONE locomotion
@@ -5757,6 +5879,21 @@ let dryTripsTotal = 0;        // RR.decisionAlarms() — tournament summary
 // a flag run is the single most important thing in the game to be able to count.
 let flagCarriesTotal = 0;     // flags picked up (a run STARTED)
 let carrierRefuelsTotal = 0;  // …and the carrier broke off to go and refuel
+// …AND HOW THE RUN ENDED. Counting starts and never endings is how "the FB got the flag and then
+// just sat there" stayed invisible through weeks of tournaments: 366 runs started across 240 seeds
+// said nothing at all about whether any of them converted. The win condition is CAPTURE ONLY, so
+// these four numbers have to add up — a run either scores, or the runner dies, or it is still
+// holding the flag when the clock stops, and the fourth is the interesting one.
+let flagRunsScored = 0;       // …reached the base and won it
+let flagRunsRunnerDied = 0;   // …carrier killed en route (a normal, honest way to lose a run)
+// (…still carrying when the clock stopped is read live off the flags — see decisionAlarms.)
+let flagRunStalls = 0;        // …held the flag CARRY_STALL_S with no ground gained toward home
+const flagRunStallList = [];  // the autopsies, like the scuttle list: seed-level detail for the summary
+// A run that makes no ground is the failure. Not "stopped" — a runner legitimately holds still to
+// fight, to wait out a tower sweep, to let a shield recharge — but a runner that has not beaten its
+// own best distance home in three quarters of a minute is not doing any of those things.
+const CARRY_STALL_S = 45;     // seconds without closing on the delivery point
+const CARRY_STALL_D = 10;     // …and "closing" means beating our own best by this much (u)
 let swapLoopsTotal = 0;
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
@@ -6104,6 +6241,15 @@ class AICommander {
     const s = this._lastEnemyPos;
     return s && (performance.now() - s.t) < 12000 ? { x: s.x, z: s.z } : null;
   }
+  // THE OPPONENT, as a unit. Returned only while it is ALIVE, so a duel can never be opened
+  // against a wreck; once a mission has snapshotted it, the mission holds its own reference and
+  // watches `.dead` itself. Read for IDENTITY and for that one flag — never for its position,
+  // which would be seeing through the fog. Where it is comes from lastEnemySeen() below.
+  lastEnemyVeh() { const u = this._lastEnemyVeh; return u && !u.dead ? u : null; }
+  // Where we last actually SAW a vehicle (as opposed to heard one, or got shot from somewhere).
+  // No staleness window: the caller knows which unit this belongs to and decides what an old fix
+  // is worth — a frozen last-known position is exactly what "they got away" is measured against.
+  lastEnemySeen() { const s = this._lastEnemySeen; return s ? { x: s.x, z: s.z, t: s.t } : null; }
   // "Our towers are being SHOT" — stamped by updateProjectileHits when an enemy round hits
   // one of our structures near home. Unlike hearing this has no range limit (the tower
   // radios for help), so a defender out on the mid-field lane responds immediately
@@ -6573,7 +6719,20 @@ class AICommander {
     // learned this and said so in a comment; I deleted the logic with it and put the bug straight
     // back: swap loops went 282 -> 731 across 240 seeds.
     const got = this._pickAvailableType(want);
-    if (!got || got === v.type) return null;                       // we'd roll out the same thing — the trip is wasted
+    if (!got || got === v.type) {
+      // ...UNLESS WE COULD BUILD THE REAL WANT. _pickAvailableType only reads the roster, so when
+      // the roster is out of the type the job needs it substitutes back to what we already drive
+      // and this bails as a wasted trip. That makes the whole thing circular, and seed 3362 is
+      // what the circle looks like: capture wants a firebrat, blue has none, so the swap is
+      // cancelled — which means no deploy, which means the scrap-rebuild in deploy() (which
+      // exists, and is written for exactly this) never runs, which means still no firebrat.
+      // Blue sat on 12 scrap and 6 piles on the ground for 885 seconds running `capture` with a
+      // Lurcher, against an opponent it had already eliminated, and the match timed out.
+      // Only when the bank can actually field the want — deploy() builds it — so this cannot
+      // become a recall loop on a broke commander, which matters given `swap` can already absorb
+      // a whole match.
+      if (!(aiSwapBuild && aiScrapBuild && (this.roster[want] || 0) === 0 && this.canAfford(want))) return null;
+    }
     const up = v.holder.position;
     for (const o of combatants) {                                  // a rival close enough to shoot us in the back
       if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
@@ -6942,6 +7101,25 @@ class AICommander {
   // Total vehicles this commander has left to field (the fielded unit still counts).
   fleetLeft() { let n = 0; for (const k in this.roster) n += this.roster[k]; return n; }
   // --- SALVAGE: this team's scrap bank + building from it ---
+  // THE FIGHT-OR-FLIGHT NUMBER, READ NOT RECOMPUTED. AI.js works this out once per tick for the
+  // rival in sight (hull, ammo, shields, persona, local numbers, crossfire, the counter-web,
+  // whether we could outrun it) and every other consumer reads that same value. The Fight mission
+  // scores off this so the mission layer and the reflex layer cannot disagree about a duel.
+  fightOdds() {
+    const v = this.unit;
+    if (!v || v.dead || !v.ai || v.ai._fof == null) return null;
+    // IN RANGE, NOT MERELY IN SIGHT (Jacob: "now there is an enemy in-range"). Fight is the
+    // decision you make when a rival is ON you — its opposite number is Flee, not Siege. Scoring
+    // it off a sighting made it compete with the whole board from 66u away, and units broke off
+    // real work to close 24u on contacts they could not yet shoot: across 240 seeds, pursue-stuck
+    // 1->11, assault-stuck 26->43, four matches ended with cracked keeps, six runners in reserve
+    // and nobody capturing. Same rule the flee side already learned (AI.js ~1109).
+    // Symmetric with Fight.done, which ends the mission at 1.25x this reach — so the mission
+    // covers exactly the window where a duel is actually possible.
+    const d = v.ai._fofD;
+    return (d != null && d <= (SHOT_REACH[v.type] || 42)) ? v.ai._fof : null;
+  }
+  shotReach(type) { return SHOT_REACH[type] || 42; }   // how far this chassis can actually shoot (Fight.done)
   scrap() { return teamScrap[this.team] || 0; }
   canAfford(type) { return this.scrap() >= (BUILD_COST[type] || 99); }
   // Build one of `type` from salvage — capped at the base garage count (same finite fleet
@@ -7801,7 +7979,16 @@ class AICommander {
         const rec = this._mrec; this._mrec = null;
         if (rec) this._noteTour(this._tourRecord(rec, 1, this._slotI));
         if (rec) {
+          // WHICH MISSION IS THIS DEATH ABOUT? `strategy.step` is what the unit was DOING at the
+          // instant it died, and for a unit that died badly that is almost never the plan that
+          // got it killed — it is the errand it switched to in reaction (Flee, a top-up, a swap
+          // trip). Grade the PRIMARY mission instead: the last real job it was out doing.
+          // A re-task mid-flight moves the blame with it, deliberately — a decision replaces the
+          // plan and is then committed to, so a runner re-tasked from capture onto siege and
+          // killed there is a failure of the siege, not of the capture it was pulled off.
           const step = this.strategy.step;
+          const primary = (aiMsnAttrib && this._primaryKey) || step;   // full directional key
+          const bstep = primary.split('-')[0];                          // 'capture-left' → 'capture'
           // GRADE THE TOUR, DON'T PASS/FAIL IT. The old test forgave any tour that took 60hp off a
           // fort of roughly 1960 (four 340hp towers plus a 600hp keep) — about 3% — so siege was
           // very nearly incapable of failing its own report card, and the anti-repeat never bit it.
@@ -7823,7 +8010,7 @@ class AICommander {
           // "consecutive losses with nothing to show" instead of a running death toll. Its only
           // reset used to be redraw(), which never runs for archetype commanders.
           if (progress) this.failStreak = 0;
-          const msnKey = aiMsnDirKey ? this._msnKeyFor(step) : step;
+          const msnKey = aiMsnAttrib ? primary : (aiMsnDirKey ? this._msnKeyFor(step) : step);
           if (aiGradedTour) {
             const pen = Math.min(0, -4 + ach * 4);
             if (pen < -0.05) this._missionSuccess[msnKey] = pen; else delete this._missionSuccess[msnKey];
@@ -7835,28 +8022,38 @@ class AICommander {
           // instead of changing the tool. Track the PAIRING as well; _vehicleForMission reads
           // this and substitutes a different chassis before the mission itself is abandoned.
           if (!this._msnVehFail) this._msnVehFail = {};
-          const vk = `${step}|${lost}`;
+          const vk = `${aiMsnAttrib ? bstep : step}|${lost}`;
           if (!progress) this._msnVehFail[vk] = (this._msnVehFail[vk] || 0) + 1;
           // A tour that DID make progress earns the chassis credit back — but only one tour's
           // worth. Deleting the whole record let a single good outing erase a run of failures,
           // so a chassis that fails this mission four times out of five never accumulated.
           else if (this._msnVehFail[vk]) this._msnVehFail[vk] = Math.max(0, this._msnVehFail[vk] - 1);
           if (!progress) {
-            if (this._failStep === step) this._failN++; else { this._failStep = step; this._failN = 1; }
+            const fstep = aiMsnAttrib ? bstep : step;
+            if (this._failStep === fstep) this._failN++; else { this._failStep = fstep; this._failN = 1; }
             this._failT = performance.now();
             if (this._failN === 2) {
               // Snapshot the battlefield the bench is supposed to change — the ban lifts on
               // PROGRESS against these, not on a timer (see missionBanned).
               this._failSnap = { twr: this.turretsLive(), fort: fortHpOf(this.targetTeam()), k: this.kills };
-              aiLog(this.team, `${this.cname}: That's two units lost on this ${step} plan with NOTHING to show — we're trying something else!`);
+              aiLog(this.team, `${this.cname}: That's two units lost on this ${fstep} plan with NOTHING to show — we're trying something else!`);
             }
-          } else if (this._failStep === step) { this._failStep = null; this._failN = 0; }
+          } else if (this._failStep === (aiMsnAttrib ? bstep : step)) { this._failStep = null; this._failN = 0; }
         }
         // A runner died storming the base → don't just feed another firebrat in. If the enemy
         // still has DEFENDING VEHICLES, they'll intercept the fragile runner — send a combat
         // unit to CLEAR THEM FIRST (better signal than the death's damage-split, which mislabels
         // a mixed tower+vehicle kill). Only a pure tower gauntlet (no enemy vehicles) → sneak wide.
-        if (this.unit.type === 'firebrat' && this.strategy.step === 'capture') {
+        // THE GATE THAT NEVER OPENED. This read strategy.step, which at a runner's death is
+        // 'flee' far more often than 'capture' — the runner is chewed down on the approach, turns
+        // for home, and dies on the way. Measured over 8 seeds: 13 of 15 runner deaths slipped
+        // past this (step was 'flee' 12x, 'swap' 1x), so the escalating lane penalty, the
+        // interceptor boost and the tower boost below have essentially never run. Ask the primary
+        // mission instead — the job it was out doing, not the errand it died on.
+        // (computed again rather than reused: the report card above lives inside `if (rec)`, and a
+        // runner can die on a tour with no record — the gate still has to be right for those.)
+        const runStep = (aiMsnAttrib && this._primaryKey) ? this._primaryKey.split('-')[0] : this.strategy.step;
+        if (this.unit.type === 'firebrat' && runStep === 'capture') {
           const tt = this.targetTeam();
           const enemyHasUnits = combatants.some(o => !o.dead && o.team === tt && !vehicleHidden(o));
           this.strategy.onRunnerLost(this, enemyHasUnits);
@@ -8507,6 +8704,11 @@ class AICommander {
         const bearing = Math.atan2(-(o.holder.position.x - px), -(o.holder.position.z - pz));
         effR *= coneFactor(Math.abs(wrapPi(bearing - lookAng)));
       }
+      // WHICH ONE DO WE POINT THE GUNS AT: nearest visible, and deliberately nothing cleverer.
+      // Target priority (a flag carrier outranking a nearer hull) was built and removed — it can
+      // only ever fire when two enemies are visible at once, and with one unit per team that
+      // never happens, so it could not be gated and would have sat here untested. Revisit it if
+      // multi-unit stops being the exception.
       if (effR > 0 && d < effR * effR && d < nearestD && (flyer || hasLOS(px, pz, o.holder.position.x, o.holder.position.z))) {
         nearestD = d; enemy = { x: o.holder.position.x, y: o.holder.position.y, z: o.holder.position.z, type: o.type, shield: o.shield, vx: o._vx || 0, vz: o._vz || 0,
           heading: o.heading, hpFrac: o.maxHp ? o.hp / o.maxHp : 1, retreating: !!o._fleeing || o._aiState === 'resupply' }; seen = o; seesEnemy = true;
@@ -8514,7 +8716,18 @@ class AICommander {
     }
     // Remember WHERE the enemy was last seen (team-shared) so the Attack mission can recall
     // their last-known position instead of only marching to the fixed elevator (ai_behavior).
-    if (seen) { this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() }; this._noteContact(enemy.x, enemy.z); }
+    if (seen) {
+      this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() }; this._noteContact(enemy.x, enemy.z);
+      // …AND WHO IT WAS. _lastEnemyPos is a place, shared by three different senses (see below:
+      // hearing and being shot at write to it too), so it can never answer "is my opponent dead" —
+      // it does not know there was an opponent. The Fight mission needs that answer and nothing
+      // else in the codebase could give it: view.enemy and ai._lastEnemyView are both flat COPIES
+      // of the sighting, not the vehicle. This is the only live handle, and it is deliberately
+      // written ONLY on a real sighting — never on a noise or an incoming round — so "the unit I
+      // am duelling" cannot be reassigned by something the unit never saw.
+      this._lastEnemyVeh = seen;
+      this._lastEnemySeen = { x: enemy.x, z: enemy.z, t: performance.now() };
+    }
     // HEARING: if it can't SEE a rival, it may still HEAR one — engine drone from movers +
     // gunfire reports, damped by its own engine noise (same model as the player's sound HUD).
     // A heard contact is intel, NOT a firing solution — it only updates the team's last-known
@@ -10561,7 +10774,7 @@ function scaleScene() {
   scene.fog.far = span * 1.6;
   camera.far = span * 3 + 200;
   camera.updateProjectionMatrix();
-  // Sun nearly overhead, tilted slightly toward -Z — the specular look bro dialled in
+  // Sun nearly overhead, tilted slightly toward -Z — the specular look this was tuned for
   // (x:0, z:-25 on the default 480 map). Kept proportional to span so any map size gets
   // the same light DIRECTION, not just the default one.
   sun.position.set(0, span * 0.42, -span * 0.052);
@@ -11512,7 +11725,13 @@ window.RR = {
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
-  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal }),
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal,
+    // How every flag run ENDED. scored + runnerDied + heldAtEnd should account for flagCarries;
+    // a shortfall means a run ended some way none of these three describes, which is itself worth
+    // knowing. `stalls` overlaps the others on purpose — a stalled run can still be killed later.
+    flagScored: flagRunsScored, flagRunnerDied: flagRunsRunnerDied,
+    flagHeldAtEnd: flags.filter(f => f.carried && f.carrier && !f.carrier.dead).length,
+    flagStalls: flagRunStalls, flagStallList: flagRunStallList.slice(-8) }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
@@ -11553,6 +11772,12 @@ window.RR = {
   setFlyerRoute: on => { aiFlyerRoute = !!on; return aiFlyerRoute; },      // route flyers as GOTO straight lines (A/B)
   setStandArrive: on => { aiStandArrive = !!on; return aiStandArrive; },   // arrive ON the firing position vs 14u short (A/B)
   setSmooth: on => { aiSmoothPath = !!on; return aiSmoothPath; },          // string-pull A* routes (A/B)
+  setMsnAttrib: on => { aiMsnAttrib = !!on; return aiMsnAttrib; },         // grade a death against the primary mission, not the errand it died on (A/B)
+  setFleeScore: on => { aiFleeScore = !!on; setFleeScore(aiFleeScore); return aiFleeScore; },   // flee scored rather than preempting (A/B)
+  setFightMission: on => { aiFightMission = !!on; setFightMission(aiFightMission); return aiFightMission; },   // a duel becomes a mission (A/B)
+  setReqVehicle: on => { aiReqVehicle = !!on; setReqVehicle(aiReqVehicle); return aiReqVehicle; },   // price whether the fleet can crew each plan (A/B)
+  crewFor: key => commanders.map(c => ({ team: c.team, key, ...requiredVehicle(c, key) })),          // what would roll out for `key`, and what it costs — probe/ai-lab readout
+  primaryKey: () => commanders.map(c => ({ team: c.team, step: c.strategy && c.strategy.step, msnKey: c._msnKey, primary: c._primaryKey })),   // attribution readout for probes/ai-lab
   setSmoothClear: on => { smoothClear = !!on; return smoothClear; },        // require hull clearance on a shortcut (A/B)
   smoothStats: () => ({ cut: smoothCut, kept: smoothKept }),               // waypoints the smoothing pass removed vs kept
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
@@ -11671,6 +11896,7 @@ window.RR = {
   startCommanders: (reserved) => startCommanders(reserved),
   get lock() { return lock; },
   get resupplies() { return resupplies; },
+  get scrapPiles() { return scrapPiles; },   // debug: salvage on the ground — probes ask if a hull can actually reach each one
   get scrapPiles() { return scrapPiles; },       // live salvage piles on the field
   get gibCount() { return gibChunks.length; },   // debug: debris pieces currently mid-flight
   get teamScrap() { return { ...teamScrap }; },   // scrap banked per team

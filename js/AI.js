@@ -1079,6 +1079,12 @@ export function runBrain(graph, view, mem) {
   // Fight-or-flight score for the rival in sight (null if none) — computed ONCE here so the
   // `engaging` condition, the log overlay and the flight recorder all read the same number.
   mem._fof = (view.seesEnemy && view.enemy) ? fightScore(view, p) : null;
+  // …and HOW FAR that rival is, stamped here for the same reason the score is: one number, one
+  // place, read by everyone. The Fight mission needs it because sight is not a firing solution —
+  // AI_VISION is 66u while a Firebrat's gun reaches 40 and a Lurcher's 42, so "there is an enemy"
+  // and "there is an enemy we can shoot" are two different facts for the two commonest chassis.
+  mem._fofD = (view.seesEnemy && view.enemy && view.self)
+    ? Math.hypot(view.enemy.x - view.self.x, view.enemy.z - view.self.z) : null;
   // COMMITMENT BIAS (anti-flap): a score hovering AT the fight/flee boundary used to strobe the
   // state every tick or two (richwatch: resupply↔engage ×38, pursue↔engage ×26 in 6s) — each
   // tiny hp/distance change flipped the sign. Once fighting, it takes a clearly BAD score to

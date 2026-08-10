@@ -511,19 +511,27 @@ const INCUMBENT_MAX = 3.0;    // …rising to this at the objective
 // it is nearly dry, and rewarding it for having driven a long way to the pump would make the
 // worst case — out of fuel, far from home — the hardest one to interrupt.
 const INCUMBENT_FLAT = { refuel: 1, rearm: 1, repair: 1, armour: 1 };
+// HOW FAR OUT THE UNIT IS — 0 at the pad, 1 at the enemy base. Shared by BOTH distance terms so
+// they can never drift onto different scales: the incumbent bonus (what the running plan has
+// already spent getting here) and requiredVehicle's recall cost (what a chassis change would
+// spend driving home and back out). They are opposite halves of the same question.
+export function travelFraction(cmd) {
+  const v = cmd.unit;
+  if (!v || v.dead || !v.holder) return 0;
+  let home, away;
+  try { home = cmd.homePos(); away = cmd.enemyBasePos(); } catch (e) { return 0; }
+  if (!home || !away) return 0;
+  const span = Math.hypot(away.x - home.x, away.z - home.z);
+  if (!(span > 1)) return 0;
+  const p = v.holder.position;
+  return Math.max(0, Math.min(1, Math.hypot(p.x - home.x, p.z - home.z) / span));
+}
 export function incumbentBonus(cmd) {
   const key = (cmd._msnKey || '').split('-')[0];
   if (INCUMBENT_FLAT[key]) return INCUMBENT_BASE;
   const v = cmd.unit;
   if (!v || v.dead || !v.holder) return INCUMBENT_BASE;
-  let home, away;
-  try { home = cmd.homePos(); away = cmd.enemyBasePos(); } catch (e) { return INCUMBENT_BASE; }
-  if (!home || !away) return INCUMBENT_BASE;
-  const span = Math.hypot(away.x - home.x, away.z - home.z);
-  if (!(span > 1)) return INCUMBENT_BASE;
-  const p = v.holder.position;
-  const gone = Math.hypot(p.x - home.x, p.z - home.z) / span;          // 0 at the pad, 1 at their base
-  const f = Math.max(0, Math.min(1, gone));
+  const f = travelFraction(cmd);
   return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
 }
 export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
@@ -656,6 +664,108 @@ class Swap extends Mission {
 // For a Firebrat carrying the flag this is not a retreat at all. Capture is abandoned, but the
 // destination is the same base, and an AI carrier scores on ARRIVAL — so fleeing is the backup
 // plan that still wins the match.
+// FIGHT — vehicle versus vehicle, the counterpart to Siege's vehicle versus tower gun.
+// Until now a duel was invisible to the mission layer: `engage` is a STATE in AI.js's reflex
+// layer, so a unit could pick a fight, win it, and the mission layer would never learn either
+// happened. Seed 3362 is what that costs — a runner on capture-left was re-tasked to siege-back
+// the instant an enemy appeared, killed that enemy three seconds later, and then died sieging a
+// tower in a Firebrat, because the mission it was pulled onto had meanwhile earned its own
+// incumbent bonus and the capture never came back.
+//
+// As a mission the duel becomes a thing that STARTS and ENDS, and the plan underneath survives it.
+class Fight extends Mission {
+  get key() { return 'fight'; }
+  get garageOK() { return false; }            // decided in the field, mid-contact — never buy a hull for it
+  wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }   // fight with what we brought
+  shoot(cmd) { return true; }
+  arriveDist(cmd) { return 8; }
+  enter(cmd, doc) {
+    super.enter(cmd, doc);
+    // Snapshot WHO we are fighting. The reflex layer re-picks its own target every tick — that is
+    // its job — but the MISSION has to be about one opponent, or "is it over?" has no answer.
+    // This used to snapshot a POINT, and that is the whole reason three gates of this mission
+    // failed: a point cannot be killed, so `done` could not fire on a kill, and the point itself
+    // was shared with hearing and with incoming fire, so an unrelated engine drone kept a finished
+    // duel alive. Hold the vehicle.
+    this.foeV = cmd.lastEnemyVeh ? cmd.lastEnemyVeh() : null;
+    const s = cmd.lastEnemySeen && cmd.lastEnemySeen();
+    this.foe = s ? { x: s.x, z: s.z } : null;
+  }
+  // THE FOE IS WHOEVER THE GUNS ARE ON (Jacob's ruling). Not a snapshot taken when the duel
+  // opened: a second rival that closes to knife range while we chase the one that started it gets
+  // to unload on us unopposed, so priority decides the target and the mission follows the target.
+  //
+  // Position still comes from the last SIGHTING, never from foeV.holder.position — that is the
+  // live truth, and reading it would let a unit track an opponent it cannot see. So a foe that
+  // breaks line of sight leaves its last known spot behind, which is exactly what "they got away"
+  // has to be measured against.
+  _acquire(cmd) {
+    const t = cmd.lastEnemyVeh ? cmd.lastEnemyVeh() : null;
+    if (t) {
+      this.foeV = t;
+      const s = cmd.lastEnemySeen && cmd.lastEnemySeen();
+      if (s) { this.foe = { x: s.x, z: s.z }; this.foeT = s.t; }
+    }
+    return this.foeV;
+  }
+  objective(cmd) {
+    // Where the fight is: refreshed while we have eyes on them so a pursuing unit keeps closing,
+    // frozen at the last known spot once we lose them — which is what makes `done` fire on range
+    // rather than on a flicker.
+    this._acquire(cmd);
+    return this.foe || cmd.enemyBasePos();
+  }
+  label(cmd) { return 'the rival in front of us'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Contact! Break off and take them — everything else can wait!',
+    'They picked the fight. Finish it!',
+    'Enemy on us — guns front, deal with this first!',
+  ]); }
+  // OVER WHEN THEY ARE DEAD OR OUT OF REACH — never on losing sight (Jacob). A tree between two
+  // vehicles is not the end of a battle; a rival that has opened the range beyond our gun has
+  // genuinely escaped and chasing it is a different decision, taken by the scorer, not by this.
+  // The 1.25 margin is hysteresis: without it a target dancing on the edge of reach toggles the
+  // mission on and off, which is the flapping this whole layer exists to stop.
+  done(cmd) {
+    const v = cmd.unit; if (!v || v.dead) return true;
+    // DEAD IS CHECKED BEFORE RE-ACQUIRING, and the order is the whole design. Acquiring first
+    // would silently roll the duel onto the next body the moment we won, so a unit in a busy
+    // midfield would never leave Fight and the plan underneath would never resume — that is
+    // exactly the lock-in that doubled idle-at-goal in v3. The duel ENDS on the kill; the board
+    // is re-scored; if somebody still qualifies, the next tick opens a fresh one.
+    if (this.foeV && this.foeV.dead) return true;   // KILLING THEM ENDS IT (Jacob's first rule)
+    if (!this._acquire(cmd)) return true;           // nobody to duel — a fight is vehicle vs vehicle
+    // …OR THEY OPENED THE RANGE (Jacob's second rule), measured against where the opponent
+    // ACTUALLY IS. Reading the live position here is not the wallhack it looks like, and the
+    // distinction is worth stating because getting it wrong cost a whole gate:
+    //   objective() decides where the unit DRIVES, and must use what we have SEEN — driving at a
+    //   live position we have no eyes on would track a rival straight through a hill.
+    //   done() only decides when to STOP, so the truth can only ever make the unit disengage
+    //   sooner. It cannot help it aim, chase or intercept. There is no exploit in knowing that
+    //   your opponent has genuinely left.
+    // Measured against the frozen last-SEEN point instead, this test can never fire at all: the
+    // ghost stands where we last saw it, so a rival that drives off is forever "in range". That
+    // was v4 — idle-at-goal tripled because the goal WAS the stale point.
+    const q = this.foeV.holder && this.foeV.holder.position;
+    if (!q) return true;
+    const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42) * FIGHT_BREAK;
+    const p = v.holder.position;
+    if ((q.x - p.x) ** 2 + (q.z - p.z) ** 2 > reach * reach) return true;
+    // BACKSTOP, for the one case the two rules above leave open: an opponent alive and technically
+    // within reach, but sat behind cover where we never see them — the range test says stay, the
+    // objective sends us to a stale point, and the unit holds there indefinitely. A tree between
+    // two vehicles is not the end of a battle (Jacob), and this is not a tree: eight seconds
+    // without laying eyes on them is the line between an obstruction and a standoff we should
+    // walk away from. Untuned — there is no measurement behind 8s, only the argument.
+    return performance.now() - (this.foeT || 0) > FIGHT_LOST_MS;
+  }
+}
+const FIGHT_BREAK = 1.25;   // they are out of the fight at 125% of our reach — see Fight.done
+const FIGHT_LOST_MS = 8000; // …and they are OUT of it entirely once we have not laid eyes on them
+                            // this long. Not "lost sight" (a tree blocks for a second or two) —
+                            // this is the difference between an obstruction and an escape, and
+                            // without it the frozen last-seen position makes a duel unendable.
+
 class Flee extends Mission {
   get key() { return 'flee'; }
   get garageOK() { return false; }          // a decision taken in the field; never buy a chassis for it
@@ -754,7 +864,7 @@ class ArmourUp extends Supply {
 }
 
 const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass,
-  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp, flee: Flee, swap: Swap };
+  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp, flee: Flee, swap: Swap, fight: Fight };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // Is this mission one a commander may buy a chassis for at the lift? (Top-ups are decisions a
 // unit already in the field makes; letting one reach the garage would deploy the wrong vehicle.)
@@ -775,7 +885,21 @@ export function missionWants(key, cmd) {
 // has run a short dwell (anti-thrash) — except URGENT transitions (grab the flag now),
 // which fire immediately. This is what makes missions complete/abort cleanly instead of
 // the old linear step machine that could never let go of a finished objective.
-const URGENT = new Set(['capture', 'intercept', 'sap', 'flee']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
+// `fight` joins for the reason Jacob gave: life or death, the result of the highest-priority
+// trigger. Unlike flee it is still SCORED (fight-or-flight can say this is a bad trade and it
+// should lose) — being urgent only means that once chosen it starts now instead of waiting out
+// the 8s dwell, which is the whole point of a contact.
+const URGENT = new Set(['capture', 'intercept', 'sap', 'flee', 'fight']);   // sap fires once at the start — switch immediately, no wrong-unit deploy first
+// A PLAN YOU CAN BENCH vs AN ERRAND YOU CANNOT. Benching "flee" is meaningless — you do not stop
+// fleeing because fleeing did not work — so these never receive a report card, and a death while
+// one is running is filed against the objective mission the unit was actually out doing. Every
+// other mission in MSN_CANDS is a plan and can be judged. See _applyKey / cmd._primaryKey.
+// `fight` is support for the same reason: you do not bench "fight" because fighting did not work.
+// It also has a second job here — keeping _primaryKey on the real plan through a duel is what
+// leaves the incumbent bonus with that plan, so winning a fight RESUMES the job instead of
+// handing the board to whatever happened to be second.
+const SUPPORT_MISSIONS = new Set(['flee', 'swap', 'refuel', 'rearm', 'repair', 'armour', 'fight']);
+export const isSupportMission = key => SUPPORT_MISSIONS.has((key || '').split('-')[0]);
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch (event re-decides)
 // How long a SCORED mission runs before a non-urgent re-think. Deliberately far calmer than the
 // old cascade's 1.5s: the incumbent bonus plus this dwell are what turn a score into a commitment
@@ -908,7 +1032,17 @@ const PERSONA_FADE = 240;    // …down to ×1 by the four-minute mark
 export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_FADE - matchT) / PERSONA_FADE);
 // A2: capture is DIRECTIONAL (front/left/right/rear — a stonewalled lane has three other
 // angles, and each direction remembers its own failures) and the rear siege is its own plan.
-const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
+let FIGHT_MSN = false;   // A/B knob (?fightmsn / RR.setFightMission) — a duel becomes a mission
+export function setFightMission(on) { FIGHT_MSN = !!on; return FIGHT_MSN; }
+// Flee stops being a hard preempt and becomes a scored candidate like everything else, so
+// fight-or-flight is one comparison on one board instead of a decision split across two
+// mechanisms. SELECTION ONLY: the commitment ("once we are leaving, we are leaving") still lives
+// in tick()'s terminal early-return, so this changes why flee is CHOSEN, not whether it can be
+// abandoned halfway. Removing that early-return and letting the hull score hold the mission is
+// the obvious next step and is deliberately NOT bundled in — one thing at a time.
+let FLEE_SCORE = false;   // A/B knob (?fleescore / RR.setFleeScore)
+export function setFleeScore(on) { FLEE_SCORE = !!on; return FLEE_SCORE; }
+const MSN_CANDS_BASE = ['scout', 'attack', 'siege', 'siege-back',
   'capture-front', 'capture-left', 'capture-right', 'capture-rear',
   'defend', 'intercept', 'scavenge', 'sap', 'trap',
   // The supply missions (see the Supply classes above). `repair` JOINED once the rung it was
@@ -918,6 +1052,88 @@ const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
   // back out at 30% hull. `armour` stays out: its pull is 3 against attack's 9-15, so it can never
   // be picked, and raising it flat would make armour worth abandoning a fight for. See task #40.
   'refuel', 'rearm', 'repair'];
+// Built per call rather than mutated, so the flag genuinely removes `fight` from the board when
+// off — a candidate scored at -50 would still show up in every breakdown and every near-tie log.
+const MSN_CANDS = () => {
+  let c = MSN_CANDS_BASE;
+  if (FIGHT_MSN) c = c.concat('fight');
+  if (FLEE_SCORE) c = c.concat('flee');
+  return c;
+};
+
+// ---- requiredVehicle — CAN WE ACTUALLY CREW THIS PLAN? --------------------------------------
+// MissionScore priced everything about a mission except whether the fleet can execute it, so an
+// impossible plan could outrank the plan that would MAKE it possible: seed 3362 ran `capture` for
+// 885s with no Firebrat alive or buildable, beating the siege that would have cleared the tower
+// eating its runners. The same blind spot let a Firebrat be re-tasked onto a siege and killed.
+//
+// ONE VALUE carries both meanings (Jacob's call, and he was right — if a mission is impossible the
+// graded part is irrelevant, and if it is possible the binary part is zero, so they never need to
+// compose differently). The magnitude says which: 0 ideal, small negative workable, -50 impossible.
+//
+// Deliberately asks missionWants() for the ideal rather than carrying its own mission×chassis
+// table: wantVehicle is already persona-aware (a Warrior sieges with a Jotun, a Rogue with a
+// Valkyrie) and board-aware (enemy eliminated → Jotun, gambit → Valkyrie), and a parallel table
+// would drift out of sync with it within a month.
+const FIGHTERS = new Set(['jotun', 'lurcher', 'valkyrie']);   // interchangeable; the runner stands alone
+const NO_SUBSTITUTE = new Set(['capture', 'sap']);            // only a Firebrat carries a flag / lays mines
+// URGENCY BEATS FIT (Jacob): "anything can and should intercept — you use what you have because
+// you don't have the time." A thief is leaving with our flag; charging the wrong chassis a
+// penalty here would price a delay we cannot afford as if it were free.
+const URGENT_FIT = new Set(['intercept']);
+const REQV_IMPOSSIBLE = -50;   // the fleet cannot do this job at all
+const REQV_SAME_ROLE = -2;     // a stand-in from the same role pool
+const REQV_CROSS_ROLE = -6;    // a runner sent to fight, or a fighter sent to run
+const REQV_RECALL_MAX = -3;    // …at the objective; 0 at the pad (mirrors INCUMBENT_MAX)
+
+export function requiredVehicle(cmd, key) {
+  const have = (cmd.unit && !cmd.unit.dead) ? cmd.unit.type : null;
+  const ideal = missionWants(key, cmd);
+  if (!ideal) return { score: 0, chassis: have };              // the mission does not care what it drives
+  const base = key.split('-')[0];
+
+  // WHAT WOULD ACTUALLY ROLL OUT. Ask _pickAvailableType — the same ladder deploy() walks,
+  // including "save the last of a type" — so the scorer and the swapper cannot give different
+  // answers. Guessing separately is the bug behind a firing spot solved for a Jotun's 80u gun and
+  // handed to the Lurcher that replaced it.
+  let chassis = have, recall = false;
+  if (have !== ideal) {
+    const pick = (cmd._pickAvailableType && cmd._pickAvailableType(ideal)) || null;
+    // THE BANK IS PART OF THE FLEET. _pickAvailableType only reads what is parked; a commander
+    // holding the scrap to build the right chassis is not short of it, it just has not spent yet.
+    const buyable = (!cmd.roster || (cmd.roster[ideal] || 0) === 0)
+      && cmd.canAfford && cmd.canAfford(ideal);
+    // ORDER MATTERS, and getting it wrong inverts the whole term. With an empty Firebrat roster
+    // _pickAvailableType('firebrat') does NOT return null — its last resort is "whatever we have
+    // most of", so it hands back a Lurcher. Taking that answer first would score a capture as
+    // IMPOSSIBLE for a commander sitting on the scrap to build a runner.
+    if (pick === ideal) chassis = ideal;                            // the ladder already gives us the right one
+    else if (!NO_SUBSTITUTE.has(base) && pick) chassis = pick;      // a stand-in is acceptable for this job
+    else if (buyable) chassis = ideal;                              // no stand-in will do — buy the real thing
+    else chassis = pick || have;                                    // stuck with whatever we can field
+    recall = !!chassis && chassis !== have;
+  }
+
+  // Tier A — no substitute exists and none can be bought. A genuine binary, the same kind the
+  // board already carries ("flag sealed" -10, "only way we win" +10), so the house rule allows it.
+  if (chassis !== ideal && NO_SUBSTITUTE.has(base)) return { score: REQV_IMPOSSIBLE, chassis: null };
+
+  let score = 0;
+  // Tier B — how well can we crew it. The IDEAL scores 0, which is what makes this change
+  // one-sided: a mission crewed correctly scores exactly what it scored before, so nothing on the
+  // existing board needs rebalancing and only mismatches move.
+  if (chassis !== ideal && !URGENT_FIT.has(base)) {
+    const sameRole = FIGHTERS.has(chassis) === FIGHTERS.has(ideal);
+    score += sameRole ? REQV_SAME_ROLE : REQV_CROSS_ROLE;
+  }
+  // Tier C — the trip. Only when the hull must change, and it must VANISH at the pad: that is what
+  // makes the arrival re-score settle instead of recalling again. When the unit gets home the cost
+  // is gone and the new chassis is in the roster, so the mission that sent it improves by exactly
+  // what the trip cost — which is the whole reason this cannot become a recall treadmill.
+  if (recall) score += REQV_RECALL_MAX * travelFraction(cmd);
+
+  return { score: Math.round(score * 10) / 10, chassis };
+}
 
 // A/B for the last-runner term, set from main.js so both halves of the change — this and the
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
@@ -925,6 +1141,8 @@ const MSN_CANDS = ['scout', 'attack', 'siege', 'siege-back',
 // pattern right here is the house way to pass a knob across this boundary.
 let SAVE_RUNNER = true;
 export function setSaveRunner(on) { SAVE_RUNNER = !!on; return SAVE_RUNNER; }
+let REQ_VEHICLE = false;   // A/B knob (?reqveh / RR.setReqVehicle) — score whether the fleet can crew each plan
+export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
 export function missionScore(cmd, key, running = null) {
@@ -1020,6 +1238,36 @@ export function missionScore(cmd, key, running = null) {
       // with a KNOWN contact on it is actively repelling; unscouted = neutral (earn it by scouting)
       if (cmd.laneIntel) { const li = cmd.laneIntel(dir); if (li === 'clear') add('lane clear', 1); else if (li === 'blocked') add('lane blocked', -2); }
       if (spareFB >= 0.1) add('spare FB', spareFB); break;
+    }
+    // FIGHT — the duel, priced off the number the reflex layer ALREADY computes. Deliberately not
+    // a second opinion: fightScore weighs hull, ammo, shields, persona, local numbers, crossfire,
+    // the counter-web and whether we could even outrun this rival, and recomputing any of that
+    // here would be two rulebooks for one judgement — the defect behind every flap in this layer.
+    case 'fight': {
+      const f = cmd.fightOdds ? cmd.fightOdds() : null;
+      if (f == null) break;                    // nothing engaged — scores 0 and cannot be picked
+      // The contact itself is the mandate (a rival inside our reach is not a thing to ignore);
+      // the odds then decide whether we take it or let the board send us elsewhere. Range is
+      // roughly ±5, so a duel lands 5-15: it beats routine work and loses to a real emergency.
+      add('a rival on us', 10);
+      add('odds', Math.round(f * 10) / 10);
+      break;
+    }
+    // FLEE — the other half of the same decision as Fight, and now on the same board so the two
+    // can actually be compared. Mirror-imaged deliberately: fight is 10 + odds, flee is 10 - odds,
+    // so they cross where the odds cross and the breakdown reads as one judgement rather than two.
+    case 'flee': {
+      if (!cmd.shouldFlee || !cmd.shouldFlee()) break;   // 0 — the brain's bail test says we are staying
+      add('breaking off', 10);
+      const ff = cmd.fightOdds ? cmd.fightOdds() : null;
+      if (ff != null) add('odds', -Math.round(ff * 10) / 10);
+      // A CARRIER'S RUN HOME IS THE WIN CONDITION. The preempt gave this for free and deliberately
+      // — flee's destination is our own base, so for a carrier it is the same errand by a safer
+      // road, and arriving still wins the match. Stated as a weight now instead of as position in
+      // a ladder, which is the whole point of moving it onto the board.
+      const fl = cmd.flag && cmd.flag();
+      if (fl && fl.carrier === cmd.unit) add('carrying the flag home', 6);
+      break;
     }
     case 'defend': {
       if (cmd.homeAttack && cmd.homeAttack()) add('base under fire', 4);
@@ -1134,8 +1382,19 @@ export function missionScore(cmd, key, running = null) {
   // Lurcher at an open enemy flag until the clock ran out (seed 116). Price it out of contention
   // instead — this mission cannot produce a win no matter how good the board looks. The fielded
   // unit counts too: a Firebrat already on the field can finish the job with an empty roster.
-  if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')
+  // SUPERSEDED BY requiredVehicle when that is on: this is the same statement ("we cannot crew
+  // this plan") for one mission and one chassis, and requiredVehicle makes it for all of them.
+  // Leaving both would stack -14 and -50 on the same fact.
+  if (!REQ_VEHICLE && base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')
       && !(cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat')) add('nothing can carry the flag', -14);
+  // CAN THE FLEET ACTUALLY CREW THIS PLAN — and what would roll out if it did. One value: 0 for
+  // the ideal chassis (so a correctly-crewed mission scores exactly what it always did), a small
+  // negative for a stand-in plus the trip home, -50 for a job nothing we own or can buy can do.
+  if (REQ_VEHICLE) {
+    const rv = requiredVehicle(cmd, key);
+    if (rv.score) add(rv.chassis ? `crew: ${rv.chassis}` : 'nothing can crew this', rv.score);
+    (cmd._msnChassis || (cmd._msnChassis = {}))[key] = rv.chassis;   // the swapper reads this — one answer, not two
+  }
   // THE LAST RUNNER IS A ONE-SHOT BET — the mirror of spareFB above. That term pays for having
   // SPARE runners, so holding exactly one produced no signal either way, and the fleet-comp term
   // is bonus-only (`if (b > 0)`) so being down to a last runner never discouraged capture at all:
@@ -1177,7 +1436,7 @@ export function missionPick(cmd, incumbent = null) {
   if (exp && !cmd._expForgave) { cmd._expForgave = true; for (const k in S) if (k === 'capture' || k.startsWith('capture-')) delete S[k]; }
   else if (!exp) cmd._expForgave = false;
   let best = null, bestV = -1e9; const all = [];
-  for (const key of MSN_CANDS) {
+  for (const key of MSN_CANDS()) {
     const r = missionScore(cmd, key, incumbent);
     // INCUMBENT BONUS — now weighted by how much of the plan is already PAID FOR. Near-tied
     // scores must not flap the commander between missions every few seconds (autopsy: a
@@ -1263,15 +1522,56 @@ class Doctrine {
       this._switch(then, cmd, 'swapped at the pad — getting on with it');
       return;
     }
+    // A FIGHT IS A COMMITMENT TOO — and until this guard existed it was not one. Fight had no
+    // terminal clause, so its done() was dead code and the duel survived only while it kept
+    // out-scoring the entire board at every re-score. That made it hostage to the sight CONE:
+    // _fof goes null the instant the rival leaves it, which during a duel is constantly, and the
+    // unit was handed a fresh objective every few seconds. Measured over 240 seeds: transit-stuck
+    // +65%, nav alarms +40%, scuttles +91%, concentrated in `advance` — the signature of a
+    // destination that keeps changing. NEITHER of the two gates run before this tested the design;
+    // both tested a mission that could not commit to anything.
+    // done() reads lastEnemyPos (12s memory) and 1.25x our reach, so it is immune to that flicker
+    // — which is exactly why it was written that way, and exactly why it had to be connected.
+    if (this.step === 'fight') {
+      // ONE exception, and only one: self-preservation. A unit whose brain has decided this fight
+      // is lost must be able to leave it. Nothing else interrupts a duel — not a better-looking
+      // plan, not a stolen flag. That is what makes it a commitment rather than an opinion.
+      if (cmd.shouldFlee && cmd.shouldFlee()) { this._switch('flee', cmd, 'this fight is lost — breaking off'); return; }
+      if (!this.mission.done(cmd)) return;
+      // Over → back to the JOB. _primaryKey never moved (Fight is a support mission), so the plan
+      // returns as the INCUMBENT and keeps the travel bonus it had already earned. That is what
+      // makes winning a fight resume the job instead of handing the board to whatever was second —
+      // seed 3362's runner was re-tasked onto a siege it then died on, having just won its duel.
+      this._switch(this._applyKey(cmd, missionPick(cmd, cmd._primaryKey || null)) || 'attack', cmd,
+        'contact dealt with — back to the job');
+      return;
+    }
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
     let next = this._urgent(cmd);
-    // Two flavours of the same emergency: a live thief carrying it (chase) vs the thief died
-    // and the flag's lying loose in the field (drive over and touch it home before their next
-    // runner re-grabs it mid-field — far closer than our base).
-    const loose = next && !cmd.ourFlagStolen();
-    let why = next ? (loose ? 'our flag is lying in the field — recover it before they re-grab' : 'our flag is on the move — run the thief down') : null;
-    let fk = next ? (loose ? 'flag_loose' : 'flag_stolen') : null;   // which doctrine rung justified the decision (ai-lab decision-path)
+    // WHICH emergency. _urgent answers with 'flee' OR 'intercept', and this used to read `next`
+    // as a bare truthy and describe it as a flag recovery either way — so a unit breaking off to
+    // save itself was logged, and FILED, as "our flag is lying in the field". Both halves were
+    // wrong: the bark read like nonsense next to the actual situation, and `fk` feeds the ai-lab
+    // decision path, so every self-preservation flee in the game was recorded there as flag_loose.
+    // Nothing downstream was broken by it; the LOGS were, which is worse — they are what we read
+    // to work out why a match went the way it did.
+    let why = null, fk = null;
+    if (next === 'flee') {
+      // shouldFlee has two reasons and they are different decisions, so name the one that fired:
+      // the brain wrote this unit off, or we are carrying and the road home is shut.
+      const hurt = !!(cmd.unit && cmd.unit.ai && cmd.unit.ai._bail);
+      why = hurt ? 'we are done here — break off before we lose the hull'
+                 : 'carrying, and the direct road home is blocked — take the back way';
+      fk = hurt ? 'self_preservation' : 'route_home_blocked';
+    } else if (next) {
+      // Two flavours of the same emergency: a live thief carrying it (chase) vs the thief died
+      // and the flag's lying loose in the field (drive over and touch it home before their next
+      // runner re-grabs it mid-field — far closer than our base).
+      const loose = !cmd.ourFlagStolen();
+      why = loose ? 'our flag is lying in the field — recover it before they re-grab' : 'our flag is on the move — run the thief down';
+      fk = loose ? 'flag_loose' : 'flag_stolen';   // which doctrine rung justified the decision (ai-lab decision-path)
+    }
     // PRESERVATION (any persona): losing the attrition war → hold under tower cover instead
     // of trading the last of the army out in the open — UNLESS we can win right now by
     // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
@@ -1358,7 +1658,9 @@ class Doctrine {
     // SELF-PRESERVATION OUTRANKS EVERYTHING, and unlike the two below it is NOT waived for a
     // flag carrier: Flee's destination is our own base, so for a carrier it is the same trip by
     // a safer road, and arriving still wins the match.
-    if (cmd.shouldFlee && cmd.shouldFlee()) return 'flee';
+    // …unless flee is being SCORED, in which case preempting here would short-circuit the very
+    // comparison the change exists to make (the board would never see fight and flee side by side).
+    if (!FLEE_SCORE && cmd.shouldFlee && cmd.shouldFlee()) return 'flee';
     if (cmd.flag() && cmd.flag().carrier === cmd.unit) return null;
     if (cmd.ourFlagStolen()) return 'intercept';
     if (cmd.ourFlagLoose && cmd.ourFlagLoose()) return 'intercept';
@@ -1407,6 +1709,19 @@ class Doctrine {
   }
   _applyKey(cmd, key) {
     cmd._msnKey = key;
+    // THE PRIMARY MISSION — the JOB this unit is out doing, as opposed to the errand it is
+    // running right now. A unit under fire switches to Flee (correctly — Flee is terminal and
+    // re-scores nothing) and then dies, and every consumer that grades a death reads
+    // strategy.step, so the report card, the chassis blame, the loss streak and the runner-death
+    // handler all got filed against 'flee'. Measured over 8 seeds: 13 of 15 runner deaths were
+    // recorded against a support mission, and the ledger on seed 3362 literally read
+    // {"flee": -0.22}. The plan that got the unit killed kept a clean record and stayed top of
+    // the board; the reflex that was working correctly took the blame.
+    // Frozen while a support mission runs, so the errand can never inherit the blame — and the
+    // supply missions are the reason this test lives here rather than at the write sites: Flee
+    // and Swap return early before _applyKey, but refuel/rearm/repair are scored candidates and
+    // come straight through it.
+    if (!isSupportMission(key)) cmd._primaryKey = key;
     if (key.startsWith('capture-')) { cmd._capDir = key.slice(8); return 'capture'; }
     cmd._capDir = null;
     cmd._siegeBack = key === 'siege-back';
@@ -1468,7 +1783,12 @@ class Doctrine {
     if (!cmd._missionSuccess) cmd._missionSuccess = {};
     const n = cmd._runnerLosses = (cmd._runnerLosses || 0) + 1;
     const pen = -Math.min(16, 4 + 5 * n);   // −9, −14, −16… escalating (enough to unseat an OPEN-flag capture at +13.9)
-    const failedKey = (cmd._msnKey && cmd._msnKey.startsWith('capture-')) ? cmd._msnKey : 'capture-front';
+    // WHICH LANE FAILED. Prefer the primary mission over _msnKey: they agree on an objective
+    // mission, but _msnKey follows the unit onto a supply errand (refuel/rearm/repair go through
+    // _applyKey), so a runner that died during a top-up detour would file its loss under 'refuel'
+    // and fall back to benching capture-front — a lane it may never have driven.
+    const runKey = cmd._primaryKey || cmd._msnKey;
+    const failedKey = (runKey && runKey.startsWith('capture-')) ? runKey : 'capture-front';
     if (enemyHasUnits) {
       // A DEFENDER killed the runner on THIS lane. Bench only this lane and raise ATTACK, so the
       // follow-up is a revenge sweep and the next grab can come straight down a different

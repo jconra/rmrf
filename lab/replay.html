@@ -14,6 +14,14 @@
      in a 12,000-line file we do not want to fork. Nothing here is styled — it never shows. */
   #hud, #player-bars, #perf, #touch-joystick, #touch-aim, #fire-btn, #fire-btn-l { display:none !important; }
 
+  /* THE BLACK VEIL WHEN PAUSED. #deployfade is the garage/deploy blackout, and main.js fades it
+     out with `garageFadeT += dt` — so at dt = 0 it never advances and never finishes, leaving the
+     whole screen sitting under a half-opaque black sheet exactly when you are paused and trying to
+     look at something. It clears the moment you press play, which is why it reads as a lighting
+     bug rather than a stuck animation. The lab is a spectator view with no garage and no deploy
+     sequence, so this overlay has no job here at all. */
+  #deployfade { display:none !important; }
+
   /* ── the lab's own UI ───────────────────────────────────────────────────── */
   #lab-ui { position:fixed; inset:0; pointer-events:none; z-index:10000; }
   #lab-ui > * { pointer-events:auto; }
@@ -106,14 +114,31 @@
   // harness. During playback it advances with real elapsed time SCALED by the play speed, so the
   // game's wall-clock timers keep step with its simulated time at 0.1x and at 2x alike, and stop
   // dead when paused.
-  window.__labClock = { t: 0, rate: 1 };
+  // STARTS FROZEN (rate 0), and the module below only starts it after re-pinning the RNG.
+  // Without that the lab shows a DIFFERENT MATCH from the one the tournament scored: main.js's
+  // ?rngseed stream is consumed by async asset callbacks during load, in a load-order-dependent
+  // amount, which is exactly why every headless rig calls RR.reseed(n) after load and why the
+  // runbook says the query seeds alone are not enough. A lab that quietly plays a different match
+  // is worse than no lab — it produced a clean win on a seed the tournament recorded as a
+  // stalemate, which reads as "the bug is fixed" when nothing has been fixed at all.
+  window.__labClock = { t: 0, rate: 0 };
   performance.now = function () { return window.__labClock.t; };
+  // FIXED QUANTUM, and this is the second half of "the lab plays the match the tournament scored".
+  // The clock may only ever move in 50ms steps — the exact tick every rig and the tournament use —
+  // because main.js derives dt from it (dt = min(0.05, rawDt) * timeScale). Advancing by real
+  // elapsed time instead fed dt ~0.0167 at 60fps, so the seeded stream was consumed at a different
+  // rate and the match drifted apart the instant playback started. The seek was always faithful;
+  // only live play diverged, which is the worst possible shape for a debugging tool — it looks
+  // right for a moment and then quietly shows you a different game.
+  // SPEED THEREFORE COMES FROM MORE TICKS, NEVER BIGGER ONES (see replay.js: timeScale stays 1).
   (function pump() {
-    var last = Date.now();
+    var last = Date.now(), acc = 0;
     (function frame() {
       var now = Date.now();
-      window.__labClock.t += (now - last) * window.__labClock.rate;
+      acc += (now - last) * window.__labClock.rate;
       last = now;
+      if (acc > 1000) acc = 1000;        // a backgrounded tab must not bank an unbounded catch-up burst
+      while (acc >= 50) { window.__labClock.t += 50; acc -= 50; }
       requestAnimationFrame(frame);
     })();
   })();
@@ -150,7 +175,13 @@
     await new Promise(r => {
       (function wait() { (window.RR && window.RR.setTimeScale && window.RR.commanders && window.RR.commanders.length >= 2) ? r() : setTimeout(wait, 40); })();
     });
-    const { initReplay } = await import('../js/replay.js?v=2');
+    // THE RE-PIN, before a single tick of sim time is allowed to pass (the clock is still at
+    // rate 0 here). Same call, same moment, same argument as tourney.cjs and every probe — this
+    // is what makes "matches are bit-identical from a seed" actually true in the lab.
+    const sd = Number(qs.get('rngseed') || qs.get('dseed') || qs.get('seed'));
+    if (Number.isFinite(sd) && window.RR.reseed) window.RR.reseed(sd);
+    window.__labClock.rate = 1;                       // …now let time start
+    const { initReplay } = await import('../js/replay.js?v=4');
     initReplay(window.RR, qs, document.getElementById('lab-ui'));
   }
 </script>
