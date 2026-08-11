@@ -38,7 +38,7 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=1';
+import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
 import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=97';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
@@ -5361,9 +5361,13 @@ let NAV_FRAME_BUDGET_MS = 3;
 // LIKELY MECHANISM: flagreach and msnattrib are both "stop capturing" pressures — one withholds
 // capture when the flag is unreachable, the other benches capture lanes after losses. Stacked, the
 // commander gives up on capture too readily, and capture is the ONLY way to win.
-// This one had the weakest evidence of the three (no solo fresh-seed run) so it is the one that
-// goes back behind a flag while the pair is re-measured. ?flagreach to try it.
-const aiFlagReach = QS.has('flagreach');
+// KEPT ON ANYWAY — Jacob's call, 2026-08-10: "let's keep them. we will figure it out."
+// Same standing rule as msnattrib: a change that makes the AI reason correctly is worth keeping
+// while the cost gets worked on, rather than reverted for a number. ?noflagreach reverts.
+// THE THING TO FIX (do not lose this): the two pressures must stop stacking. flagreach should
+// withhold capture only when NO lane is reachable, not whenever the chosen one is not — that is
+// the all-or-nothing that combines badly with msnattrib's per-lane bench.
+const aiFlagReach = !QS.has('noflagreach');
 // BREACH: shoot the breakable thing standing between us and an objective we cannot reach.
 // Lowest-priority target, below towers and the keep — see the breach block in the target picker.
 // SHIPPED 2026-08-10 (?nobreach reverts). 240 seeds x2: resolution 0 then +1 (never negative),

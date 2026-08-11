@@ -169,7 +169,11 @@ export function fireBurst(x, y, z, scale = 1, lifeMul = 1) {
   // like it is hovering". Remember the ground and re-seat it every frame in drawFire.
   slot.baseY = y;
   slot.fire.mesh.position.set(x, y, z);
-  slot.fire.mesh.rotation.set(0, frnd() * Math.PI * 2, 0);
+  // Keep the per-instance spin ON THE SLOT: drawFire rebuilds the mesh's quaternion every frame to
+  // lean the column at the camera, and writing .quaternion discards .rotation — so a yaw that lived
+  // only on the mesh would be wiped on the first frame and every fire would face the same way.
+  slot.yaw = frnd() * Math.PI * 2;
+  slot.fire.mesh.rotation.set(0, slot.yaw, 0);
   slot.fire.mesh.visible = true;
   live.push(slot);
   // Hand back the footprint rather than a bare true: whoever lights the NEXT one needs to know how
@@ -233,16 +237,52 @@ export function tickFire(dt) {
 }
 
 // The expensive half — slicing the volume against the camera — only when there is a frame to draw.
+// Scratch objects, reused — a Quaternion/Euler/Vector3 per fire per frame would be garbage for
+// nothing at 12 fires x 60fps.
+const _fq = new THREE.Quaternion();
+const _fe = new THREE.Euler();
+const _fax = new THREE.Vector3();
+// How far the column tips toward the viewer, in radians. 0.30 is ~17deg and is a GUESS — the
+// headless rig cannot really judge it, and the person who sees the donut in play is the one who
+// should pick it. ?firelean=0.5 to dial it live; ?firelean=0 turns the lean off entirely.
+const LEAN = (() => { const q = new URLSearchParams(location.search).get('firelean');
+  return q == null ? 0.30 : Math.max(0, Math.min(1.2, +q || 0)); })();
+
 export function drawFire(elapsed) {
   if (!ready || !live.length) return;
   for (const s of live) {
     const u = s.t / s.life;
     const grow = Math.min(1, s.t / GROW);
-    const fall = u < HOLD ? 1 : 1 - (u - HOLD) / (1 - HOLD);
-    const k = SIZE * s.scale * grow * Math.pow(Math.max(0, fall), 0.7);
+    // SINK, DON'T SHRINK (Jacob). The tail used to multiply the SCALE by `fall` while pinning the
+    // base to baseY, so a dying fire collapsed to a point in mid-air. Now it keeps its size and
+    // slides DOWN through the ground instead. depthTest is on for this material, so the terrain
+    // clips whatever has dropped below it and it reads as sinking rather than vanishing.
+    const fall = u < HOLD ? 0 : (u - HOLD) / (1 - HOLD);   // 0..1 across the tail
+    const sink = Math.pow(fall, 0.8);                       // ease, so the last moments linger
+    const k = SIZE * s.scale * grow;                        // full size for the whole burn
     s.fire.mesh.scale.set(k * s.jw, k * s.jh, k * s.jw);
-    // half of the 6-tall box, at THIS frame's size — the base then stays planted at every size
-    s.fire.mesh.position.y = s.baseY + 3 * k * s.jh;
+    const half = 3 * k * s.jh;                              // half of the 6-tall box at this size
+    s.fire.mesh.position.y = s.baseY + half - sink * (half * 2 + 0.5);   // fully under by the end
+    // LEAN TOWARD THE VIEWER (Jacob: "they kind of look like a donut"). The volume is a box sliced
+    // against the view direction, so a camera looking down the column's axis sees the annulus
+    // instead of the side of the flame. Tipping the top toward the camera restores a side-on read.
+    // Leaning at where the camera ACTUALLY is — rather than a fixed world tilt — stays correct as
+    // the view orbits, and costs nothing: this loop already runs per frame.
+    const dx = camera.position.x - s.fire.mesh.position.x;
+    const dz = camera.position.z - s.fire.mesh.position.z;
+    const len = Math.hypot(dx, dz);
+    if (len > 0.001) {
+      // Horizontal axis perpendicular to the camera bearing, so the tip goes toward the viewer
+      // rather than sideways.
+      _fax.set(dz / len, 0, -dx / len);
+      _fq.setFromAxisAngle(_fax, LEAN);
+      s.fire.mesh.quaternion.setFromEuler(_fe.set(0, s.yaw || 0, 0));
+      s.fire.mesh.quaternion.premultiply(_fq);              // lean in WORLD space, after the yaw
+    }
+    // updateViewVector() derives the slice direction from mesh.matrixWorld, which is otherwise only
+    // built at construction — without this refresh the slicing uses last frame's orientation and
+    // the lean simply never appears.
+    s.fire.mesh.updateMatrixWorld();
     s.fire.update(elapsed + s.phase);   // its own clock — see the note on PHASE above
   }
 }
@@ -251,7 +291,9 @@ export function fireStatus() {
   return {
     ready, live: live.length, pool: POOL,
     mats: new Set(pool.map(s => s.fire && s.fire.mesh.material.uuid)).size,   // 1 = they are all the same fire
-    looks: live.map(s => ({ phase: +s.phase.toFixed(1), yaw: +s.fire.mesh.rotation.y.toFixed(2),
+    looks: live.map(s => ({ phase: +s.phase.toFixed(1), yaw: +(s.yaw || 0).toFixed(2),
+                            x: +s.fire.mesh.position.x.toFixed(1), z: +s.fire.mesh.position.z.toFixed(1),
+                            age: +(s.t / s.life).toFixed(2), y: +s.fire.mesh.position.y.toFixed(2), baseY: +s.baseY.toFixed(2),
                             jw: +s.jw.toFixed(2), jh: +s.jh.toFixed(2) })),
   };
 }
