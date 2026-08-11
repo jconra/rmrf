@@ -5366,7 +5366,12 @@ let NAV_FRAME_BUDGET_MS = 3;
 // covered by known enemy guns (and the enemy FOB). 0 = shipped behaviour. Base ground costs 1/cell,
 // so ?dodge=3 makes a cell under a gun cost 4 and A* will walk ~3 extra cells to avoid each one.
 // Needs a sweep before any default — too high and it takes absurd detours or refuses the only lane.
-const aiDodge = Math.max(0, Math.min(20, +QS.get('dodge') || 0));
+// SHIPPED 2026-08-11 at 8 (?dodge=0 disables, ?dodge=N to try another weight). Three independent
+// 240-seed sets: resolution never negative, and FASTER on all three (-37s, -22s, -29s) with every
+// stuck column improved on every set. 12 was measured too and goes bad on the second set (inland
+// stuck +182%) — past 8 the detours cost more than the survival buys.
+const aiDodge = (() => { const q = QS.get('dodge'); const v = q == null ? 8 : +q;
+  return Math.max(0, Math.min(20, isFinite(v) ? v : 8)); })();
 // "The flag is exposed" requires a ROUTE to it, not just a revealed flag — see flagExposed().
 // PULLED BACK TO OPT-IN, 2026-08-10, hours after shipping it. On its own it looked fine (resolution
 // flat, near-water transit-stuck -55%). But the FULL configuration — breach + flagreach + msnattrib
@@ -5393,7 +5398,12 @@ const _breachDbg = { seen:0, noThreat:0, hasCap:0, both:0, fired:0 };   // why t
 // Base A* node budget multiplier for ORDINARY navigation (see planPath). 1 = shipped behaviour.
 // ?navbudget=2 / =4 for the A/B. Left at 1 until a 240 says otherwise: the last time budgets were
 // touched here (a per-frame NODE budget) it pushed unreachable-GOTO violations up 56%.
-const aiNavBudgetX = Math.max(1, Math.min(8, +QS.get('navbudget') || 1));
+// SHIPPED 2026-08-11 at 4 (?navbudget=1 restores the old budget). Truncated routes fall from 7.8%
+// to 3.2% of sampled routes with the replan cadence unchanged (0.39 -> 0.40/s against a 2/s
+// ceiling). Rejected on 2026-08-10 as "does not replicate" — that verdict was measured against a
+// baseline dominated by sealed-flag maps; re-gated after breach it is +2/0 with nav alarms -38%.
+const aiNavBudgetX = (() => { const q = QS.get('navbudget'); const v = q == null ? 4 : +q;
+  return Math.max(1, Math.min(8, isFinite(v) ? v : 4)); })();
 let _astarFrameMs = 0;            // ms spent in planPath this AI pass; reset in updateCommanders
 // A* nodes expanded during ONE AI pass. Reported by astarGrid, accumulated here, surfaced on the
 // ?perf panel — the honest measure of how much work nav is doing, where the ms figure beside it
@@ -6056,7 +6066,14 @@ let aiFlyerRoute = !QS.has('noflyerroute');    // give the Valkyrie a real GOTO 
 // is bought with 2-3x the transit-stuck (near-water +190% and +206% on the two fresh sets,
 // stuck/advance +97% and +239%) and matches 18-26s slower. More units standing around is worse to
 // WATCH, and that is what this game is for. Jacob's call if he wants the trade — ?standarrive.
-let aiStandArrive = QS.has('standarrive');
+// SHIPPED 2026-08-11 (?nostandarrive reverts). Drive ONTO the solved firing position instead of
+// stopping 14u short — the standoff solver already proved that spot is in range, on land, out of
+// crossfire and reachable, so handing back 14u threw that work away (Jacob's argument, always).
+// +3 and +3 across two seed sets, stalemates 4->1 and 3->0 (a full 240/240 on the second).
+// REJECTED TWICE BEFORE, both times on stuck columns that were measuring sealed-flag maps rather
+// than this change. It costs ~20s a match on its own; shipped alongside dodge, which more than
+// pays that back. See VERDICT_2026-08-11_overnight.txt.
+let aiStandArrive = !QS.has('nostandarrive');
 const STAND_ARRIVE = 5;                        // u — close enough to be standing on the spot the solver vetted
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
 // How many times ONE tower's firing spot may be re-solved before we stop trying and move down the
