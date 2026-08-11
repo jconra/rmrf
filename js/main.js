@@ -5353,9 +5353,17 @@ function detourMines(v, pts) {
 let NAV_HSCALE = 1.5;
 let NAV_FRAME_BUDGET_MS = 3;
 // "The flag is exposed" requires a ROUTE to it, not just a revealed flag — see flagExposed().
-// SHIPPED 2026-08-10 (?noflagreach reverts). 240 seeds: resolution flat, near-water transit-stuck
-// -55%, advance-stuck -56% — it stops units driving at flags they cannot reach.
-const aiFlagReach = !QS.has('noflagreach');
+// PULLED BACK TO OPT-IN, 2026-08-10, hours after shipping it. On its own it looked fine (resolution
+// flat, near-water transit-stuck -55%). But the FULL configuration — breach + flagreach + msnattrib
+// together, which is what actually ships — measured WORSE than its parts: resolved -1 on seeds 11+,
+// inland stuck +184%, and on fresh seeds +10s per match with nav alarms +67%. The parts were
+// 0/+1, +2/+1 and 0; together they were -1/0.
+// LIKELY MECHANISM: flagreach and msnattrib are both "stop capturing" pressures — one withholds
+// capture when the flag is unreachable, the other benches capture lanes after losses. Stacked, the
+// commander gives up on capture too readily, and capture is the ONLY way to win.
+// This one had the weakest evidence of the three (no solo fresh-seed run) so it is the one that
+// goes back behind a flag while the pair is re-measured. ?flagreach to try it.
+const aiFlagReach = QS.has('flagreach');
 // BREACH: shoot the breakable thing standing between us and an objective we cannot reach.
 // Lowest-priority target, below towers and the keep — see the breach block in the target picker.
 // SHIPPED 2026-08-10 (?nobreach reverts). 240 seeds x2: resolution 0 then +1 (never negative),
