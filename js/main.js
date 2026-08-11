@@ -907,7 +907,20 @@ let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Va
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
 let aiScrapTightArrive = true;   // salvage-detouring units close to within the pickup radius instead of halting at mission arriveDist (A/B via RR.setScrapTightArrive)
 let aiSwapBuild = QS.has('swapbuild');   // let a recall proceed when the roster is empty but the bank can BUILD the wanted chassis (A/B knob — see swapWanted)
-let aiMsnAttrib = QS.has('msnattrib');   // grade a death against the PRIMARY mission (the job) instead of strategy.step (the errand it died on) — A/B knob, see _applyKey/_primaryKey
+// SHIPPED 2026-08-10 (?nomsnattrib reverts). Grade a unit's death against the PRIMARY mission (the
+// job) instead of strategy.step (the errand it died on). Without it a runner that takes
+// capture-front, gets shot up, correctly breaks off to FLEE and dies on the way out files its loss
+// against `flee` — so capture-front is never punished and the commander feeds runner after runner
+// down the same lane. Jacob watched exactly that: 12 in reserve, then 11, then 10.
+// 240 seeds x2: resolved +2 and +1, stalemates 3->1 and 3->2. The sign holds.
+// IT COSTS SOMETHING AND THAT IS ACCEPTED: matches ~13s longer on fresh seeds, nav alarms +42%,
+// inland stuck +44%. Jacob's call — "sometimes we just have to eat the numbers and then work on
+// them", and the new alarms are the work queue, not grounds to revert.
+// (An earlier gate on 2026-08-09 rejected this for being slower. That run was on a different build
+// and leaned on stuck columns since shown to be dominated by a couple of pathological maps. No
+// verdict file was written then, which is why it had to be re-derived — see
+// VERDICT_2026-08-10_msnattrib.txt.)
+let aiMsnAttrib = !QS.has('nomsnattrib');
 let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the fleet can actually CREW each plan (A/B knob — see requiredVehicle)
 let aiFleeScore = QS.has('fleescore');   // flee becomes a SCORED candidate instead of a hard preempt (A/B knob — selection only, the terminal commitment stays)
 let aiFightMission = QS.has('fightmsn'); // a vehicle-vs-vehicle duel becomes a MISSION that starts and ends (A/B knob — see the Fight class)
@@ -5339,6 +5352,21 @@ function detourMines(v, pts) {
 // route are never deferred, so movement is never starved.
 let NAV_HSCALE = 1.5;
 let NAV_FRAME_BUDGET_MS = 3;
+// "The flag is exposed" requires a ROUTE to it, not just a revealed flag — see flagExposed().
+// SHIPPED 2026-08-10 (?noflagreach reverts). 240 seeds: resolution flat, near-water transit-stuck
+// -55%, advance-stuck -56% — it stops units driving at flags they cannot reach.
+const aiFlagReach = !QS.has('noflagreach');
+// BREACH: shoot the breakable thing standing between us and an objective we cannot reach.
+// Lowest-priority target, below towers and the keep — see the breach block in the target picker.
+// SHIPPED 2026-08-10 (?nobreach reverts). 240 seeds x2: resolution 0 then +1 (never negative),
+// near-water transit-stuck -81%, advance-stuck -69%, matches 10s faster. Proven on the case first:
+// seed 1572 goes from a 1500s stalemate to a 580s win with 2 wall segments destroyed.
+const aiBreach = !QS.has('nobreach');
+const _breachDbg = { seen:0, noThreat:0, hasCap:0, both:0, fired:0 };   // why the breach target does/doesn't fire (RR.breachDbg)
+// Base A* node budget multiplier for ORDINARY navigation (see planPath). 1 = shipped behaviour.
+// ?navbudget=2 / =4 for the A/B. Left at 1 until a 240 says otherwise: the last time budgets were
+// touched here (a per-frame NODE budget) it pushed unreachable-GOTO violations up 56%.
+const aiNavBudgetX = Math.max(1, Math.min(8, +QS.get('navbudget') || 1));
 let _astarFrameMs = 0;            // ms spent in planPath this AI pass; reset in updateCommanders
 // A* nodes expanded during ONE AI pass. Reported by astarGrid, accumulated here, surfaced on the
 // ?perf panel — the honest measure of how much work nav is doing, where the ms figure beside it
@@ -5496,7 +5524,17 @@ function planPath(v, dest, opts = {}) {
   // Capped so a genuinely-unreachable search still bails cheaply. partial:true → on failure A*
   // returns a valid route to the closest reachable cell, so the unit still makes real progress.
   const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
-  let maxNodes = Math.round(Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4))) * (opts.nodeMul || 1));
+  // ORDINARY NAVIGATION ONLY. Callers that pass their own nodeMul (the standoff solver asks for
+  // ~22500) have tuned budgets of their own and must not be scaled underneath them — the note
+  // below records what happened last time this number was touched globally.
+  // WHY THIS KNOB EXISTS: measured 2026-08-10, 5-12% of sampled routes come back budgetHit, and
+  // the comment below says searches already hit their cap HALF the time. Meanwhile the replan
+  // cadence has collapsed since this was tuned — NAV_TTL used to be 1.1s and is now 7s, and the
+  // measured rate is 0.32-0.49 replans/sec against a 2/s ceiling. A budget sized for a
+  // high-frequency regime is being paid in a low-frequency one, where the design is explicitly
+  // "one expensive search per route, then follow it".
+  const _navMul = opts.nodeMul || aiNavBudgetX;
+  let maxNodes = Math.round(Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4))) * _navMul);
   // NOTE: a per-frame NODE budget was tried here and backed out. Measured over 4 seeds, a pass
   // expands 9001 nodes at the median — searches already run to their own maxNodes cap half the
   // time — so a 12000 budget clipped only 0.7% of passes yet cost the standoff solver (which asks
@@ -5640,6 +5678,24 @@ Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → rou
 // contract convict the order and the mission re-score — a loud failure instead of a silent park.
 const NAV_PARTIAL_RETRY = 0.5;   // s between retries of a budget-truncated route
 const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
+// HOW HARD TO ASK ON A RETRY. nodeMul by retry number: the first search runs the base budget, and
+// each retry doubles it. The old ladder was `1 + retryN` — 2x, 3x, 4x — which MEASURED AS NOT
+// ENOUGH: seed 1572's lurcher at (57,125) held a 3-point budget-truncated route to a goal 39u away
+// with retryN already at 1, and asking the SAME query at nodeMul 8 returned a complete 13-point
+// route that reached it. A route existed; the search was never allowed to find it.
+// Doubling rather than incrementing because search cost grows with area, not with attempt number.
+// SAFE BY CONSTRUCTION: NAV_FRAME_BUDGET_MS still caps A* per AI pass, so a bigger search cannot
+// add replans — it spends the frame's budget sooner and the other units defer to the next frame.
+// Measured headroom before the change: 0.32-0.49 replans/sec across 4 seeds, against Jacob's 2/s
+// ceiling, and this ladder only ever runs on the retry path.
+// MEASURED AND NOT SHIPPED. 240 seeds: resolution EXACTLY flat, and the movement columns drifted
+// the wrong way (inland transit-stuck +35%). The reason is exposure — retryN reaches 2 or more on
+// about 0.1% of samples, so the ladder almost never differs from the old `1 + retryN`. The one
+// case that motivated it is real; it is simply too rare to pay for. ?navescalate to try it.
+// I shipped this default-ON before measuring it, which is exactly the habit this file's other
+// comments keep warning about. Measured, then switched off.
+const NAV_RETRY_MUL = [1, 2, 4, 8];
+const aiNavEscalate = QS.has('navescalate');
 // Default ON: this closes a SILENT deadlock (no alarm, no stuck sample, no re-score), and a silent
 // failure that the harness cannot see is the worst kind to leave switched off. ?nonavretry for the A/B.
 const aiNavRetry = !QS.has('nonavretry');
@@ -5679,7 +5735,10 @@ function navWaypoint(nav, v, dest, dt) {
       // Escalate the search on a retry: the previous attempt ran out of nodes, so repeating it with
       // the same budget would return the same truncated route. On the LAST try, clear budgetHit so
       // "we don't know" becomes "we could not get there" and the contract is allowed to speak.
-      nav.path = planPath(v, dest, nav.retryN ? { nodeMul: 1 + nav.retryN } : undefined);
+      const _mul = !nav.retryN ? 1
+        : aiNavEscalate ? NAV_RETRY_MUL[Math.min(nav.retryN, NAV_RETRY_MUL.length - 1)]
+        : 1 + nav.retryN;
+      nav.path = planPath(v, dest, _mul > 1 ? { nodeMul: _mul } : undefined);
       if (nav.path && nav.retryN > NAV_PARTIAL_TRIES) nav.path.budgetHit = false;
       nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
       nav.epoch = _navEpoch;
@@ -7079,7 +7138,25 @@ class AICommander {
   // The enemy flag is sealed inside its HQ until that building is rubble. The
   // runner can't grab it before then, so the heavy must finish the HQ first —
   // strategy cards gate the open→grab handoff on this.
-  flagExposed() { const f = this.flag(); return !!(f && f.revealed); }
+  // EXPOSED MEANS REACHABLE, not merely visible (Jacob's ruling). Killing the keep reveals the
+  // flag, but the keep can be shelled from OUTSIDE the wall ring — seed 1572 ends with the HQ at
+  // -68hp, all 30 walls intact, one shut gate, and a runner parked 30u from a flag it can never
+  // touch for the rest of the match. `revealed` said yes; the board said no, and the whole
+  // mission layer believed `revealed`.
+  // Reading reachability here is what makes the SCORER pick a siege instead of a capture it cannot
+  // finish — the fix belongs in the definition, not in a guard bolted onto Capture.
+  // Cheap: reachFrom() memoises per vehicle per cell with its own TTL, so this is a flood fill
+  // only when the unit has actually moved cells or the map changed.
+  flagExposed() {
+    const f = this.flag();
+    if (!(f && f.revealed)) return false;
+    if (!aiFlagReach) return true;
+    const v = this.unit;
+    if (!v || v.dead || !f.home) return true;   // nothing fielded → don't claim the flag is shut
+    const F = reachFrom(v);
+    const k = navIdx(Math.round(f.home.x / grid.cell), Math.round(f.home.z / grid.cell));
+    return k >= 0 && !!F[k];
+  }
   // A staging point on the FAR (back) side of the enemy flag base — past its centre,
   // away from the lane our units approach on. A Rogue runner curls around to here to slip
   // in the BACK instead of the hot front (ai_behavior Capture).
@@ -9403,6 +9480,50 @@ class AICommander {
           }
           if (hqSpot) { stand2 = hqSpot; stand2Ref = threat; }
         }
+      }
+    }
+    // BREACH THE THING IN THE WAY. Lowest priority in the whole picker — it only runs when there
+    // is nothing else worth shooting at all. Condition: the nav has ALREADY proved our objective
+    // unreachable (that is what _reachCap means — "holding at the closest ground we can stand on")
+    // and a live enemy wall or gate sits inside our own gun's reach.
+    // WHY THIS EXISTS (Jacob): "it blasts trees that get in its way, it should definitely also
+    // blast walls that get in its way." Seed 1572 ends with the enemy keep at -68hp, ALL 30 walls
+    // intact, one shut gate, the enemy eliminated, and a full-health Firebrat with 80 rounds
+    // parked 30u from the flag for 750 seconds — because no code path ever considered a wall a
+    // target. The guns were always able to kill it: every projectile already calls
+    // hitSolid.damage(), which is how a stray round chips a wall today.
+    // Deliberately NOT gated on `siege`: a runner that cannot reach the flag is exactly the unit
+    // that should be making its own door.
+    // PRIORITY, not last resort. Gating this on "no other target" made it fire ZERO times in a
+    // 900s match (measured: conditions aligned on 724 ticks, fired 0) — because a parked unit
+    // almost always still has a target assigned: the far tower it cannot reach. Being aimed at
+    // something out of range is not a reason to ignore the wall an arm's length away.
+    // So: a live enemy wall inside our OWN gun's reach outranks any target that is FARTHER than
+    // it, whenever the nav has already proved our objective unreachable. Nothing closer is ever
+    // displaced, so a gun actually shooting at us still wins.
+    if (aiBreach) { _breachDbg.seen++; if (!threat) _breachDbg.noThreat++; if (this._reachCap) _breachDbg.hasCap++; }
+    if (aiBreach && this._reachCap) {
+      _breachDbg.both++;
+      const reach = SHOT_REACH[v.type] || 42;
+      let bestW = null, bestC = null, bestD = reach * reach;
+      for (const c of camps) {
+        if (c.team === this.team) continue;
+        for (const w of c.walls) {
+          // A camp wall carries NO x/z of its own — its position lives on w.group.position. (I
+          // guarded on w.x first and silently skipped all 30 walls, which is why this block read
+          // as "measured, does nothing" until the wall record was actually inspected.)
+          const g = w.group && w.group.position;
+          if (!w.body || w.body.dead || !g) continue;
+          const dx = g.x - px, dz = g.z - pz, d2 = dx * dx + dz * dz;
+          if (d2 < bestD) { bestD = d2; bestW = g; bestC = c; }
+        }
+      }
+      // Only displace a target that is FARTHER than the wall. A gun shooting at us from closer in
+      // keeps priority; a tower 200u away that we are parked short of does not.
+      const curD2 = threat ? (threat.x - px) ** 2 + (threat.z - pz) ** 2 : Infinity;
+      if (bestW && bestD < curD2) {
+        threat = { x: bestW.x, y: map.heightAt(bestW.x, bestW.z) + 3, z: bestW.z };
+        _tgtWhy = 'breaching the wall in our way'; threatCamp = bestC; _breachDbg.fired++;
       }
     }
     // SHOOT BACK: a turret that LANDED A HIT on us in the last 4s IS the threat — not the
@@ -11996,6 +12117,7 @@ window.RR = {
   get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
   planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
   planByAll: () => ({ ..._planByAll }),                        // whole-match planPath calls by CALLER
+  breachDbg: () => ({ ..._breachDbg }),
   replanWhy: () => ({ ..._pfWhyAll }),                         // whole-match replan causes: trigger, and trigger/state
   planBy: () => ({ ..._planBy }),                              // debug: those calls attributed to their CALLER (nav vs standoff) — needs ?perf
   setVision: (v) => { AI_VISION = v; return AI_VISION; },      // base sight range (A/B the "less distraction" idea)
