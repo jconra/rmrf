@@ -9546,8 +9546,18 @@ class AICommander {
     // So: a live enemy wall inside our OWN gun's reach outranks any target that is FARTHER than
     // it, whenever the nav has already proved our objective unreachable. Nothing closer is ever
     // displaced, so a gun actually shooting at us still wins.
-    if (aiBreach) { _breachDbg.seen++; if (!threat) _breachDbg.noThreat++; if (this._reachCap) _breachDbg.hasCap++; }
-    if (aiBreach && this._reachCap) {
+    // WHAT COUNTS AS "BLOCKED IN". _reachCap alone was too narrow: it is set only when the nav
+    // proves the CURRENT ORDER's destination unreachable, and it expires after REACHCAP_TTL (25s).
+    // Seed 24372 is the proof — blue eliminated, its keep dead, 5 of 30 walls already breached, and
+    // a healthy Firebrat (hp95 ammo90) sitting 81u from a revealed-but-unreachable flag with
+    // reachCap null, so the breach stopped firing part-way through the job and the match ran out
+    // the clock.
+    // The persistent form of the same fact is the one flagreach already computes: the flag is
+    // REVEALED (we want it) and flagExposed() says we cannot get to it. That does not expire.
+    const _wantFlag = this.flag && this.flag();
+    const _flagWalled = !!(_wantFlag && _wantFlag.revealed && !this.flagExposed());
+    if (aiBreach) { _breachDbg.seen++; if (!threat) _breachDbg.noThreat++; if (this._reachCap || _flagWalled) _breachDbg.hasCap++; }
+    if (aiBreach && (this._reachCap || (_flagWalled && !QS.has('nobreachwide')))) {
       _breachDbg.both++;
       const reach = SHOT_REACH[v.type] || 42;
       let bestW = null, bestC = null, bestD = reach * reach;
@@ -12309,8 +12319,7 @@ window.RR = {
   startCommanders: (reserved) => startCommanders(reserved),
   get lock() { return lock; },
   get resupplies() { return resupplies; },
-  get scrapPiles() { return scrapPiles; },   // debug: salvage on the ground — probes ask if a hull can actually reach each one
-  get scrapPiles() { return scrapPiles; },       // live salvage piles on the field
+  get scrapPiles() { return scrapPiles; },   // live salvage on the ground — probes ask if a hull can actually reach each one, and the stalemate autopsy asks whether a dying unit had scrap it could have taken instead
   get gibCount() { return gibChunks.length; },   // debug: debris pieces currently mid-flight
   get teamScrap() { return { ...teamScrap }; },   // scrap banked per team
   get scrapBuilds() { return { ...scrapBuilds }; },   // vehicles built from salvage this match
