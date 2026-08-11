@@ -2151,6 +2151,7 @@ function noteTowerKillsNear(point, blast, team) {
     if (dx * dx + dz * dz > r * r) continue;
     if (wall.turret.dead || wall.turret.falling) {
       rec.armed = false; rec.seenT = cm._matchT;
+      markThreatDirty(cm.team);   // that lane is safe now — let the runner use it
       if (cm._siegePlan) { cm._siegePlan.spots.delete(wall); cm._siegePlan.spotReach.delete(wall); }
       aiLog(team, `${cm.cname}: That's its gun off — tower at (${Math.round(rec.x)}, ${Math.round(rec.z)}) is done.`);
     }
@@ -5285,9 +5286,18 @@ function vehCellCost(v, i, j) {
     // threads a forest when there's no reasonable way around, and never returns "no route" for
     // woods it could blast through.
     if (foliage && foliage.treeAt(i * c, j * c, VEH_R * 0.5)) return 30;
-    if (onRoad) return 0.5;
     const treeNear = forestHasN(i + 1, j) || forestHasN(i - 1, j) || forestHasN(i, j + 1) || forestHasN(i, j - 1);
-    return treeNear ? 6 : 1;   // water == clean land (1); don't PREFER water, just skirt trees
+    let cost = onRoad ? 0.5 : (treeNear ? 6 : 1);   // water == clean land (1); don't PREFER water, just skirt trees
+    // DODGE THE GUNS. The runner is the ONLY type that should refuse ground it can be shot on:
+    // every other chassis has a reason to close with a tower, and weighting them away would break
+    // sieging outright. Arriving alive is the runner's whole job.
+    // Additive and never Infinity, so a lane that ONLY goes through cover is still found — this
+    // must not be able to reintroduce a "no route" stall.
+    if (aiDodge > 0 && v.team) {
+      const idx = navIdx(i, j);
+      if (idx >= 0) cost += aiDodge * (buildThreatField(v.team)[idx] / 100);
+    }
+    return cost;
   }
   // Personality terrain preference: Rogue sneaks over OCEAN, Hunter moves under FOREST cover,
   // Warrior/default uses ROADS (only bites where the unit can traverse it — see cellBlocked).
@@ -5352,6 +5362,11 @@ function detourMines(v, pts) {
 // route are never deferred, so movement is never starved.
 let NAV_HSCALE = 1.5;
 let NAV_FRAME_BUDGET_MS = 3;
+// THREAT-WEIGHTED ROUTING for the runner: how hard to push a Firebrat's route away from ground
+// covered by known enemy guns (and the enemy FOB). 0 = shipped behaviour. Base ground costs 1/cell,
+// so ?dodge=3 makes a cell under a gun cost 4 and A* will walk ~3 extra cells to avoid each one.
+// Needs a sweep before any default — too high and it takes absurd detours or refuses the only lane.
+const aiDodge = Math.max(0, Math.min(20, +QS.get('dodge') || 0));
 // "The flag is exposed" requires a ROUTE to it, not just a revealed flag — see flagExposed().
 // PULLED BACK TO OPT-IN, 2026-08-10, hours after shipping it. On its own it looked fine (resolution
 // flat, near-water transit-stuck -55%). But the FULL configuration — breach + flagreach + msnattrib
@@ -9100,6 +9115,7 @@ class AICommander {
           const d2 = (wx - px) ** 2 + (wz - pz) ** 2;
           if (d2 >= bSight * bSight || !(flyer || hasLOS(px, pz, wx, wz))) continue;
           const t = w.turret;
+          markThreatDirty(this.team);   // a newly-discovered gun changes where the runner should walk
           this.knownTowers.set(w, { camp: c, wall: w, x: wx, z: wz, seenT: this._matchT,
             armed: !t.dead && !t.falling });   // "armed" = has a live gun; rubble/gunless is remembered but not planned against
         }
@@ -10611,6 +10627,52 @@ const navIdx = (i, j) => {
 //
 // Cached per unit for a beat: a siege solves a spot for several towers in the same breath, and the
 // hull has not moved between them.
+// ── THREAT FIELD ─────────────────────────────────────────────────────────────
+// How heavily each cell is covered by KNOWN enemy guns, per team. One byte per cell on the nav
+// grid. Jacob's design: "adding a line to my A* function that increases the weight of spots that
+// are in range of a tower" — the runner on his seed had to drive straight past the enemy FOB with
+// the back towers still able to reach it.
+//
+// A FIELD RATHER THAN A PER-CELL LOOP, deliberately. vehCellCost is the hottest function in the
+// game — the old per-cell obstacle scan was 42.5% of sampled CPU, and the lesson recorded next to
+// the static nav bitmap is "making each cell cheaper is what pays". Walking the tower list inside
+// the cost function would walk straight back into that. Stamp it once when the tower set changes;
+// the cost function then does one array read.
+//
+// FOG-HONEST BY CONSTRUCTION: built from the commander's knownTowers notebook, not the board, so a
+// gun we have never seen costs nothing until we find it.
+const threatField = new Map();          // team -> { f: Uint8Array, dirty: boolean }
+let threatBuilds = 0;                   // RR.threatStats — if this climbs per tick, it is wrong
+function markThreatDirty(team) { const e = threatField.get(team); if (e) e.dirty = true; }
+function buildThreatField(team) {
+  if (!navStatic) buildNavStatic();
+  let e = threatField.get(team);
+  if (!e) { e = { f: new Uint8Array(navStaticN * navStaticN), dirty: true }; threatField.set(team, e); }
+  if (!e.dirty) return e.f;
+  e.dirty = false; threatBuilds++;
+  e.f.fill(0);
+  const cm = commanders.find(c => c.team === team);
+  if (!cm) return e.f;
+  const c = grid.cell;
+  const stamp = (x, z, R, peak) => {
+    const rc = Math.ceil(R / c), ci = Math.round(x / c), cj = Math.round(z / c);
+    for (let di = -rc; di <= rc; di++) for (let dj = -rc; dj <= rc; dj++) {
+      const idx = navIdx(ci + di, cj + dj); if (idx < 0) continue;
+      const d = Math.hypot(di, dj) * c; if (d > R) continue;
+      // GRADUAL, not a step (the standing rule on weights): full weight under the gun easing to
+      // nothing at the edge of its reach, so grazing the fringe costs a little and crossing under
+      // the barrel costs a lot. Overlapping guns ADD — a crossfire lane should read as worse than
+      // one gun, which is exactly the ground that kills runners.
+      e.f[idx] = Math.min(255, e.f[idx] + Math.round((1 - d / R) * peak));
+    }
+  };
+  for (const k of cm.knownTowers.values()) if (k.armed) stamp(k.x, k.z, TURRET_RANGE * 1.1, 100);
+  // The enemy FOB is a threat too: it is where their units surface. Milder and smaller than a gun,
+  // but enough to bend the lane wide of the door.
+  const fob = cm.enemyFobPos && cm.enemyFobPos();
+  if (fob) stamp(fob.x, fob.z, 45, 45);
+  return e.f;
+}
 const FLOOD_TTL = 400;   // ms a reachability flood stays good for (the unit has barely moved)
 function reachFrom(v) {
   if (!navStatic) buildNavStatic();
@@ -12129,6 +12191,8 @@ window.RR = {
   get combatEvents() { return combatEvents.slice(); },         // debug: vehicle-vs-vehicle hit feed
   planCount: () => _planCount,                                 // debug: cumulative A* planPath calls (needs ?perf to increment)
   planByAll: () => ({ ..._planByAll }),                        // whole-match planPath calls by CALLER
+  threatAt: (team, x, z) => { const f = buildThreatField(team), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 ? f[k] : -1; },
+  threatStats: () => ({ builds: threatBuilds, teams: [...threatField.keys()] }),
   breachDbg: () => ({ ..._breachDbg }),
   replanWhy: () => ({ ..._pfWhyAll }),                         // whole-match replan causes: trigger, and trigger/state
   planBy: () => ({ ..._planBy }),                              // debug: those calls attributed to their CALLER (nav vs standoff) — needs ?perf
