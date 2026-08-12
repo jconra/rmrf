@@ -526,14 +526,29 @@ export function travelFraction(cmd) {
   const p = v.holder.position;
   return Math.max(0, Math.min(1, Math.hypot(p.x - home.x, p.z - home.z) / span));
 }
+// INBOUND MISSIONS RUN THE OTHER WAY. travelFraction is distance from HOME, so for an outbound job
+// (siege, capture, attack) it rises as the sortie is spent — which is what incumbency wants. Swap
+// and Flee are trips TO the pad, so the same number FALLS as they near completion, and a swap that
+// is 90% home ends up cheaper to interrupt than one that just set off. Exactly backwards, and it is
+// why a third of swaps were abandoned once the terminal guards came off: the closer a unit got to
+// solving everything at once (fresh hull = full fuel, ammo and armour), the easier it was to steal.
+// Measured under ?flat: 26 swaps lost to the home-defence recall and ~30 more to rearm/repair —
+// missions that interrupted a trip home in order to go home.
+// For these, invested fraction is 1 - travelFraction. Same weight, correct in both directions.
+const INCUMBENT_INBOUND = { swap: 1, flee: 1 };
 export function incumbentBonus(cmd) {
   const key = (cmd._msnKey || '').split('-')[0];
   if (INCUMBENT_FLAT[key]) return INCUMBENT_BASE;
   const v = cmd.unit;
   if (!v || v.dead || !v.holder) return INCUMBENT_BASE;
-  const f = travelFraction(cmd);
+  let f = travelFraction(cmd);
+  if (INCUMB_DIR && INCUMBENT_INBOUND[key]) f = 1 - f;
   return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
 }
+let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/armour (A/B knob)
+export function setSwapSupply(on) { SWAP_SUPPLY = !!on; return SWAP_SUPPLY; }
+let INCUMB_DIR = false;   // incumbency counts an inbound trip's progress correctly (A/B knob)
+export function setIncumbDir(on) { INCUMB_DIR = !!on; return INCUMB_DIR; }
 export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
@@ -1353,6 +1368,14 @@ export function missionScore(cmd, key, running = null) {
       const what = key === 'refuel' ? 'fuel' : key === 'rearm' ? 'ammo' : key === 'repair' ? 'hp' : 'shield';
       const v = cmd.unit;
       if (!v || v.dead) break;                                        // nothing in the field to top up
+      // A SWAP ALREADY SOLVES ALL OF THESE. The unit is driving to the pad, and arriving hands it a
+      // FRESH HULL — full tank, full magazine, full plating. Scoring a top-up against a swap in
+      // progress is one trip home competing with another trip to the same place, and the one that
+      // wins does strictly less. Measured under ?flat: ~30 swaps were stolen part-way by rearm,
+      // repair and refuel, all with re-score reasons like "nothing has happened for a while".
+      // This is not a guard bolted on to protect swap — it is a true statement about the board that
+      // the scorer did not know, and it belongs in the score for the same reason everything else does.
+      if (SWAP_SUPPLY && cmd.strategy && cmd.strategy.step === 'swap') break;
       if (key === 'armour' && !(v.maxShield > 0 && cmd.nearestKnownShield
           && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no armour to fetch
       if (key === 'repair' && !cmd._home) break;                      // only an own base patches a hull
