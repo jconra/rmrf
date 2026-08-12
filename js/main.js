@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT } from './AI.js?v=109';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, FOF_DEFAULT } from './AI.js?v=110';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=97';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setSwapYield, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=98';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5703,6 +5703,17 @@ setTrigFix(QS.has('trigfix'));
 // NOT SHIPPED. Every movement column improved and matches ran 7s faster, but resolution 237 -> 236
 // — and a -1 is REAL here, not noise. No reason to buy it while trigfix, its only partner, is dead.
 setScoreClock(QS.has('scoreclock'));
+// A TRIP IS NOT A BLINDFOLD. An in-progress swap stops blocking the re-score, so a unit driving
+// home to change hulls can still answer a stolen flag or a rival in front of it. Pairs with
+// ?trigfix, which keeps the trigger observations current during that trip — on their own, trigfix
+// leaves the commander looking but unable to act, and swapyield leaves it able to act on stale
+// observations, so the gate runs both halves and the pair.
+setSwapYield(QS.has('swapyield'));
+// PURSUE OFF THE LADDER. Removes both rungs that produce the pursue mode; the chase lives in the
+// Fight and Attack missions, which already do it properly and can END. Pairs with swapyield: this
+// hands the "should I chase?" decision to MissionScore, and swapyield is what lets MissionScore be
+// asked during a trip. Gated together and apart.
+setNoPursue(QS.has('nopursue'));
 setFleeScore(aiFleeScore);          // …and for Flee joining it too
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }

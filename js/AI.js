@@ -957,8 +957,10 @@ export function recActive() { return REC_ON; }
 export function setBrainConfig(k, v) { if (k in DEFAULT_BRAIN.config) DEFAULT_BRAIN.config[k] = v; return DEFAULT_BRAIN.config[k]; }
 let AI_JOUST = true;   // the Valkyrie's jousting attack runs (off → legacy hover-strafe duel; A/B knob)
 let AI_ALIGN = true;   // plain duel footwork issued as an ALIGN order instead of steering itself (A/B knob)
+let NO_PURSUE = false;   // pursue comes off the reflex ladder; Fight and Attack own the chase (A/B knob)
 export function setAlign(on) { AI_ALIGN = !!on; return AI_ALIGN; }
 export function setJoust(on) { AI_JOUST = !!on; return AI_JOUST; }
+export function setNoPursue(on) { NO_PURSUE = !!on; return NO_PURSUE; }
 export function getBrainConfig(k) { return k ? DEFAULT_BRAIN.config[k] : { ...DEFAULT_BRAIN.config }; }
 function maybeRecord(view, mem, reason, state, out) {
   if (!REC_ON) return;
@@ -1123,8 +1125,26 @@ export function runBrain(graph, view, mem) {
         || (view.underFire && mem._fof != null && mem._fof < (cfg.fofBail ?? -1.2)));
 
   // Pick the active state: first transition whose condition holds.
+  // PURSUE IS NOT A REFLEX (Jacob, 2026-08-11). Both rungs that produce it — `pursuing` (chase a
+  // sighting) and `ambushed` (turn toward whatever just hit us) — are skipped when NO_PURSUE is on,
+  // which removes the mode from this ladder entirely. Nothing is lost:
+  //   · the CHASE already exists as a mission, twice over and built better. Fight refreshes its
+  //     objective while we have eyes on so a chase keeps closing, holds a foe VEHICLE so the duel
+  //     ends on a kill, and freezes at the last known spot when eyes are lost. Attack's objective
+  //     IS the enemy's last-known position, with a staging-point fallback and a real arrive
+  //     distance. This rung was a third implementation with no way to end.
+  //   · the INFORMATION ambushed was acting on is recorded by perception regardless — incoming fire
+  //     writes mem.lastSeen, and the commander's `sees` trigger counts a contact "seen, heard, or
+  //     shot at". So being ambushed still wakes MissionScore; it just no longer steers the hull.
+  // Why it had to go rather than be guarded: a ladder rung re-decides every tick and never consults
+  // the commander, so `pursue` could sit on top of a mission that had already correctly decided
+  // something else — a swap, in the case that found this. It is the only aggressive rung with no
+  // ammo check, so a dry hull fell past every other rung and landed here permanently.
   let rule = graph.transitions[graph.transitions.length - 1];
-  for (const t of graph.transitions) { if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; } }
+  for (const t of graph.transitions) {
+    if (NO_PURSUE && t.mode === 'pursue') continue;
+    if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; }
+  }
   const mode = rule.mode;
   mem.state = mode;
   mem._when = rule.when;   // the exact transition that won (for the ai-lab decision-path view)

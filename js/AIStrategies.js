@@ -1161,6 +1161,8 @@ export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
 // same block, so time spent in a duel does not count toward "it has been a while, look again".
 let SCORE_CLOCK = false;
 export function setScoreClock(on) { SCORE_CLOCK = !!on; return SCORE_CLOCK; }
+let SWAP_YIELD = false;   // a swap still in progress no longer blocks the re-score (A/B knob)
+export function setSwapYield(on) { SWAP_YIELD = !!on; return SWAP_YIELD; }
 
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
 export function missionScore(cmd, key, running = null) {
@@ -1539,12 +1541,29 @@ class Doctrine {
     // than either end of it. Home → hand the chassis change to the commander (it owns despawn and
     // re-deploy) → run the job we were switching to when we noticed we were in the wrong vehicle.
     if (this.step === 'swap') {
-      if (!this.mission.done(cmd)) return;
-      const then = this._swapThen || 'attack';
-      this._swapThen = null;
-      cmd.completeSwap(this.mission.want, this.mission.ditched);
-      this._switch(then, cmd, 'swapped at the pad — getting on with it');
-      return;
+      if (this.mission.done(cmd)) {
+        const then = this._swapThen || 'attack';
+        this._swapThen = null;
+        cmd.completeSwap(this.mission.want, this.mission.ditched);
+        this._switch(then, cmd, 'swapped at the pad — getting on with it');
+        return;
+      }
+      // A TRIP IS NOT A BLINDFOLD (Jacob, 2026-08-11). Arriving is still terminal — the block above
+      // is unchanged — but a swap that is merely IN PROGRESS no longer returns here, so the normal
+      // decision path underneath gets to run: _urgent first (self-preservation, and our flag being
+      // taken), then the trigger-driven re-score. The old early return is why "vehicles just walk
+      // on by each other": for the whole duration of a trip the commander was not asked anything,
+      // so a Lurcher heading home for a Firebrat could not notice a rival, a stolen flag, or a
+      // rebuilt gun. It was not ignoring them — it never looked.
+      //
+      // WHAT THE GUARD WAS PROTECTING, and why this is not simply undoing it: a trip half-taken is
+      // worse than either end of it, and the same reasoning gave Fight its terminal clause after a
+      // measured disaster (transit-stuck +65%, nav alarms +40%, scuttles +91%). That thrash came
+      // from an INPUT that flickered — _fof going null every time a rival left the sight cone — not
+      // from the commander being asked too often. The fix for thrash is a steady signal, never a
+      // deaf commander: MissionScore is free to pick anything and is expected to pick sensibly.
+      // If it thrashes, that is a bug in the scoring, and it wants finding rather than muffling.
+      if (!SWAP_YIELD) return;
     }
     // A FIGHT IS A COMMITMENT TOO — and until this guard existed it was not one. Fight had no
     // terminal clause, so its done() was dead code and the duel survived only while it kept
