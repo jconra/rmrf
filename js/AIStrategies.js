@@ -1162,6 +1162,23 @@ export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
 let SCORE_CLOCK = false;
 export function setScoreClock(on) { SCORE_CLOCK = !!on; return SCORE_CLOCK; }
 let SWAP_YIELD = false;   // a swap still in progress no longer blocks the re-score (A/B knob)
+// FLATTEN THE MISSION SPACE (Jacob, 2026-08-11). Flee, swap and fight each used to switch the
+// commander OFF for their whole duration — `if (!done) return`, above the decision block — so while
+// one ran, nothing could be re-scored: not a rival in front of us, not our flag being stolen, not a
+// tower coming back up. Three special cases, each defensible alone, collectively a second decision
+// system sitting on top of MissionScore.
+//
+// THE COMMITMENT DOES NOT LIVE IN THOSE RETURNS AND NEVER DID. It lives in `incumbentBonus` — "how
+// much of the running plan is already paid for", weighted by travel — plus the dwell time, and the
+// comment at its definition already says those two "are what turn a score into a commitment". The
+// returns were a BINARY copy of a GRADUAL rule that was already there and already better. Deleting
+// them removes the duplicate, not the commitment: a mission still has to be out-scored to be
+// replaced, it just can no longer be un-replaceable.
+//
+// Completion is untouched — arriving home, finishing a swap at the pad, and winning a duel all
+// still end their mission exactly as before, and Fight keeps its one self-preservation exit.
+let FLAT_MISSIONS = false;
+export function setFlatMissions(on) { FLAT_MISSIONS = !!on; return FLAT_MISSIONS; }
 export function setSwapYield(on) { SWAP_YIELD = !!on; return SWAP_YIELD; }
 
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
@@ -1533,9 +1550,11 @@ class Doctrine {
     // gets to choose again — that is what "a decision replaces the route and is then committed to"
     // means in code, and it is the difference between this and every flapping version before it.
     if (this.step === 'flee') {
-      if (!this.mission.done(cmd)) return;
-      this._switch(this._applyKey(cmd, missionPick(cmd, null)) || 'attack', cmd, 'made it home — picking up the next job');
-      return;
+      if (this.mission.done(cmd)) {
+        this._switch(this._applyKey(cmd, missionPick(cmd, null)) || 'attack', cmd, 'made it home — picking up the next job');
+        return;
+      }
+      if (!FLAT_MISSIONS) return;
     }
     // SWAP is terminal for the same reason Flee is: it is a trip, and a trip half-taken is worse
     // than either end of it. Home → hand the chassis change to the commander (it owns despawn and
@@ -1563,7 +1582,7 @@ class Doctrine {
       // from the commander being asked too often. The fix for thrash is a steady signal, never a
       // deaf commander: MissionScore is free to pick anything and is expected to pick sensibly.
       // If it thrashes, that is a bug in the scoring, and it wants finding rather than muffling.
-      if (!SWAP_YIELD) return;
+      if (!SWAP_YIELD && !FLAT_MISSIONS) return;
     }
     // A FIGHT IS A COMMITMENT TOO — and until this guard existed it was not one. Fight had no
     // terminal clause, so its done() was dead code and the duel survived only while it kept
@@ -1580,14 +1599,17 @@ class Doctrine {
       // is lost must be able to leave it. Nothing else interrupts a duel — not a better-looking
       // plan, not a stolen flag. That is what makes it a commitment rather than an opinion.
       if (cmd.shouldFlee && cmd.shouldFlee()) { this._switch('flee', cmd, 'this fight is lost — breaking off'); return; }
-      if (!this.mission.done(cmd)) return;
-      // Over → back to the JOB. _primaryKey never moved (Fight is a support mission), so the plan
-      // returns as the INCUMBENT and keeps the travel bonus it had already earned. That is what
-      // makes winning a fight resume the job instead of handing the board to whatever was second —
-      // seed 3362's runner was re-tasked onto a siege it then died on, having just won its duel.
-      this._switch(this._applyKey(cmd, missionPick(cmd, cmd._primaryKey || null)) || 'attack', cmd,
-        'contact dealt with — back to the job');
-      return;
+      // ONE done() call — it re-acquires the foe and measures range, and this runs every tick.
+      if (this.mission.done(cmd)) {
+        // Over → back to the JOB. _primaryKey never moved (Fight is a support mission), so the plan
+        // returns as the INCUMBENT and keeps the travel bonus it had already earned. That is what
+        // makes winning a fight resume the job instead of handing the board to whatever was second —
+        // seed 3362's runner was re-tasked onto a siege it then died on, having just won its duel.
+        this._switch(this._applyKey(cmd, missionPick(cmd, cmd._primaryKey || null)) || 'attack', cmd,
+          'contact dealt with — back to the job');
+        return;
+      }
+      if (!FLAT_MISSIONS) return;
     }
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.

@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setSwapYield, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=98';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setSwapYield, setFlatMissions, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=99';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5719,6 +5719,16 @@ setScoreClock(QS.has('scoreclock'));
 // Re-gate this once those are fixed, not before — the design intent (a trip is not a blindfold)
 // stands on its own.
 setSwapYield(QS.has('swapyield'));
+// FLATTEN THE MISSION SPACE (?flat). Opens all three terminal guards at once — flee, swap and
+// fight stop switching the commander off for their duration and become ordinary missions that
+// MissionScore can replace. Commitment survives as `incumbentBonus` + dwell, which is where it
+// always actually lived; the returns were a binary copy of a gradual rule.
+// TRIGFIX RIDES WITH IT, and has to: opening the guards lets the commander DECIDE during a trip,
+// and trigfix is what keeps it OBSERVING during one. Without both, it can act only on memories
+// frozen at the moment the trip began. That is also why trigfix measured as nothing on its own —
+// it was shelved with a note saying it would matter once something raised its exposure. This is it.
+setFlatMissions(QS.has('flat'));
+if (QS.has('flat')) setTrigFix(true);
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
 // 720 seeds, base vs this: resolved 715 -> 719, stalemates 5 -> 1, unreachable-GOTO contract
