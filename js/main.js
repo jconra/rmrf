@@ -5708,12 +5708,28 @@ setScoreClock(QS.has('scoreclock'));
 // ?trigfix, which keeps the trigger observations current during that trip — on their own, trigfix
 // leaves the commander looking but unable to act, and swapyield leaves it able to act on stale
 // observations, so the gate runs both halves and the pair.
+// NOT SHIPPED (yet). It works — it fixes the stare-down seeds and it is what stops a unit driving
+// past a rival mid-trip — but ?nopursue does the same job for less: measured alone on set 0,
+// swapyield adds +19 nav alarms and +4% mission switches that nopursue alone does not, and it
+// changes no band outcome once nopursue is on (both give 9 -> 1 matches outside healthy).
+// DO NOT read that as "swapyield is bad". The likeliest source of its cost is that it wakes the
+// commander more often during trips, which means more chances to fire the futile "our base is under
+// fire" recall (a Jotun at SPEED 1 answering a 15-second alarm from 200u away) and more Jotun
+// anti-wedge jolts from a chassis-blind stillEps. Both are known bugs with tasks against them.
+// Re-gate this once those are fixed, not before — the design intent (a trip is not a blindfold)
+// stands on its own.
 setSwapYield(QS.has('swapyield'));
-// PURSUE OFF THE LADDER. Removes both rungs that produce the pursue mode; the chase lives in the
-// Fight and Attack missions, which already do it properly and can END. Pairs with swapyield: this
-// hands the "should I chase?" decision to MissionScore, and swapyield is what lets MissionScore be
-// asked during a trip. Gated together and apart.
-setNoPursue(QS.has('nopursue'));
+// PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
+// which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
+// 720 seeds, base vs this: resolved 715 -> 719, stalemates 5 -> 1, unreachable-GOTO contract
+// violations 3764 -> 1772 (-53%, and pursue was ~72% of them), idle-at-goal -16%, matches outside
+// the healthy 180-700s band 15 -> 7. Per-set resolution +2/0/+2 — positive or flat on every set,
+// no sign flip, which is the first change in this batch that can say that.
+// Measured ALONE it is also cheaper than pairing it with swapyield: nav alarms flat (61 -> 61)
+// rather than +19, mission switches DOWN 3% rather than up 4%, idle-at-goal -31% rather than -16%,
+// and it still fixes the mutual stare-down seeds (22937, 23357) on its own — because it removes the
+// latch rather than working around it.
+setNoPursue(!QS.has('ladderpursue'));
 setFleeScore(aiFleeScore);          // …and for Flee joining it too
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
