@@ -12181,14 +12181,14 @@ window.RR = {
   // was sitting on commander[1]. Deduped by identity because slot 0 and the commander can be the
   // same object.
   swapRescore: () => {
-    const out = { n: 0, held: 0, changed: 0, why: {}, to: {} };
+    const out = { n: 0, held: 0, retarget: 0, dropped: 0, why: {}, to: {} };
     const seen = new Set();
     for (const c of commanders) {
       for (const o of [c, ...(c._slots || [])]) {
         const S = o && o._swapRescore;
         if (!S || seen.has(o)) continue;
         seen.add(o);
-        out.n += S.n; out.held += S.held; out.changed += S.changed;
+        out.n += S.n; out.held += S.held; out.retarget += S.retarget || 0; out.dropped += S.dropped || 0;
         for (const k in S.why) out.why[k] = (out.why[k] || 0) + S.why[k];
         for (const k in S.to) out.to[k] = (out.to[k] || 0) + S.to[k];
       }

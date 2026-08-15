@@ -1731,16 +1731,23 @@ class Doctrine {
           const wantedJob = wasSwap ? this._swapThen : null;
           next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = `re-scored: ${trig}`; fk = 'weights';
           if (wasSwap) {
-            const S = (cmd._swapRescore || (cmd._swapRescore = { n: 0, held: 0, changed: 0, why: {}, to: {} }));
+            const S = (cmd._swapRescore || (cmd._swapRescore = { n: 0, held: 0, retarget: 0, dropped: 0, why: {}, to: {} }));
             S.n++;
-            // "Held" means the swap survived: either the same job won again, or the re-score
-            // re-derived a swap for whatever won. Both leave the unit driving home.
-            if (this.step === 'swap' && this._swapThen === wantedJob) S.held++;
-            else {
-              S.changed++;
-              S.why[trig] = (S.why[trig] || 0) + 1;                     // which trigger pulled it off
-              const dest = this.step === 'swap' ? `swap→${this._swapThen}` : this.step;
-              S.to[`${wantedJob}→${dest}`] = (S.to[`${wantedJob}→${dest}`] || 0) + 1;
+            // READ `next`, NOT this.step. The actual switch happens ~30 lines below, after the
+            // dwell gate — so testing this.step here reads the state BEFORE anything moved and
+            // scores every single re-score as "held". That is exactly what it did: 419 of 419.
+            //
+            // _applyKey returns UNDEFINED when it re-derives a swap (it sets up the trip and
+            // returns early), and a mission key when the winning job needs no new hull. So:
+            //   next == null  → still swapping. Same job = held, different job = retargeted.
+            //   next != null  → the job that asked for this trip stopped winning; the trip ends.
+            if (next == null) {
+              if (this._swapThen === wantedJob) S.held++;
+              else { S.retarget++; S.to[`${wantedJob}→swap:${this._swapThen}`] = (S.to[`${wantedJob}→swap:${this._swapThen}`] || 0) + 1; }
+            } else {
+              S.dropped++;
+              S.why[trig] = (S.why[trig] || 0) + 1;
+              S.to[`${wantedJob}→${next}`] = (S.to[`${wantedJob}→${next}`] || 0) + 1;
             }
           }
         } else { next = runningKey ? this._applyKey(cmd, runningKey) : this.step; why = 'carrying on'; fk = 'weights'; }
