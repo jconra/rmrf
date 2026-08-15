@@ -6966,8 +6966,15 @@ class AICommander {
   //         it wants is now simply believed: 212 of 237 aborted recalls were this.
   swapWanted(key) {
     const v = this.unit; if (!v || v.dead) return null;
+    // WHY DID THE ANSWER CHANGE? Every early return here can flip tick to tick, and when it flips
+    // during a trip already underway it does not defer the swap, it CANCELS it. Tagged by reason
+    // and split by in-flight, because starting and cancelling are different events sharing one
+    // function. RR.swapWhy(). Diagnostic only — no return value is altered.
+    const _inSwap = !!(this.strategy && this.strategy.step === 'swap');
+    const _why = (t) => { const W = (this._swapWhy || (this._swapWhy = {}));
+      const k = t + (_inSwap ? ' [IN-FLIGHT]' : ' [starting]'); W[k] = (W[k] || 0) + 1; return null; };
     const want = missionWants(key, this);
-    if (!want || want === v.type) return null;                     // the job is happy with what we drive
+    if (!want || want === v.type) return _why('job is happy with this hull');
     // COMPARE AGAINST WHAT WE WOULD ACTUALLY FIELD, not the raw want. `_pickAvailableType`
     // substitutes ("save the last of a type"), so asking for a Valkyrie can hand back a Lurcher —
     // and a Lurcher that drives home to become a Valkyrie rolls out as a Lurcher. The recall had
@@ -6986,19 +6993,21 @@ class AICommander {
       // Only when the bank can actually field the want — deploy() builds it — so this cannot
       // become a recall loop on a broke commander, which matters given `swap` can already absorb
       // a whole match.
-      if (!(aiSwapBuild && aiScrapBuild && (this.roster[want] || 0) === 0 && this.canAfford(want))) return null;
+      if (!(aiSwapBuild && aiScrapBuild && (this.roster[want] || 0) === 0 && this.canAfford(want))) return _why('no better hull available or buildable');
     }
     const up = v.holder.position;
     for (const o of combatants) {                                  // a rival close enough to shoot us in the back
       if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
-      if ((o.holder.position.x - up.x) ** 2 + (o.holder.position.z - up.z) ** 2 < SWAP_DEFER_R * SWAP_DEFER_R) return null;
+      if ((o.holder.position.x - up.x) ** 2 + (o.holder.position.z - up.z) ** 2 < SWAP_DEFER_R * SWAP_DEFER_R) return _why('rival within SWAP_DEFER_R');
     }
     if (key === 'intercept') {
       const ground = v.type === 'jotun' || v.type === 'lurcher';
       const home = teamCenter(this.team, 'fob');
       const near = (up.x - home.x) ** 2 + (up.z - home.z) ** 2 < INTERCEPT_SWAP_R * INTERCEPT_SWAP_R;
-      if (!(ground && near)) return null;                          // chase with what we have
+      if (!(ground && near)) return _why('intercept: chase with what we have');
     }
+    { const W = (this._swapWhy || (this._swapWhy = {}));
+      const k = 'WANTS A SWAP' + (_inSwap ? ' [IN-FLIGHT]' : ' [starting]'); W[k] = (W[k] || 0) + 1; }
     return want;
   }
   // At the pad: retire the hull we brought home so deploy() rolls out the one the job asked for.
@@ -12180,6 +12189,16 @@ window.RR = {
   // so reading only one of the two silently loses half the data — it read zero while the counter
   // was sitting on commander[1]. Deduped by identity because slot 0 and the commander can be the
   // same object.
+  // Why swapWanted answered the way it did, summed over both commanders. The [IN-FLIGHT] rows are
+  // the interesting ones: those are trips being cancelled, not deferred.
+  swapWhy: () => {
+    const out = {}; const seen = new Set();
+    for (const c of commanders) for (const o of [c, ...(c._slots || [])]) {
+      const W = o && o._swapWhy; if (!W || seen.has(o)) continue; seen.add(o);
+      for (const k in W) out[k] = (out[k] || 0) + W[k];
+    }
+    return out;
+  },
   swapRescore: () => {
     const out = { n: 0, held: 0, retarget: 0, dropped: 0, why: {}, to: {} };
     const seen = new Set();
