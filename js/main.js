@@ -1527,14 +1527,10 @@ const SWAP_DEFER_R = 52;
 // Clearing a contact off a kill: matched to _noteContact's own 15u merge radius, because that is
 // the distance at which the notebook already considers two sightings to be the same vehicle.
 const CONTACT_CLEAR_R = 15;
-let aiContactClear = !QS.has('nocontactclear');   // a destroyed vehicle stops blocking lanes (A/B: ?nocontactclear)
 let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
 let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a firing tower jumps) instead of walking a queue — RR.setTargetPrio
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
-let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
-let aiFordHalo = !QS.has('nofordhalo');   // judge WATER clearance by the hull's own footing (1u) instead of its wall-clearance radius (3u)
-let aiMineAvoid = !QS.has('nomineavoid'); // soft-steer AI ground units around mines their team has spotted
 
 // ── DEEP LOG (RR.setDeepLog / ?deeplog) ──────────────────────────────────────────
 // Raw console.log tracing for the decision points that turned out hardest to see from
@@ -2738,7 +2734,7 @@ function destroyVehicle(veh, cause, killer = null) {
   // duel at t474 and its own lane still scored `lane blocked -2` for the next 25 seconds, which
   // is a 3-point swing against the capture it had just cleared the way for. It died at t484,
   // fifteen seconds inside a block posted by a unit it had already destroyed.
-  if (aiContactClear) for (const c of commanders) {
+  for (const c of commanders) {
     if (!c._contacts || c.team === veh.team) continue;   // only the ENEMY's notebook held this contact
     const p = veh.holder.position;
     c._contacts = c._contacts.filter(k => (k.x - p.x) ** 2 + (k.z - p.z) ** 2 >= CONTACT_CLEAR_R * CONTACT_CLEAR_R);
@@ -4149,7 +4145,7 @@ function isFlyer(v) { return !!(v._move && v._move.ignoreWalls); }
 // with distance/bearing so it doesn't fight the brain's steering; head-on mines get a fixed side.
 const MINE_LOOK = MINE.R * 3.5;
 function mineAvoidNudge(v) {
-  if (!aiMineAvoid || isFlyer(v) || !minefield.items.length) return 0;
+  if (isFlyer(v) || !minefield.items.length) return 0;
   const px = v.holder.position.x, pz = v.holder.position.z, h = v.heading;
   let best = null, bestD = Infinity;
   for (const m of minefield.items) {
@@ -5371,21 +5367,10 @@ let NAV_FRAME_BUDGET_MS = 3;
 const aiDodge = (() => { const q = QS.get('dodge'); const v = q == null ? 8 : +q;
   return Math.max(0, Math.min(20, isFinite(v) ? v : 8)); })();
 // "The flag is exposed" requires a ROUTE to it, not just a revealed flag — see flagExposed().
-// PULLED BACK TO OPT-IN, 2026-08-10, hours after shipping it. On its own it looked fine (resolution
-// flat, near-water transit-stuck -55%). But the FULL configuration — breach + flagreach + msnattrib
-// together, which is what actually ships — measured WORSE than its parts: resolved -1 on seeds 11+,
-// inland stuck +184%, and on fresh seeds +10s per match with nav alarms +67%. The parts were
-// 0/+1, +2/+1 and 0; together they were -1/0.
-// LIKELY MECHANISM: flagreach and msnattrib are both "stop capturing" pressures — one withholds
-// capture when the flag is unreachable, the other benches capture lanes after losses. Stacked, the
-// commander gives up on capture too readily, and capture is the ONLY way to win.
-// KEPT ON ANYWAY — Jacob's call, 2026-08-10: "let's keep them. we will figure it out."
-// Same standing rule as msnattrib: a change that makes the AI reason correctly is worth keeping
-// while the cost gets worked on, rather than reverted for a number. ?noflagreach reverts.
-// THE THING TO FIX (do not lose this): the two pressures must stop stacking. flagreach should
-// withhold capture only when NO lane is reachable, not whenever the chosen one is not — that is
-// the all-or-nothing that combines badly with msnattrib's per-lane bench.
-const aiFlagReach = !QS.has('noflagreach');
+// Kept on despite measuring worse in combination (Jacob, 2026-08-10: "let's keep them. we will
+// figure it out"): it stacks with msnattrib into "gives up on capture too readily", which is the
+// one thing that can never be right, since capture is the ONLY way to win. Task #51 has the
+// mechanism and the fix — it is a real open item, not a note.
 // BREACH: shoot the breakable thing standing between us and an objective we cannot reach.
 // Lowest-priority target, below towers and the keep — see the breach block in the target picker.
 // SHIPPED 2026-08-10 (?nobreach reverts). 240 seeds x2: resolution 0 then +1 (never negative),
@@ -5464,7 +5449,6 @@ function walkCells(ax, az, bx, bz, cb) {
 
 const SMOOTH_LOOKAHEAD = 24;   // cells to try to reach ahead — bounds the pass at O(n·k)
 let aiSmoothPath = !QS.has('nosmooth');   // string-pull A* routes (RR.setSmooth) — A/B knob
-let smoothClear = !QS.has('nosmoothclear');  // a shortcut must keep a clear ring around it (RR.setSmoothClear)
 let smoothCut = 0, smoothKept = 0;        // waypoints removed / kept, so the pass can prove it works
 const _smooth = (v, pts) => {
   if (!aiSmoothPath) return pts;
@@ -5511,11 +5495,11 @@ function smoothPath(v, pts) {
   //
   // Note this does not change what A* may route through: a one-cell corridor stays navigable, it
   // just keeps its staircase. Only the SHORTCUT has to earn the room.
-  const hasRoom = (a, b) => smoothClear ? walkCells(a.x, a.z, b.x, b.z, (i, j) => {
+  const hasRoom = (a, b) => walkCells(a.x, a.z, b.x, b.z, (i, j) => {
     for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++)
       if ((di || dj) && cellBlocked(v, i + di, j + dj)) return false;
     return true;
-  }) : true;
+  });
   const out = [pts[0]];
   let i = 0;
   while (i < pts.length - 1) {
@@ -7212,7 +7196,6 @@ class AICommander {
   flagExposed() {
     const f = this.flag();
     if (!(f && f.revealed)) return false;
-    if (!aiFlagReach) return true;
     const v = this.unit;
     if (!v || v.dead || !f.home) return true;   // nothing fielded → don't claim the flag is shut
     const F = reachFrom(v);
@@ -10786,7 +10769,7 @@ function buildNavStatic() {
   // water, which is exactly the ground this halo opens up, and leaving the two together cost
   // alarms 46 -> 65 and scuttles 13 -> 16 for nothing.
   const FORD_CLEAR = 1.0;
-  const rSoft = VEH_R * 0.85, rHard = aiFordHalo ? FORD_CLEAR : VEH_R;
+  const rSoft = VEH_R * 0.85, rHard = FORD_CLEAR;
   for (let i = -iMax; i <= iMax; i++) for (let j = -iMax; j <= iMax; j++) {
     const x = i * c, z = j * c;
     let f = 0;
@@ -12217,7 +12200,6 @@ window.RR = {
   setReqVehicle: on => { aiReqVehicle = !!on; setReqVehicle(aiReqVehicle); return aiReqVehicle; },   // price whether the fleet can crew each plan (A/B)
   crewFor: key => commanders.map(c => ({ team: c.team, key, ...requiredVehicle(c, key) })),          // what would roll out for `key`, and what it costs — probe/ai-lab readout
   primaryKey: () => commanders.map(c => ({ team: c.team, step: c.strategy && c.strategy.step, msnKey: c._msnKey, primary: c._primaryKey })),   // attribution readout for probes/ai-lab
-  setSmoothClear: on => { smoothClear = !!on; return smoothClear; },        // require hull clearance on a shortcut (A/B)
   smoothStats: () => ({ cut: smoothCut, kept: smoothKept }),               // waypoints the smoothing pass removed vs kept
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
   getDeepLog: () => aiDeepLog,
