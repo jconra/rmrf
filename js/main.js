@@ -5194,7 +5194,7 @@ function cellBlocked(v, i, j) {
   const m = v._move;
   const gw = gateCells.get(key);
   if (gw) return m.ignoreWalls ? false : gateBlocks(gw, v.team);
-  if (aiGateBand && !m.ignoreWalls) for (const g of gates) {
+  if (!m.ignoreWalls) for (const g of gates) {
     const ax = x - g.gx, az = z - g.gz;
     if (ax * ax + az * az > 400) continue;
     if (!gateBlocks(g.w, v.team)) continue;
@@ -6028,10 +6028,6 @@ let aiReverseCap = true;    // doctrine: reverse at half throttle (RR.setReverse
 let aiPadFight = true;
 // Vehicle-aware mission failure: swap chassis when one keeps failing a mission (RR.setVehSwap for A/B).
 let aiVehSwap = true;
-let aiGateBand = !QS.has('nogateband');   // mirror the shut-gate physics slab in nav (RR.setGateBand) — stops the gate-band hug
-let aiStandHold = !QS.has('nostandhold');   // hysteretic siege sense: hold a committed stand past the enter ring (RR.setStandHold) — stops the suppress/advance strobe
-let aiDefendInPlace = !QS.has('nodefendinplace');   // defend under live fire responds in the CURRENT vehicle, no home-swap (RR.setDefendInPlace)
-let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHABLE in-range crossfire-free LOS spot (vs the old radial + _standRot). RR.setStand2
 // Drop cached routing state when a SUPPORT mission hands back to the primary — see
 // replanOnResume(). THREE forms, because the combined one was measured and REJECTED (240 seeds:
 // inland transit-stuck +276%, stuck/resupply 7 -> 88). It fired after every top-up, which is the
@@ -6045,10 +6041,6 @@ let aiStand2 = !QS.has('nostand2');   // lab-validated standoff: nearest REACHAB
 const REPLAN_MODE = QS.has('replanfight') ? 'fight'
   : QS.has('replanroute') ? 'route'
   : QS.has('replanresume') ? 'all' : '';
-let aiLandmass = !QS.has('nolandmass');   // reject destinations on ground the unit can't drive to (see buildNavComp). RR.setLandmass
-let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
-let aiStandRoute = !QS.has('nostandroute');    // route the WHOLE way to a firing position instead of handing the last 26u back to direct steer (RR.setStandRoute)
-let aiFlyerRoute = !QS.has('noflyerroute');    // give the Valkyrie a real GOTO (a straight line) instead of no order at all (RR.setFlyerRoute)
 // DRIVE ONTO THE SOLVED FIRING POSITION rather than stopping 14u short. The standoff solver has
 // already proved that spot is in range, on land, out of crossfire and reachable, so handing the
 // last 14u back to direct steer throws that work away. SHIPPED 2026-08-11; ?nostandarrive reverts.
@@ -7973,7 +7965,6 @@ class AICommander {
     // covered. Nothing on the map blocks it, so planPath hands back the straight line without
     // searching; the point of coming through here is that the result is a real GOTO somebody owns.
     const flyer = v._move.ignoreWalls;
-    if (flyer && !aiFlyerRoute) { this._navBail = 'flyer'; return; }
     if (cmd.breakAim) return this._hold(cmd, 'lining up a shot on a blocker');
     const st = cmd.state;
     // RELEASE VALVE: a sieger holding a target it is sitting OUTSIDE its own weapon range of
@@ -7981,7 +7972,7 @@ class AICommander {
     // patience helps. Nothing else in the loop ever revisits that stand, so a unit could hold
     // one for a whole match at full ammo (survey: 48 of 74 such stretches never fired a shot).
     // Give the position up and re-pick: try the next bearing, or start the geometry fresh.
-    if (aiStandRelease && st === 'suppress' && view.threat) {
+    if (st === 'suppress' && view.threat) {
       const reach = SHOT_REACH[v.type] || 42;
       const tD = Math.hypot(view.threat.x - v.holder.position.x, view.threat.z - v.holder.position.z);
       // Trading fire means it IS working — only an idle gun counts as held-out-of-reach.
@@ -8019,16 +8010,14 @@ class AICommander {
     // (richwatch: stagnant 30s+ at gd 75-185 in suppress). Path-follow with A* until close,
     // then hand the final approach + the fire ladder back to the behavior. NAV_ASTAR_STATES
     // stays without 'suppress' — the nav overlay treats the close-in fight as combat-steered.
-    // THE 26u HANDBACK IS GONE (aiStandRoute). The route used to stop 26u short and hand the last
+    // THE 26u HANDBACK IS GONE. The route used to stop 26u short and hand the last
     // leg to direct steer + dodge feelers — and that last leg is the whole point of a firing
     // position. Measured over six seeds, 7425 driving ticks fell through here with no order at
     // all, 52% of them still 14u+ out; it is the single biggest hole in the nav ledger after the
     // Valkyrie (which needs no route). It is also the same bug as the 70u split deleted from this
     // very branch: a bare distance test that swaps WHO IS DRIVING mid-journey. The fire ladder
     // never needed this — the brain keeps cmd.fire regardless of who owns the pedals.
-    else if (st === 'suppress' && view.threatStand
-             && (aiStandRoute
-                 || (view.threatStand.x - v.holder.position.x) ** 2 + (view.threatStand.z - v.holder.position.z) ** 2 > 26 * 26)) {
+    else if (st === 'suppress' && view.threatStand) {
       // ONE DESTINATION, ONE ROUTE. There used to be a 70u split here: beyond it the unit drove
       // to the MISSION OBJECTIVE, inside it to the firing spot. Two stable destinations far apart,
       // chosen by a bare distance test recomputed every tick — so a unit hovering at the boundary
@@ -9305,7 +9294,7 @@ class AICommander {
       if (_lock.spot) { stand2 = _lock.spot; stand2Ref = threat; }
       _br.locked = true;
     }
-    if (aiStand2 && !_locked) {
+    if (!_locked) {
       // THE PLAN owns the target. Not gated on the siege mission any more: `suppress` is entered
       // from ANY mission (the threatened transition — a tower is shelling us), and the old gate
       // meant every non-siege case fell through to a raw global nearest-turret scan with no
@@ -10841,7 +10830,7 @@ function landmassAt(x, z) {
 // No A* involved: it's a ring search over the baked component labels, a few array reads.
 // Returns the point unchanged when it's already drivable, or when nothing better is within maxR.
 function nearestDrivable(v, x, z, maxR = 60) {
-  if (!aiLandmass || !v || !v._move || v._move.water !== 'sink') return { x, z };
+  if (!v || !v._move || v._move.water !== 'sink') return { x, z };
   const here = landmassAt(v.holder.position.x, v.holder.position.z);
   if (!here) return { x, z };
   // A 0 here means water, off-grid, or a coastal cell the sinker footprint clips — "don't know",
@@ -10917,7 +10906,7 @@ function standableGoal(v, x, z) {
   let out = { x, z };
   if (v._blocked(x, z)) {
     const c = grid.cell, i0 = Math.round(x / c), j0 = Math.round(z / c), R = Math.ceil(GOAL_SNAP_R / c);
-    const here = aiLandmass && navComp ? landmassAt(v.holder.position.x, v.holder.position.z) : 0;
+    const here = navComp ? landmassAt(v.holder.position.x, v.holder.position.z) : 0;
     ring: for (let r = 1; r <= R; r++) {
       let best = null, bd = Infinity;
       for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
@@ -10938,7 +10927,6 @@ function standableGoal(v, x, z) {
   return out;
 }
 function drivableTo(v, x, z) {
-  if (!aiLandmass) return true;
   if (!v || !v._move || v._move.water !== 'sink') return true;
   const here = landmassAt(v.holder.position.x, v.holder.position.z);
   if (!here) return true;
@@ -12150,18 +12138,12 @@ window.RR = {
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   setAlign: on => setAlign(on),                                         // duel footwork as an ALIGN order vs steering itself (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
-  setGateBand: on => { aiGateBand = !!on; return aiGateBand; },         // nav mirrors the shut-gate physics slab (A/B the gate-band-hug fix)
-  setStandHold: on => { aiStandHold = !!on; return aiStandHold; },      // hysteretic siege sense — hold a committed stand past the enter ring (A/B the suppress/advance strobe fix)
   setSightCone: on => { sightCone = !!on; return sightCone; },          // forward vision cone on/off (stealth A/B tournament)
   getSightCone: () => sightCone,
   setConeAngles: (full, half, blind) => { if (full != null) CONE.full = full; if (half != null) CONE.half = half; if (blind != null) CONE.blind = blind; return { ...CONE }; },
   setScan: on => { aiScan = !!on; return aiScan; },                      // scan-sweep at objective transitions on/off (stealth follow-on)
   getScan: () => aiScan,
   setScanParams: p => { Object.assign(SCAN, p || {}); return { ...SCAN }; }, // { arc, max, rate, cool } — tune the sweep
-  setDefendInPlace: on => { aiDefendInPlace = !!on; return aiDefendInPlace; }, // defend-under-fire responds in the current vehicle vs home-swap (A/B)
-  getDefendInPlace: () => aiDefendInPlace,
-  setStand2: on => { aiStand2 = !!on; return aiStand2; },                  // lab-logic standoff vs old radial+_standRot (A/B)
-  setLandmass: on => { aiLandmass = !!on; return aiLandmass; },            // refuse goals on ground we can't drive to (A/B)
   // Landmass census: how many components the map actually has and how big they are. The point
   // is to know whether the "target across water" idea describes this map at all before trusting
   // a test built on it — a single-component island means it can never fire.
@@ -12173,9 +12155,6 @@ window.RR = {
     const cells = navComp.length, water = cells - [...size.values()].reduce((a, b) => a + b, 0);
     return { components: size.size, cells, water, biggest: [...size.values()].sort((a, b) => b - a).slice(0, 6) };
   },
-  setStandRelease: on => { aiStandRelease = !!on; return aiStandRelease; },// give up a firing position held outside our own weapon range (A/B)
-  setStandRoute: on => { aiStandRoute = !!on; return aiStandRoute; },      // route the whole way to a firing position (A/B)
-  setFlyerRoute: on => { aiFlyerRoute = !!on; return aiFlyerRoute; },      // route flyers as GOTO straight lines (A/B)
   setStandArrive: on => { aiStandArrive = !!on; return aiStandArrive; },   // arrive ON the firing position vs 14u short (A/B)
   setFleeScore: on => { aiFleeScore = !!on; setFleeScore(aiFleeScore); return aiFleeScore; },   // flee scored rather than preempting (A/B)
   setFightMission: on => { aiFightMission = !!on; setFightMission(aiFightMission); return aiFightMission; },   // a duel becomes a mission (A/B)
