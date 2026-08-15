@@ -287,33 +287,22 @@ class Capture extends Mission {
     // The 'front' direction stages on our own approach lane, so it latches almost instantly.
     if (cmd._capDir && cmd.unit && cmd.enemyRoute) {
       const u = cmd.unit.holder.position;
-      if (CAP_ROUTES) {
-        // Multi-waypoint route (front direct / left-right doglegs / rear water arc). Latch the whole
-        // route on the unit at first read, so a mid-run _capDir change doesn't flip this runner's
-        // path (the NEXT deploy picks the new direction). Then step waypoint→waypoint.
-        const route = cmd.unit._capRoute || (cmd.unit._capRoute = cmd.enemyRoute(cmd._capDir));
-        let idx = cmd.unit._capIdx || 0;
-        const now = cmd._matchT || 0;
-        let reached = false;
-        while (idx < route.length && Math.hypot(u.x - route[idx].x, u.z - route[idx].z) < 14) { idx++; reached = true; }   // consume reached waypoints
-        // BAIL-OUT: never grind ONE waypoint forever. If it can't be reached within CAP_WP_SKIP sec
-        // (unreachable/off-map/behind a wall), skip it — the 500s permanent-stuck becomes an 8s blip.
-        if (reached || cmd.unit._capWpT == null) cmd.unit._capWpT = now;                     // fresh waypoint → reset the clock
-        else if (idx < route.length && now - cmd.unit._capWpT > CAP_WP_SKIP) { idx++; cmd.unit._capWpT = now; }
-        cmd.unit._capIdx = idx;
-        const nearFlag = Math.hypot(u.x - flagPt.x, u.z - flagPt.z) < 22;
-        if (!nearFlag && idx < route.length) return route[idx];   // still staging → head for the next waypoint
-        return flagPt;                                            // route done (or on the doorstep) → grab it
-      }
-      // ROUTES OFF (?noroute): the pre-route single staging point — stage at the scored side, then grab.
-      const ap = cmd.enemyApproach(cmd._capDir);
-      if (!cmd.unit._dirReached) {
-        const nearAp = Math.hypot(u.x - ap.x, u.z - ap.z) < 10;
-        const nearFlag = Math.hypot(u.x - flagPt.x, u.z - flagPt.z) < 22;
-        if (nearAp || nearFlag) cmd.unit._dirReached = true;
-        else return ap;
-      }
-      return flagPt;
+      // Multi-waypoint route (front direct / left-right doglegs / rear water arc). Latch the whole
+      // route on the unit at first read, so a mid-run _capDir change doesn't flip this runner's
+      // path (the NEXT deploy picks the new direction). Then step waypoint→waypoint.
+      const route = cmd.unit._capRoute || (cmd.unit._capRoute = cmd.enemyRoute(cmd._capDir));
+      let idx = cmd.unit._capIdx || 0;
+      const now = cmd._matchT || 0;
+      let reached = false;
+      while (idx < route.length && Math.hypot(u.x - route[idx].x, u.z - route[idx].z) < 14) { idx++; reached = true; }   // consume reached waypoints
+      // BAIL-OUT: never grind ONE waypoint forever. If it can't be reached within CAP_WP_SKIP sec
+      // (unreachable/off-map/behind a wall), skip it — the 500s permanent-stuck becomes an 8s blip.
+      if (reached || cmd.unit._capWpT == null) cmd.unit._capWpT = now;                     // fresh waypoint → reset the clock
+      else if (idx < route.length && now - cmd.unit._capWpT > CAP_WP_SKIP) { idx++; cmd.unit._capWpT = now; }
+      cmd.unit._capIdx = idx;
+      const nearFlag = Math.hypot(u.x - flagPt.x, u.z - flagPt.z) < 22;
+      if (!nearFlag && idx < route.length) return route[idx];   // still staging → head for the next waypoint
+      return flagPt;                                            // route done (or on the doorstep) → grab it
     }
     // Stealth run: sneak the runner in the back — but only when the rear is undefended (_sneak).
     // If the back towers are still up (only the front fell), go straight in the front instead.
@@ -1006,8 +995,6 @@ export function setHunterHarass(v) { HUNTER_HARASS = !!v; }
 export function setRogueRearSiege(v) { ROGUE_REAR_SIEGE = !!v; }
 // CAPTURE ROUTES (A/B knob): multi-waypoint directional runner paths (doglegs + rear water arc)
 // vs the pre-route single staging point. Isolates whether the routes are the nav regression.
-let CAP_ROUTES = true;
-export function setCapRoutes(v) { CAP_ROUTES = !!v; }
 const CAP_WP_SKIP = 8;   // sec a runner may chase one route waypoint before skipping it (anti permanent-stuck)
 
 // A back-door runner only sneaks around the rear when the REAR towers are dead; if the back is
@@ -1168,8 +1155,6 @@ export function requiredVehicle(cmd, key) {
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
 // missionScore runs for all 13 candidates every decision, and the persona
 // pattern right here is the house way to pass a knob across this boundary.
-let SAVE_RUNNER = true;
-export function setSaveRunner(on) { SAVE_RUNNER = !!on; return SAVE_RUNNER; }
 let REQ_VEHICLE = false;   // A/B knob (?reqveh / RR.setReqVehicle) — score whether the fleet can crew each plan
 export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 // ONE RUNNING PLAN, ONE NAME (?msnkeyfix). _msnKey is written only by _applyKey, but three forced
@@ -1177,8 +1162,6 @@ export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 // ABANDONED. That is not only the ai-lab lighting two cards: incumbentBonus() reads _msnKey
 // UNGUARDED and pays the travel bonus to the abandoned plan, measured against that plan's
 // objective. See NOTE_2026-08-09_stale_msnkey.txt.
-let MSNKEY_FIX = false;
-export function setMsnKeyFix(on) { MSNKEY_FIX = !!on; return MSNKEY_FIX; }
 // KEEP LOOKING WHILE PREEMPTED (?trigfix). _triggers holds a LEVEL memory per edge, and it is
 // called only inside `if (!next)` — so an _urgent preempt skips it, and the terminal guards for
 // flee/swap/fight return before reaching it at all. For the whole duration of a flee, a swap or a
@@ -1477,7 +1460,7 @@ export function missionScore(cmd, key, running = null) {
   // (Jacob: "every other unit should have tried to kill the enemies and towers before the last FB
   // gets sent out"), so at four towers this is a bad bet and at zero it is exactly the moment to
   // go — the term falls to nothing on its own rather than needing a threshold.
-  if (base === 'capture' && SAVE_RUNNER) {
+  if (base === 'capture') {
     const runners = (roster.firebrat || 0) + (cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat' ? 1 : 0);
     if (runners === 1 && !cmd.canAfford('firebrat')) add('last runner', -Math.min(4, towers));
   }
@@ -1899,7 +1882,7 @@ class Doctrine {
     // but the forced transitions arrive here with a bare literal and leave _msnKey stale. Reconcile
     // at the one point every mission change funnels through: keep the directional key when it still
     // describes this step, adopt the step when it does not.
-    if (MSNKEY_FIX && (!cmd._msnKey || cmd._msnKey.split('-')[0] !== key)) cmd._msnKey = key;
+    if (!cmd._msnKey || cmd._msnKey.split('-')[0] !== key) cmd._msnKey = key;
     if (why) this._lastWhy = why;   // keep the last meaningful reason (for the ai-lab live overlay)
     // Radio-chatter order + a machine-readable decision trail: the cry() supplies the
     // characterful line, the bracket names the transition and WHY it happened, so every

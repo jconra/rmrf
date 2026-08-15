@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setCapRoutes, setSaveRunner as setSaveRunnerScore, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setMsnKeyFix, setTrigFix, setScoreClock, setSwapYield, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=100';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=101';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5650,21 +5650,17 @@ const NAV_TTL = 7;   // s — safety-net expiry (was the 1.1s "just in case" cad
 // quickly. Deliberately not longer: the call exists BECAUSE a wrong "no path" stranded a unit.
 const REACH_TTL = 2;
 // Protect the LAST firebrat: it is the only unit that can carry a flag, so don't spend it on
-// errands and don't bet it on a still-armed fort. A/B via RR.setSaveRunner / ?nosaverunner.
-let aiSaveRunner = !QS.has('nosaverunner');
+// errands and don't bet it on a still-armed fort.
 // Treat the closest reachable point as arrival when the driver proves a goal unreachable, instead
 // of re-issuing the impossible order until the unit is scuttled. A/B via RR.setReachArrive.
-let aiReachArrive = !QS.has('noreacharrive');
 const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
-setSaveRunnerScore(aiSaveRunner);   // keep the scorer's copy in step with the deploy guard
 setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
 setFightMission(aiFightMission);    // …and for the Fight mission joining the candidate list
 // MEASURED 2026-08-10, three independent 240-seed sets each. See
 // VERDICT_2026-08-10_overnight_summary.txt.
 // SHIPPED: resolution 237 -> 237 exactly, every stuck column within 7 samples, against a baseline
 // measured as deterministic. Kept for CORRECTNESS (incumbentBonus was pricing the abandoned plan),
-// and the tournament's only job was to prove it free. ?nomsnkeyfix restores the old behaviour.
-setMsnKeyFix(!QS.has('nomsnkeyfix'));
+// and the tournament's only job was to prove it free.
 // NOT SHIPPED. Looked like the best result of the night on one seed set and did not replicate:
 // resolved +2 / -1 / +1 across seeds 11+, 5011+, 9011+. The SIGN FLIPS, so there is no reliable
 // effect — the frozen level-memories are real (see setTrigFix) but do not cost enough matches to
@@ -5737,8 +5733,7 @@ const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
 // and inland transit-stuck drifted +35%. The reason is exposure: retryN reaches 2 or more on about
 // 0.1% of samples, so the two ladders almost never differ. Too rare to pay for.
 // Default ON: this closes a SILENT deadlock (no alarm, no stuck sample, no re-score), and a silent
-// failure that the harness cannot see is the worst kind to leave switched off. ?nonavretry for the A/B.
-const aiNavRetry = !QS.has('nonavretry');
+// failure that the harness cannot see is the worst kind to leave switched off.
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
@@ -5810,7 +5805,7 @@ function navWaypoint(nav, v, dest, dt) {
   // thousands of seconds with its order still reading GOTO 20u away, and not one alarm anywhere.
   // Silent, so it contributes NOTHING to any tournament number — which is why the harness could
   // never find it.
-  if (aiNavRetry && nav.path.budgetHit && nav.idx >= nav.path.length - 1) {
+  if (nav.path.budgetHit && nav.idx >= nav.path.length - 1) {
     const slack = Math.max(grid.cell * 1.2, 9);
     if ((dest.x - px) ** 2 + (dest.z - pz) ** 2 > slack * slack && !(nav.retryT > 0)) {
       nav.retryN = (nav.retryN || 0) + 1;
@@ -6043,7 +6038,7 @@ const REPLAN_MODE = QS.has('replanfight') ? 'fight'
   : QS.has('replanresume') ? 'all' : '';
 // DRIVE ONTO THE SOLVED FIRING POSITION rather than stopping 14u short. The standoff solver has
 // already proved that spot is in range, on land, out of crossfire and reachable, so handing the
-// last 14u back to direct steer throws that work away. SHIPPED 2026-08-11; ?nostandarrive reverts.
+// last 14u back to direct steer throws that work away. SHIPPED 2026-08-11.
 //
 // IT TOOK THREE GATES, and the first two were measuring the wrong thing — worth keeping because the
 // mistake is repeatable. In 2026-08-08 it read as a decisive loss (239/240 vs 240/240 resolved,
@@ -6056,7 +6051,6 @@ const REPLAN_MODE = QS.has('replanfight') ? 'fight'
 // across two sets, stalemates 4->1 and 3->0. See VERDICT_2026-08-11_overnight.txt.
 //
 // Costs ~20s a match on its own; shipped alongside dodge, which more than pays that back.
-let aiStandArrive = !QS.has('nostandarrive');
 const STAND_ARRIVE = 5;                        // u — close enough to be standing on the spot the solver vetted
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
 // How many times ONE tower's firing spot may be re-solved before we stop trying and move down the
@@ -6077,7 +6071,6 @@ const VEH_FAIL_SWAP = 2;
 const SCUTTLE_ALARM_N = 4;      // units lost in a row on one mission before we shout about it
 const ASTAR_FRAME_ALARM = 12;   // A* searches in ONE frame that mean something is looping, not working
 let _astarAlarmed = false;      // fire once per match — an alarm that repeats every frame IS the storm
-setCapRoutes(!QS.has('noroute'));     // multi-waypoint capture routes on unless ?noroute (isolation gate)
 const STAND = { band: 0.65 };   // stand-off band: min fraction of range to hold out at (0.55 close/fast … 0.85 far/safe). RR.setStandBand
 
 // ── THE DRIVER (js/Driver.js) ────────────────────────────────────────────────
@@ -7610,7 +7603,7 @@ class AICommander {
     // its last flag carrier out sightseeing.
     // A capture has no substitute and must still go. Everything else does have one, so when the
     // runner pool is down to its last and the mission is not a capture, field something else.
-    if (aiSaveRunner && rawWant === 'firebrat' && this.strategy.step !== 'capture'
+    if (rawWant === 'firebrat' && this.strategy.step !== 'capture'
         && (this.roster.firebrat || 0) <= 1) {
       const sub = ['lurcher', 'valkyrie', 'jotun'].find(t => (this.roster[t] || 0) > 0);
       if (sub) {
@@ -8044,7 +8037,7 @@ class AICommander {
       // the driver already clamps its final leg to 2u regardless of what the order asks for, so
       // the hull eases in the same way it always did. All this number decides is how close the
       // unit gets before navigation hands the pedals back to the firing footwork.
-      dest = view.threatStand; slack = aiStandArrive ? STAND_ARRIVE : 14;
+      dest = view.threatStand; slack = STAND_ARRIVE;
       this._destIsStand = true;
       dlog(`suppressStand:${this.team}`, { unit: v.type, distU: +Math.sqrt(d2s).toFixed(0) },
         `${this.cname} ${v.type}: routing to its firing position, ${Math.round(Math.sqrt(d2s))}u out.`);
@@ -8130,7 +8123,7 @@ class AICommander {
     // tied to _navEpoch, so a wall coming down or a gate opening clears it and the real goal is
     // tried again; it also ages out on its own.
     const rcap = this._reachCap;
-    if (rcap && aiReachArrive && rcap.by === st && rcap.epoch === _navEpoch
+    if (rcap && rcap.by === st && rcap.epoch === _navEpoch
         && this._matchT - rcap.t < REACHCAP_TTL) { dest = { x: rcap.x, z: rcap.z }; }
     else if (rcap && (rcap.epoch !== _navEpoch || this._matchT - rcap.t >= REACHCAP_TTL)) this._reachCap = null;
     const isStand = this._destIsStand; this._destIsStand = false;
@@ -8171,7 +8164,7 @@ class AICommander {
       // the way a firing position does — so the answer is neither "write it off" nor "re-solve".
       // The unit is already standing at the closest reachable point to it; treat THAT as arrival
       // so the mission proceeds from there, instead of failing to reach something forever.
-      else if (aiReachArrive && !isStand && st !== 'pursue') {
+      else if (!isStand && st !== 'pursue') {
         const p = this._nav && this._nav.path;
         const end = p && p.length ? p[p.length - 1] : null;
         if (end) {
@@ -12096,9 +12089,6 @@ window.RR = {
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
-  saveRunner: () => aiSaveRunner,
-  setReachArrive: (v) => { aiReachArrive = !!v; return aiReachArrive; },   // A/B: cap an unreachable goal at the closest reachable point
-  setSaveRunner: (v) => { aiSaveRunner = !!v; setSaveRunnerScore(aiSaveRunner); return aiSaveRunner; },   // A/B: protect the last flag carrier (both halves)
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   navNodes: () => _astarFrameNodes,
   resetNavNodes: () => { _astarFrameNodes = 0; },   // benchmark hook: start a fresh 'frame'
@@ -12155,7 +12145,6 @@ window.RR = {
     const cells = navComp.length, water = cells - [...size.values()].reduce((a, b) => a + b, 0);
     return { components: size.size, cells, water, biggest: [...size.values()].sort((a, b) => b - a).slice(0, 6) };
   },
-  setStandArrive: on => { aiStandArrive = !!on; return aiStandArrive; },   // arrive ON the firing position vs 14u short (A/B)
   setFleeScore: on => { aiFleeScore = !!on; setFleeScore(aiFleeScore); return aiFleeScore; },   // flee scored rather than preempting (A/B)
   setFightMission: on => { aiFightMission = !!on; setFightMission(aiFightMission); return aiFightMission; },   // a duel becomes a mission (A/B)
   setReqVehicle: on => { aiReqVehicle = !!on; setReqVehicle(aiReqVehicle); return aiReqVehicle; },   // price whether the fleet can crew each plan (A/B)
@@ -12164,7 +12153,6 @@ window.RR = {
   smoothStats: () => ({ cut: smoothCut, kept: smoothKept }),               // waypoints the smoothing pass removed vs kept
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points
   getDeepLog: () => aiDeepLog,
-  setCapRoutes: on => { setCapRoutes(!!on); return !!on; },                // multi-waypoint capture routes vs single staging (A/B)
   setStandBand: b => { STAND.band = Math.max(0, Math.min(0.98, +b || 0.6)); return STAND.band; },   // how far out to stand (0.55 close/fast … 0.85 far/safe)
   getStandBand: () => STAND.band,
   navCellBlocked: (v, i, j) => cellBlocked(v, i, j),          // debug: nav passability of a cell
