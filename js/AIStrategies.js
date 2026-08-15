@@ -1174,6 +1174,10 @@ export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
 let SCORE_CLOCK = false;
 export function setScoreClock(on) { SCORE_CLOCK = !!on; return SCORE_CLOCK; }
 let SWAP_YIELD = false;   // a swap still in progress no longer blocks the re-score (A/B knob)
+// A trip in progress is not re-validated against an errand (?noswapcommit reverts). Default ON:
+// it wires up missionGarageOK, which the file already defined for this exact purpose.
+let SWAP_COMMIT = true;
+export function setSwapCommit(on) { SWAP_COMMIT = !!on; return SWAP_COMMIT; }
 // FLATTEN THE MISSION SPACE (Jacob, 2026-08-11). Flee, swap and fight each used to switch the
 // commander OFF for their whole duration — `if (!done) return`, above the decision block — so while
 // one ran, nothing could be re-scored: not a rival in front of us, not our flag being stolen, not a
@@ -1886,6 +1890,29 @@ class Doctrine {
     // with your back turned is how a slow hull dies. Deferring here is safe in a way the recall's
     // version was not — we just carry on with the current mission and get asked again, instead of
     // arming something that then has to abort.
+    // AN ERRAND CANNOT CANCEL A TRIP (2026-08-15). A swap is ordered for a JOB — capture wants a
+    // Firebrat, so the Lurcher drives home. But this re-asks swapWanted about whatever mission is
+    // current at that instant, and mid-trip that is usually an errand: measured over 240 seeds,
+    // ~74% of in-flight cancellations came in under `rearm`, `flee`, `refuel` or `repair`.
+    //
+    // Those missions cannot answer the question. Fight and Flee return `cmd.unit.type` on purpose
+    // ("fight with what we brought"), so asking them whether we need a different hull gets "no" BY
+    // DEFINITION; the supply missions have no opinion at all and fall through to the persona's role
+    // table. Either way the answer has nothing to do with the trip in progress, and the trip dies.
+    //
+    // missionGarageOK is exactly this predicate and was already in the file — exported, documented
+    // ("letting one reach the garage would deploy the wrong vehicle"), and called by nothing. This
+    // is the caller it was written for.
+    // ...and NEITHER CAN THE SAME JOB ASKING TWICE. If the winning mission is still the one that
+    // ordered the trip, the requirement was already decided — re-deriving it just gives the board a
+    // second chance to change its mind about a settled question. That is `capture→capture` 239 in
+    // the drop table: the job never wavered, only the answer to "do you need a hull" did.
+    // A genuinely DIFFERENT garage-relevant job still re-derives, which is a real retarget.
+    // _swapThen is deliberately NOT required here. A handful of trips run without a recorded job
+    // (measured: 4 in ~1470 guard hits on seed 11), and requiring it let an errand cancel exactly
+    // those. Not knowing which job ordered a trip is no reason to let a top-up end it.
+    if (SWAP_COMMIT && this.step === 'swap'
+        && (key === this._swapThen || !missionGarageOK(key))) return;
     if (key !== 'swap' && cmd.unit && !cmd.unit.dead) {
       const want = cmd.swapWanted(key);
       if (want) {

@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=101';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=101';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -906,7 +906,6 @@ const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvag
 let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
 let aiScrapTightArrive = true;   // salvage-detouring units close to within the pickup radius instead of halting at mission arriveDist (A/B via RR.setScrapTightArrive)
-let aiSwapBuild = QS.has('swapbuild');   // let a recall proceed when the roster is empty but the bank can BUILD the wanted chassis (A/B knob — see swapWanted)
 // SHIPPED 2026-08-10. Grade a unit's death against the PRIMARY mission (the
 // job) instead of strategy.step (the errand it died on). Without it a runner that takes
 // capture-front, gets shot up, correctly breaks off to FLEE and dies on the way out files its loss
@@ -5700,7 +5699,8 @@ if (QS.has('flat')) setTrigFix(true);
 // terminal guards are OPEN (?flat) — a swap that cannot be interrupted cannot be stolen — so they
 // are gated with flat as the BASE, not against today's default.
 setIncumbDir(QS.has('incumbdir'));    // an inbound trip is best defended when it is nearly done
-setSwapSupply(QS.has('swapsupply'));  // a running swap suppresses the top-ups it is about to satisfy
+setSwapSupply(QS.has('swapsupply'));
+setSwapCommit(!QS.has('noswapcommit'));   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
 // 720 seeds, base vs this: resolved 715 -> 719, stalemates 5 -> 1, unreachable-GOTO contract
@@ -6974,13 +6974,25 @@ class AICommander {
     const _why = (t) => { const W = (this._swapWhy || (this._swapWhy = {}));
       const k = t + (_inSwap ? ' [IN-FLIGHT]' : ' [starting]'); W[k] = (W[k] || 0) + 1; return null; };
     const want = missionWants(key, this);
-    if (!want || want === v.type) return _why('job is happy with this hull');
+    // SPLIT THE TWO WAYS A JOB STOPS WANTING A NEW HULL, and record what it wanted when the trip
+    // was ORDERED. missionWants reads the board and the persona, not just the mission name, so the
+    // ideal can move under a unit that is already driving home for it — and "wants nothing" and
+    // "now wants exactly what we drive" are different faults with different fixes.
+    if (!want) return _why('missionWants returned nothing for ' + key);
+    if (want === v.type) {
+      if (_inSwap) { const W = (this._swapIdealMoved || (this._swapIdealMoved = {}));
+        const k = `${key}: ordered a ${this._swapOrderedWant || '?'}, now happy with the ${v.type}`;
+        W[k] = (W[k] || 0) + 1; }
+      return _why('ideal is now the hull we already drive');
+    }
+    if (!_inSwap) this._swapOrderedWant = want;   // remember what the trip was ordered FOR
     // COMPARE AGAINST WHAT WE WOULD ACTUALLY FIELD, not the raw want. `_pickAvailableType`
     // substitutes ("save the last of a type"), so asking for a Valkyrie can hand back a Lurcher —
     // and a Lurcher that drives home to become a Valkyrie rolls out as a Lurcher. The recall had
     // learned this and said so in a comment; I deleted the logic with it and put the bug straight
     // back: swap loops went 282 -> 731 across 240 seeds.
     const got = this._pickAvailableType(want);
+    let needBuy = false;
     if (!got || got === v.type) {
       // ...UNLESS WE COULD BUILD THE REAL WANT. _pickAvailableType only reads the roster, so when
       // the roster is out of the type the job needs it substitutes back to what we already drive
@@ -6993,7 +7005,8 @@ class AICommander {
       // Only when the bank can actually field the want — deploy() builds it — so this cannot
       // become a recall loop on a broke commander, which matters given `swap` can already absorb
       // a whole match.
-      if (!(aiSwapBuild && aiScrapBuild && (this.roster[want] || 0) === 0 && this.canAfford(want))) return _why('no better hull available or buildable');
+      if (!(aiScrapBuild && (this.roster[want] || 0) === 0 && this.canAfford(want))) return _why('no better hull available or buildable');
+      needBuy = true;   // affordable but not parked — bought below, once the trip is actually ordered
     }
     const up = v.holder.position;
     for (const o of combatants) {                                  // a rival close enough to shoot us in the back
@@ -7006,6 +7019,25 @@ class AICommander {
       const near = (up.x - home.x) ** 2 + (up.z - home.z) ** 2 < INTERCEPT_SWAP_R * INTERCEPT_SWAP_R;
       if (!(ground && near)) return _why('intercept: chase with what we have');
     }
+    // BUY IT NOW, NOT ON ARRIVAL (Jacob, 2026-08-15): "enable the ability to spend scrap on a
+    // vehicle that we need when we determine that we need it. Then swap can run and it knows that
+    // the vehicle that it needs will be there when it arrives."
+    //
+    // This is the LAST thing the function does on purpose. Every refusal above returns before it,
+    // so we never buy a hull for a trip that is then declined — buying at the roster check would
+    // have spent scrap and then bailed on the rival test two lines later.
+    //
+    // It also retires the affordability re-check that VERDICT_2026-08-09_swapbuild.txt suspected
+    // for its +26 swap loops: canAfford was tested when the recall was DECIDED and never again when
+    // the unit got home, so a bank spent during the drive rolled out the old chassis. Spending at
+    // the decision means there is nothing left to re-check — the money is already gone.
+    //
+    // EARMARKED, not just built. The roster lives on the COMMANDER and is shared by every slot, so
+    // a hull bought for one trip is otherwise free for another slot's deploy() to take, and the
+    // unit arrives to nothing — the same failure, moved. Held against _slotI and released when the
+    // trip ends either way (see the release in update()).
+    if (needBuy && !this.buildUnit(want)) return _why('could not build the hull we need');
+    if (needBuy) (this._swapHold || (this._swapHold = {}))[this._slotI] = want;
     { const W = (this._swapWhy || (this._swapWhy = {}));
       const k = 'WANTS A SWAP' + (_inSwap ? ' [IN-FLIGHT]' : ' [starting]'); W[k] = (W[k] || 0) + 1; }
     return want;
@@ -7521,7 +7553,14 @@ class AICommander {
     return alt;
   }
   _pickAvailableType(want) {
-    const have = t => this.roster[t] || 0;
+    // A hull bought for another slot's swap is spoken for. Without this the roster is a common
+    // pool and the trip that paid for the vehicle can lose it to whoever deploys first.
+    const have = t => {
+      let n = this.roster[t] || 0;
+      const H = this._swapHold;
+      if (H) for (const k in H) if (+k !== this._slotI && H[k] === t) n--;
+      return Math.max(0, n);
+    };
     // Substitute by ROLE, not raw speed. The Valkyrie is a base-ATTACKER (like the
     // heavies); the Firebrat is the fragile flag RUNNER. The old by-speed grouping fell a
     // dead-Valkyrie siege role back to a Firebrat (both "fast") and shoved a paper-thin
@@ -8390,6 +8429,11 @@ class AICommander {
         }
       } else { return; }
     }
+    // The earmark lives exactly as long as the trip. Released here rather than in completeSwap so
+    // that an ABANDONED swap frees its hull too — otherwise a cancelled trip locks a vehicle out of
+    // the fleet for the rest of the match.
+    if (this._swapHold && this._swapHold[this._slotI] != null
+        && !(this.strategy && this.strategy.step === 'swap')) delete this._swapHold[this._slotI];
     this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
     const v = this.unit;
     if (!v) return;
@@ -12191,6 +12235,16 @@ window.RR = {
   // same object.
   // Why swapWanted answered the way it did, summed over both commanders. The [IN-FLIGHT] rows are
   // the interesting ones: those are trips being cancelled, not deferred.
+  // The ideal chassis moving out from under a trip already underway: what it was ordered for vs
+  // what the job decided it wanted instead. This is the majority of in-flight refusals.
+  swapIdealMoved: () => {
+    const out = {}; const seen = new Set();
+    for (const c of commanders) for (const o of [c, ...(c._slots || [])]) {
+      const W = o && o._swapIdealMoved; if (!W || seen.has(o)) continue; seen.add(o);
+      for (const k in W) out[k] = (out[k] || 0) + W[k];
+    }
+    return out;
+  },
   swapWhy: () => {
     const out = {}; const seen = new Set();
     for (const c of commanders) for (const o of [c, ...(c._slots || [])]) {
