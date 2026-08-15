@@ -1535,7 +1535,6 @@ let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a 
 let aiFobRearm = !QS.has('nofobrearm');    // re-arm the deterministic gate-exit for a grounder tangled at its own FOB
 let aiFordHalo = !QS.has('nofordhalo');   // judge WATER clearance by the hull's own footing (1u) instead of its wall-clearance radius (3u)
 let aiMineAvoid = !QS.has('nomineavoid'); // soft-steer AI ground units around mines their team has spotted
-let aiSoftFord = QS.has('softford');       // revert A* ford check to the old loose 4-dir/0.85 margin
 
 // ── DEEP LOG (RR.setDeepLog / ?deeplog) ──────────────────────────────────────────
 // Raw console.log tracing for the decision points that turned out hardest to see from
@@ -5220,9 +5219,8 @@ function cellBlocked(v, i, j) {
     const e = navAvoid.get(key);
     if (e !== undefined) { if (e > performance.now()) return true; navAvoid.delete(key); }
   }
-  // Nine isDeepWater calls became one bit test. Both ford settings are baked because neither
-  // implies the other, so the knob still works without touching the terrain at run time.
-  if (m.water === 'sink' && (f & (aiSoftFord ? NAVF.SINKSOFT : NAVF.SINKHARD))) return true;
+  // Nine isDeepWater calls became one bit test, baked once with the terrain.
+  if (m.water === 'sink' && (f & NAVF.SINKHARD)) return true;
   if (!m.ignoreWalls) {
     const near = obsBuckets.get(key);                   // only obstacles that can reach this cell
     if (near) {
@@ -5757,24 +5755,14 @@ Destructible.onBlocksChanged = bumpNavEpoch;   // structure died/rebuilt → rou
 // contract convict the order and the mission re-score — a loud failure instead of a silent park.
 const NAV_PARTIAL_RETRY = 0.5;   // s between retries of a budget-truncated route
 const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
-// HOW HARD TO ASK ON A RETRY. nodeMul by retry number: the first search runs the base budget, and
-// each retry doubles it. The old ladder was `1 + retryN` — 2x, 3x, 4x — which MEASURED AS NOT
-// ENOUGH: seed 1572's lurcher at (57,125) held a 3-point budget-truncated route to a goal 39u away
-// with retryN already at 1, and asking the SAME query at nodeMul 8 returned a complete 13-point
-// route that reached it. A route existed; the search was never allowed to find it.
-// Doubling rather than incrementing because search cost grows with area, not with attempt number.
-// SAFE BY CONSTRUCTION: NAV_FRAME_BUDGET_MS still caps A* per AI pass, so a bigger search cannot
-// add replans — it spends the frame's budget sooner and the other units defer to the next frame.
-// Measured headroom before the change: 0.32-0.49 replans/sec across 4 seeds, against Jacob's 2/s
-// ceiling, and this ladder only ever runs on the retry path.
-// MEASURED AND NOT SHIPPED. 240 seeds: resolution EXACTLY flat, and the movement columns drifted
-// the wrong way (inland transit-stuck +35%). The reason is exposure — retryN reaches 2 or more on
-// about 0.1% of samples, so the ladder almost never differs from the old `1 + retryN`. The one
-// case that motivated it is real; it is simply too rare to pay for. ?navescalate to try it.
-// I shipped this default-ON before measuring it, which is exactly the habit this file's other
-// comments keep warning about. Measured, then switched off.
-const NAV_RETRY_MUL = [1, 2, 4, 8];
-const aiNavEscalate = QS.has('navescalate');
+// HOW HARD TO ASK ON A RETRY: nodeMul grows as `1 + retryN` — 2x, 3x, 4x — so a search cut short by
+// its node budget gets a bigger allowance each time rather than repeating an identical query.
+//
+// A DOUBLING ladder ([1,2,4,8]) was tried here and REMOVED after measuring. The case for it was
+// real — seed 1572's lurcher held a 3-point truncated route to a goal 39u away, and the same query
+// at nodeMul 8 returned a complete 13-point route — but over 240 seeds resolution was exactly flat
+// and inland transit-stuck drifted +35%. The reason is exposure: retryN reaches 2 or more on about
+// 0.1% of samples, so the two ladders almost never differ. Too rare to pay for.
 // Default ON: this closes a SILENT deadlock (no alarm, no stuck sample, no re-score), and a silent
 // failure that the harness cannot see is the worst kind to leave switched off. ?nonavretry for the A/B.
 const aiNavRetry = !QS.has('nonavretry');
@@ -5814,9 +5802,7 @@ function navWaypoint(nav, v, dest, dt) {
       // Escalate the search on a retry: the previous attempt ran out of nodes, so repeating it with
       // the same budget would return the same truncated route. On the LAST try, clear budgetHit so
       // "we don't know" becomes "we could not get there" and the contract is allowed to speak.
-      const _mul = !nav.retryN ? 1
-        : aiNavEscalate ? NAV_RETRY_MUL[Math.min(nav.retryN, NAV_RETRY_MUL.length - 1)]
-        : 1 + nav.retryN;
+      const _mul = !nav.retryN ? 1 : 1 + nav.retryN;
       nav.path = planPath(v, dest, _mul > 1 ? { nodeMul: _mul } : undefined);
       if (nav.path && nav.retryN > NAV_PARTIAL_TRIES) nav.path.budgetHit = false;
       nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
@@ -6090,31 +6076,21 @@ let aiLandmass = !QS.has('nolandmass');   // reject destinations on ground the u
 let aiStandRelease = !QS.has('nostandrelease'); // give up a firing position we're sitting outside our own weapon range of (RR.setStandRelease)
 let aiStandRoute = !QS.has('nostandroute');    // route the WHOLE way to a firing position instead of handing the last 26u back to direct steer (RR.setStandRoute)
 let aiFlyerRoute = !QS.has('noflyerroute');    // give the Valkyrie a real GOTO (a straight line) instead of no order at all (RR.setFlyerRoute)
-// DRIVE ONTO THE SOLVED FIRING POSITION rather than stopping 14u short. The reasoning was sound —
-// the standoff solver vets the spot (in range, not too close, on land, out of crossfire, path
-// checked), so throwing that away 14u out wastes it — but the 240-seed gate says no, decisively:
-//   with it:     239/240 resolved, 1 stalemate, transit-stuck in suppress 254
-//   without it:  240/240 resolved, 0 stalemates, transit-stuck in suppress 4
-// Everything else in the batch held constant. So the spot is fine and the APPROACH to it is not:
-// the last 14u into a firing position is tight, contested ground, and hulls grind there. That is a
-// real finding the change earned — it is left in, defaulted OFF, and `?standarrive` turns it back
-// on for whoever fixes the approach. Not deleted: the argument for it is still right.
-// RE-MEASURED 2026-08-10, three independent 240-seed sets, and the picture INVERTED from the
-// 2026-08-08 verdict that turned it off. Resolution is now consistently BETTER — +2 / +1 / +1,
-// sign never flips, 711 -> 715 over 720 matches — and suppress-stuck IMPROVED (36 -> 32) where it
-// used to be the whole regression (254 vs 4). The nav retry and the parked-unit fix both landed in
-// between and both act on exactly the ground that was blamed.
-// STILL OFF, deliberately, and this is a judgement call rather than a number: the resolution gain
-// is bought with 2-3x the transit-stuck (near-water +190% and +206% on the two fresh sets,
-// stuck/advance +97% and +239%) and matches 18-26s slower. More units standing around is worse to
-// WATCH, and that is what this game is for. Jacob's call if he wants the trade — ?standarrive.
-// SHIPPED 2026-08-11 (?nostandarrive reverts). Drive ONTO the solved firing position instead of
-// stopping 14u short — the standoff solver already proved that spot is in range, on land, out of
-// crossfire and reachable, so handing back 14u threw that work away (Jacob's argument, always).
-// +3 and +3 across two seed sets, stalemates 4->1 and 3->0 (a full 240/240 on the second).
-// REJECTED TWICE BEFORE, both times on stuck columns that were measuring sealed-flag maps rather
-// than this change. It costs ~20s a match on its own; shipped alongside dodge, which more than
-// pays that back. See VERDICT_2026-08-11_overnight.txt.
+// DRIVE ONTO THE SOLVED FIRING POSITION rather than stopping 14u short. The standoff solver has
+// already proved that spot is in range, on land, out of crossfire and reachable, so handing the
+// last 14u back to direct steer throws that work away. SHIPPED 2026-08-11; ?nostandarrive reverts.
+//
+// IT TOOK THREE GATES, and the first two were measuring the wrong thing — worth keeping because the
+// mistake is repeatable. In 2026-08-08 it read as a decisive loss (239/240 vs 240/240 resolved,
+// suppress-stuck 254 vs 4) and was turned off; a 2026-08-10 re-run across three 240-seed sets came
+// out consistently BETTER on resolution (+2/+1/+1, sign never flipping) with suppress-stuck now
+// IMPROVING, because the nav retry and the parked-unit fix had landed in between and both act on
+// exactly the ground that had been blamed. It was still held off once more over transit-stuck, on
+// the judgement that units standing around is worse to WATCH. That last hesitation was wrong: the
+// stuck columns were dominated by sealed-flag maps rather than by this change. Final gate +3 and +3
+// across two sets, stalemates 4->1 and 3->0. See VERDICT_2026-08-11_overnight.txt.
+//
+// Costs ~20s a match on its own; shipped alongside dodge, which more than pays that back.
 let aiStandArrive = !QS.has('nostandarrive');
 const STAND_ARRIVE = 5;                        // u — close enough to be standing on the spot the solver vetted
 const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting, before we re-pick
@@ -10818,10 +10794,11 @@ function buildNavStatic() {
     else if (islandBound && x * x + z * z > islandBound * islandBound) f |= NAVF.OOB;
     if (roadNet.cells && roadNet.cells.has(i + ',' + j)) f |= NAVF.ROAD;
     if (gateSideCells.has(i + ',' + j)) f |= NAVF.FLANK;
-    // The sinker footprint, baked for BOTH ford settings. Neither implies the other — the soft
-    // test uses a smaller radius and skips the diagonals — so they get a bit each and the live
-    // path just picks one. aiSoftFord defaults OFF, so HARD is the hot one: nine isDeepWater
-    // calls per cell, on every cell of every search, for terrain that never changes.
+    // The sinker footprint, baked in TWO radii because two callers need different ones. HARD (the
+    // hull's full clearance, diagonals included) is what blocks a cell for pathing — nine
+    // isDeepWater calls per cell, hoisted out of every search onto terrain that never changes.
+    // SOFT (a smaller radius, no diagonals) blocks fewer cells and exists for buildNavComp, which
+    // wants the most generous possible read of what counts as one landmass.
     if (!map.isLand(x, z)) {
       const deep = map.isDeepWater.bind(map);
       if (deep(x, z)) { f |= NAVF.SINKSOFT | NAVF.SINKHARD; }
