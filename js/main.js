@@ -907,7 +907,7 @@ let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Va
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
 let aiScrapTightArrive = true;   // salvage-detouring units close to within the pickup radius instead of halting at mission arriveDist (A/B via RR.setScrapTightArrive)
 let aiSwapBuild = QS.has('swapbuild');   // let a recall proceed when the roster is empty but the bank can BUILD the wanted chassis (A/B knob — see swapWanted)
-// SHIPPED 2026-08-10 (?nomsnattrib reverts). Grade a unit's death against the PRIMARY mission (the
+// SHIPPED 2026-08-10. Grade a unit's death against the PRIMARY mission (the
 // job) instead of strategy.step (the errand it died on). Without it a runner that takes
 // capture-front, gets shot up, correctly breaks off to FLEE and dies on the way out files its loss
 // against `flee` — so capture-front is never punished and the commander feeds runner after runner
@@ -920,7 +920,6 @@ let aiSwapBuild = QS.has('swapbuild');   // let a recall proceed when the roster
 // and leaned on stuck columns since shown to be dominated by a couple of pathological maps. No
 // verdict file was written then, which is why it had to be re-derived — see
 // VERDICT_2026-08-10_msnattrib.txt.)
-let aiMsnAttrib = !QS.has('nomsnattrib');
 let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the fleet can actually CREW each plan (A/B knob — see requiredVehicle)
 let aiFleeScore = QS.has('fleescore');   // flee becomes a SCORED candidate instead of a hard preempt (A/B knob — selection only, the terminal commitment stays)
 let aiFightMission = QS.has('fightmsn'); // a vehicle-vs-vehicle duel becomes a MISSION that starts and ends (A/B knob — see the Fight class)
@@ -1529,7 +1528,6 @@ const SWAP_DEFER_R = 52;
 const CONTACT_CLEAR_R = 15;
 let GAMBIT_AFTER = 240;   // seconds of a stalemate (base untouched) before a commander abandons the mid-field grind and sends a Valkyrie around the back to crack the HQ (RR.setGambitAfter)
 let aiKeepBreach = true;     // flatten the HQ early + let the runner grab with back towers up (A/B via RR.setKeepBreach); off = old all-towers-first siege
-let aiTargetPrio = !QS.has('noprio');   // score siege targets (keep highest, a firing tower jumps) instead of walking a queue — RR.setTargetPrio
 // A/B gates for this session's nav changes — default to the new behavior; ?no… reverts one for isolation.
 
 // ── DEEP LOG (RR.setDeepLog / ?deeplog) ──────────────────────────────────────────
@@ -5373,10 +5371,9 @@ const aiDodge = (() => { const q = QS.get('dodge'); const v = q == null ? 8 : +q
 // mechanism and the fix — it is a real open item, not a note.
 // BREACH: shoot the breakable thing standing between us and an objective we cannot reach.
 // Lowest-priority target, below towers and the keep — see the breach block in the target picker.
-// SHIPPED 2026-08-10 (?nobreach reverts). 240 seeds x2: resolution 0 then +1 (never negative),
+// SHIPPED 2026-08-10. 240 seeds x2: resolution 0 then +1 (never negative),
 // near-water transit-stuck -81%, advance-stuck -69%, matches 10s faster. Proven on the case first:
 // seed 1572 goes from a 1500s stalemate to a 580s win with 2 wall segments destroyed.
-const aiBreach = !QS.has('nobreach');
 const _breachDbg = { seen:0, noThreat:0, hasCap:0, both:0, fired:0 };   // why the breach target does/doesn't fire (RR.breachDbg)
 // Base A* node budget multiplier for ORDINARY navigation (see planPath). 1 = shipped behaviour.
 // ?navbudget=2 / =4 for the A/B. Left at 1 until a 240 says otherwise: the last time budgets were
@@ -5448,10 +5445,8 @@ function walkCells(ax, az, bx, bz, cb) {
 }
 
 const SMOOTH_LOOKAHEAD = 24;   // cells to try to reach ahead — bounds the pass at O(n·k)
-let aiSmoothPath = !QS.has('nosmooth');   // string-pull A* routes (RR.setSmooth) — A/B knob
 let smoothCut = 0, smoothKept = 0;        // waypoints removed / kept, so the pass can prove it works
 const _smooth = (v, pts) => {
-  if (!aiSmoothPath) return pts;
   const out = smoothPath(v, pts);
   smoothCut += pts.length - out.length; smoothKept += out.length;
   return out;
@@ -5654,12 +5649,6 @@ const NAV_TTL = 7;   // s — safety-net expiry (was the 1.1s "just in case" cad
 // keeping the staleness window short enough that a unit which has just been boxed in finds out
 // quickly. Deliberately not longer: the call exists BECAUSE a wrong "no path" stranded a unit.
 const REACH_TTL = 2;
-// Grade a mission tour in proportion to what it achieved, instead of pass/fail at 3% fort damage.
-// A/B via RR.setGradedTour / ?nograded — off restores the old binary test exactly.
-let aiGradedTour = !QS.has('nograded');
-// File the report card under the DIRECTIONAL mission key the scorer reads, not the base name.
-// A/B via RR.setMsnDirKey / ?nodirkey — off restores the old (mis-filing) behaviour.
-let aiMsnDirKey = !QS.has('nodirkey');
 // Protect the LAST firebrat: it is the only unit that can carry a flag, so don't spend it on
 // errands and don't bet it on a still-armed fort. A/B via RR.setSaveRunner / ?nosaverunner.
 let aiSaveRunner = !QS.has('nosaverunner');
@@ -8285,7 +8274,7 @@ class AICommander {
           // plan and is then committed to, so a runner re-tasked from capture onto siege and
           // killed there is a failure of the siege, not of the capture it was pulled off.
           const step = this.strategy.step;
-          const primary = (aiMsnAttrib && this._primaryKey) || step;   // full directional key
+          const primary = this._primaryKey || step;   // full directional key
           const bstep = primary.split('-')[0];                          // 'capture-left' → 'capture'
           // GRADE THE TOUR, DON'T PASS/FAIL IT. The old test forgave any tour that took 60hp off a
           // fort of roughly 1960 (four 340hp towers plus a 600hp keep) — about 3% — so siege was
@@ -8301,18 +8290,15 @@ class AICommander {
           const tourDmg = Math.max(0, rec.fort0 - fortHpOf(this.targetTeam()));
           const tourKills = Math.max(0, this.kills - rec.kills0);
           const ach = tourDmg / 340 + tourKills * 0.5 + (rec.flagTouched ? 2 : 0);
-          const progress = aiGradedTour ? ach >= 0.5           // half a tower, or one kill
-            : (this.kills > rec.kills0 || rec.flagTouched || tourDmg > 60);
+          const progress = ach >= 0.5;           // half a tower, or one kill
           if (!this._missionSuccess) this._missionSuccess = {};
           // A tour that ACHIEVED something clears the streak — that is what makes the counter mean
           // "consecutive losses with nothing to show" instead of a running death toll. Its only
           // reset used to be redraw(), which never runs for archetype commanders.
           if (progress) this.failStreak = 0;
-          const msnKey = aiMsnAttrib ? primary : (aiMsnDirKey ? this._msnKeyFor(step) : step);
-          if (aiGradedTour) {
-            const pen = Math.min(0, -4 + ach * 4);
-            if (pen < -0.05) this._missionSuccess[msnKey] = pen; else delete this._missionSuccess[msnKey];
-          } else if (!progress) this._missionSuccess[msnKey] = -4; else delete this._missionSuccess[msnKey];
+          const msnKey = primary;
+          const pen = Math.min(0, -4 + ach * 4);
+          if (pen < -0.05) this._missionSuccess[msnKey] = pen; else delete this._missionSuccess[msnKey];
           // BLAME THE CHASSIS, NOT JUST THE PLAN (Jacob, watching a 4907s match: a Lurcher
           // scuttled on siege over and over, then one Jotun cleared the towers in a single
           // mission). The memory above keys on the MISSION alone, so a plan that is right but
@@ -8320,14 +8306,14 @@ class AICommander {
           // instead of changing the tool. Track the PAIRING as well; _vehicleForMission reads
           // this and substitutes a different chassis before the mission itself is abandoned.
           if (!this._msnVehFail) this._msnVehFail = {};
-          const vk = `${aiMsnAttrib ? bstep : step}|${lost}`;
+          const vk = `${bstep}|${lost}`;
           if (!progress) this._msnVehFail[vk] = (this._msnVehFail[vk] || 0) + 1;
           // A tour that DID make progress earns the chassis credit back — but only one tour's
           // worth. Deleting the whole record let a single good outing erase a run of failures,
           // so a chassis that fails this mission four times out of five never accumulated.
           else if (this._msnVehFail[vk]) this._msnVehFail[vk] = Math.max(0, this._msnVehFail[vk] - 1);
           if (!progress) {
-            const fstep = aiMsnAttrib ? bstep : step;
+            const fstep = bstep;
             if (this._failStep === fstep) this._failN++; else { this._failStep = fstep; this._failN = 1; }
             this._failT = performance.now();
             if (this._failN === 2) {
@@ -8336,7 +8322,7 @@ class AICommander {
               this._failSnap = { twr: this.turretsLive(), fort: fortHpOf(this.targetTeam()), k: this.kills };
               aiLog(this.team, `${this.cname}: That's two units lost on this ${fstep} plan with NOTHING to show — we're trying something else!`);
             }
-          } else if (this._failStep === (aiMsnAttrib ? bstep : step)) { this._failStep = null; this._failN = 0; }
+          } else if (this._failStep === bstep) { this._failStep = null; this._failN = 0; }
         }
         // A runner died storming the base → don't just feed another firebrat in. If the enemy
         // still has DEFENDING VEHICLES, they'll intercept the fragile runner — send a combat
@@ -8350,7 +8336,7 @@ class AICommander {
         // mission instead — the job it was out doing, not the errand it died on.
         // (computed again rather than reused: the report card above lives inside `if (rec)`, and a
         // runner can die on a tour with no record — the gate still has to be right for those.)
-        const runStep = (aiMsnAttrib && this._primaryKey) ? this._primaryKey.split('-')[0] : this.strategy.step;
+        const runStep = this._primaryKey ? this._primaryKey.split('-')[0] : this.strategy.step;
         if (this.unit.type === 'firebrat' && runStep === 'capture') {
           const tt = this.targetTeam();
           const enemyHasUnits = combatants.some(o => !o.dead && o.team === tt && !vehicleHidden(o));
@@ -9492,7 +9478,7 @@ class AICommander {
         // crossfire-free stand — is unchanged, it just now applies to whichever target scored
         // highest rather than to whatever the queue happened to name.
         let promote = this._gambit || !threat || !hasPathNow;
-        if (aiTargetPrio && !promote && threat) {
+        if (!promote && threat) {
           promote = this._keepOutranks(v, threat.x, threat.z, px, pz);
         }
         this._prioTarget = promote ? 'hq' : 'tower'; _br.promote = !!promote;
@@ -9557,8 +9543,8 @@ class AICommander {
     // REVEALED (we want it) and flagExposed() says we cannot get to it. That does not expire.
     const _wantFlag = this.flag && this.flag();
     const _flagWalled = !!(_wantFlag && _wantFlag.revealed && !this.flagExposed());
-    if (aiBreach) { _breachDbg.seen++; if (!threat) _breachDbg.noThreat++; if (this._reachCap || _flagWalled) _breachDbg.hasCap++; }
-    if (aiBreach && (this._reachCap || (_flagWalled && !QS.has('nobreachwide')))) {
+    _breachDbg.seen++; if (!threat) _breachDbg.noThreat++; if (this._reachCap || _flagWalled) _breachDbg.hasCap++;
+    if (this._reachCap || _flagWalled) {
       _breachDbg.both++;
       const reach = SHOT_REACH[v.type] || 42;
       let bestW = null, bestC = null, bestD = reach * reach;
@@ -12125,8 +12111,6 @@ window.RR = {
   saveRunner: () => aiSaveRunner,
   setReachArrive: (v) => { aiReachArrive = !!v; return aiReachArrive; },   // A/B: cap an unreachable goal at the closest reachable point
   setSaveRunner: (v) => { aiSaveRunner = !!v; setSaveRunnerScore(aiSaveRunner); return aiSaveRunner; },   // A/B: protect the last flag carrier (both halves)
-  setMsnDirKey: (v) => { aiMsnDirKey = !!v; return aiMsnDirKey; },   // A/B: file tour results under the directional mission key
-  setGradedTour: (v) => { aiGradedTour = !!v; return aiGradedTour; },   // A/B: graded tour report card vs the old 3% pass/fail
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   navNodes: () => _astarFrameNodes,
   resetNavNodes: () => { _astarFrameNodes = 0; },   // benchmark hook: start a fresh 'frame'
@@ -12193,8 +12177,6 @@ window.RR = {
   setStandRoute: on => { aiStandRoute = !!on; return aiStandRoute; },      // route the whole way to a firing position (A/B)
   setFlyerRoute: on => { aiFlyerRoute = !!on; return aiFlyerRoute; },      // route flyers as GOTO straight lines (A/B)
   setStandArrive: on => { aiStandArrive = !!on; return aiStandArrive; },   // arrive ON the firing position vs 14u short (A/B)
-  setSmooth: on => { aiSmoothPath = !!on; return aiSmoothPath; },          // string-pull A* routes (A/B)
-  setMsnAttrib: on => { aiMsnAttrib = !!on; return aiMsnAttrib; },         // grade a death against the primary mission, not the errand it died on (A/B)
   setFleeScore: on => { aiFleeScore = !!on; setFleeScore(aiFleeScore); return aiFleeScore; },   // flee scored rather than preempting (A/B)
   setFightMission: on => { aiFightMission = !!on; setFightMission(aiFightMission); return aiFightMission; },   // a duel becomes a mission (A/B)
   setReqVehicle: on => { aiReqVehicle = !!on; setReqVehicle(aiReqVehicle); return aiReqVehicle; },   // price whether the fleet can crew each plan (A/B)
@@ -12331,7 +12313,6 @@ window.RR = {
   setPostKillMoveOn: (v) => { aiPostKillMoveOn = !!v; return aiPostKillMoveOn; },   // A/B: drop engage-afterglow ghost on a kill (no post-kill linger)
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
-  setTargetPrio: (v) => { aiTargetPrio = !!v; return aiTargetPrio; },   // A/B: scored siege targets vs the old tower queue
   setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
   setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
   get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
