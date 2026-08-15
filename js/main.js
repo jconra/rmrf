@@ -12171,6 +12171,30 @@ window.RR = {
   threatAt: (team, x, z) => { const f = buildThreatField(team), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 ? f[k] : -1; },
   threatStats: () => ({ builds: threatBuilds, teams: [...threatField.keys()] }),
   breachDbg: () => ({ ..._breachDbg }),
+  // Mid-swap re-scores, summed over both commanders. A swap is derived rather than scored, so it
+  // survives only while the job that asked for it keeps winning — `changed` is how often that
+  // stopped being true before the unit got home. Not a failure count on its own: a swap SHOULD be
+  // dropped when the board really moves, so `why`/`to` are the part that says which it was.
+  // SCAN THE COMMANDER *AND* ITS SLOTS. The strategy's `cmd` is the commander itself for slot 0
+  // (Commander's constructor Object.assign's slot 0 onto itself) and the slot object for the rest,
+  // so reading only one of the two silently loses half the data — it read zero while the counter
+  // was sitting on commander[1]. Deduped by identity because slot 0 and the commander can be the
+  // same object.
+  swapRescore: () => {
+    const out = { n: 0, held: 0, changed: 0, why: {}, to: {} };
+    const seen = new Set();
+    for (const c of commanders) {
+      for (const o of [c, ...(c._slots || [])]) {
+        const S = o && o._swapRescore;
+        if (!S || seen.has(o)) continue;
+        seen.add(o);
+        out.n += S.n; out.held += S.held; out.changed += S.changed;
+        for (const k in S.why) out.why[k] = (out.why[k] || 0) + S.why[k];
+        for (const k in S.to) out.to[k] = (out.to[k] || 0) + S.to[k];
+      }
+    }
+    return out;
+  },
   replanWhy: () => ({ ..._pfWhyAll }),                         // whole-match replan causes: trigger, and trigger/state
   planBy: () => ({ ..._planBy }),                              // debug: those calls attributed to their CALLER (nav vs standoff) — needs ?perf
   setVision: (v) => { AI_VISION = v; return AI_VISION; },      // base sight range (A/B the "less distraction" idea)

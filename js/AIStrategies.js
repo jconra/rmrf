@@ -1719,7 +1719,30 @@ class Doctrine {
         if (!SCORE_CLOCK) this._scoreT = (this._scoreT || 0) + dt;
         if (trig && this._scoreT >= MSN_RESCORE_MIN) {
           this._scoreT = 0; this._lastTrig = trig;
+          // MID-SWAP RE-SCORE LEDGER. A swap is DERIVED, never scored: MissionScore picks a job,
+          // the job asks for a chassis we are not driving, and swap is swapped in to go and get it
+          // (see _applyKey). Nothing holds the unit to that trip — which is the design, because a
+          // swap must still react to threats — so the trip survives only while the SAME job keeps
+          // winning. That makes "did the top mission change mid-swap, and did the board change
+          // too?" the question the whole model rests on, and it is invisible in every existing
+          // counter. Recorded here, where the swap is still running and its intended follow-up
+          // (_swapThen) is still known; read back via RR.swapRescore().
+          const wasSwap = this.step === 'swap';
+          const wantedJob = wasSwap ? this._swapThen : null;
           next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = `re-scored: ${trig}`; fk = 'weights';
+          if (wasSwap) {
+            const S = (cmd._swapRescore || (cmd._swapRescore = { n: 0, held: 0, changed: 0, why: {}, to: {} }));
+            S.n++;
+            // "Held" means the swap survived: either the same job won again, or the re-score
+            // re-derived a swap for whatever won. Both leave the unit driving home.
+            if (this.step === 'swap' && this._swapThen === wantedJob) S.held++;
+            else {
+              S.changed++;
+              S.why[trig] = (S.why[trig] || 0) + 1;                     // which trigger pulled it off
+              const dest = this.step === 'swap' ? `swap→${this._swapThen}` : this.step;
+              S.to[`${wantedJob}→${dest}`] = (S.to[`${wantedJob}→${dest}`] || 0) + 1;
+            }
+          }
         } else { next = runningKey ? this._applyKey(cmd, runningKey) : this.step; why = 'carrying on'; fk = 'weights'; }
       }
     }
