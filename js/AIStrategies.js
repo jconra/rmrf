@@ -542,7 +542,21 @@ export function incumbentBonus(cmd) {
   const v = cmd.unit;
   if (!v || v.dead || !v.holder) return INCUMBENT_BASE;
   let f = travelFraction(cmd);
-  if (INCUMB_DIR && INCUMBENT_INBOUND[key]) f = 1 - f;
+  // TEST THE RUNNING MISSION, NOT _msnKey. Swap and Flee are SUPPORT missions, and _applyKey only
+  // moves _primaryKey for non-support ones — so mid-swap _msnKey can still read `capture-right`,
+  // the job underneath. Keying the inbound test off it meant the lookup never matched and the flag
+  // was completely inert: its 240-seed arm came back byte-identical to base on every metric,
+  // including the swap counters it was supposed to move. `strategy.step` is the mission actually
+  // running, which is what incumbency is pricing.
+  // INERT UNTIL SWAP IS A SCORED CANDIDATE — measured, not assumed. Two 240-seed arms came back
+  // byte-identical to base on every metric including the swap counters, because `swap` is not in
+  // MSN_CANDS, and missionPick only applies the bonus when `key === incumbent`. So a running swap
+  // is never scored, never gets an incumbent bonus, and cannot defend itself: any candidate that
+  // scores anything beats it. The terminal `return` was not A protection for swap, it was the ONLY
+  // one — which is why a third of swaps are abandoned once ?flat removes it. See task #33.
+  // The direction below is still correct and stays; it starts mattering the moment swap is scored.
+  const running = (cmd.strategy && cmd.strategy.step) || '';
+  if (INCUMB_DIR && INCUMBENT_INBOUND[running]) f = 1 - f;
   return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
 }
 let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/armour (A/B knob)
