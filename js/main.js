@@ -902,6 +902,7 @@ let resupplies = [];  // neutral fuel/ammo/shield points of interest
 let scrapPiles = [];  // salvage piles — drive over one to collect it for your team (a gib-wreck is worth SCRAP_DROP[type])
 let gibChunks = [];   // vehicle part-meshes currently flying apart on death (see gibVehicle/updateGibs)
 const teamScrap = { red: 0, blue: 0 };   // scrap banked per team; spent in the garage to build vehicles
+let BUY_FIRST = true;   // buy the hull when the trip is ORDERED (?nobuyfirst reverts to buying on arrival)
 const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
 let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
@@ -5700,7 +5701,8 @@ if (QS.has('flat')) setTrigFix(true);
 // are gated with flat as the BASE, not against today's default.
 setIncumbDir(QS.has('incumbdir'));    // an inbound trip is best defended when it is nearly done
 setSwapSupply(QS.has('swapsupply'));
-setSwapCommit(!QS.has('noswapcommit'));   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
+setSwapCommit(!QS.has('noswapcommit'));
+BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
 // 720 seeds, base vs this: resolved 715 -> 719, stalemates 5 -> 1, unreachable-GOTO contract
@@ -7036,6 +7038,9 @@ class AICommander {
     // a hull bought for one trip is otherwise free for another slot's deploy() to take, and the
     // unit arrives to nothing — the same failure, moved. Held against _slotI and released when the
     // trip ends either way (see the release in update()).
+    // Split from the errand guard by its own flag so the gate can price each half. They shipped
+    // together and the pair costs 1-2 resolutions; which half carries that is the open question.
+    if (needBuy && !BUY_FIRST) return _why('no better hull available or buildable');
     if (needBuy && !this.buildUnit(want)) return _why('could not build the hull we need');
     if (needBuy) (this._swapHold || (this._swapHold = {}))[this._slotI] = want;
     { const W = (this._swapWhy || (this._swapWhy = {}));
