@@ -938,6 +938,61 @@ const SAP_CHANCE = { hunter: 0.7, turtle: 0.6, rogue: 0.4, warrior: 0.2 };
 // per 25s raid window in tick()). Identity, not balance: the turtle is a homebody, the
 // rogue's whole doctrine is "their base falls before ours does" — it plays the race.
 const HOME_RESPONSE = { turtle: 1.0, warrior: 0.7, hunter: 0.55, rogue: 0.25 };
+// ---- SCORED HOME DEFENCE (?homescore) ----------------------------------------------------------
+// Replaces the dice roll above. The roll limits how OFTEN a unit turns back and says nothing about
+// whether the trip can accomplish anything — a 55% chance of a pointless two-minute drive is still a
+// pointless two-minute drive (task #49; Jacob watching a Jotun yo-yo home to meet a Valkyrie that had
+// already left). Two things a responder can achieve, so two terms rather than one classification:
+//
+//   save = beat the attacker's magazine. Measured time-to-empty at continuous fire: firebrat 9.9s,
+//          valkyrie 12.6s, lurcher 21.8s, jotun 27.2s — Jacob's 20s estimate sits in the middle, and
+//          20s is used flat because under fog we usually cannot see WHICH gun is shooting us.
+//   kill = the attacker is often still there after it runs dry, so a late arrival can still pay off
+//          for a commander that wants the kill. T_KILL is the one number here derived from nothing;
+//          it is the first thing the duels should challenge.
+//
+// The chassis never appears. A slow hull excludes itself through travel time, which is why a Jotun
+// 40u away (5s) still turns back and the same Jotun 200u away does not. NOTE the speeds come from
+// Vehicles.js (`def.speed`, u/s: valkyrie 22, firebrat 20, lurcher 14, jotun 8) and NOT from AI.js's
+// SPEED table, which is a RANK (firebrat 4 > valkyrie 3) and disagrees with the real order. Task #49
+// read that rank as a speed and concluded a sieging Jotun was "minutes" from home; it is ~25s.
+let HOME_SCORE = false;
+export function setHomeScore(on) { HOME_SCORE = !!on; return HOME_SCORE; }
+const T_SAVE = 20, T_KILL = 45;                 // seconds — the two deadlines
+// Per-persona pull, by what that commander actually wants. Same shape as teamSupplyW so two weight
+// sets can be played on OPPOSITE TEAMS IN ONE MATCH and the sides flipped — weights get DUELLED,
+// builds get A/B'd.
+const HOME_W = {
+  turtle:  { save: 4,   kill: 1   },   // the towers are the point; arriving late is worthless
+  warrior: { save: 1.5, kill: 4   },   // most motivated — the kill outlives the siege
+  hunter:  { save: 1.5, kill: 3.5 },   // a sieging unit is stationary: that is the ambush
+  rogue:   { save: 0,   kill: 0   },   // base racing, never turns around
+};
+const teamHomeW = {};
+export function setHomeW(team, w) { teamHomeW[team] = { ...(teamHomeW[team] || {}), ...w }; return teamHomeW[team]; }
+export function homeWOf(team) { return teamHomeW[team] || null; }
+// Score for turning back, plus the parts a caller needs to record WHY. Returns null when the term
+// does not apply at all, so `defend` can fall through to its old flat value under ?nohomescore.
+export function homeDefenceScore(cmd) {
+  const pt = cmd.homeAttack && cmd.homeAttack();
+  const v = cmd.unit;
+  if (!pt || !v || v.dead) return null;
+  const p = v.holder.position;
+  const dist = Math.hypot(pt.x - p.x, pt.z - p.z);
+  // Straight-line over nominal speed. Deliberately an ESTIMATE: the real path is longer, but asking
+  // the pathfinder for a route we may not take costs more than the precision is worth here.
+  const spd = (v.def && v.def.speed) || 10;
+  const travel = dist / spd;
+  const tw = teamHomeW[cmd.team] || null;
+  const base = HOME_W[cmd.archetype] || HOME_W.warrior;
+  const wSave = tw && tw.save != null ? tw.save : base.save;
+  const wKill = tw && tw.kill != null ? tw.kill : base.kill;
+  const tSave = tw && tw.tSave != null ? tw.tSave : T_SAVE;
+  const tKill = tw && tw.tKill != null ? tw.tKill : T_KILL;
+  const save = Math.max(0, Math.min(1, 1 - travel / tSave));
+  const kill = Math.max(0, Math.min(1, 1 - travel / tKill));
+  return { score: wSave * save + wKill * kill, travel, dist, save, kill };
+}
 
 // REPORT-CARD UNBLOCKERS — what to run instead when a mission is banned (two straight
 // total-failure deaths: no kills, no base damage, flag untouched — see cmd.missionBanned).
@@ -1155,7 +1210,7 @@ export function requiredVehicle(cmd, key) {
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
 // missionScore runs for all 13 candidates every decision, and the persona
 // pattern right here is the house way to pass a knob across this boundary.
-let REQ_VEHICLE = false;   // A/B knob (?reqveh / RR.setReqVehicle) — score whether the fleet can crew each plan
+let REQ_VEHICLE = false;   // A/B knob (?reqveh) — score whether the fleet can crew each plan (default tried and reverted 2026-08-17)
 export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 // ONE RUNNING PLAN, ONE NAME (?msnkeyfix). _msnKey is written only by _applyKey, but three forced
 // transitions switch by bare literal and never touch it, so it goes on naming the mission the unit
@@ -1167,7 +1222,7 @@ export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 // flee/swap/fight return before reaching it at all. For the whole duration of a flee, a swap or a
 // duel, every edge memory is frozen at whatever the board looked like when the unit last decided.
 // This refreshes the memories every tick; the DECISION stays exactly where it was.
-let TRIG_FIX = false;
+let TRIG_FIX = false;   // rides with FLAT_MISSIONS (?flat turns both on); useless on its own
 export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
 // …and the same freeze on the re-score clock (?scoreclock). _scoreT accumulates only inside that
 // same block, so time spent in a duel does not count toward "it has been a while, look again".
@@ -1178,6 +1233,9 @@ let SWAP_YIELD = false;   // a swap still in progress no longer blocks the re-sc
 // it wires up missionGarageOK, which the file already defined for this exact purpose.
 let SWAP_COMMIT = true;
 export function setSwapCommit(on) { SWAP_COMMIT = !!on; return SWAP_COMMIT; }
+// A flag carrier scores capture with the same +6 flee has always had (?nocapcarry to compare).
+let CAP_CARRY = true;
+export function setCapCarry(on) { CAP_CARRY = !!on; return CAP_CARRY; }
 // FLATTEN THE MISSION SPACE (Jacob, 2026-08-11). Flee, swap and fight each used to switch the
 // commander OFF for their whole duration — `if (!done) return`, above the decision block — so while
 // one ran, nothing could be re-scored: not a rival in front of us, not our flag being stolen, not a
@@ -1193,7 +1251,7 @@ export function setSwapCommit(on) { SWAP_COMMIT = !!on; return SWAP_COMMIT; }
 //
 // Completion is untouched — arriving home, finishing a swap at the pad, and winning a duel all
 // still end their mission exactly as before, and Fight keeps its one self-preservation exit.
-let FLAT_MISSIONS = false;
+let FLAT_MISSIONS = false;  // A/B knob (?flat) — default tried and reverted 2026-08-17, net -19 on 720 seeds
 export function setFlatMissions(on) { FLAT_MISSIONS = !!on; return FLAT_MISSIONS; }
 export function setSwapYield(on) { SWAP_YIELD = !!on; return SWAP_YIELD; }
 
@@ -1254,6 +1312,25 @@ export function missionScore(cmd, key, running = null) {
       }
       break;
     case 'capture': {
+      // WE ARE HOLDING THE WIN CONDITION. Flee has carried this exact term since the preempt was
+      // moved onto the board (+6, 'carrying the flag home') and capture never did — so a carrier
+      // scored capture as if it were still shopping for a flag, and any supply mission outbid it.
+      // Measured at 3v3: seed 20081's Firebrat topped up at a NEUTRAL fuel depot seven times over
+      // 1400s, odometer 156u -> 1651u while its straight-line distance from the grab never left
+      // ~223u and home sat 178u away — a full tank is worth ~590u, so it had triple the range it
+      // needed and spent the match shuttling. Seed 20067 flapped capture<->flee ~70 times because
+      // flee had the bonus and capture did not, and the two sat near-tied.
+      //
+      // Deliberately NOT a rule about fuel. Ammo, shields and repair outbid a carrier by exactly
+      // the same arithmetic, and a destination override on the fuel picker would have fixed one of
+      // the four (Jacob's call). Stated once, where the fact belongs: this unit is carrying, and
+      // getting it home ends the match.
+      //
+      // Arithmetic, for whoever tunes this next: supplyUrge maxes at `urge` (9 for fuel) on a dry
+      // tank, so +6 on top of capture's ~3 clears every supply urge at every level. What it does
+      // NOT clear is 'about to be a statue' (+10 at <=5%), and that is intended — a unit that is
+      // about to stop moving cannot score either, so at 5% the top-up genuinely is the better plan.
+      if (CAP_CARRY) { const fc = cmd.flag && cmd.flag(); if (fc && fc.carrier === cmd.unit) add('carrying the flag home', 6); }
       if (!exposed) add('flag sealed', -10);
       else add('flag OPEN', 4);   // the win condition is on the table — outweigh routine fighting
       if (cmd.flagGrabbable()) add('grabbable', 2);
@@ -1323,7 +1400,12 @@ export function missionScore(cmd, key, running = null) {
       break;
     }
     case 'defend': {
-      if (cmd.homeAttack && cmd.homeAttack()) add('base under fire', 4);
+      // Under ?homescore the flat +4 becomes "can I get there while it still matters, and do I care" —
+      // see homeDefenceScore. The flat value stays as the fallback so the A/B has a real control arm.
+      if (HOME_SCORE) {
+        const hd = homeDefenceScore(cmd);
+        if (hd) add(`base under fire (${Math.round(hd.travel)}s out)`, hd.score);
+      } else if (cmd.homeAttack && cmd.homeAttack()) add('base under fire', 4);
       // gradual, but RE-ANCHORED to the proven operating point: the old rule only turtled at
       // a deficit of 3 — starting the lean at 1 made every slightly-behind team cagey and gave
       // back five head-to-head wins. Now: down 2 → +1, down 3 → +2, down 4+ → +3 (capped).
@@ -1676,7 +1758,11 @@ class Doctrine {
     // breaks off its own attack. And a commander whose assault is about to pay off (their
     // towers down / keep cracked / flag grabbable) stays committed regardless of the dice —
     // winning the race beats saving towers.
-    if (!next && cmd.homeAttack && cmd.homeAttack()
+    // ?homescore RETIRES THIS WHOLE RUNG. It is a preempt: it sets `next` BEFORE the trigger-driven
+    // re-score, so the commander never weighs travel time or the progress of the job it is already
+    // doing against turning back. Scoring it in `defend` is the same move that fixed pursue (#45) and
+    // the flag carrier — state the fact once, where facts are compared, instead of jumping the queue.
+    if (!HOME_SCORE && !next && cmd.homeAttack && cmd.homeAttack()
         && !cmd.flagGrabbable() && !(cmd.fortDown && cmd.fortDown()) && !cmd.flagExposed()) {
       const now = performance.now();
       if (!cmd._homeRollAt || now - cmd._homeRollAt > 25000) {   // one decision per raid window, not per tick (mood can shift on the next window)
@@ -1703,6 +1789,9 @@ class Doctrine {
     // OPENING SAPPER (persona-rolled): a Firebrat out to a home flank — lay mines on the way back,
     // drop a pod, scout that side — then fall through to the persona's real playbook.
     // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
+    // Mid-swap ledger state, hoisted to function scope: the question is whether the trip SURVIVES
+    // this re-score, and that is only knowable after the dwell-gated _switch far below.
+    let msWasSwap = false, msWantedJob = null, msTrig = null;
     if (!next) {
       {
         // MISSIONSCORE: the weighted picker owns the whole offensive/economy plan (the
@@ -1731,29 +1820,11 @@ class Doctrine {
           // too?" the question the whole model rests on, and it is invisible in every existing
           // counter. Recorded here, where the swap is still running and its intended follow-up
           // (_swapThen) is still known; read back via RR.swapRescore().
-          const wasSwap = this.step === 'swap';
-          const wantedJob = wasSwap ? this._swapThen : null;
+          msWasSwap = this.step === 'swap';
+          msWantedJob = msWasSwap ? this._swapThen : null;
+          msTrig = trig;
           next = this._applyKey(cmd, missionPick(cmd, runningKey)); why = `re-scored: ${trig}`; fk = 'weights';
-          if (wasSwap) {
-            const S = (cmd._swapRescore || (cmd._swapRescore = { n: 0, held: 0, retarget: 0, dropped: 0, why: {}, to: {} }));
-            S.n++;
-            // READ `next`, NOT this.step. The actual switch happens ~30 lines below, after the
-            // dwell gate — so testing this.step here reads the state BEFORE anything moved and
-            // scores every single re-score as "held". That is exactly what it did: 419 of 419.
-            //
-            // _applyKey returns UNDEFINED when it re-derives a swap (it sets up the trip and
-            // returns early), and a mission key when the winning job needs no new hull. So:
-            //   next == null  → still swapping. Same job = held, different job = retargeted.
-            //   next != null  → the job that asked for this trip stopped winning; the trip ends.
-            if (next == null) {
-              if (this._swapThen === wantedJob) S.held++;
-              else { S.retarget++; S.to[`${wantedJob}→swap:${this._swapThen}`] = (S.to[`${wantedJob}→swap:${this._swapThen}`] || 0) + 1; }
-            } else {
-              S.dropped++;
-              S.why[trig] = (S.why[trig] || 0) + 1;
-              S.to[`${wantedJob}→${next}`] = (S.to[`${wantedJob}→${next}`] || 0) + 1;
-            }
-          }
+          if (msWasSwap) (cmd._swapRescore || (cmd._swapRescore = { n: 0, held: 0, guard: 0, retarget: 0, dropped: 0, why: {}, to: {} })).n++;
         } else { next = runningKey ? this._applyKey(cmd, runningKey) : this.step; why = 'carrying on'; fk = 'weights'; }
       }
     }
@@ -1771,6 +1842,24 @@ class Doctrine {
     // runner died) still switches immediately.
     const dwell = MSN_DWELL;
     if (next && next !== this.step && (this.t > dwell || URGENT.has(next) || decisive)) this._switch(next, cmd, why);
+    // MID-SWAP OUTCOME — recorded HERE, and nowhere earlier, because "did the trip survive?" is a
+    // question about this.step AFTER the switch above has had its chance. Two earlier versions of
+    // this ledger read state that could not have moved yet and each reported a constant: v1 read
+    // this.step before the switch (419 of 419 "held"), v2 read _applyKey's return believing it goes
+    // undefined on a re-derived swap — it does not, it is a pure key mapper that always returns a
+    // string, so every re-score scored as "dropped" (8770 of 8770). A ledger that cannot print more
+    // than one answer is not measuring anything.
+    if (msWasSwap) {
+      const S = cmd._swapRescore;
+      if (this.step === 'swap') {
+        if (this._swapThen === msWantedJob) S.held++;
+        else { S.retarget++; S.to[`${msWantedJob}→swap:${this._swapThen}`] = (S.to[`${msWantedJob}→swap:${this._swapThen}`] || 0) + 1; }
+      } else {
+        S.dropped++;
+        S.why[msTrig] = (S.why[msTrig] || 0) + 1;
+        S.to[`${msWantedJob}→${this.step}`] = (S.to[`${msWantedJob}→${this.step}`] || 0) + 1;
+      }
+    }
   }
   // Emergencies that preempt any persona's plan: our flag's been lifted → run it down;
   // the thief died and dropped it in the field → go RECOVER it (any teammate's touch snaps
@@ -1912,7 +2001,20 @@ class Doctrine {
     // (measured: 4 in ~1470 guard hits on seed 11), and requiring it let an errand cancel exactly
     // those. Not knowing which job ordered a trip is no reason to let a top-up end it.
     if (SWAP_COMMIT && this.step === 'swap'
-        && (key === this._swapThen || !missionGarageOK(key))) return;
+        && (key === this._swapThen || !missionGarageOK(key))) {
+      // Counted separately from `held`: a trip that survives because the guard refused the switch is
+      // this change working, whereas one that survives because the dwell timer had not expired would
+      // have survived anyway. Same outcome, completely different evidence.
+      //
+      // `guard` counts TRIPS SAVED, latched once per trip, because _switch is reached many times a
+      // second while a trip runs — the raw refusal count came out at 11488 against 89 swaps, which
+      // measures tick rate, not saves. Raw kept as guardTicks for intensity only; never compare it
+      // to a trip count.
+      const S = (cmd._swapRescore || (cmd._swapRescore = { n: 0, held: 0, guard: 0, guardTicks: 0, retarget: 0, dropped: 0, why: {}, to: {} }));
+      S.guardTicks++;
+      if (!this._swapGuarded) { this._swapGuarded = true; S.guard++; }
+      return;
+    }
     if (key !== 'swap' && cmd.unit && !cmd.unit.dead) {
       const want = cmd.swapWanted(key);
       if (want) {
@@ -1921,6 +2023,7 @@ class Doctrine {
         this.mission.want = want;
         this.mission.enter(cmd, this);
         this.step = 'swap'; this.t = 0;
+        this._swapGuarded = false;   // fresh trip — it has not been saved by the guard yet
         this._lastWhy = why || 'wrong vehicle for the next job';
         if (this.log) this.log(`${this.mission.cry(cmd)}   [${this.step} → swap → ${key}${why ? ' — ' + why : ''}]`);
         return;

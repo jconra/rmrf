@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=101';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=101';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -920,6 +920,12 @@ let aiScrapTightArrive = true;   // salvage-detouring units close to within the 
 // and leaned on stuck columns since shown to be dominated by a couple of pathological maps. No
 // verdict file was written then, which is why it had to be re-derived — see
 // VERDICT_2026-08-10_msnattrib.txt.)
+// TRIED AS A DEFAULT 2026-08-17 AND REVERTED THE SAME DAY. It was flipped on BIG3v3's +4 over ONE
+// 240-seed set at units=3. Re-gated against the old default with the flag-carrier bonus present in
+// BOTH arms — which is the only honest comparison, since that bonus repairs most of what flat breaks
+// — it went -15 / +2 / -6 over three sets, net -19 on 720 seeds. The +2 was the same seed territory
+// BIG3v3 measured, which is precisely why one set was never enough.
+// Still opt-in via ?flat&?reqveh; it is not disproven, it just has not earned a default.
 let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the fleet can actually CREW each plan (A/B knob — see requiredVehicle)
 let aiFleeScore = QS.has('fleescore');   // flee becomes a SCORED candidate instead of a hard preempt (A/B knob — selection only, the terminal commitment stays)
 let aiFightMission = QS.has('fightmsn'); // a vehicle-vs-vehicle duel becomes a MISSION that starts and ends (A/B knob — see the Fight class)
@@ -5694,14 +5700,23 @@ setSwapYield(QS.has('swapyield'));
 // and trigfix is what keeps it OBSERVING during one. Without both, it can act only on memories
 // frozen at the moment the trip began. That is also why trigfix measured as nothing on its own —
 // it was shelved with a note saying it would matter once something raised its exposure. This is it.
-setFlatMissions(QS.has('flat'));
-if (QS.has('flat')) setTrigFix(true);
-// TWO FIXES FOR THE ABANDONED-TRIP PROBLEM the flattening exposed. Both only do anything while the
-// terminal guards are OPEN (?flat) — a swap that cannot be interrupted cannot be stolen — so they
-// are gated with flat as the BASE, not against today's default.
+// Opt-in again as of 2026-08-17 — see the note on aiReqVehicle for the three-set evidence.
+const FLAT_ON = QS.has('flat');
+setFlatMissions(FLAT_ON);
+if (FLAT_ON) setTrigFix(true);
+// FIXES FOR THE ABANDONED-TRIP PROBLEM the flattening exposed. These only do anything while the
+// terminal guards are OPEN — a swap that cannot be interrupted cannot be stolen — which is now the
+// default, so they are live rather than gated behind ?flat as they were when first written.
+// swapsupply stays OFF and is not a candidate: measured twice AFTER the dominant abandonment bug
+// was fixed (so its mechanism was reachable) at +31% and +21% abandoned swaps. It is not masked.
 setIncumbDir(QS.has('incumbdir'));    // an inbound trip is best defended when it is nearly done
 setSwapSupply(QS.has('swapsupply'));
 setSwapCommit(!QS.has('noswapcommit'));
+setCapCarry(!QS.has('nocapcarry'));   // a carrier scores capture with flee's +6 — see the capture case
+// SCORED HOME DEFENCE — default OFF, gated deliberately (task #49). Shipping an untested default is
+// exactly what cost 15 resolutions with flat&reqveh this morning; this one earns its default or
+// does not get one.
+setHomeScore(QS.has('homescore'));
 BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
@@ -9114,6 +9129,36 @@ class AICommander {
     // Same for the base-under-attack radio: the responder reached the spot and there's nobody
     // to see or hear → the raid's over (or the raider moved on); resume the patrol now instead
     // of standing on the crater for the full stale window.
+    // HOME-DEFENCE RESPONSE LEDGER (task #49). Resolution rate cannot see this failure: a unit can
+    // drive home, find an empty crater, drive back, and the match still resolves — the trip was pure
+    // waste and every existing counter reads it as a normal mission switch. So the trip gets its own
+    // outcome, recorded where `seesEnemy`, `heard` and the arrival radius already live.
+    //   CONTACT — arrived, the raider was still there. The number the weights are tuned to raise.
+    //   FUTILE  — arrived, nobody home. The bug, counted directly.
+    //   (ABANDONED is closed out in the step-transition check below, not here.)
+    // The TRIP lives on the unit (three slots can each be running one); the LEDGER on the commander,
+    // because the question is about a team's doctrine, not one hull.
+    {
+      const L = this._hdLedger || (this._hdLedger = { started: 0, contact: 0, futile: 0, abandoned: 0, repeats: 0, travel: [] });
+      const step = this.strategy ? this.strategy.step : null;
+      if (step === 'defend' && v._hdStep !== 'defend' && this._homeAttack) {
+        v._hdTrip = { t0: performance.now(), x: this._homeAttack.x, z: this._homeAttack.z };
+        L.started++;
+        // The yo-yo signature Jacob spotted: the SAME hull answering the radio over and over.
+        if ((v._hdN = (v._hdN || 0) + 1) > 1) L.repeats++;
+      } else if (step !== 'defend' && v._hdTrip) {
+        L.abandoned++; v._hdTrip = null;          // re-scored away before it ever arrived
+      }
+      v._hdStep = step;
+      if (v._hdTrip) {
+        const tx = v._hdTrip.x - px, tz = v._hdTrip.z - pz;
+        if (tx * tx + tz * tz < 12 * 12) {        // arrived at the spot the radio call named
+          L[(seesEnemy || heard) ? 'contact' : 'futile']++;
+          L.travel.push(Math.round((performance.now() - v._hdTrip.t0) / 1000));
+          v._hdTrip = null;
+        }
+      }
+    }
     if (!seesEnemy && !heard && this._homeAttack) {
       const dx = this._homeAttack.x - px, dz = this._homeAttack.z - pz;
       if (dx * dx + dz * dz < 12 * 12) this._homeAttack = null;
@@ -12098,6 +12143,17 @@ window.RR = {
   repairStats: () => JSON.parse(JSON.stringify(repairStats)),   // cumulative per-match repair telemetry (sorties/heals/guns/jeep fates)
   // Multi-unit slots (elevator = one fielded unit)
   setSupplyW: (team, w) => setSupplyW(team, w),   // A/B: per-team repair weights (hpUrge, nearMax, nearFar)
+  setHomeW: (team, w) => setHomeW(team, w),      // DUEL: per-team home-defence weights (save, kill, tSave, tKill)
+  setHomeScore: on => setHomeScore(on),
+  // Home-defence trip outcomes, summed over both teams' commanders. contact/(contact+futile) is
+  // the number the weights are tuned to raise; `futile` alone is task #49's bug counted directly.
+  homeDefense: () => {
+    const out = { started: 0, contact: 0, futile: 0, abandoned: 0, repeats: 0, travel: [] };
+    for (const c of commanders) { const L = c._hdLedger; if (!L) continue;
+      out.started += L.started; out.contact += L.contact; out.futile += L.futile;
+      out.abandoned += L.abandoned; out.repeats += L.repeats; out.travel.push(...L.travel); }
+    return out;
+  },
   setUnitCap: (n) => { aiUnitCap = n == null ? null : Math.max(1, n | 0); return aiUnitCap; },   // A/B: force the per-team unit cap (null = back to counting elevators)
   unitCap: (i = 0) => { const c = commanders[i]; return c ? c.unitCap() : null; },
   slots: (i = 0) => { const c = commanders[i]; return c ? c._slots.map(s => ({ type: s.unit ? s.unit.type : null, dead: s.unit ? !!s.unit.dead : null, respawnT: +s.respawnT.toFixed(1), rising: s._rising, swapping: s.strategy ? s.strategy.step === 'swap' : false, state: s._dbg ? s._dbg.state : null, px: s._dbg ? s._dbg.px : null, pz: s._dbg ? s._dbg.pz : null, card: s.strategy ? (s.strategy.constructor.name || '') : null, step: s.strategy ? s.strategy.step : null })) : null; },   // debug: per-slot fielded unit + its role card
@@ -12259,14 +12315,15 @@ window.RR = {
     return out;
   },
   swapRescore: () => {
-    const out = { n: 0, held: 0, retarget: 0, dropped: 0, why: {}, to: {} };
+    const out = { n: 0, held: 0, guard: 0, guardTicks: 0, retarget: 0, dropped: 0, why: {}, to: {} };
     const seen = new Set();
     for (const c of commanders) {
       for (const o of [c, ...(c._slots || [])]) {
         const S = o && o._swapRescore;
         if (!S || seen.has(o)) continue;
         seen.add(o);
-        out.n += S.n; out.held += S.held; out.retarget += S.retarget || 0; out.dropped += S.dropped || 0;
+        out.n += S.n; out.held += S.held; out.guard += S.guard || 0; out.guardTicks += S.guardTicks || 0;
+        out.retarget += S.retarget || 0; out.dropped += S.dropped || 0;
         for (const k in S.why) out.why[k] = (out.why[k] || 0) + S.why[k];
         for (const k in S.to) out.to[k] = (out.to[k] || 0) + S.to[k];
       }
