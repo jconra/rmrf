@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=102';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=103';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5717,6 +5717,9 @@ setCapCarry(!QS.has('nocapcarry'));   // a carrier scores capture with flee's +6
 // exactly what cost 15 resolutions with flat&reqveh this morning; this one earns its default or
 // does not get one.
 setHomeScore(QS.has('homescore'));
+// A dry tank does not strand a unit (LIMP = 0.35) — ?statuefix replaces the +10 'about to be a
+// statue' with a gradual mobility cost. Default OFF, unmeasured.
+setStatueFix(QS.has('statuefix'));
 BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
@@ -9139,18 +9142,51 @@ class AICommander {
     // The TRIP lives on the unit (three slots can each be running one); the LEDGER on the commander,
     // because the question is about a team's doctrine, not one hull.
     {
-      const L = this._hdLedger || (this._hdLedger = { started: 0, contact: 0, futile: 0, abandoned: 0, repeats: 0, travel: [] });
+      const L = this._hdLedger || (this._hdLedger = { started: 0, contact: 0, futile: 0, abandoned: 0, fought: 0, gaveUp: 0, repeats: 0, travel: [], to: {}, topScored: {}, tipped: {}, margin: {} });
       const step = this.strategy ? this.strategy.step : null;
       if (step === 'defend' && v._hdStep !== 'defend' && this._homeAttack) {
-        v._hdTrip = { t0: performance.now(), x: this._homeAttack.x, z: this._homeAttack.z };
+        // ammo0 IS THE POINT (Jacob, 2026-08-18: "It ran out of ammo? That means it must have been
+        // shooting at something"). The first cut of this ledger called every early exit `abandoned`,
+        // which quietly equates a unit that gave up with a unit that met the raider on the road and
+        // emptied its magazine into it. The second is the mechanic WORKING. Recording the magazine at
+        // the start is what tells them apart afterwards.
+        v._hdTrip = { t0: performance.now(), x: this._homeAttack.x, z: this._homeAttack.z, ammo0: v.ammo, saw: false };
         L.started++;
         // The yo-yo signature Jacob spotted: the SAME hull answering the radio over and over.
         if ((v._hdN = (v._hdN || 0) + 1) > 1) L.repeats++;
       } else if (step !== 'defend' && v._hdTrip) {
-        L.abandoned++; v._hdTrip = null;          // re-scored away before it ever arrived
+        // WHAT KILLED THE TRIP (Jacob, 2026-08-18: "which weight changed that made the mission
+        // change?"). Counting abandonments told us 63% die and nothing about why, which is not
+        // enough to write a guard against — so record the whole decision, not the verdict:
+        //   to      — the mission that took the slot
+        //   tipped  — the single biggest TERM in that mission's score, i.e. the actual weight that won
+        //   margin  — how far it beat defend by; a hair's-breadth loss is a different bug from a rout
+        // cmd._missionScores is [key, total, terms] for every candidate, already sorted, written by
+        // the scorer on the tick that just ran.
+        L.abandoned++;
+        const S = this._missionScores;
+        if (S && S.length) {
+          const [wKey, wTot, wTerms] = S[0];
+          const dRow = S.find(r => String(r[0]).split('-')[0] === 'defend');
+          const top = (wTerms || []).slice().sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0];
+          // RECORD THE STEP IT ACTUALLY MOVED TO, not the scorer's favourite. Those are different
+          // whenever a PREEMPT takes the slot (flee, a flag emergency) — that path never consults the
+          // score at all, so reading _missionScores[0] reported `defend` as the thing that replaced
+          // defend, which cannot happen. Both are kept: a gap between them IS the preempt count.
+          L.to[step] = (L.to[step] || 0) + 1;
+          L.topScored[wKey] = (L.topScored[wKey] || 0) + 1;
+          if (top) L.tipped[`${wKey}: ${top[0]}`] = (L.tipped[`${wKey}: ${top[0]}`] || 0) + 1;
+          if (dRow) { const m = Math.round((wTot - dRow[1]) * 2) / 2; L.margin[m] = (L.margin[m] || 0) + 1; }
+        }
+        // Fought, or gave up? Shots actually leaving the barrel is the honest test; sighting alone
+        // is kept as a weaker signal for a unit that was jumped before it could fire.
+        const shots = Math.max(0, (v._hdTrip.ammo0 || 0) - v.ammo);
+        if (shots > 0 || v._hdTrip.saw) L.fought++; else L.gaveUp++;
+        v._hdTrip = null;                         // left the mission before reaching the spot
       }
       v._hdStep = step;
       if (v._hdTrip) {
+        if (seesEnemy) v._hdTrip.saw = true;      // it found something on the way, wherever it ended up
         const tx = v._hdTrip.x - px, tz = v._hdTrip.z - pz;
         if (tx * tx + tz * tz < 12 * 12) {        // arrived at the spot the radio call named
           L[(seesEnemy || heard) ? 'contact' : 'futile']++;
@@ -12148,10 +12184,12 @@ window.RR = {
   // Home-defence trip outcomes, summed over both teams' commanders. contact/(contact+futile) is
   // the number the weights are tuned to raise; `futile` alone is task #49's bug counted directly.
   homeDefense: () => {
-    const out = { started: 0, contact: 0, futile: 0, abandoned: 0, repeats: 0, travel: [] };
+    const out = { started: 0, contact: 0, futile: 0, abandoned: 0, fought: 0, gaveUp: 0, repeats: 0, travel: [], to: {}, topScored: {}, tipped: {}, margin: {} };
     for (const c of commanders) { const L = c._hdLedger; if (!L) continue;
       out.started += L.started; out.contact += L.contact; out.futile += L.futile;
-      out.abandoned += L.abandoned; out.repeats += L.repeats; out.travel.push(...L.travel); }
+      out.abandoned += L.abandoned; out.fought += L.fought || 0; out.gaveUp += L.gaveUp || 0;
+      out.repeats += L.repeats; out.travel.push(...L.travel);
+      for (const k of ['to', 'topScored', 'tipped', 'margin']) for (const j in L[k]) out[k][j] = (out[k][j] || 0) + L[k][j]; }
     return out;
   },
   setUnitCap: (n) => { aiUnitCap = n == null ? null : Math.max(1, n | 0); return aiUnitCap; },   // A/B: force the per-team unit cap (null = back to counting elevators)

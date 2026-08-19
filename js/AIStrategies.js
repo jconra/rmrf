@@ -1236,6 +1236,9 @@ export function setSwapCommit(on) { SWAP_COMMIT = !!on; return SWAP_COMMIT; }
 // A flag carrier scores capture with the same +6 flee has always had (?nocapcarry to compare).
 let CAP_CARRY = true;
 export function setCapCarry(on) { CAP_CARRY = !!on; return CAP_CARRY; }
+// Running dry costs MOBILITY, not the ability to act (?statuefix) — see the fuel term in the supply case.
+let STATUE_FIX = false;
+export function setStatueFix(on) { STATUE_FIX = !!on; return STATUE_FIX; }
 // FLATTEN THE MISSION SPACE (Jacob, 2026-08-11). Flee, swap and fight each used to switch the
 // commander OFF for their whole duration — `if (!done) return`, above the decision block — so while
 // one ran, nothing could be re-scored: not a rival in front of us, not our flag being stolen, not a
@@ -1328,8 +1331,8 @@ export function missionScore(cmd, key, running = null) {
       //
       // Arithmetic, for whoever tunes this next: supplyUrge maxes at `urge` (9 for fuel) on a dry
       // tank, so +6 on top of capture's ~3 clears every supply urge at every level. What it does
-      // NOT clear is 'about to be a statue' (+10 at <=5%), and that is intended — a unit that is
-      // about to stop moving cannot score either, so at 5% the top-up genuinely is the better plan.
+      // NOT clear is the fuel term's old +10 'about to be a statue' — which turned out to be premised
+      // on something the physics does not do (LIMP = 0.35: a dry tank still drives). See ?statuefix.
       if (CAP_CARRY) { const fc = cmd.flag && cmd.flag(); if (fc && fc.carrier === cmd.unit) add('carrying the flag home', 6); }
       if (!exposed) add('flag sealed', -10);
       else add('flag OPEN', 4);   // the win condition is on the table — outweigh routine fighting
@@ -1483,7 +1486,22 @@ export function missionScore(cmd, key, running = null) {
       // +10 is the same number the design gives fight/flight and the desperate grab: the moments
       // where one option has to win rather than argue. Being unable to act is one of them.
       if (what === 'ammo' && frac <= 0.02) add('nothing to shoot with', 10);
-      if (what === 'fuel' && frac <= 0.05) add('about to be a statue', 10);
+      // A DRY TANK DOES NOT STRAND ANYTHING (Jacob, 2026-08-18). This was +10 named 'about to be a
+      // statue', sat beside the ammo term as if the two were the same kind of fact. They are not:
+      // `nothing to shoot with` is a genuine binary — no rounds, no fight — while main.js has
+      // `const LIMP = 0.35` with the comment "An empty tank doesn't strand you", and a dry unit keeps
+      // driving at 35% speed. The +10 was pricing an emergency the physics never implements.
+      //
+      // What running dry actually costs is MOBILITY, so that is what it now says: gradual across the
+      // last tenth of the tank rather than a cliff at 5%, and 4 rather than 10 because a slow unit is
+      // impaired, not disabled. It still stacks on supplyUrge (up to 9 for fuel), so a dry hull is
+      // pulled home hard — just not harder than winning the match.
+      //
+      // This matters most to a flag carrier: the +6 carry bonus clears every supply urge but could
+      // never clear a +10, so a carrier under 5% abandoned the run — while perfectly able to limp
+      // home and score. That was the ceiling on the 2026-08-17 result.
+      if (what === 'fuel' && STATUE_FIX) { const crawl = Math.max(0, 1 - frac / 0.10); if (crawl > 0) add('down to a crawl', 4 * crawl); }
+      else if (what === 'fuel' && frac <= 0.05) add('about to be a statue', 10);
       if (running === key && frac < SUPPLY_FULL_F) add('finish the job', 8);
       break;
     }
