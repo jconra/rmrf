@@ -1333,7 +1333,16 @@ export function missionScore(cmd, key, running = null) {
       // tank, so +6 on top of capture's ~3 clears every supply urge at every level. What it does
       // NOT clear is the fuel term's old +10 'about to be a statue' — which turned out to be premised
       // on something the physics does not do (LIMP = 0.35: a dry tank still drives). See ?statuefix.
-      if (CAP_CARRY) { const fc = cmd.flag && cmd.flag(); if (fc && fc.carrier === cmd.unit) add('carrying the flag home', 6); }
+      // cmd.unit MUST BE TESTED FIRST. garagePick() scores before roll-out, so cmd.unit is nullish
+      // there — and with nobody carrying, flag().carrier is nullish too, making `carrier === cmd.unit`
+      // an undefined===undefined match that handed +6 to a unit that did not exist yet. Caught by
+      // Jacob reading a live breakdown: a Rogue's opening roll-out scored `capture-rear +12.1
+      // (carrying the flag home +6, flag sealed -10, ...)` at t1s. Without the phantom term that pick
+      // is +6.1 and siege-back +11 wins, so the bug was choosing openings.
+      if (CAP_CARRY && cmd.unit && !cmd.unit.dead) {
+        const fc = cmd.flag && cmd.flag();
+        if (fc && fc.carrier && fc.carrier === cmd.unit) add('carrying the flag home', 6);
+      }
       if (!exposed) add('flag sealed', -10);
       else add('flag OPEN', 4);   // the win condition is on the table — outweigh routine fighting
       if (cmd.flagGrabbable()) add('grabbable', 2);
@@ -1399,7 +1408,7 @@ export function missionScore(cmd, key, running = null) {
       // road, and arriving still wins the match. Stated as a weight now instead of as position in
       // a ladder, which is the whole point of moving it onto the board.
       const fl = cmd.flag && cmd.flag();
-      if (fl && fl.carrier === cmd.unit) add('carrying the flag home', 6);
+      if (fl && fl.carrier && fl.carrier === cmd.unit) add('carrying the flag home', 6);   // fl.carrier tested: see the capture case
       break;
     }
     case 'defend': {
