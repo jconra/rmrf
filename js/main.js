@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=104';
+import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=105';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -927,7 +927,12 @@ let aiScrapTightArrive = true;   // salvage-detouring units close to within the 
 // BIG3v3 measured, which is precisely why one set was never enough.
 // Still opt-in via ?flat&?reqveh; it is not disproven, it just has not earned a default.
 let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the fleet can actually CREW each plan (A/B knob — see requiredVehicle)
-let aiFleeScore = QS.has('fleescore');   // flee becomes a SCORED candidate instead of a hard preempt (A/B knob — selection only, the terminal commitment stays)
+// SHIPPED DEFAULT 2026-08-18 (?nofleescore reverts). Flee was a hard PREEMPT — it returned from
+// _urgent() before the scorer ran, so `fight` was never compared against it. Watched live: a lurcher
+// broke off at t82s and drove past an enemy sitting at 17% hp, because nothing asked the question.
+// Measured +3 and +1 across two seed sets with mission switches -5.9%; shipped on the mechanism as
+// much as the numbers. Selection only — the terminal commitment is a separate thing (see ?flat).
+let aiFleeScore = !QS.has('nofleescore');
 let aiFightMission = QS.has('fightmsn'); // a vehicle-vs-vehicle duel becomes a MISSION that starts and ends (A/B knob — see the Fight class)
 let aiPostKillMoveOn = true;   // on a kill, drop the killer's engage-afterglow ghost so it doesn't linger "searching" the corpse (A/B via RR.setPostKillMoveOn)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
@@ -5719,7 +5724,11 @@ setCapCarry(!QS.has('nocapcarry'));   // a carrier scores capture with flee's +6
 setHomeScore(QS.has('homescore'));
 // A dry tank does not strand a unit (LIMP = 0.35) — ?statuefix replaces the +10 'about to be a
 // statue' with a gradual mobility cost. Default OFF, unmeasured.
-setStatueFix(QS.has('statuefix'));
+// SHIPPED DEFAULT 2026-08-18 (?nostatuefix reverts). Unmeasured, and shipped anyway because the term
+// it replaces asserts something the physics does not do: `about to be a statue` priced running dry as
+// an emergency, while main.js's own `const LIMP = 0.35` comment says "An empty tank doesn't strand
+// you". A weight premised on a falsehood is wrong at any value.
+setStatueFix(!QS.has('nostatuefix'));
 BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.

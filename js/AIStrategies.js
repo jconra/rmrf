@@ -1111,7 +1111,7 @@ export function setFightMission(on) { FIGHT_MSN = !!on; return FIGHT_MSN; }
 // in tick()'s terminal early-return, so this changes why flee is CHOSEN, not whether it can be
 // abandoned halfway. Removing that early-return and letting the hull score hold the mission is
 // the obvious next step and is deliberately NOT bundled in — one thing at a time.
-let FLEE_SCORE = false;   // A/B knob (?fleescore / RR.setFleeScore)
+let FLEE_SCORE = true;    // SHIPPED DEFAULT 2026-08-18 (?nofleescore)   // A/B knob (?fleescore / RR.setFleeScore)
 export function setFleeScore(on) { FLEE_SCORE = !!on; return FLEE_SCORE; }
 const MSN_CANDS_BASE = ['scout', 'attack', 'siege', 'siege-back',
   'capture-front', 'capture-left', 'capture-right', 'capture-rear',
@@ -1237,7 +1237,7 @@ export function setSwapCommit(on) { SWAP_COMMIT = !!on; return SWAP_COMMIT; }
 let CAP_CARRY = true;
 export function setCapCarry(on) { CAP_CARRY = !!on; return CAP_CARRY; }
 // Running dry costs MOBILITY, not the ability to act (?statuefix) — see the fuel term in the supply case.
-let STATUE_FIX = false;
+let STATUE_FIX = true;    // SHIPPED DEFAULT 2026-08-18 (?nostatuefix)
 export function setStatueFix(on) { STATUE_FIX = !!on; return STATUE_FIX; }
 // FLATTEN THE MISSION SPACE (Jacob, 2026-08-11). Flee, swap and fight each used to switch the
 // commander OFF for their whole duration — `if (!done) return`, above the decision block — so while
