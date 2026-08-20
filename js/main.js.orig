@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=111';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=110';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -1544,8 +1544,6 @@ const ENGAGE_RANGE = { lurcher: 40, firebrat: 24, valkyrie: 50, jotun: 70 };
 // fly, sinks in water) sits at the corner and busts that tower/wall the hard way.
 const TURRET_HOLD = { jotun: 64, valkyrie: 46, lurcher: 38, firebrat: 26 };
 let ROAD_SPEED_MUL = 1.25;   // ground vehicles drive this much faster on a road cell (RR.setRoadSpeed to tune)
-// ?oldkiller restores the map-wide "do they own a vehicle" proxy for runner-death blame (task #44).
-let KILLER_FIX = true;
 let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
 const INTERCEPT_HOLD_R = 16;   // u — inside this of the camp we are STANDING IN THE DOOR: watch the lane home, and pursue is back on
 const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie if a ground unit is within this of our FOB — else chase with what we've got
@@ -5756,7 +5754,6 @@ setStatueFix(!QS.has('nostatuefix'));
 { const d = (QS.get('difficulty') || '').toLowerCase(); if (AIM_DIFFICULTY[d]) aimDiff = AIM_DIFFICULTY[d]; }
 LEAD_FIX = !QS.has('oldlead');
 setBurstFix(!QS.has('oldburst'));
-KILLER_FIX = !QS.has('oldkiller');   // blame a dead runner on what actually shot it (task #44)
 BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
 // which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
@@ -8429,24 +8426,7 @@ class AICommander {
         const runStep = this._primaryKey ? this._primaryKey.split('-')[0] : this.strategy.step;
         if (this.unit.type === 'firebrat' && runStep === 'capture') {
           const tt = this.targetTeam();
-          // WHAT ACTUALLY KILLED THIS RUNNER (task #44, defect 2). This asked whether the enemy owns
-          // a vehicle ANYWHERE ON THE MAP, which is not the same question and answered it wrong 14
-          // times out of 15: measured over 8 seeds, 14 of 15 runner deaths took the interceptor
-          // branch while the damage ledger said 14 of 14 were PURE TOWER kills. The branch decides
-          // whether the answer is "clear their defenders" or "go silence that gun", so getting it
-          // wrong means the siege boost — the only thing that removes the gun that is actually
-          // killing runners — essentially never fired.
-          //
-          // veh._dmgBy has tallied {turret, vehicle, tree, other} per unit the whole time; nothing
-          // had to be built, only asked. The old comment defended the map-wide proxy as a "better
-          // signal than the death's damage-split, which mislabels a mixed tower+vehicle kill" — but
-          // there were no mixed kills in the sample, so it avoided a case that does not occur and
-          // got the real one wrong nearly every time. Ties and empty ledgers fall back to the proxy,
-          // which is the only situation the old reasoning actually described.
-          const by = this.unit._dmgBy;
-          const enemyHasUnits = (KILLER_FIX && by && (by.vehicle || by.turret))
-            ? by.vehicle > by.turret
-            : combatants.some(o => !o.dead && o.team === tt && !vehicleHidden(o));
+          const enemyHasUnits = combatants.some(o => !o.dead && o.team === tt && !vehicleHidden(o));
           this.strategy.onRunnerLost(this, enemyHasUnits);
           aiLog(this.team, enemyHasUnits ? `${this.cname}: Runner's down — they've got defenders! Clear them out first!` : `${this.cname}: Lost the runner — go quiet, we're sneaking the next one in wide!`);
         }

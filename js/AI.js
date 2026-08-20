@@ -66,7 +66,30 @@ function ammoFrac(view) { return view.self.ammoFrac != null ? view.self.ammoFrac
 // but ENTERING one needs a usable burst (~12% of the magazine). Without the asymmetry a unit
 // topping up at base flipped resupply↔engage on every refill tick — off to fight with one
 // round, fire it, dry, back to resupply, repeat (the deterministic ×38 strobe, seed 11 t=201).
-function ammoBurst(view, mem) { return ammoFrac(view) > (mem && mem.state === 'engage' ? 0 : 0.12); }
+// A USABLE BURST IS A NUMBER OF ROUNDS, NOT A FRACTION (task #47 — "It's dumb if you can't fire your
+// last rocket"). The flat 0.12 was tuned on the Firebrat and is absurd at the extremes, because the
+// magazines and the damage per round are nothing like each other:
+//     chassis    dmg/shot   mag   12% is   damage withheld
+//     lurcher       35       68     8.2       286
+//     firebrat      14       90    10.8       151   <- where 0.12 was tuned
+//     valkyrie      90       12      1.4       130
+//     jotun        180       16      1.9       346   <- two shells, and ONE kills a Firebrat outright
+// So a Jotun sitting on its last rocket would not enter a fight it could win with that rocket.
+// Restated as the thing the rule is actually about: enough rounds to be worth starting a fight,
+// ~150 damage (roughly one kill), floored at one round so a loaded gun is never unusable.
+//   rounds = max(1, ceil(150 / dmgPerShot))  ->  lurcher 5/68, firebrat 11/90, valkyrie 2/12, jotun 1/16
+// The Firebrat's value is unchanged at 0.122, so the strobe fix that produced 0.12 keeps its tuning.
+const BURST_FRAC = { lurcher: 5 / 68, firebrat: 11 / 90, valkyrie: 2 / 12, jotun: 1 / 16 };
+// ?oldburst restores the flat 0.12 so the gate has a control arm inside this same build.
+let BURST_FIX = true;
+export function setBurstFix(on) { BURST_FIX = !!on; return BURST_FIX; }
+// The asymmetry stays: STAYING in a fight needs only a round in the gun, ENTERING one needs the
+// burst. Without it a unit topping up at base flipped resupply<->engage on every refill tick (the
+// deterministic x38 strobe, seed 11 t=201).
+function ammoBurst(view, mem) {
+  if (mem && mem.state === 'engage') return ammoFrac(view) > 0;
+  return ammoFrac(view) > (BURST_FIX ? (BURST_FRAC[view.self && view.self.type] ?? 0.12) : 0.12);
+}
 // Pull-out HP threshold: brave brains hold longer (0.27–0.45 across aggression). The
 // Jotun is the exception — it's far too slow to flee (a crawling retreat just gets it
 // shot in the back), so it holds and keeps firing down to nearly dead.
