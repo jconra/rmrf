@@ -1117,7 +1117,15 @@ const PERSONA_FADE = 240;    // …down to ×1 by the four-minute mark
 export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_FADE - matchT) / PERSONA_FADE);
 // A2: capture is DIRECTIONAL (front/left/right/rear — a stonewalled lane has three other
 // angles, and each direction remembers its own failures) and the rear siege is its own plan.
-let FIGHT_MSN = false;   // A/B knob (?fightmsn / RR.setFightMission) — a duel becomes a mission
+// SHIPPED DEFAULT 2026-08-21 (?nofightmsn). A duel stops being a rung and becomes a mission that
+// starts, holds and ends — the step the one-mission-layer design has been waiting on. Until now
+// `underAttack` and `engaging` in AI.js decided every fight per tick, which is why that layer had
+// to grow improvised hysteresis (the ammo burst gate) at the engage/resupply boundary. Scored as
+// 10 + odds against flee's 10 - odds, so the two cross exactly where the odds do.
+// It gated FLAT six times in August (FIGHTRPL: 231 -> 230 resolved, 9 -> 10 stalemates), always
+// stacked with msnattrib&reqveh so nothing isolated it. Flat is the expected reading for half a
+// migration and is not a reason to hold architecture — see the devblog.
+let FIGHT_MSN = true;   // A/B knob (?nofightmsn / RR.setFightMission) — a duel becomes a mission
 export function setFightMission(on) { FIGHT_MSN = !!on; return FIGHT_MSN; }
 // Flee stops being a hard preempt and becomes a scored candidate like everything else, so
 // fight-or-flight is one comparison on one board instead of a decision split across two
