@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=107';
+import { CAPTURE_COMMIT, setGrabScore, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=108';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1583,12 +1583,8 @@ function dlog(key, value, msg) {
     _dlogState.set(key, { snap, t: now });
   }
 }
-const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beelines it and ignores turrets/fire (final-dash commit).
-                             // MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
-                             // fear-ring, and with the commit at 55 the ring ENCLOSED the dash zone — the runner ping-ponged in
-                             // the 60..100u shell forever, aborting the grab each lap ("Taking fire — breaking off toward
-                             // snatching the flag" ×10+, seed 25's endless endgame). Commit outside the fear ring: grab or die
-                             // trying — either resolves the match, and the defender/intercept play is the counter, not the dance.
+// CAPTURE_COMMIT now lives in AIStrategies.js — the `capturing` rung and the desperate-grab
+// score term price the same moment and must not drift apart. Imported above.
 
 // Movement personality per type. cruise = rest altitude above the surface;
 // ignoreWalls = flies over base walls; water = 'cross' (hover/fly) or 'sink'
@@ -5689,6 +5685,7 @@ const REACH_TTL = 2;
 const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
 setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
 setFightMission(aiFightMission);    // …and for the Fight mission joining the candidate list
+setGrabScore(!QS.has('nograbscore'));   // the desperate grab competes on the board instead of needing the rung
 // MEASURED 2026-08-10, three independent 240-seed sets each. See
 // VERDICT_2026-08-10_overnight_summary.txt.
 // SHIPPED: resolution 237 -> 237 exactly, every stuck column within 7 samples, against a baseline

@@ -1125,6 +1125,22 @@ export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_
 // It gated FLAT six times in August (FIGHTRPL: 231 -> 230 resolved, 9 -> 10 stalemates), always
 // stacked with msnattrib&reqveh so nothing isolated it. Flat is the expected reading for half a
 // migration and is not a reason to hold architecture — see the devblog.
+// SHARED WITH THE `capturing` RUNG IN main.js, which is the whole point of it living here: the rung
+// forces the final beeline and the score term below prices the same moment, so they must agree on
+// where "the final approach" starts or the unit commits to a dash its own board did not choose.
+export const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beelines it and ignores turrets/fire (final-dash commit).
+                             // MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
+                             // fear-ring, and with the commit at 55 the ring ENCLOSED the dash zone — the runner ping-ponged in
+                             // the 60..100u shell forever, aborting the grab each lap ("Taking fire — breaking off toward
+                             // snatching the flag" x10+, seed 25's endless endgame). Commit outside the fear ring: grab or die
+                             // trying — either resolves the match, and the defender/intercept play is the counter, not the dance.
+// THE DESPERATE GRAB (?nograbscore reverts). A runner inside grab range of a takeable flag is in
+// the same category of moment as a rival on our guns: the win is on the table RIGHT NOW. Fight and
+// flee each take +10 for contact and capture took nothing, so the grab lost to the fight-or-flight
+// answer and needed the `capturing` rung to override the board per tick. A mission that already
+// outscores everything does not need to be forced.
+let GRAB_SCORE = true;
+export function setGrabScore(on) { GRAB_SCORE = !!on; return GRAB_SCORE; }
 let FIGHT_MSN = true;   // A/B knob (?nofightmsn / RR.setFightMission) — a duel becomes a mission
 export function setFightMission(on) { FIGHT_MSN = !!on; return FIGHT_MSN; }
 // Flee stops being a hard preempt and becomes a scored candidate like everything else, so
@@ -1364,6 +1380,18 @@ export function missionScore(cmd, key, running = null) {
       if (CAP_CARRY && cmd.unit && !cmd.unit.dead) {
         const fc = cmd.flag && cmd.flag();
         if (fc && fc.carrier && fc.carrier === cmd.unit) add('carrying the flag home', 6);
+      }
+      // Deliberately NOT gated on capture already running, unlike the rung: a term that only
+      // applies once the mission is chosen cannot cause it to be chosen. `flagGrabbable` is the
+      // genuine state fact (the guns are down, or it is loose in the open) and stays binary; the
+      // approach is a degree, so the pull ramps from half at the rim to full standing on it.
+      if (GRAB_SCORE && cmd.unit && !cmd.unit.dead && cmd.flagGrabbable && cmd.flagGrabbable()) {
+        const fg = cmd.flag && cmd.flag();
+        if (fg && fg.carrier !== cmd.unit && fg.group && cmd.unit.holder) {
+          const up = cmd.unit.holder.position;
+          const d = Math.hypot(up.x - fg.group.position.x, up.z - fg.group.position.z);
+          if (d < CAPTURE_COMMIT) add('the flag is right there', Math.round(10 * (0.5 + 0.5 * (1 - d / CAPTURE_COMMIT)) * 10) / 10);
+        }
       }
       if (!exposed) add('flag sealed', -10);
       else add('flag OPEN', 4);   // the win condition is on the table — outweigh routine fighting
