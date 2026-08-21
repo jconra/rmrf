@@ -556,11 +556,9 @@ export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   /
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
 // merely a weak one. Armour is the softest — worth a detour, never worth a crisis.
-// hp: 10 and NEAR_MAX 4 come from a 1200-match head-to-head over a 4x range of both knobs
-// (2026-08-07). The honest result was a NULL one — every config landed inside 48.6%-51.6%, which
-// at ~400 games each is noise, so win rate cannot pick between them. These are chosen on BEHAVIOUR
-// instead: the strongest near/far contrast, which is the design goal (heal to full standing at the
-// fob; do not cross the map for it until genuinely low). Do not read the numbers as tuned optima.
+// hp: 10 is a behaviour choice, not a tuned optimum — see NEAR_MAX below for why win rate cannot
+// pick it. The one combination the numbers do reject is hp 10 paired with NEAR_MAX 4: last place
+// in both seed sets at one unit, and the only config that lost on every set it played.
 const SUPPLY_URGE = { fuel: 9, ammo: 6, hp: 10, shield: 3 };
 // The curve. A plain linear ramp from the low line is nearly zero just under it, so the mission
 // could never get STARTED — it would only become winnable once the unit was already in trouble,
@@ -570,7 +568,23 @@ const SUPPLY_URGE = { fuel: 9, ammo: 6, hp: 10, shield: 3 };
 const supplyUrge = (frac, low, urge) => urge * Math.sqrt(Math.max(0, 1 - frac / low));
 // 1 at NEAR_FAR or beyond, rising to NEAR_MAX standing on the base. Gradual on purpose — the
 // house rule is that a term scales with how true its condition is rather than stepping at a line.
-const NEAR_MAX = 4, NEAR_FAR = 140;
+//
+// NEAR_MAX IS A DESIGN CHOICE AND CANNOT BE MEASURED. ~7,700 matches (2026-08-20) swept 0..4 at
+// one, two and three units, then replayed the 1-vs-4 comparison on four seed sets sharing no
+// seeds. Win rate pooled to 50.5% (one unit) and 51.6% (three) against error bars of 2.8 and 3.4
+// — while individual seed sets swung as much as 11.9 points. Any ordering read off a single set
+// is noise; an earlier monotone curve reversed completely on fresh seeds.
+//
+// What DOES reproduce, to within half a point everywhere, is the behaviour: repair's share of
+// live ticks runs 0.5% -> 4.9% across this range at one unit, monotone at every fleet size. It
+// also crowds OUT the other supply runs (5.3% -> 4.3%) rather than adding to them, which is what
+// a unit topping off while already home for repairs looks like.
+//
+// So 2 is picked on how the game should read, not on a gate. At 1 repair holds ~1.2% of ticks and
+// rarely outbids anything; at 4 it holds ~4.9% and a lightly scratched unit will break off for it.
+// 2 sits near the middle at ~3.3%, keeping the trip a real option without letting it outbid the
+// fight, and leaves room to move in either direction.
+const NEAR_MAX = 2, NEAR_FAR = 140;
 // PER-TEAM OVERRIDES, so one weight set can be played against another IN THE SAME MATCH and then
 // the sides flipped — which is the only way to see which is actually better rather than which does
 // better against a fixed opponent. Same shape as RR.setFof for the fight-or-flight weights.
