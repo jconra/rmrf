@@ -34,7 +34,7 @@ const BLURB = {
 const MCOLOR = {
   scout: '#7dd3fc', attack: '#ff8a6a', siege: '#ffcf6a', capture: '#9fe6b0', defend: '#b88df0',
   intercept: '#ff6a9a', scavenge: '#d9a441', harass: '#f0a0d0', sap: '#8fd3ff', trap: '#c0e070',
-  refuel: '#8fa3b3', rearm: '#8fa3b3', repair: '#8fa3b3', armour: '#8fa3b3',
+  refuel: '#8fa3b3', rearm: '#8fa3b3', repair: '#8fa3b3', shield: '#8fa3b3',
 };
 const mcol = k => MCOLOR[String(k).split('-')[0]] || '#667';
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');

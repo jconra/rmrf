@@ -2,7 +2,8 @@
 //   FUEL TANK     — drive near it to refill fuel
 //   AMMO DEPOT    — drive near it to rearm
 //   SHIELD GENERATOR — drive near it to pick up a SHIELD (an HP pool that absorbs
-//                      damage before the hull, GoldenEye body-armour style)
+//                      damage before the hull, the way a GoldenEye vest does — an energy
+//                      bubble, not plating)
 // Any vehicle of either team can use them; each is destructible, so a side can
 // blow one up to DENY it to the enemy. Pure mesh factories here — the gameplay
 // (proximity refill, destruction bookkeeping) lives in main.js, same split as

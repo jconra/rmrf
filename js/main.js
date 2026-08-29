@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=111';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=113';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { CAPTURE_COMMIT, setGrabScore, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFightMission, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=108';
+import { setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=113';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -933,7 +933,6 @@ let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the flee
 // Measured +3 and +1 across two seed sets with mission switches -5.9%; shipped on the mechanism as
 // much as the numbers. Selection only — the terminal commitment is a separate thing (see ?flat).
 let aiFleeScore = !QS.has('nofleescore');
-let aiFightMission = !QS.has('nofightmsn'); // a vehicle-vs-vehicle duel becomes a MISSION that starts and ends (?nofightmsn reverts — see the Fight class)
 let aiPostKillMoveOn = true;   // on a kill, drop the killer's engage-afterglow ghost so it doesn't linger "searching" the corpse (A/B via RR.setPostKillMoveOn)
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
@@ -1583,8 +1582,9 @@ function dlog(key, value, msg) {
     _dlogState.set(key, { snap, t: now });
   }
 }
-// CAPTURE_COMMIT now lives in AIStrategies.js — the `capturing` rung and the desperate-grab
-// score term price the same moment and must not drift apart. Imported above.
+// CAPTURE_COMMIT lives in AIStrategies.js, where the desperate-grab score term uses it. It is no
+// longer needed here: the `capturing` rung it used to gate has retired, because the score term
+// makes that dash win on the board instead of being forced from outside it.
 
 // Movement personality per type. cruise = rest altitude above the surface;
 // ignoreWalls = flies over base walls; water = 'cross' (hover/fly) or 'sink'
@@ -1605,7 +1605,7 @@ const VEH_MOVE = {
 const LAND_SNAP = { _move: { water: 'sink', ignoreWalls: false, tree: 'bump' }, team: null, holder: { position: { x: 0, z: 0 } } };
 // Durability + thirst. burn = fuel/sec at full throttle (idle sips 25%).
 // ammo = shots carried (fast guns carry more, heavy hitters few); shield = the
-// MAX armour pool a shield-generator pickup can give this vehicle (starts at 0).
+// MAX shield pool a shield-generator pickup can give this vehicle (starts at 0).
 const VEH_STATS = {
   lurcher:  { hp: 220, fuel: 200, burn: 2.4, ammo: 68, shield: 110 },
   firebrat: { hp: 90,  fuel: 200, burn: 3.0, ammo: 90, shield: 45  },
@@ -1768,7 +1768,7 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
   veh.burn = st.burn;
   veh.maxAmmo = st.ammo; veh.ammo = st.ammo;
   veh._ammoAcc = 0;                 // fractional rearm accumulator
-  veh.maxShield = st.shield; veh.shield = 0;   // armour pool, picked up at a generator
+  veh.maxShield = st.shield; veh.shield = 0;   // shield pool, picked up at a generator
   veh._shieldFx = null;             // force-field bubble, created on first pickup
   veh._move = VEH_MOVE[veh.type] || VEH_MOVE.lurcher;
   veh._blocked = blockedFor(veh._move, !isPlayer, veh.team);   // AI paths around water; player may dive in
@@ -2236,7 +2236,7 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null, srcPos = nu
   const _hp0 = veh.hp;   // hull before, for the combat log
   dmgTally[cause] = (dmgTally[cause] || 0) + amount;
   if (veh.ai) veh._dmgBy = veh._dmgBy || { turret: 0, vehicle: 0, tree: 0, other: 0 }, veh._dmgBy[cause] += amount;
-  // The shield pool soaks damage before the hull (body-armour style).
+  // The shield pool soaks damage before the hull — an energy bubble, not plating.
   if (veh.shield > 0) {
     const absorbed = Math.min(veh.shield, amount);
     veh.shield -= absorbed;
@@ -3017,7 +3017,7 @@ const STATUS_COLORS = {
 };
 // The mission steps that mean "I am at/heading to a depot". Kept as a set because the mission
 // layer names four separate errands that all read the same from outside the vehicle.
-const SUPPLY_STEPS = new Set(['refuel', 'rearm', 'repair', 'armour', 'resupply']);
+const SUPPLY_STEPS = new Set(['refuel', 'rearm', 'repair', 'shield', 'resupply']);
 const aiStatusLights = !QS.has('nolights');
 let _haloTex = null;
 function haloTexture() {
@@ -3283,24 +3283,24 @@ const AI_HEARD_MIN = 0.18;
 const SHIELD_GRAB_RANGE = 130;  // max detour a Lurcher/Valkyrie will take to top up at a known shield generator
 const GUARD_GEN_DWELL = 25000;  // ms a patrolling guard holds ON the shield generator each lap (turtle v2)
 let turtleGuardOn = true;       // A/B: turtle v2 (slot-kill gate + gen guarding + maintenance) — RR.setTurtleGuard
-const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT — grab the armour before fighting
-// THE GAP. A single number can't be both "start wanting armour" and "stop wanting armour": a
+const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT — grab the shield before fighting
+// THE GAP. A single number can't be both "start wanting a shield" and "stop wanting a shield": a
 // shield sitting on one line flips the decision every time it wobbles across, and under fire at a
 // generator it wobbles every second. Want it below 60%, done at 95% — so topping up ENDS the job
 // instead of instantly un-justifying it. Same shape as SUPPLY_FULL below.
-const SHIELD_WANT = 0.6;        // below this fraction of max armour, go top up
+const SHIELD_WANT = 0.6;        // below this fraction of max shield, go top up
 const SHIELD_FULL = 0.95;       // …and stay until this full (not merely back over the want line)
-const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the armour top-up
+const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the shield top-up
 let SHIELD_SIGHT_MULT = 1.4;    // shield beacon spotted at this × base vision. Tall & glowing so it carries
                                 // past a crate, but NOT half the map — a shield is a reason to SCOUT, not a
                                 // freebie. Runtime-tunable via RR.setShieldSight for A/B.
 // Shield-doctrine narration: the commander calls the play in plain English (like the Rogue bark). One
 // pool per tactic; a per-commander counter cycles them (no RNG → deterministic).
 const SHIELD_BARKS = {
-  grab:    ['armour up first — then we fight', 'grabbing the shield before this gets ugly', 'topping off on the way in', 'not charging in bare — shield first'],
-  camp:    ['holding the generator — come and get it', 'digging in on the armour', 'this shield is mine — hold here', 'let them come to me, I\'ll be armoured'],
-  contest: ['they\'re turtling on the shield — push them off it', 'go break up their armour party', 'they don\'t get to sit on that generator', 'deny them the shield — move in'],
-  deny:    ['wreck that generator — no armour for them', 'take out the shield, then take the base', 'smash the generator so they stop leaning on it', 'no more free armour — level the shield'],
+  grab:    ['shield up first — then we fight', 'grabbing the shield before this gets ugly', 'topping off on the way in', 'not charging in bare — shield first'],
+  camp:    ['holding the generator — come and get it', 'digging in on the shield', 'this shield is mine — hold here', 'let them come to me, I\'ll be shielded'],
+  contest: ['they\'re turtling on the shield — push them off it', 'go break up their shield party', 'they don\'t get to sit on that generator', 'deny them the shield — move in'],
+  deny:    ['wreck that generator — no shields for them', 'take out the shield, then take the base', 'smash the generator so they stop leaning on it', 'no more free shields — level the generator'],
 };
 function shieldBark(cmd, v, kind) {
   const pool = SHIELD_BARKS[kind]; cmd._sbN = (cmd._sbN || 0) + 1;
@@ -5684,8 +5684,6 @@ const REACH_TTL = 2;
 // of re-issuing the impossible order until the unit is scuttled. A/B via RR.setReachArrive.
 const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
 setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
-setFightMission(aiFightMission);    // …and for the Fight mission joining the candidate list
-setGrabScore(!QS.has('nograbscore'));   // the desperate grab competes on the board instead of needing the rung
 // MEASURED 2026-08-10, three independent 240-seed sets each. See
 // VERDICT_2026-08-10_overnight_summary.txt.
 // SHIPPED: resolution 237 -> 237 exactly, every stuck column within 7 samples, against a baseline
@@ -6780,8 +6778,8 @@ class AICommander {
   patrolSpot() {
     const flag = this.homeBasePos(), fob = this.homePos(), enemy = this.enemyBasePos();
     // GUARD THE SHIELD (turtle v2): the nearest KNOWN shield generator on OUR half joins
-    // the patrol — armour decides lurcher duels, so the guard re-tops its own shield and
-    // DENIES the enemy's re-armour by standing on the spawner. The route rebuilds if the
+    // the patrol — the shield decides lurcher duels, so the guard re-tops its own and
+    // DENIES the enemy's re-shielding by standing on the spawner. The route rebuilds if the
     // qualifying gen changes (they get scouted mid-match). Guarding never outranks a real
     // threat: Defend.objective checks homeAttack + our-half contacts BEFORE the patrol.
     let genPt = null;
@@ -6851,7 +6849,7 @@ class AICommander {
       let best = menu[0], bd = -1;
       for (const m of menu) { const d = (m.x - from.x) ** 2 + (m.z - from.z) ** 2; if (d > bd) { bd = d; best = m; } }
       this._harassTgt = best; this._harassT0 = 0; this._harassHp0 = 0;
-      const say = best.gen ? 'Taking out their shield generator — no more armour for them!'
+      const say = best.gen ? 'Taking out their shield generator — no more shields for them!'
         : best.wall ? 'Sniping that tower — make ’em flinch, then gone.'
         : 'Lifting their salvage — bleed the economy.';
       if (this.unit) aiLog(this.team, `${this.cname} ${this.unit.type}: “${say}”`);
@@ -9309,16 +9307,16 @@ class AICommander {
       if (ip) { goal = ip; this._intercepting = true; }
     }
     // ATTACK prep (ai_behavior): a Lurcher/Valkyrie rolling out with little shield swings
-    // by a KNOWN, nearby shield generator to armour up first. (Firebrats run — speed is
-    // their armour; Jotuns siege — too slow to detour. Intercept always outranks this.)
+    // by a KNOWN, nearby shield generator to shield up first. (Firebrats run — speed is
+    // their shield; Jotuns siege — too slow to detour. Intercept always outranks this.)
     this._shielding = false; this._shieldGen = null;
-    // ARMOUR UP IS A JOB, NOT A TICK-BY-TICK OPINION. `_shieldRun` used to be wiped to false here
+    // SHIELDING UP IS A JOB, NOT A TICK-BY-TICK OPINION. `_shieldRun` used to be wiped to false here
     // and rebuilt from a bare `shield < 60%` test, so a unit at a generator UNDER FIRE — where the
     // recharge and the incoming rounds very nearly cancel — flipped its mind once a second: at 62%
     // "I'm fine" handed the unit to the next rule down (out of fuel), a round landed, and at 58%
-    // armour outranked fuel again. Seed 1123: 145.8 shield gained against 138.9 lost over thirty
+    // the shield outranked fuel again. Seed 1123: 145.8 shield gained against 138.9 lost over thirty
     // seconds, the fraction balanced on the 60% line, seventeen seconds of shuttling, tank run dry,
-    // scuttled having got neither the armour nor the fuel. Trip on LOW, clear on FULL — the same
+    // scuttled having got neither the shield nor the fuel. Trip on LOW, clear on FULL — the same
     // shape as the resupply latch next door, which never had this problem because it clears on
     // `resupDone`. See devblog/2026-08-05-one-mission-layer.md.
     const shieldable = !this._intercepting && (v.type === 'lurcher' || v.type === 'valkyrie')
@@ -9326,15 +9324,15 @@ class AICommander {
     const shFrac = v.maxShield > 0 ? v.shield / v.maxShield : 1;
     const gen = shieldable ? this.nearestKnownShield(px, pz) : null;
     const gd = gen ? Math.hypot(gen.pos.x - px, gen.pos.z - pz) : Infinity;
-    // Detour distance scales with how EMPTY the shield is: a fresh unit (0 armour) will
+    // Detour distance scales with how EMPTY the shield is: a fresh unit (0 shield) will
     // go well out of its way to top up (×1.6), one already half-full barely diverts (×1).
-    // So armour-capable units reliably swing by the generator on the way out, instead of
+    // So shield-capable units reliably swing by the generator on the way out, instead of
     // only grabbing it when it happens to be right next to them.
     const reach = SHIELD_GRAB_RANGE * (1.6 - shFrac);
     // Clear first, and clear on distance too: the latch outlives the vehicle in the slot record,
     // and a generator that was close to the LAST unit is not a commitment for this one.
     if (!shieldable || !gen || shFrac >= SHIELD_FULL || gd > SHIELD_GRAB_RANGE) this._shieldRun = false;
-    // SECURE IT: once we're CLOSE, grabbing the armour beats shelling a fort — beeline the gen and
+    // SECURE IT: once we're CLOSE, grabbing the shield beats shelling a fort — beeline the gen and
     // top up. Fixes the "went for the shield, then wandered off to a turret and never got it" bail.
     // shootGoal is already off while detouring, so it won't gun down its own generator on the way in.
     else if (!this._shieldRun && shFrac < SHIELD_WANT && gd < SHIELD_COMMIT) this._shieldRun = true;
@@ -9961,14 +9959,6 @@ class AICommander {
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
       finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
       rushBase: this._gambit && !this.flagExposed(),   // stalemate gambit: IGNORE the enemy, slip around and crack the HQ (suppresses engaging)
-      // CAPTURE COMMIT: on a capture run, once the flag is grabbable AND we're on the final approach
-      // (within CAPTURE_COMMIT), beeline it and ignore turrets (brain: 'capturing' near the top). Not
-      // set once we're carrying it (then the objective is home). Fixes "worked the turret, never grabbed".
-      capturing: this.strategy.step === 'capture' && this.flagGrabbable() && (() => {   // (was strategy.key — always undefined, so the final flag-grab commit never fired)
-        const f = this.flag(); if (!f || f.carrier === v) return false;
-        return (px - f.group.position.x) ** 2 + (pz - f.group.position.z) ** 2 < CAPTURE_COMMIT * CAPTURE_COMMIT;
-      })(),
-
       shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
       // THE MISSION DECIDES whether we are on a supply run. Two layers each answering "do I need
       // fuel" is what produced the 90u depot shuttle; the brain's resupply rung now just executes
@@ -9986,6 +9976,8 @@ class AICommander {
       // The Flee mission is running: drive the route, don't stop to fight. The decision to break
       // off has already been taken; re-opening it on every sighting is the flap this replaced.
       fleeing: this.strategy.step === 'flee',
+      // MISSION-DRIVEN, exactly like `fleeing` above: the board picked the duel, the ladder executes it.
+      fighting: this.strategy.step === 'fight',
       // HOW BRAVE IS THIS RUNNER RIGHT NOW? 0 far from the flag, 1 on top of it — the heroic dash,
       // weighted into fightScore rather than bolted on as an exception. Only on the way TO the
       // flag: once carrying, the job is the trip home and picking fights is never right.
@@ -12229,6 +12221,7 @@ window.RR = {
   grantScrap: (team, n = 10) => { teamScrap[team] = (teamScrap[team] || 0) + n; updateScrapHud(); return teamScrap[team]; },   // debug: bank scrap for a team
   repairStats: () => JSON.parse(JSON.stringify(repairStats)),   // cumulative per-match repair telemetry (sorties/heals/guns/jeep fates)
   // Multi-unit slots (elevator = one fielded unit)
+  setShieldNear: (max, far) => setShieldNear(max, far),   // DUEL the shield top-up's distance curve (max, far)
   setSupplyW: (team, w) => setSupplyW(team, w),   // A/B: per-team repair weights (hpUrge, nearMax, nearFar)
   setHomeW: (team, w) => setHomeW(team, w),      // DUEL: per-team home-defence weights (save, kill, tSave, tKill)
   setHomeScore: on => setHomeScore(on),
@@ -12353,7 +12346,6 @@ window.RR = {
     return Object.keys(AIM_DIFFICULTY).find(k => AIM_DIFFICULTY[k] === aimDiff); },
   getDifficulty: () => Object.keys(AIM_DIFFICULTY).find(k => AIM_DIFFICULTY[k] === aimDiff),
   setFleeScore: on => { aiFleeScore = !!on; setFleeScore(aiFleeScore); return aiFleeScore; },   // flee scored rather than preempting (A/B)
-  setFightMission: on => { aiFightMission = !!on; setFightMission(aiFightMission); return aiFightMission; },   // a duel becomes a mission (A/B)
   setReqVehicle: on => { aiReqVehicle = !!on; setReqVehicle(aiReqVehicle); return aiReqVehicle; },   // price whether the fleet can crew each plan (A/B)
   crewFor: key => commanders.map(c => ({ team: c.team, key, ...requiredVehicle(c, key) })),          // what would roll out for `key`, and what it costs — probe/ai-lab readout
   primaryKey: () => commanders.map(c => ({ team: c.team, step: c.strategy && c.strategy.step, msnKey: c._msnKey, primary: c._primaryKey })),   // attribution readout for probes/ai-lab

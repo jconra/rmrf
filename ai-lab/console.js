@@ -17,7 +17,7 @@ const MCOLOR = { intercept:'#c0392b', attack:'#c0392b', harass:'#cf6f3a', siege:
   // reads the published list, so a mission cannot show up here that the scorer did not see) — but
   // an unknown key falls back to grey, which made the newest missions the hardest ones to read.
   fight:'#e0645a', flee:'#e0c65a', swap:'#7a8a99', refuel:'#caa23a', rearm:'#caa23a',
-  repair:'#3a8f6f', armour:'#2e8fb0' };
+  repair:'#3a8f6f', shield:'#2e8fb0' };
 const STATE_COLOR = { engage:'#e0645a', suppress:'#e0645a', assault:'#e0645a', pursue:'#e0975a',
   advance:'#5a9fe0', exit:'#5a9fe0', flee:'#e0c65a', retreat:'#e0c65a', resupply:'#e0c65a' };
 const ACOLOR = { warrior:'#c0392b', rogue:'#8e44ad', hunter:'#2e8fb0', turtle:'#caa23a' };
@@ -85,7 +85,7 @@ const SUB = {
   defend: [ { label:'Respond — towers under fire', m:/tower|under fire|responding/i, why:'run down the attacker' },
     { label:'Run down a contact', m:/contact|running down/i, why:'chase it off our half' },
     { label:'Patch up at home', m:/patch|patching/i, why:'heal between fights' },
-    { label:'Patrol lane / guard gen', m:CATCH, why:'hold base↔mid, deny re-armour' } ],
+    { label:'Patrol lane / guard gen', m:CATCH, why:'hold base↔mid, deny re-shielding' } ],
   siege: [ { label:'Rear-flank gambit', m:/flank|behind|rear/i, why:'Valkyrie around the back' },
     { label:'Shell the HQ', m:CATCH, why:'crack the keep from range' } ],
   capture: [ { label:'Carry it home', m:/home with the flag/i, why:'run it to our lift' },
@@ -111,7 +111,7 @@ const BRAIN = [
   { when:'capturing',    cond:'Final approach to a grabbable flag?', mode:'advance', why:'commit — ignore turrets' },
   { when:'fleeLatched',  cond:'Runner escaping?\n(flee latch)', mode:'flee', why:'run the flag home' },
   { when:'underAttack',  cond:'Inescapable enemy on top of us?', mode:'engage', why:'answer it now' },
-  { when:'shieldRun',    cond:'Committed to a close shield gen?', mode:'advance', why:'grab the armour first' },
+  { when:'shieldRun',    cond:'Committed to a close shield gen?', mode:'advance', why:'grab the shield first' },
   { when:'engaging',     cond:'Enemy in range and worth it?\n(fightScore>0)', mode:'engage', why:'fight-or-flight says fight' },
   { when:'hurtLatched',  cond:'Hurt and no fight to be had?', mode:'retreat', why:'limp home to heal' },
   { when:'resupLatched', cond:'Low on fuel / ammo?', mode:'resupply', why:'top up at a depot' },

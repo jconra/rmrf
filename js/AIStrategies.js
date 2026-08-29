@@ -405,7 +405,7 @@ class Defend extends Mission {
 // HARASS — the hunter's disruption tour, run when there's no live contact to hunt:
 // rotate cheap-to-hit, expensive-to-ignore stops on THEIR half — the enemy-half shield
 // generator above all (kill it and their lurchers fight the rest of the match without
-// armour), a corner tower to snipe, their salvage to steal. Fire briefly, then FADE to
+// a shield), a corner tower to snipe, their salvage to steal. Fire briefly, then FADE to
 // the farthest next stop before the response lands: every poke writes a false alarm
 // into their radio and drags guards to where we WERE, opening the field for the rest
 // of the army. Never commits — this is disruption, not a siege (harassSpot rotates on
@@ -499,7 +499,7 @@ const INCUMBENT_MAX = 3.0;    // …rising to this at the objective
 // Supply missions are exempt from the SCALING (they keep the base): a unit is on refuel BECAUSE
 // it is nearly dry, and rewarding it for having driven a long way to the pump would make the
 // worst case — out of fuel, far from home — the hardest one to interrupt.
-const INCUMBENT_FLAT = { refuel: 1, rearm: 1, repair: 1, armour: 1 };
+const INCUMBENT_FLAT = { refuel: 1, rearm: 1, repair: 1, shield: 1 };
 // HOW FAR OUT THE UNIT IS — 0 at the pad, 1 at the enemy base. Shared by BOTH distance terms so
 // they can never drift onto different scales: the incumbent bonus (what the running plan has
 // already spent getting here) and requiredVehicle's recall cost (what a chassis change would
@@ -520,7 +520,7 @@ export function travelFraction(cmd) {
 // and Flee are trips TO the pad, so the same number FALLS as they near completion, and a swap that
 // is 90% home ends up cheaper to interrupt than one that just set off. Exactly backwards, and it is
 // why a third of swaps were abandoned once the terminal guards came off: the closer a unit got to
-// solving everything at once (fresh hull = full fuel, ammo and armour), the easier it was to steal.
+// solving everything at once (fresh hull = full fuel, ammo and shield), the easier it was to steal.
 // Measured under ?flat: 26 swaps lost to the home-defence recall and ~30 more to rearm/repair —
 // missions that interrupted a trip home in order to go home.
 // For these, invested fraction is 1 - travelFraction. Same weight, correct in both directions.
@@ -548,14 +548,14 @@ export function incumbentBonus(cmd) {
   if (INCUMB_DIR && INCUMBENT_INBOUND[running]) f = 1 - f;
   return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
 }
-let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/armour (A/B knob)
+let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/shield (A/B knob)
 export function setSwapSupply(on) { SWAP_SUPPLY = !!on; return SWAP_SUPPLY; }
 let INCUMB_DIR = false;   // incumbency counts an inbound trip's progress correctly (A/B knob)
 export function setIncumbDir(on) { INCUMB_DIR = !!on; return INCUMB_DIR; }
 export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
-// merely a weak one. Armour is the softest — worth a detour, never worth a crisis.
+// merely a weak one. The shield is the softest — worth a detour, never worth a crisis.
 // hp: 10 is a behaviour choice, not a tuned optimum — see NEAR_MAX below for why win rate cannot
 // pick it. The one combination the numbers do reject is hp 10 paired with NEAR_MAX 4: last place
 // in both seed sets at one unit, and the only config that lost on every set it played.
@@ -603,6 +603,46 @@ function supplyNearness(cmd) {
   const d = Math.hypot(p.x - cmd._home.x, p.z - cmd._home.z);
   const t = Math.max(0, 1 - d / nearFar);
   return 1 + (nearMax - 1) * t;
+}
+// HOW CLOSE IS "THE FINAL APPROACH". Used by the desperate-grab term in the capture case: inside
+// this, a runner beside a takeable flag scores the moment the win is on the table. It used to be
+// shared with a `capturing` rung in main.js that forced the beeline from outside the board; that
+// rung has retired, so this is now the score term's range and nothing else's.
+//
+// MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
+// fear-ring, and with the commit at 55 the ring ENCLOSED the dash zone — the runner ping-ponged in
+// the 60..100u shell forever, aborting the grab each lap ("Taking fire — breaking off toward
+// snatching the flag" x10+, seed 25's endless endgame). Commit outside the fear ring: grab or die
+// trying — either resolves the match, and the defender/intercept play is the counter, not the dance.
+const CAPTURE_COMMIT = 85;
+
+// THE SHIELD TOP-UP'S MISSING HALF. supplyNearness prices a repair trip by distance
+// to HOME because that is where a hull is patched. The shield's cure is not at home — it is at the
+// generator — so the shield top-up got nearMul 1 and stayed a flat 3, which is precisely the failure the
+// comment in the supply case describes: a flat number has to be "worth a short detour" and "not
+// worth abandoning a fight for" at the same time, and it cannot be. Measured against attack at
+// 9-15, a flat 3 could never be picked at all, which is why `shield` sat outside MSN_CANDS.
+//
+// Same curve as supplyNearness, measured to the generator: ~12 standing on one with a stripped
+// shield (beats attack, worth the few seconds), 3 from across the island (loses to everything,
+// which is correct — nobody crosses the map for plating).
+// 4 is INHERITED, not chosen: it mirrors what repair's NEAR_MAX used to be before that was moved to
+// 2 on a behaviour argument (a top-up should stay a real option without outbidding the fight). The
+// same argument points here too, and ~7,700 matches proved win rate cannot tell these values apart.
+// Settable so the two can be compared directly rather than reasoned about — see RR.setShieldNear.
+let SHIELD_NEAR_MAX = 4, SHIELD_NEAR_FAR = 120;
+export function setShieldNear(max, far) {
+  if (max != null) SHIELD_NEAR_MAX = +max;
+  if (far != null) SHIELD_NEAR_FAR = +far;
+  return { max: SHIELD_NEAR_MAX, far: SHIELD_NEAR_FAR };
+}
+function shieldNearness(cmd) {
+  const v = cmd.unit; if (!v || v.dead || !v.holder || !cmd.nearestKnownShield) return 1;
+  const p = v.holder.position;
+  const g = cmd.nearestKnownShield(p.x, p.z);
+  if (!g || !g.pos) return 1;
+  const d = Math.hypot(p.x - g.pos.x, p.z - g.pos.z);
+  return 1 + (SHIELD_NEAR_MAX - 1) * Math.max(0, 1 - d / SHIELD_NEAR_FAR);
 }
 const fracOf = (cmd, what) => {
   const v = cmd.unit; if (!v || v.dead) return 1;
@@ -882,21 +922,21 @@ class Repair extends Supply {
     'Hull’s failing. Breaking off before I lose it!',
   ]); }
 }
-class ArmourUp extends Supply {
-  get key() { return 'armour'; }
+class ShieldUp extends Supply {
+  get key() { return 'shield'; }
   get what() { return 'shield'; }
   get supplyWant() { return 'shield'; }
   objective(cmd) { const g = cmd.nearestKnownShield && cmd.unit ? cmd.nearestKnownShield(cmd.unit.holder.position.x, cmd.unit.holder.position.z) : null; return (g && g.pos) || cmd._home || cmd.homePos(); }
-  label(cmd) { return 'topping up armour at the generator'; }
+  label(cmd) { return 'topping up the shield at the generator'; }
   cry(cmd) { return pickCry(cmd, [
-    'Swinging by the generator — I want armour before this fight!',
+    'Swinging by the generator — I want a shield before this fight!',
     'No shield, no duel. Topping up first!',
-    'Grabbing armour, then I’m back in it!',
+    'Grabbing a shield, then I’m back in it!',
   ]); }
 }
 
 const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass,
-  refuel: Refuel, rearm: Rearm, repair: Repair, armour: ArmourUp, flee: Flee, swap: Swap, fight: Fight };
+  refuel: Refuel, rearm: Rearm, repair: Repair, shield: ShieldUp, flee: Flee, swap: Swap, fight: Fight };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // Is this mission one a commander may buy a chassis for at the lift? (Top-ups are decisions a
 // unit already in the field makes; letting one reach the garage would deploy the wrong vehicle.)
@@ -930,7 +970,7 @@ const URGENT = new Set(['capture', 'intercept', 'sap', 'flee', 'fight']);   // s
 // It also has a second job here — keeping _primaryKey on the real plan through a duel is what
 // leaves the incumbent bonus with that plan, so winning a fight RESUMES the job instead of
 // handing the board to whatever happened to be second.
-const SUPPORT_MISSIONS = new Set(['flee', 'swap', 'refuel', 'rearm', 'repair', 'armour', 'fight']);
+const SUPPORT_MISSIONS = new Set(['flee', 'swap', 'refuel', 'rearm', 'repair', 'shield', 'fight']);
 export const isSupportMission = key => SUPPORT_MISSIONS.has((key || '').split('-')[0]);
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch (event re-decides)
 // How long a SCORED mission runs before a non-urgent re-think. Deliberately far calmer than the
@@ -1117,32 +1157,6 @@ const PERSONA_FADE = 240;    // …down to ×1 by the four-minute mark
 export const personaWeight = matchT => 1 + PERSONA_EARLY * Math.max(0, (PERSONA_FADE - matchT) / PERSONA_FADE);
 // A2: capture is DIRECTIONAL (front/left/right/rear — a stonewalled lane has three other
 // angles, and each direction remembers its own failures) and the rear siege is its own plan.
-// SHIPPED DEFAULT 2026-08-21 (?nofightmsn). A duel stops being a rung and becomes a mission that
-// starts, holds and ends — the step the one-mission-layer design has been waiting on. Until now
-// `underAttack` and `engaging` in AI.js decided every fight per tick, which is why that layer had
-// to grow improvised hysteresis (the ammo burst gate) at the engage/resupply boundary. Scored as
-// 10 + odds against flee's 10 - odds, so the two cross exactly where the odds do.
-// It gated FLAT six times in August (FIGHTRPL: 231 -> 230 resolved, 9 -> 10 stalemates), always
-// stacked with msnattrib&reqveh so nothing isolated it. Flat is the expected reading for half a
-// migration and is not a reason to hold architecture — see the devblog.
-// SHARED WITH THE `capturing` RUNG IN main.js, which is the whole point of it living here: the rung
-// forces the final beeline and the score term below prices the same moment, so they must agree on
-// where "the final approach" starts or the unit commits to a dash its own board did not choose.
-export const CAPTURE_COMMIT = 85;   // within this of a grabbable flag, the runner beelines it and ignores turrets/fire (final-dash commit).
-                             // MUST exceed the runnerFlee trip radius (60): a defender camping the exposed flag projects a 60u
-                             // fear-ring, and with the commit at 55 the ring ENCLOSED the dash zone — the runner ping-ponged in
-                             // the 60..100u shell forever, aborting the grab each lap ("Taking fire — breaking off toward
-                             // snatching the flag" x10+, seed 25's endless endgame). Commit outside the fear ring: grab or die
-                             // trying — either resolves the match, and the defender/intercept play is the counter, not the dance.
-// THE DESPERATE GRAB (?nograbscore reverts). A runner inside grab range of a takeable flag is in
-// the same category of moment as a rival on our guns: the win is on the table RIGHT NOW. Fight and
-// flee each take +10 for contact and capture took nothing, so the grab lost to the fight-or-flight
-// answer and needed the `capturing` rung to override the board per tick. A mission that already
-// outscores everything does not need to be forced.
-let GRAB_SCORE = true;
-export function setGrabScore(on) { GRAB_SCORE = !!on; return GRAB_SCORE; }
-let FIGHT_MSN = true;   // A/B knob (?nofightmsn / RR.setFightMission) — a duel becomes a mission
-export function setFightMission(on) { FIGHT_MSN = !!on; return FIGHT_MSN; }
 // Flee stops being a hard preempt and becomes a scored candidate like everything else, so
 // fight-or-flight is one comparison on one board instead of a decision split across two
 // mechanisms. SELECTION ONLY: the commitment ("once we are leaving, we are leaving") still lives
@@ -1158,14 +1172,14 @@ const MSN_CANDS_BASE = ['scout', 'attack', 'siege', 'siege-back',
   // waiting on — `hurtLatched` — was replaced by the Flee mission: Flee gets a hurt unit HOME, and
   // repair is what keeps it there until the hull is actually patched. Without it a unit arrived,
   // MissionScore had no "stay and heal" to choose, so it took a fighting job and drove straight
-  // back out at 30% hull. `armour` stays out: its pull is 3 against attack's 9-15, so it can never
-  // be picked, and raising it flat would make armour worth abandoning a fight for. See task #40.
-  'refuel', 'rearm', 'repair'];
+  // back out at 30% hull. `shield` JOINED once its pull stopped being flat: at 3 against attack's
+  // 9-15 it could never be picked, and raising it flat would have made a shield worth abandoning a
+  // fight for. Distance is what resolves that — see shieldNearness. (Was task #40.)
+  'refuel', 'rearm', 'repair', 'shield', 'fight'];
 // Built per call rather than mutated, so the flag genuinely removes `fight` from the board when
 // off — a candidate scored at -50 would still show up in every breakdown and every near-tie log.
 const MSN_CANDS = () => {
   let c = MSN_CANDS_BASE;
-  if (FIGHT_MSN) c = c.concat('fight');
   if (FLEE_SCORE) c = c.concat('flee');
   return c;
 };
@@ -1385,7 +1399,7 @@ export function missionScore(cmd, key, running = null) {
       // applies once the mission is chosen cannot cause it to be chosen. `flagGrabbable` is the
       // genuine state fact (the guns are down, or it is loose in the open) and stays binary; the
       // approach is a degree, so the pull ramps from half at the rim to full standing on it.
-      if (GRAB_SCORE && cmd.unit && !cmd.unit.dead && cmd.flagGrabbable && cmd.flagGrabbable()) {
+      if (cmd.unit && !cmd.unit.dead && cmd.flagGrabbable && cmd.flagGrabbable()) {
         const fg = cmd.flag && cmd.flag();
         if (fg && fg.carrier !== cmd.unit && fg.group && cmd.unit.holder) {
           const up = cmd.unit.holder.position;
@@ -1509,7 +1523,7 @@ export function missionScore(cmd, key, running = null) {
     // lifts the level back over the line that sent us (the two-depot shuttle and the shield
     // flicker were both exactly that). It is a weight, not a lock, so a flag emergency still
     // outbids it — which is the ordering Jacob asked for, expressed as numbers on one scale.
-    case 'refuel': case 'rearm': case 'repair': case 'armour': {
+    case 'refuel': case 'rearm': case 'repair': case 'shield': {
       const what = key === 'refuel' ? 'fuel' : key === 'rearm' ? 'ammo' : key === 'repair' ? 'hp' : 'shield';
       const v = cmd.unit;
       if (!v || v.dead) break;                                        // nothing in the field to top up
@@ -1521,18 +1535,19 @@ export function missionScore(cmd, key, running = null) {
       // This is not a guard bolted on to protect swap — it is a true statement about the board that
       // the scorer did not know, and it belongs in the score for the same reason everything else does.
       if (SWAP_SUPPLY && cmd.strategy && cmd.strategy.step === 'swap') break;
-      if (key === 'armour' && !(v.maxShield > 0 && cmd.nearestKnownShield
-          && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no armour to fetch
+      if (key === 'shield' && !(v.maxShield > 0 && cmd.nearestKnownShield
+          && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no shield to fetch
       if (key === 'repair' && !cmd._home) break;                      // only an own base patches a hull
       const frac = fracOf(cmd, what), low = SUPPLY_LOW[what];
       // HOW MUCH IT PULLS DEPENDS ON HOW FAR THE CURE IS (Jacob). A flat number has to be two
       // contradictory things at once — worth crossing the map for, and not worth abandoning a
-      // fight for — and it cannot be both, which is exactly why `armour` at a flat 3 was
+      // fight for — and it cannot be both, which is exactly why `shield` at a flat 3 was
       // unpickable while the detour it replaced would travel 208u. Healing is CHEAP when you are
       // standing on the pad and EXPENSIVE from the far side of the island, so the score says so:
       // strong enough at home to beat attacking and finish the job, small enough far away that
       // nobody walks home over a scratch.
-      const nearMul = key === 'repair' ? supplyNearness(cmd) : 1;
+      const nearMul = key === 'repair' ? supplyNearness(cmd)
+                    : key === 'shield' ? shieldNearness(cmd) : 1;
       const tw = teamSupplyW[cmd.team];
       const urgeW = (tw && key === 'repair' && tw.hpUrge != null) ? tw.hpUrge : SUPPLY_URGE[what];
       add('low ' + what, supplyUrge(frac, low, urgeW) * nearMul);

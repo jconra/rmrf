@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=108';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=113';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -106,7 +106,7 @@ function bailOf(p, cfg, type) {
 export const FOF_DEFAULT = {
   hpPivot: 0.45, hpGain: 3,          // healthy → fight, low → flee
   ammoHi: 1, ammoLow: -0.5, ammoDry: -4,   // dry guns can't win
-  shield: 1,                         // we have armour to spend
+  shield: 1,                         // we have shield to spend
   aggrPivot: 0.45, aggr: 2,          // brave brains press
   defvPivot: 0.4, defv: 1.2,         // cautious brains hold back
   fragile: 1.2,                      // firebrat dies in a hit or two
@@ -180,7 +180,6 @@ function fightScore(v, p) {
 // pick the active state in the transition table.
 const CONDITIONS = {
   always:       () => true,
-  capturing:    (v) => !!v.capturing,                      // final dash to a grabbable flag → take it, ignore the turrets
   // ON THE WAY HOME. The commander's Flee mission is running: the decision to break off has
   // already been taken and the route is fixed, so this just drives it.
   //
@@ -199,35 +198,24 @@ const CONDITIONS = {
   // Fight-or-flight: only duel a spotted rival when the weighted odds favour it (good
   // hp/ammo/matchup), otherwise keep moving instead of trading into a loss.
   shieldRun: (v) => !!v.shieldRun,   // committed to grab a close shield → do that first (see transitions)
+  // EXECUTOR, NOT DECIDER. `fight` is a scored mission, so the board has already answered "is this
+  // a duel" — this rung never re-opens it. It asks only whether we are close enough for engage
+  // footwork or should keep driving in; the Fight mission's goal IS the foe, so falling through
+  // advances on it. The stalemate gambit still suppresses (that flyer is deliberately not trading).
+  //
+  // The ammo BURST threshold that used to live here is gone with the decision. It was hysteresis
+  // standing in for a latch the ladder could not express — a unit topping up flipped
+  // resupply<->engage on every refill tick — and a mission that holds itself does not need it. The
+  // DRY check stays: engage footwork with an empty gun is the two-Jotun stare-down.
   engaging: (v, m, p) => {
-    if (!v.seesEnemy) return false;
-    // STALEMATE GAMBIT: we've committed a flyer to slip AROUND the mid-field fight and crack the
-    // HQ — ignore the enemy entirely and keep rushing the base (the whole point is not to trade).
-    if (v.rushBase) return false;
-    // OUT OF AMMO can't duel — standing in 'engage' dry just holds the unit nose-to-nose with a
-    // rival forever (two dry Jotuns stared each other down for a whole match). Disengage so it
-    // falls through to resupLatched and pulls back to rearm (matches underAttack, which already
-    // bails when dry). ENTRY needs a usable magazine, not a trickle: a unit topping up at base
-    // used to flip resupply↔engage on every refill tick, fighting one round at a time (×38
-    // strobe) — while it stays in resupply, the pad-fight branch already returns fire.
-    if (!ammoBurst(v, m)) return false;
-    if (!((m._fof != null ? m._fof : fightScore(v, p)) > 0)) return false;
-    // FOCUS (discipline / mood): a disciplined brain won't abandon its objective to chase a
-    // DISTANT enemy — it only breaks off to brawl one that's actually close. brawlR shrinks
-    // with focus (focus 0 → ~1.25× weapon range = fights on sight; focus 1 → ~0.5× = only up
-    // close). An ATTACK mission still fights: its GOAL is the enemy, so it drives in to brawlR.
-    // The JOTUN is exempt: it's far too slow to run, so there's no "too far to be worth leaving
-    // the mission" — it must answer ANY rival it sees, or it gets caught fleeing and dies (the
-    // "Jotun flees a Valkyrie at 5% HP" bug). It always has fof ≥ jotunFloor when it has ammo.
+    if (!v.fighting || !v.seesEnemy || v.rushBase) return false;
+    if (!(ammoFrac(v) > 0)) return false;
     if (v.enemy && p.focus && v.self.type !== 'jotun') {
       const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
-      // HYSTERESIS (anti boundary-strobe): enter the brawl at brawlR, but once we're ALREADY
-      // fighting hold it out to a wider ring. Without this, a kited enemy hovering right at
-      // brawlR flipped engage↔advance every tick — the two states pull opposite ways, so the
-      // unit lurched in place and self-scuttled on a pin (the "open-ground grind" that was
-      // never terrain). Mirrors what fofStick does for the fight-score boundary.
+      // Hold a wider ring once already fighting, so a kited enemy sitting exactly on the boundary
+      // cannot flip engage<->advance every tick (the two pull opposite ways and the unit lurches).
       const brawlR = (v.engageRange || 36) * (1.25 - 0.75 * p.focus) * (m.state === 'engage' ? 1.4 : 1);
-      if (dx * dx + dz * dz > brawlR * brawlR) return false;   // too far to be worth leaving the mission
+      if (dx * dx + dz * dz > brawlR * brawlR) return false;   // still closing — advance on the foe
     }
     return true;
   },
@@ -924,7 +912,6 @@ export const DEFAULT_BRAIN = {
     // ignore the turrets. A runner that stops to trade with the last tower next to the flag just
     // dies without the grab (the "worked an angle on the turret and shot the wall" bug). It's a
     // short, distance-gated dash (the flag's right there), so it's a commit, not a suicide charge.
-    { when: 'capturing',    mode: 'advance',  target: 'goal' },
     // ON THE WAY HOME, GO HOME. While the Flee mission is running the unit drives its route and
     // does not stop to fight — the decision to disengage has already been taken, and a unit that
     // re-opens it every time something comes into view is the flapping this replaced. It sits
@@ -948,12 +935,12 @@ export const DEFAULT_BRAIN = {
     // only fires when the alternative is driving on oblivious.
     { when: 'ambushed',     mode: 'pursue',   target: 'lastSeen' },
     { when: 'pursuing',     mode: 'pursue',   target: 'lastSeen' },
-    // SECURE THE SHIELD: committed to a close generator → grab the armour before picking a fight.
+    // SECURE THE SHIELD: committed to a close generator → grab the shield before picking a fight.
     // The commit is a real latch now (SHIELD_WANT trip / SHIELD_FULL clear, in _view) rather than
     // a value rebuilt every tick. DEMOTING this rung below engage/hurt/resupply was tried on
     // 2026-08-05 and measured badly on its own (attack thrash 9.66 -> 31.07, scuttles 4 -> 20,
     // two stalemates): a long-lived latch sitting under rules that flicker is worse than a
-    // short-lived one sitting on top. The demotion is right once fight/armour-up are missions
+    // short-lived one sitting on top. The demotion is right once fight/shield-up are missions
     // that cannot both be running — see devblog/2026-08-05-one-mission-layer.md.
     { when: 'shootGoal',    mode: 'assault',  target: 'goal' },
     { when: 'always',       mode: 'advance',  target: 'goal' },
