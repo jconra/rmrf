@@ -2261,7 +2261,19 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null, srcPos = nu
   if (cause === 'vehicle' && shooter && shooter !== veh && shooter.team !== veh.team) {
     veh._hitByVehT = performance.now();
     const sp = (shooter.holder && shooter.holder.position) || srcPos;
-    if (sp) veh._hitByVeh = { x: sp.x, z: sp.z, t: veh._hitByVehT };
+    // A HIT TELLS YOU WHAT, NOT JUST WHERE (Jacob). This used to record a bare position and the
+    // comment above called it "intel only — sight still has to confirm before it can shoot back".
+    // That is the reason four rungs still exist: the BOARD cannot answer a hit it has no odds for,
+    // because fightOdds() reads v.ai._fof, which only exists for a VISIBLE rival. So a unit shot
+    // from behind had no mission that could score, and a reflex rung had to cover for it.
+    //
+    // Nothing here is a guess. The round that landed knows which hull fired it, so the type is as
+    // hard a fact as the position — a laser in the back IS a Firebrat behind you, and a shell in
+    // the flank IS a Lurcher on your side. Carrying `type` and the shooter reference lets the fight
+    // and flee terms price a duel against an attacker that has not been SEEN yet, which is what
+    // lets the reflexes retire instead of being reordered.
+    if (sp) veh._hitByVeh = { x: sp.x, z: sp.z, t: veh._hitByVehT, type: shooter.type, veh: shooter,
+                              hpFrac: shooter.maxHp ? shooter.hp / shooter.maxHp : 1 };
   }
   // A TURRET landed a hit — remember which gun (by head position) so the AI can SHOOT
   // BACK at the tower actually hurting it, instead of grinding whatever target its
@@ -7517,7 +7529,30 @@ class AICommander {
     // Symmetric with Fight.done, which ends the mission at 1.25x this reach — so the mission
     // covers exactly the window where a duel is actually possible.
     const d = v.ai._fofD;
-    return (d != null && d <= (SHOT_REACH[v.type] || 42)) ? v.ai._fof : null;
+    if (d != null && d <= (SHOT_REACH[v.type] || 42)) return v.ai._fof;
+    // A HIT IS ALSO A CONTACT (Jacob). _fof only exists for a rival we can SEE, so a unit shot from
+    // outside its sight cone had no odds, `fight` scored 0, `flee` needed _bail, and the board had
+    // no answer at all — which is the entire reason `ambushed`/`threatened`/`pursuing`/`underAttack`
+    // still exist as reflex rungs. A round that landed is harder evidence than a sighting: we know
+    // the hull that fired it and where it stood.
+    //
+    // Estimated, and labelled as such, from the two facts the game already models — the counter web
+    // (COUNTER[a] === b means a beats b) and the two hulls' health. Deliberately PESSIMISTIC by one
+    // point: a shooter you cannot see has the initiative, and the honest default when jumped from
+    // behind is to lean toward breaking off rather than toward a duel you did not choose. Once the
+    // unit turns and actually sees the attacker, the real _fof replaces this on the next tick.
+    const hb = v._hitByVeh;
+    if (hb && hb.type && performance.now() - hb.t < 2500) {
+      const p = v.holder.position;
+      if (Math.hypot(hb.x - p.x, hb.z - p.z) <= (SHOT_REACH[v.type] || 42)) {
+        const mine = v.maxHp ? v.hp / v.maxHp : 1, theirs = hb.hpFrac != null ? hb.hpFrac : 1;
+        let odds = (mine - theirs) * 6;                       // hull advantage, same scale fightScore uses
+        if (COUNTER[v.type] === hb.type) odds += 3;           // we beat them on the counter web
+        else if (COUNTER[hb.type] === v.type) odds -= 3;      // they beat us
+        return odds - 1;                                      // the ambush penalty
+      }
+    }
+    return null;
   }
   shotReach(type) { return SHOT_REACH[type] || 42; }   // how far this chassis can actually shoot (Fight.done)
   scrap() { return teamScrap[this.team] || 0; }
@@ -12478,6 +12513,13 @@ window.RR = {
   recStop: () => recStop(),
   recDump: () => recDump(),                                    // → [{t,ty,reason,state,hp,am,fu,threat,threatLOS,enemyD,out,…}]
   aiConfig: (k, v) => v === undefined ? getBrainConfig(k) : setBrainConfig(k, v),   // read/set a brain knob at runtime (auto-tuning sweeps)
+  // SIGHT FORENSICS. When a near-miss cannot be explained by range or the cone, these are the two
+  // remaining gates in the detection loop, and neither was observable from outside. Exposed so a
+  // watcher can ask the game which one refused rather than inferring it (seed 6493539 t=117s: two
+  // Jotuns 37u apart, both aimed within 12deg, effective range 71u, and neither could see).
+  losBlocked: (ax, az, bx, bz) => { const o = losBlocker(ax, az, bx, bz); return o ? { x: o.x, z: o.z, r: o.r, team: o.team } : null; },
+  vehHidden: (v) => !!vehicleHidden(v),
+  obstacleCount: () => obstacles.length,
   aiEvents: () => aiArchive,                                   // full structured decision-event archive (headless analysis)
   roadCells: () => roadNet.cells,                              // road layout cells (headless parallel-road checks)
   setPaused: (v) => { paused = !!v; },                         // debug: freeze the sim (screenshots)

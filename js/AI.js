@@ -926,12 +926,23 @@ export const DEFAULT_BRAIN = {
     // old ordering where a flat "I'm hurt" latch pre-empted the weighted decision (and the
     // finishHim patch that existed only to poke a hole in that override).
     { when: 'engaging',     mode: 'engage',   target: 'enemy' },
+    // BEING SHOT OUTRANKS TOPPING UP. This sat BELOW resupply, so a unit at a shield generator or a
+    // fuel dump that started taking rounds from something it could not see kept calmly resupplying
+    // — the resupply rung won every tick and `ambushed` was never reached. Watched: a full-health
+    // Lurcher at a generator, shot in the back by another Lurcher that had followed it, standing
+    // there taking it. Its own comment says it "sits below every state that already has a target",
+    // which is right — but a supply run is not a target, it is an errand, and an errand is exactly
+    // the thing a bullet should interrupt.
+    //
+    // This does not decide the fight; it turns the unit to FACE the shot. Facing is what makes the
+    // attacker visible, which makes fightOdds() non-null, which fires the engagement trigger and
+    // hands the actual fight-or-flee choice to the board where it belongs.
+    { when: 'ambushed',     mode: 'pursue',   target: 'lastSeen' },
     { when: 'resupLatched', mode: 'resupply', target: 'resupplyOrGoal' },
     { when: 'threatened',   mode: 'suppress', target: 'threat' },
     // SHOT BY SOMETHING WE CAN'T SEE — turn and find it. Sits below every state that already
     // has a target (engage/suppress/retreat all outrank it) and above the mission goal, so it
     // only fires when the alternative is driving on oblivious.
-    { when: 'ambushed',     mode: 'pursue',   target: 'lastSeen' },
     { when: 'pursuing',     mode: 'pursue',   target: 'lastSeen' },
     // SECURE THE SHIELD: committed to a close generator → grab the shield before picking a fight.
     // The commit is a real latch now (SHIELD_WANT trip / SHIELD_FULL clear, in _view) rather than

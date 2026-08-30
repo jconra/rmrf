@@ -2038,7 +2038,16 @@ class Doctrine {
     // accumulating a backlog across a flee) and wants its own flag and its own 240.
     // Priority below is unchanged; only the point at which we stop LOOKING has moved.
     const sees  = edge('sees',  !!(cmd.lastEnemyPos && cmd.lastEnemyPos()), 'a contact within 12s (seen, heard, or shot at)');
-    const fire  = edge('fire',  !!(v && v._incomingFire), 'taking fire');
+    // `_incomingFire` IS WRITTEN NOWHERE IN THE CODEBASE. It was read only here, so !!undefined
+    // made this trigger permanently false and "taking fire" — the one contact channel that works
+    // from BEHIND, where the sight cone is blind and hearing is masked by our own engine — has
+    // never fired once. The damage path has recorded the real thing all along: _hitByVeh{x,z,t}
+    // and _hitByTurret, which the sight code at main.js:9199 already reads with a 2.5s window.
+    const HIT_MS = 2500;
+    const hitT = Math.max((v && v._hitByVeh && v._hitByVeh.t) || 0,
+                          (v && v._hitByTurret && v._hitByTurret.t) || 0);
+    const underFire = !!(hitT && performance.now() - hitT < HIT_MS);
+    const fire  = edge('fire',  underFire, 'taking fire');
     const flag  = edge('flag',  !!(cmd.ourFlagStolen && cmd.ourFlagStolen()), 'our flag taken');
     // a LEG ended — arrived at the current waypoint, or the driver proved it can't be reached.
     // The unreachable case matters as much as the arrival: without it a unit grinds at an
@@ -2057,8 +2066,35 @@ class Doctrine {
       const t = edge('low' + what, fracOf(cmd, what) < SUPPLY_LOW[what], `${what} is low`);
       if (t && !lowLabel) lowLabel = t;
     }
+    // AN ENGAGEMENT MUST BE ANSWERED (Jacob's rule: contact resolves to fight or flee, nothing else).
+    // `sees` above is an EDGE on "any contact within 12s", so it fires once and then stays latched
+    // for as long as contacts keep refreshing — which means a NEW rival closing on a unit that saw
+    // anything recently produces no trigger, no re-score, and no decision at all.
+    //
+    // Watched on seed 7482249: a full-health Lurcher with a full magazine drove into a Jotun on
+    // `attack`. It SAW it the whole way (17u, dead ahead, LOS clear, sees=true in the tape), stayed
+    // on `attack` because nothing asked it to think again, never entered engage footwork, and took
+    // a 180-damage slug — hp 220 -> 40 in one second. It should have picked flee: a Jotun one-shots
+    // a Lurcher, so the odds are strongly negative and flee scores ~18 against fight's ~2.
+    //
+    // A LEVEL, not an edge, deliberately: while a rival is in REACH and we are doing something that
+    // is neither fighting nor fleeing, the plan is worth re-examining every time we are asked.
+    // MSN_RESCORE_MIN still floors that at once per second, so it cannot become per-tick scoring —
+    // which is the thing triggers exist to replace.
+    //
+    // fightOdds() is the predicate the Fight mission itself scores off — in REACH, not merely in
+    // sight — so the trigger and the score cannot disagree about whether a duel is on offer.
+    // Being SHOT is included deliberately, and not only when the shooter is in reach: a unit shelled
+    // from beyond its own weapon range still has a decision to make (break off, or close), and
+    // `fightOdds` is null out there so the reach test alone would leave it standing there taking
+    // rounds. Watched: a Lurcher shot in the back while topping up at a shield generator, not
+    // reacting at all.
+    const engaged = (cmd.fightOdds && cmd.fightOdds() != null) || underFire;
+    const unanswered = (engaged && this.step !== 'fight' && this.step !== 'flee')
+      ? (underFire ? 'taking fire and we are neither fighting nor fleeing'
+                   : 'a rival in reach and we are neither fighting nor fleeing') : null;
     // …now rank them. 1-3 are the reflexes: self-preservation, then our flag, in the order set out.
-    if (sees || fire || flag) return sees || fire || flag;
+    if (sees || fire || flag || unanswered) return sees || fire || flag || unanswered;
     // 4: the mission says it is finished (the supply missions know when they are full).
     if (this.mission && this.mission.done && this.mission.done(cmd)) return 'mission complete';
     if (legLabel) return legLabel;
