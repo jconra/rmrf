@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=113';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=114';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -197,7 +197,6 @@ const CONDITIONS = {
 
   // Fight-or-flight: only duel a spotted rival when the weighted odds favour it (good
   // hp/ammo/matchup), otherwise keep moving instead of trading into a loss.
-  shieldRun: (v) => !!v.shieldRun,   // committed to grab a close shield → do that first (see transitions)
   // EXECUTOR, NOT DECIDER. `fight` is a scored mission, so the board has already answered "is this
   // a duel" — this rung never re-opens it. It asks only whether we are close enough for engage
   // footwork or should keep driving in; the Fight mission's goal IS the foe, so falling through
@@ -920,7 +919,6 @@ export const DEFAULT_BRAIN = {
     // IMMEDIATE VEHICLE THREAT leads everything below the gate/runner: an inescapable rival on
     // top of us gets answered NOW — never keep sieging or flee-to-heal with our back to it.
     { when: 'underAttack',  mode: 'engage',   target: 'enemy' },
-    { when: 'shieldRun',    mode: 'advance',  target: 'goal' },
     // FIGHT-OR-FLIGHT LEADS when a rival is in range: fightScore already weighs hp, ammo,
     // matchup, numbers AND (now) escape-survivability, so let IT decide fight-vs-flee before
     // the blunt hurt-retreat. `fightScore>0` → engage (even if hurt, when the odds justify

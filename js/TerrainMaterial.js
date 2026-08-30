@@ -153,6 +153,18 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
   });
 
   mat.userData.maps = [sandMap, grassMap, maskMap];
+  // ?flatterrain — SHADER-COST DIAGNOSTIC, not a look. Skips the splat/water/surf injection below
+  // and leaves a plain vertexColors MeshStandardMaterial: no beach blend, no depth gradient, no
+  // foam. The terrain will look wrong; that is the point. This block is by far the most expensive
+  // program in the game — its cache key is 17,675 characters against 285 for every other material,
+  // and on Windows Chrome runs WebGL through ANGLE, which compiles GLSL to HLSL on the CPU, where
+  // cost scales with exactly this kind of long branchy multi-tap fragment shader.
+  //
+  // The query string is read HERE rather than through a setter in main.js because the map is built
+  // at main.js:892, hundreds of lines before the ?flag block runs — a setter would always be too late.
+  const FLAT_TERRAIN = typeof location !== 'undefined'
+    && new URLSearchParams(location.search).has('flatterrain');
+  if (FLAT_TERRAIN) return mat;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSand = { value: sandMap };
     shader.uniforms.uGrass = { value: grassMap };

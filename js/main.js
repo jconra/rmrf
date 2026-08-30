@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=75';
 // Same specifier IslandMap uses — a different one would load a second copy of the module and
 // RR.setSurf would then be tuning a material nobody is rendering.
-import { SURF, setSurf } from './TerrainMaterial.js?v=21';   // shoreline surf tunables (lab/surf.html)
+import { SURF, setSurf } from './TerrainMaterial.js?v=22';   // shoreline surf tunables (lab/surf.html)
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=113';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=114';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=113';
+import { setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=114';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -7422,12 +7422,44 @@ class AICommander {
   }
   // Contact notebook: every sight/sound detection any of our units makes lands here (capped,
   // pruned by age in laneIntel) — the team's honest picture of where enemies have been.
-  _noteContact(x, z) {
+  // `type` is optional and often genuinely unknown: a SIGHTING knows what it looked at, but a
+  // sound bearing and a shot-from stamp do not. Unknown is priced as middling rather than harmless
+  // — a contact you cannot identify is not a contact you can dismiss.
+  _noteContact(x, z, type) {
     if (!this._contacts) this._contacts = [];
     const now = performance.now();
-    for (const c of this._contacts) if ((c.x - x) ** 2 + (c.z - z) ** 2 < 15 * 15) { c.x = x; c.z = z; c.t = now; return; }
-    this._contacts.push({ x, z, t: now });
+    for (const c of this._contacts) if ((c.x - x) ** 2 + (c.z - z) ** 2 < 15 * 15) {
+      c.x = x; c.z = z; c.t = now; if (type) c.type = type; return;
+    }
+    this._contacts.push({ x, z, t: now, type: type || null });
     if (this._contacts.length > 8) this._contacts.shift();
+  }
+  // HOW BADLY IS THIS LANE HELD. laneIntel answers clear/blocked/unknown, and capture priced
+  // `blocked` at a flat -2 — so three Valkyries sitting in ambush cost exactly what one stray
+  // scout costs, and both lost to `flag OPEN +4` plus `grabbable +2`. Watched on seed 40921: three
+  // Firebrats drove a known-blocked lane into three Valkyries and were wiped by one volley (missile
+  // splash is 4.5u and they were inside 5u of each other).
+  //
+  // Danger is DERIVED, not invented: shots-to-kill a runner, from SHOT_DMG against a Firebrat's 90
+  // hull. Valkyrie and Jotun one-shot it (2.0); a Lurcher needs three (0.67); another Firebrat needs
+  // seven (0.29). Freshness decays linearly over the same 25s window laneIntel already trusts, so a
+  // sighting stops mattering exactly when the notebook stops believing it.
+  laneThreat(dir) {
+    if (!this._contacts || !this._contacts.length) return 0;
+    const DANGER = { valkyrie: 2.0, jotun: 2.0, lurcher: 0.67, firebrat: 0.29 };
+    const a = this.enemyApproach(dir), b = this.enemyBasePos();
+    const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz || 1;
+    const now = performance.now();
+    let threat = 0;
+    for (const c of this._contacts) {
+      const age = (now - c.t) / 1000;
+      if (age > 25) continue;
+      let t = ((c.x - a.x) * dx + (c.z - a.z) * dz) / len2; t = Math.max(0, Math.min(1, t));
+      const px2 = a.x + dx * t, pz2 = a.z + dz * t;
+      if ((c.x - px2) ** 2 + (c.z - pz2) ** 2 >= 25 * 25) continue;   // not on this corridor
+      threat += (DANGER[c.type] != null ? DANGER[c.type] : 1.0) * (1 - age / 25);
+    }
+    return Math.min(8, Math.round(threat * 10) / 10);   // capped: past a point the lane is simply shut
   }
   rearTowersLive() {
     const tt = this.targetTeam(), base = this.enemyBasePos(), from = this.homePos();
@@ -9130,7 +9162,7 @@ class AICommander {
     // Remember WHERE the enemy was last seen (team-shared) so the Attack mission can recall
     // their last-known position instead of only marching to the fixed elevator (ai_behavior).
     if (seen) {
-      this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() }; this._noteContact(enemy.x, enemy.z);
+      this._lastEnemyPos = { x: enemy.x, z: enemy.z, t: performance.now() }; this._noteContact(enemy.x, enemy.z, enemy.type);
       // …AND WHO IT WAS. _lastEnemyPos is a place, shared by three different senses (see below:
       // hearing and being shot at write to it too), so it can never answer "is my opponent dead" —
       // it does not know there was an opponent. The Fight mission needs that answer and nothing
@@ -9310,6 +9342,13 @@ class AICommander {
     // by a KNOWN, nearby shield generator to shield up first. (Firebrats run — speed is
     // their shield; Jotuns siege — too slow to detour. Intercept always outranks this.)
     this._shielding = false; this._shieldGen = null;
+    // A SWING-BY IS ROUTING, NOT A MISSION — which is why this survived the rung retirement above it.
+    // `shield` is a scored mission now and owns the COMMITTED trip: my plan is to go top up. What is
+    // left here is the cheap opportunistic version — keep the mission you have, and take the road
+    // that passes the generator. Those are different things and only one of them belongs on the
+    // board. What DID go is the rung: this no longer outranks `engaging`, so a unit swinging by that
+    // meets a rival now lets fight-or-flight answer instead of driving on regardless.
+    //
     // SHIELDING UP IS A JOB, NOT A TICK-BY-TICK OPINION. `_shieldRun` used to be wiped to false here
     // and rebuilt from a bare `shield < 60%` test, so a unit at a generator UNDER FIRE — where the
     // recharge and the incoming rounds very nearly cancel — flipped its mind once a second: at 62%
@@ -9959,7 +9998,6 @@ class AICommander {
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
       finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
       rushBase: this._gambit && !this.flagExposed(),   // stalemate gambit: IGNORE the enemy, slip around and crack the HQ (suppresses engaging)
-      shieldRun: this._shieldRun,   // committed to a close shield → grab it before fighting (brain: above 'engaging')
       // THE MISSION DECIDES whether we are on a supply run. Two layers each answering "do I need
       // fuel" is what produced the 90u depot shuttle; the brain's resupply rung now just executes
       // what the mission layer picked (AIStrategies.js's Refuel/Rearm, in MSN_CANDS).
@@ -11792,6 +11830,15 @@ if (QS.has('win')) {
 function enterField() {
   onField = true;
   fieldFadeT = 0;
+  // RE-PIN THE SEEDED STREAM HERE TOO, not just in the rigs. tourney.cjs has always called
+  // RR.reseed() after load for a reason the comment at _rngReseed spells out: async asset callbacks
+  // consume a load-order-dependent amount of the stream, so the same ?rngseed could silently play a
+  // DIFFERENT match from one boot to the next. The rigs were immune; a person watching in a browser
+  // was not — reloading a seed URL handed you a new game, which makes it impossible to go back and
+  // screenshot something you just saw. Same fix, same place in the sequence: drive-start.
+  //
+  // Only fires when ?rngseed is present, so ordinary play keeps native Math.random untouched.
+  if (QS.has('rngseed') && _rngReseed) _rngReseed(Number(QS.get('rngseed')) || 0);
   exitFortPlace(); exitTowerPick();   // never carry a garage aerial overlay onto the field (it would dangle back into the garage on return)
 
   if (!fieldBuilt) {
@@ -12150,7 +12197,11 @@ if (!GARAGE && QS.has('mapgen')) new Controls(DEFAULTS, rebuild);
 const ray = new THREE.Raycaster();
 // Debug handle (headless verification / console poking).
 window.RR = {
-  THREE, scene, camera, map,
+  // `renderer` is here for SHADER-COST probes: renderer.info.programs lists every compiled program
+  // with its cacheKey, which is the only way to see WHICH parameter is forking a material into
+  // extra variants. On Windows this matters more than it looks — ANGLE compiles GLSL to HLSL on the
+  // CPU, so each extra variant is a D3DCompiler run, not a GPU cost.
+  THREE, scene, camera, map, renderer,
   planPath: (v, dest, opts) => planPath(v, dest, opts),          // nav benchmark / path probes
   cellBlocked: (v, i, j) => cellBlocked(v, i, j),
   // What a route costs priced the way A* prices ground — so a probe can check that smoothing
@@ -12462,6 +12513,14 @@ window.RR = {
   stepField: (dt = 0.05, n = 1) => {
     for (let k = 0; k < n; k++) {
       if (matchOver) break;
+      // AIM-LEADING NEEDS THIS AND IT WAS NEVER HERE. trackVelocities is what writes _vx/_vz, and
+      // the AI's view of an enemy is built from them (`vx: o._vx || 0`). animate() calls it; this
+      // did not — so in EVERY headless tournament the AI saw every target as stationary and
+      // leadAim led by zero, shooting where the enemy was instead of where it was going. Matches
+      // dragged and stalemated in the harness that resolve in a browser (seed 40424, watched).
+      // It also means task #46's per-gun lead was gated in a rig where leading does nothing.
+      // Called BEFORE updateCommanders, matching animate(), so the AI reads this tick's velocities.
+      trackVelocities(dt);
       updateCommanders(dt);
       for (const e of elevators) e.update(dt);
       for (const v of vehicles) v.idle(dt);
@@ -13231,5 +13290,54 @@ function animate() {
 }
 updateCamera();
 ensureVolumeControl();
+
+// SHADER PRE-WARM (?noprewarm disables). Every material compiles its program the first time it is
+// DRAWN, and on Windows that compile runs through ANGLE's GLSL->HLSL translator on the CPU. Measured
+// on a 7900 XT: 28 programs, ~430ms each, two blocking stalls of 6.3s and 5.9s inside a 22s capture
+// — 55% of the session frozen, with the GPU idle throughout.
+//
+// compileAsync is the ONLY path in three.js that uses KHR_parallel_shader_compile (present on this
+// hardware), so it both moves the cost to load time and lets the driver compile across threads
+// instead of one program at a time on the main thread.
+//
+// It warms what is IN the scene now — terrain, water, grass, structures, which includes the
+// expensive one. Vehicle programs still compile on first spawn; warming those needs a hidden
+// instance of each hull, which is the obvious next step and is deliberately not bundled here.
+if (!QS.has('noprewarm') && renderer.compileAsync) {
+  const _t0 = performance.now();
+  // VEHICLE HULLS MUST BE WARMED EXPLICITLY. Their materials are built per instance in the model
+  // constructor, so a hull type that is not on the field yet HAS no material for compileAsync to
+  // find — and the first one to appear compiles mid-match. That is the elevator freeze: a Firebrat
+  // rising from the deck is the first Firebrat drawn, so it pays for its own programs right then.
+  //
+  // Hidden geometry is fine to warm — three's compile() walks with scene.traverse, not
+  // traverseVisible — so these only need to EXIST in the graph, not be on screen. Parked far below
+  // the world, warmed, then removed and disposed.
+  const _warm = [];
+  for (const _t of Object.keys(VEHICLE_TYPES)) {
+    try {
+      const _v = new Vehicle(_t);
+      // CAMO FIRST, OR THE WARMING IS WASTED. setCamo hangs map/roughnessMap/normalMap on the hull
+      // materials and flips needsUpdate, which changes USE_MAP / USE_ROUGHNESSMAP / USE_NORMALMAP —
+      // a different program. Warming a bare hull compiles a variant the game then discards and pays
+      // for the real one anyway. Only map PRESENCE keys the program, not which texture, so one
+      // colour index covers both teams.
+      if (_v.setCamo) _v.setCamo(0);
+      _v.holder.position.set(0, -4000, 0);
+      scene.add(_v.holder); _warm.push(_v);
+    } catch (e) { console.warn('[prewarm] could not build ' + _t + ' for warming:', e); }
+  }
+  renderer.compileAsync(scene, camera).then(() => {
+    for (const _v of _warm) {
+      scene.remove(_v.holder);
+      _v.holder.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        // NOT material.dispose(): the whole point is that the compiled PROGRAM survives to be
+        // reused by the real hulls. Disposing the material releases it and undoes the warming.
+      });
+    }
+    console.log(`[prewarm] ${renderer.info.programs.length} shader programs ready in ${Math.round(performance.now() - _t0)}ms (incl. ${_warm.length} hull types)`);
+  }).catch(e => console.warn('[prewarm] failed, falling back to compile-on-first-use:', e));
+}
 animate();
 

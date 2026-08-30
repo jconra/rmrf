@@ -1367,6 +1367,23 @@ export function missionScore(cmd, key, running = null) {
       }
       break;
     case 'capture': {
+      // THE JOB IS TAKEN. Once a teammate is running the flag home, capture is not a job anybody
+      // else can do — but the board did not know that, so every other runner kept scoring
+      // "flag OPEN +4, grabbable +2" and drove at the CARRIER'S OWN POSITION.
+      //
+      // Seed 40921, watched: BLUE is wiped at 362s and the match is decided. GREEN sends three
+      // Firebrats; one grabs the flag, the other two chase it. All three end up inside 5u of each
+      // other — the two escorts ordered to the exact cell the carrier is standing in, A* unable to
+      // settle a goal a teammate occupies ("route ends 10u short — the ORDER is the bug"), one
+      // reporting STUCK on open road, and the carrier boxed in so it cannot leave. It edges out,
+      // gets shoved back, waits, repeats. The match ran to 3612s without converting.
+      //
+      // Nullish-safe by construction: `carrier` must be truthy before the comparison, so the
+      // phantom undefined===undefined match that once handed +6 to a unit that did not exist yet
+      // cannot happen here. Scored for the CARRIER as before — it is still doing the job.
+      const fcarry = cmd.flag && cmd.flag();
+      if (fcarry && fcarry.carrier && fcarry.carrier !== cmd.unit
+          && fcarry.carrier.team === cmd.team) break;   // a teammate has it — go do something useful
       // WE ARE HOLDING THE WIN CONDITION. Flee has carried this exact term since the preempt was
       // moved onto the board (+6, 'carrying the flag home') and capture never did — so a carrier
       // scored capture as if it were still shopping for a flag, and any supply mission outbid it.
@@ -1442,7 +1459,18 @@ export function missionScore(cmd, key, running = null) {
       }
       // fog-honest lane intel: +1 only for a lane we've had eyes on and know is empty; a lane
       // with a KNOWN contact on it is actively repelling; unscouted = neutral (earn it by scouting)
-      if (cmd.laneIntel) { const li = cmd.laneIntel(dir); if (li === 'clear') add('lane clear', 1); else if (li === 'blocked') add('lane blocked', -2); }
+      // GRADUAL, because a lane is held by an AMOUNT, not a fact. The old flat -2 could not tell
+      // three Valkyries from one stray scout, and lost to `flag OPEN +4` either way. laneThreat
+      // sums shots-to-kill danger across fresh contacts on the corridor; `clear` stays a genuine
+      // binary (we have had eyes on it and it was empty), which the house rule allows.
+      if (cmd.laneIntel) {
+        const li = cmd.laneIntel(dir);
+        if (li === 'clear') add('lane clear', 1);
+        else if (li === 'blocked') {
+          const th = cmd.laneThreat ? cmd.laneThreat(dir) : 2;
+          add('lane held', -Math.max(2, th));   // never softer than the flat value it replaces
+        }
+      }
       if (spareFB >= 0.1) add('spare FB', spareFB); break;
     }
     // FIGHT — the duel, priced off the number the reflex layer ALREADY computes. Deliberately not
@@ -1535,6 +1563,18 @@ export function missionScore(cmd, key, running = null) {
       // This is not a guard bolted on to protect swap — it is a true statement about the board that
       // the scorer did not know, and it belongs in the score for the same reason everything else does.
       if (SWAP_SUPPLY && cmd.strategy && cmd.strategy.step === 'swap') break;
+      // WHO THE TRIP IS FOR. Every hull has a shield pool — the Jotun's is the biggest at 160 — so
+      // `maxShield > 0` excludes nobody, and without these the board would send the two types the
+      // retired rung deliberately kept home. Its comment carried the reasons: a Firebrat's speed IS
+      // its protection and it is the flag runner, and a Jotun is too slow for the detour to ever pay.
+      // Binary because "this hull does not shop for shields" is a state fact. The more principled
+      // version prices the trip by how long it takes THIS hull, which needs a speed term in
+      // shieldNearness — worth doing, not worth inventing here.
+      if (key === 'shield' && (v.type === 'firebrat' || v.type === 'jotun')) break;
+      // A CARRIER DOES NOT SHOP. Getting the flag home ends the match. Shield at a generator reaches
+      // ~12 and a carrier's capture lands ~10-13, which is far too close to leave to arithmetic —
+      // the same reason capture got an explicit carry bonus rather than trusting the sum.
+      if (key === 'shield' && cmd.flag && cmd.flag() && cmd.flag().carrier === v) break;
       if (key === 'shield' && !(v.maxShield > 0 && cmd.nearestKnownShield
           && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no shield to fetch
       if (key === 'repair' && !cmd._home) break;                      // only an own base patches a hull
