@@ -207,7 +207,25 @@ const CONDITIONS = {
   // resupply<->engage on every refill tick — and a mission that holds itself does not need it. The
   // DRY check stays: engage footwork with an empty gun is the two-Jotun stare-down.
   engaging: (v, m, p) => {
-    if (!v.fighting || !v.seesEnemy || v.rushBase) return false;
+    // VISION GATES FIRING, NOT FOOTWORK (Jacob). This required seesEnemy, so a one-second cone
+    // dropout mid-duel made `engaging` false, the ladder fell through to `always -> advance/goal`,
+    // and the unit drove at the mission's arriveDist of 8 — then `combat` pulled it back to its
+    // ~28-36u standoff as soon as vision returned. Measured on the tape: 23 of 172 fight-mode
+    // samples had sees=false, about one second in seven DURING a duel, and every crossing flipped
+    // the mode. That is the whole "lurching in place" behaviour, and it was never indecision about
+    // the mission — that stayed `fight` with a fixed goal throughout.
+    //
+    // The mission is the authority. `v.fighting` means the board chose this duel and Fight has not
+    // ended it; Fight.done retires when the foe is dead, gone, or unseen long enough, so a live
+    // fight mission IS a live foe. Losing sight for a beat is exactly what the 12s contact memory
+    // exists to cover.
+    //
+    // Firing needs no guard here: the AI shot path requires view.enemy (main.js ~8644), which only
+    // exists for a rival actually in sight — so a unit that cannot see still cannot shoot.
+    // Still requires somewhere to point: the live sighting if we have one, else the remembered
+    // position. What it no longer requires is that the sighting be LIVE THIS TICK.
+    if (!v.fighting || v.rushBase) return false;
+    if (!v.enemy && !(m && m.lastSeen)) return false;
     if (!(ammoFrac(v) > 0)) return false;
     if (v.enemy && p.focus && v.self.type !== 'jotun') {
       const dx = v.enemy.x - v.self.x, dz = v.enemy.z - v.self.z;
@@ -339,6 +357,10 @@ const CONDITIONS = {
 function resolveTarget(key, view, mem) {
   switch (key) {
     case 'enemy': return view.enemy;
+    // A duel survives a blink. `engaging` no longer drops out when the sight cone loses the target
+    // for a beat, so the target must degrade to the remembered position rather than resolve to
+    // null — which is what crashed runBrain the moment the two were allowed to disagree.
+    case 'enemyOrLastSeen': return view.enemy || mem.lastSeen || view.goal;
     case 'threat': return view.threat;
     case 'lastSeen': return mem.lastSeen;
     case 'home': return view.home || view.resupply || view.goal;   // where HP actually heals (own base)
@@ -925,7 +947,7 @@ export const DEFAULT_BRAIN = {
     // it); `<=0` → fall through to the retreat below (that's the flight). This replaces the
     // old ordering where a flat "I'm hurt" latch pre-empted the weighted decision (and the
     // finishHim patch that existed only to poke a hole in that override).
-    { when: 'engaging',     mode: 'engage',   target: 'enemy' },
+    { when: 'engaging',     mode: 'engage',   target: 'enemyOrLastSeen' },
     // BEING SHOT OUTRANKS TOPPING UP. This sat BELOW resupply, so a unit at a shield generator or a
     // fuel dump that started taking rounds from something it could not see kept calmly resupplying
     // — the resupply rung won every tick and `ambushed` was never reached. Watched: a full-health
