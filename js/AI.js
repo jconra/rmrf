@@ -518,7 +518,7 @@ const BEHAVIORS = {
     // planted siege standoff above. Picks kite / press / strafe from the pairing.
     let strafe = 0;
     if (mode === 'engage' && view.enemy && los) {
-      const tac = duelTactic(self.type, view.enemy.type);
+      let tac = duelTactic(self.type, view.enemy.type);
       const arc = Math.min(view.shotArc || 0.26, Math.PI);   // how far off-hull the turret can still bear
       // TRAP LURE (hunter's bait): kite the chaser ACROSS OUR OWN MINEFIELD — steer the hull
       // for the lure point (the commander keeps it on the far side of the mines, skirting the
@@ -682,6 +682,23 @@ const BEHAVIORS = {
         const flip = view.enemy.type === 'valkyrie' ? (1.0 + mem.rng() * 1.2) : (2.2 + mem.rng() * 2.2);
         if (mem._strafeT == null || (mem.t - mem._strafeT) > flip) {
           mem._strafeDir = mem.rng() < 0.5 ? -1 : 1; mem._strafeT = mem.t;
+        }
+        // LOOK BEFORE YOU SIDESTEP (Jacob). The direction above is chosen from the matchup table
+        // and a jittered flip timer — nothing checked whether stepping that way keeps a shot. A
+        // Lurcher orbiting a Jotun near a tower could strafe itself straight behind the tower and
+        // then grind, because the blocked-line recovery below only reacts AFTER shots are wasted.
+        // Probe the position ~one strafe-step out: if that side loses the line, take the other; if
+        // both lose it, hold station and keep firing from where we already have a shot.
+        if (view.losFrom && view.enemy) {
+          const STEP = 8;                                    // ~half a second of lateral travel
+          const ex = view.enemy.x - self.x, ez = view.enemy.z - self.z;
+          const L = Math.hypot(ex, ez) || 1;
+          const px = -ez / L, pz = ex / L;                   // unit vector perpendicular to the line of fire
+          const ok = d => view.losFrom(self.x + px * STEP * d, self.z + pz * STEP * d, view.enemy.x, view.enemy.z);
+          if (!ok(mem._strafeDir)) {
+            if (ok(-mem._strafeDir)) { mem._strafeDir = -mem._strafeDir; mem._strafeT = mem.t; }
+            else tac = { ...tac, strafe: 0 };                // both sides blind — stand and shoot
+          }
         }
         strafe = mem._strafeDir * tac.strafe;
         // ORBIT order — the strafe duel with the radius kept honest by the driver: circle
