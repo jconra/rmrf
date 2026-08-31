@@ -10000,14 +10000,14 @@ class AICommander {
       // WHERE those rounds came from (last ~2.5s) — the vehicle twin of towerFire below. underFire
       // says we're being shot; this says by whom, so a unit hit from outside its sight cone can
       // turn toward the shooter instead of only knowing it is losing hull.
-      incomingFire: v._hitByVeh && performance.now() - v._hitByVeh.t < 2500,
+      incomingFire: v._hitByVeh && performance.now() - v._hitByVeh.t < 2500
+        ? { x: v._hitByVeh.x, z: v._hitByVeh.z } : null,
       // WOULD I STILL HAVE A SHOT FROM THERE? Duel footwork picks a strafe direction from the
       // matchup table and commits to it blind — nothing asks whether the step costs the firing
       // line, so a unit can sidestep straight behind the tower it is shooting past. The existing
       // `shotBlocked` recovery only fires AFTER rounds have already been wasted on terrain.
       // Cheap: losBlocker walks the segment in 4u steps against wall pieces only.
-      losFrom: (fx, fz, tx, tz) => hasLOS(fx, fz, tx, tz)
-        ? { x: v._hitByVeh.x, z: v._hitByVeh.z } : null,
+      losFrom: (fx, fz, tx, tz) => hasLOS(fx, fz, tx, tz),
 
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
       // the enemy → the firing lane is blocked; the combat brain sidesteps to clear it.
