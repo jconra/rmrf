@@ -3325,6 +3325,21 @@ const CONE = { full: Math.PI / 4, half: Math.PI / 2, blind: Math.PI * 0.75 };   
 // How well the DRIVER sees along the hull's own heading, against the gunner's view down the
 // turret. 1 = just as well (the crew is always looking where the vehicle is going); 0 = the old
 // turret-only behaviour. ?hulleyes=0 restores it exactly, for the A/B.
+//
+// GATED TWICE, AND IT DOES NOT MEASURE. First gate (sets 0/20000/40000): resolved 233 -> 236,
+// stalemates 7 -> 4, mission switches -8.7%. Confirmation on fresh seeds (60000/80000/100000):
+// resolved 240 -> 239, stalemates 0 -> 1, switches -0.6%. The control arm was PERFECT on the fresh
+// sets, so there was nothing to win there, and the switch reduction — the number with the cleanest
+// mechanism — did not reproduce at all. Pooled over 480 matches an arm it is 473 -> 475 resolved
+// and 7 -> 5 stalemates, which is noise. Call it flat.
+//
+// KEPT ANYWAY, on the defect rather than the number. A Lurcher driving straight at a Jotun 40u away
+// in the open, with a clear line, could not see it because its turret was 113 degrees off and the
+// cone collapsed its sight from 76u to 18u — captured live, twice, and reported by Jacob both times
+// ("the cyan lurcher walked right passed the red juton ... the lurcher didn't shoot at the Juton at
+// all. But the Juton fired at the Lurcher"). A vehicle has a driver and a gunner; modelling only
+// the gunner is what produced that. Flat is the expected result for fixing something a tournament
+// cannot see — the same reason ~7,700 headless matches never surfaced the carrier bug.
 let HULL_EYES = 1;
 // APPLIED AFTER THE DECLARATION, not before it. Reading a `let` above its own line is a temporal
 // dead zone throw, and it took the whole page down — which killed 80/80 seeds of a gate's control
