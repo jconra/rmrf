@@ -654,9 +654,12 @@ const CAPTURE_COMMIT = 85;
 // 0.35 is a starting guess TO BE GATED, not a measured value. RR.setGunOnUs() to A/B it.
 // 1.2 / 200u, chosen from a 12-cell scale x radius grid then gated at 240 seeds x3 against the
 // term switched off: resolved 236 -> 238, stalemates 4 -> 2, and match time down on all three sets
-// (-46s/-16s/-23s). Honest caveat: the stalemate gain came from ONE of the three sets, with the
-// other two exact ties, so the time result is the part that reproduced. A confirmation run on
-// fresh seeds was still in flight when this shipped.
+// (-46s/-16s/-23s), then CONFIRMED on three fresh sets (60000/80000/100000): resolved 234 -> 236,
+// stalemates 6 -> 4, time -56s. Pooled over both gates, 480 matches per arm: 470 -> 474 resolved,
+// 10 -> 6 stalemates. Honest caveat, unchanged by the confirmation: the stalemate gain rides on a
+// single set in BOTH gates (fresh per-set was off [3,1,2] vs wide [0,1,3] — one much better, one
+// tied, one worse), so treat resolution as suggestive. The TIME result is the part that reproduced
+// cleanly: wide is faster on 6 of 6 sets across the two gates.
 let GUN_ON_US = 1.2;
 // The radius the weight's falloff spans. 0 = the gun's own reach (~54u unupgraded). A larger value
 // starts the pull BEFORE the unit is under fire, which is the only moment it still has room to act.
