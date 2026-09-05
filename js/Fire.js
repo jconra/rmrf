@@ -25,9 +25,14 @@ import * as THREE from 'three';
 import VolumetricFire from './VolumetricFire.js?v=3';
 
 const POOL = 12;
-const LIFE = 7.0;          // seconds, whole burn
+let LIFE = 7.0;            // seconds, whole burn
 const GROW = 0.25;         // seconds to reach full size
-const HOLD = 0.55;         // fraction of life at full size before it sags away
+let HOLD = 0.55;           // fraction of life at full size before it sags away
+// WHEN THE SPOT FIRES GO OUT, against the main flame (Jacob: "is there a control for the timing of
+// when the side fires fade versus the middle fire?"). They always died first — a wreck should
+// gutter down to one flame rather than all three ending together — but 0.5 + a 0.25 spread was
+// hardcoded at the call site with no way to feel a different answer.
+let SAT_LIFE = 0.5, SAT_LIFE_VAR = 0.25;
 // World scale of a `scale:1` (vehicle-sized) fire. The box is built 3×6×3, and the profile fades
 // out toward its top, so the FLAME you see is roughly two-thirds of the box — at 1.0 a burning
 // wreck read as a campfire sitting on it. Multiplied into `k` in drawFire so the base-planting
@@ -222,7 +227,7 @@ export function fireWreck(x, y, z, scale = 1, groundAt = null) {
     // An AIR kill (a Valkyrie shot down before it falls) leaves the terrain far below the wreck;
     // seating the spot fires on the ground there would strand them under a fire hanging in the sky.
     if (Math.abs(sy - y) > 4) sy = y;
-    if (fireBurst(sx, sy, sz, sc, 0.5 + frnd() * 0.25, SAT_BURY)) n++;
+    if (fireBurst(sx, sy, sz, sc, SAT_LIFE + frnd() * SAT_LIFE_VAR, SAT_BURY)) n++;
   }
   return n;
 }
@@ -295,12 +300,17 @@ export function setFireLook(o = {}) {
   SAT_SPREAD = c(o.spread,   0.2, 1.5, SAT_SPREAD);
   MAIN_BURY  = c(o.mainBury, 0,   0.9, MAIN_BURY);
   if (o.lean != null) LEAN_LIVE = c(o.lean, 0, 1.2, LEAN_LIVE == null ? LEAN : LEAN_LIVE);
+  LIFE     = c(o.life,    1.5, 16,  LIFE);
+  HOLD     = c(o.hold,    0.1, 0.95, HOLD);
+  SAT_LIFE = c(o.satLife, 0.15, 1.3, SAT_LIFE);
+  SAT_LIFE_VAR = c(o.satLifeVar, 0, 0.6, SAT_LIFE_VAR);
   return getFireLook();
 }
 export function getFireLook() {
   return { sat: SAT_SCALE, bury: SAT_BURY, spread: SAT_SPREAD, mainBury: MAIN_BURY,
            lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE,
-           envR: ENV.x, envTop: ENV.y, envBot: ENV.z };
+           envR: ENV.x, envTop: ENV.y, envBot: ENV.z,
+           life: LIFE, hold: HOLD, satLife: SAT_LIFE, satLifeVar: SAT_LIFE_VAR };
 }
 
 export function drawFire(elapsed) {

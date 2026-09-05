@@ -879,6 +879,12 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     ['envBot',   'bottom fade',      0,   0.6, 0.01, 'lines at the base of a slice'],
     ['envR',     'rim fade',         0.3, 1.0, 0.01, 'lines down the sides'],
     ['envTop',   'top fade',         0.3, 1.0, 0.01, 'lines across the top'],
+    // Timing: how long a wreck burns, when it starts sagging, and how much sooner the spot fires
+    // go out than the main flame.
+    ['life',     'burn time',        1.5, 16,  0.5,  'seconds, whole wreck'],
+    ['hold',     'sag starts at',    0.1, 0.95, 0.01, 'fraction of burn time'],
+    ['satLife',  'spot fire life',   0.15, 1.3, 0.05, 'vs the main flame'],
+    ['satLifeVar','spot life spread', 0,  0.6, 0.05, 'randomness between them'],
   ];
   const wrap = document.getElementById('wsliders');
   const look = getFireLook();
