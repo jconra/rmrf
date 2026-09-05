@@ -1014,12 +1014,19 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     // Emit the exact lines to paste into js/Fire.js, so a look chosen here becomes the shipped
     // default without anyone transcribing nine numbers by hand.
     const L = getFireLook(), f = n => (+n).toFixed(2).replace(/\.00$/, '.0');
+    // EVERY tunable, not just the ones that existed when this was written. The first version
+    // silently omitted the whole spawn and debris block, so a look exported from here shipped with
+    // someone else's values for half of it — the export has to be exhaustive or it is a trap.
     box.value =
       `// fire look, chosen in lab/fire.html\n`
     + `let SAT_SCALE = ${f(L.sat)}, SAT_SPREAD = ${f(L.spread)};\n`
     + `let LIFE = ${f(L.life)}, HOLD = ${f(L.hold)};\n`
     + `let SAT_LIFE = ${f(L.satLife)}, SAT_LIFE_VAR = ${f(L.satLifeVar)};\n`
     + `let OUT_MODE = '${L.outMode}', DISSOLVE = ${f(L.dissolve)};\n`
+    + `let BIRTH = ${f(L.birth)}, SHOOT = ${f(L.shoot)}, FLASH = ${f(L.flash)};\n`
+    + `let SAT_SEED = ${f(L.satSeed)}, SAT_BLOOM = ${f(L.satBloom)};\n`
+    + `let DEB_N = ${Math.round(L.debN)}, DEB_SPEED = ${f(L.debSpeed)}, DEB_LIFE = ${f(L.debLife)}, DEB_GRAV = 26;\n`
+    + `let DEB_COLD = ${f(L.debCold)}, DEB_GLOW = ${f(L.debGlow)}, DEB_HEAT = ${f(L.debHeat)};\n`
     + `const ENV = new THREE.Vector2(${f(L.envR)}, ${f(L.envBot)});\n`
     + `// lean ${f(L.lean)}  ·  wreck scale ${f(wreckScale)} (a test value, not shipped)`;
     box.classList.add('on'); box.select();
