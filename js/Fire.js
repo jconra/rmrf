@@ -41,18 +41,18 @@ let OUT_MODE = 'burn';   // 'burn' | 'sink' | 'shrink' — how a flame ends; see
 //   SHOOT  how much of the way the spot fires TRAVEL from the wreck's centre to their spot. At 1
 //          they are thrown out of the explosion; at 0 they simply appear where they belong.
 //   FLASH  a brightness punch on the first moments, which is what reads as a detonation.
-let BIRTH = 0.42, SHOOT = 1, FLASH = 0;
+let BIRTH = 0.40, SHOOT = 1, FLASH = 0;
 // A spot fire travels as a small FIREBALL and only opens up once it lands (Jacob). Without this
 // it flew out at full size, which reads as three flames sliding apart rather than one wreck
 // throwing burning debris. SEED is its size in transit; BLOOM is how long it takes to reach full
 // size after arriving.
-let SAT_SEED = 0.30, SAT_BLOOM = 0.45;
+let SAT_SEED = 0.15, SAT_BLOOM = 2.0;
 // DEBRIS — a handful of chunks thrown clear of the blast, which fall and wink out. Geometry, not a
 // sprite: they tumble, and the silhouette against the flame is the point.
-let DEB_N = 12, DEB_SPEED = 15, DEB_LIFE = 1.25, DEB_GRAV = 26;
+let DEB_N = 20, DEB_SPEED = 10, DEB_LIFE = 0.55, DEB_GRAV = 26;
 // DEB_COLD biases how many chunks are cold plate rather than molten (higher = more black ones).
 // DEB_GLOW is the distance over which the fire's light falls off. DEB_HEAT is overall brightness.
-let DEB_COLD = 2.2, DEB_GLOW = 5.5, DEB_HEAT = 1.5;
+let DEB_COLD = 6.0, DEB_GLOW = 9.5, DEB_HEAT = 4.0;
 let DISSOLVE = 1;        // fully noise-driven: licks go out at their own pace, never an even dim
 // World scale of a `scale:1` (vehicle-sized) fire. The box is built 3×6×3, and the profile fades
 // out toward its top, so the FLAME you see is roughly two-thirds of the box — at 1.0 a burning
@@ -163,7 +163,12 @@ function makeFireProfile() {
 // One shared geometry and one shared material — they differ only by transform, so they cost a draw
 // call each and nothing else. Chunks shrink to nothing at the end of their life rather than fading,
 // which avoids transparency sorting against the additive flames entirely.
-const DEB_MAX = 40;
+// Sized against SIMULTANEOUS wrecks, not one. At 20 chunks a burst, a 40-slot pool left the second
+// kill inside a half-second with half a burst and a third with none — and a 3v3 exchange kills
+// several units at once, which is exactly when the effect matters. Three full bursts fit here.
+// It costs nothing to raise: this is one InstancedMesh, so the draw call count does not move and
+// the only growth is the transform buffer.
+const DEB_MAX = 60;
 const deb = [];                 // plain state; the mesh is instanced, so nothing here is a THREE object
 let debMesh = null, debGeo = null, debMat = null;
 const _dq = new THREE.Quaternion(), _de = new THREE.Euler(), _dv = new THREE.Vector3(), _dm = new THREE.Matrix4();
