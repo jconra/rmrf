@@ -8054,13 +8054,37 @@ class AICommander {
     const fob = teamCamp(this.team, 'fob'); if (!fob) return null;
     const gates = fob.walls.filter(w => w.type && w.type.startsWith('GATE'));
     if (!gates.length) return null;
+    // A MISSION MUST NAME A PLACE, and if it cannot, that is its bug — not a reason to take the
+    // deploy down with it. Live crash on v461: objective() returned null here and killed
+    // startCommanders, so NEITHER commander ever deployed and the match sat empty. Every other
+    // branch of this function already answers "no exit plan" with null and the caller handles it,
+    // so that is the honest answer here too. The alarm is the point: it names the mission that
+    // broke the contract, once per commander, instead of leaving us reading objective() bodies.
+    // THE OBJECTIVE MUST BE A REAL PLACE — finite, not merely non-null. Live crash on v461, and the
+    // NaN case is the one that actually bit: a coordinate of NaN makes every `d < bestD` false, so
+    // `best` stays null and the line below throws "reading 'x' of null" — which reads like a missing
+    // gate and is nothing of the kind. It took startCommanders down with it, so NEITHER commander
+    // deployed and the match sat empty. Every other branch here already answers "no exit plan" with
+    // null and the caller handles that, so it is the honest answer for a broken objective too.
+    // The alarm is the point: it names the mission that broke the contract instead of leaving us
+    // reading objective() bodies looking for which one can go non-finite.
     const obj = this.strategy.objective(this);
+    if (!obj || !Number.isFinite(obj.x) || !Number.isFinite(obj.z)) {
+      if (!this._objAlarmed) {
+        this._objAlarmed = true;
+        console.warn(`[ALARM] ${this.cname}: mission '${this.strategy.step}' gave no usable objective `
+          + `(${JSON.stringify(obj)}) — deploying without an exit plan. This is a mission bug.`);
+      }
+      return null;
+    }
     let best = null, bestD = Infinity;
     for (const g of gates) {
       const gx = g.group.position.x, gz = g.group.position.z;
+      if (!Number.isFinite(gx) || !Number.isFinite(gz)) continue;   // a malformed gate must not poison the pick
       const d = (gx - obj.x) ** 2 + (gz - obj.z) ** 2;
       if (d < bestD) { bestD = d; best = { x: gx, z: gz }; }
     }
+    if (!best) return null;   // belt and braces: no gate produced a finite distance
     const dx = best.x - fob.center.x, dz = best.z - fob.center.z, m = Math.hypot(dx, dz) || 1;
     return { x: best.x + dx / m * 16, z: best.z + dz / m * 16 };
   }
