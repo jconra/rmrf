@@ -3322,6 +3322,15 @@ const VIS   = { valkyrie: 1.5, jotun: 1.3, lurcher: 1.0, firebrat: 0.65 };
 // toggleable via RR.setSightCone + RR.setConeAngles for the A/B tournament.
 let sightCone = !QS.has('nocone');
 const CONE = { full: Math.PI / 4, half: Math.PI / 2, blind: Math.PI * 0.75 };   // ±45° full, 90° half, 135° blind
+// How well the DRIVER sees along the hull's own heading, against the gunner's view down the
+// turret. 1 = just as well (the crew is always looking where the vehicle is going); 0 = the old
+// turret-only behaviour. ?hulleyes=0 restores it exactly, for the A/B.
+let HULL_EYES = 1;
+// APPLIED AFTER THE DECLARATION, not before it. Reading a `let` above its own line is a temporal
+// dead zone throw, and it took the whole page down — which killed 80/80 seeds of a gate's control
+// arm while the other arm (which never sets the flag) ran clean, so the run looked like it worked.
+// Second time today: the ?shadernonce hook had the identical bug against QS.
+if (QS.has('hulleyes')) HULL_EYES = Math.max(0, Math.min(1, +QS.get('hulleyes') || 0));
 // SCAN-ON-TRANSITION ("check the surroundings"): a unit that just finished something LOUD — it
 // dropped a tower it was sieging, or killed the enemy it was fighting — pauses, before rolling
 // off to its next objective, to sweep its surroundings once. The noise it made draws defenders,
@@ -4147,7 +4156,23 @@ function scatterScrap() {
   // TRY HARDER, because the flag-HQ exclusion below shrinks the legal rim considerably and this
   // loop used to give up at 400 and leave the map short (measured: 8.0 pallets/map -> 5.9, with
   // seeds landing 2 and 3). This runs ONCE at map creation, so the budget is free.
+  // SPREAD IT ALONG THE SHORE (Jacob, 2026-09-05: "the supply drops on the shore really seem to be
+  // clustered together ... can we just increase the distance in between"). The old spacing was a
+  // flat 14u, which on an island is barely a spacing rule at all: the rim ring this samples is
+  // mostly WATER, so the handful of land arcs took several pallets each and they bunched onto one
+  // islet.
+  //
+  // Raising the number alone would trade clustering for a half-empty map — the budget comment
+  // below is there because the legal rim is already tight, and seeds were landing 2 and 3 pallets.
+  // So it RELAXES instead: ask for generous spacing, and only if the map cannot seat eight at that
+  // distance does the requirement ease, one step at a time, down to the old value. A crowded map
+  // ends up no worse than before; a roomy one ends up properly strung out along the coast.
+  const SCRAP_SPACING = [46, 36, 28, 20, 14];
+  let spacingI = 0;
   while (placed < 8 && tries++ < 4000) {
+    // Out of patience at this spacing and still short → ease off and keep going.
+    if (tries % 700 === 0 && spacingI < SCRAP_SPACING.length - 1) spacingI++;
+    const gap = SCRAP_SPACING[spacingI];
     const ang = Math.random() * Math.PI * 2, r = span * (0.6 + Math.random() * 0.34);   // out toward the rim
     const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
     if (!map.isLand(x, z) || blockedAt(x, z)) continue;
@@ -4163,7 +4188,7 @@ function scatterScrap() {
       const clear = c.role === 'main' ? SCRAP_HQ_CLEAR : campClearance(c);
       if (Math.hypot(x - c.center.x, z - c.center.z) < clear) { ok = false; break; }
     }
-    if (ok) for (const p of scrapPiles) if (Math.hypot(x - p.pos.x, z - p.pos.z) < 14) { ok = false; break; }
+    if (ok) for (const p of scrapPiles) if (Math.hypot(x - p.pos.x, z - p.pos.z) < gap) { ok = false; break; }
     if (ok) { addScrapPile(x, z, 'parts'); placed++; }
   }
 }
@@ -9297,7 +9322,22 @@ class AICommander {
       // ahead, half at the flank, blind behind). Sound (below) still catches a rear flanker.
       if (sightCone) {
         const bearing = Math.atan2(-(o.holder.position.x - px), -(o.holder.position.z - pz));
-        effR *= coneFactor(Math.abs(wrapPi(bearing - lookAng)));
+        // THE DRIVER WATCHES THE ROAD (Jacob, 2026-09-05: "it was walking right in the direction of
+        // the Juton, so it seems odd that it wasn't in the cone"). The cone used to hang entirely
+        // off the TURRET, so a crew's whole awareness swung with the gun — and the gun remembers:
+        // aiming sets a 4s _aimHold, so a hull that just fired at something behind it then drove
+        // forward with its sight collapsed in the direction it was travelling. Caught live at
+        // t=198s: a Lurcher 40u from a Jotun, clean line of sight, turret 113 degrees off, so its
+        // 76u sight shrank to 18u and it walked straight past a machine standing in the open.
+        //
+        // A vehicle has a driver AND a gunner. Take the BETTER of the two looks — the turret's, and
+        // the hull's own heading — so a unit always sees where it is going, and additionally sees
+        // wherever the gun happens to be trained. Behind is still blind, so flanking survives
+        // intact; what dies is only the case nobody could defend.
+        const offTurret = Math.abs(wrapPi(bearing - lookAng));
+        let f = coneFactor(offTurret);
+        if (HULL_EYES > 0) f = Math.max(f, HULL_EYES * coneFactor(Math.abs(wrapPi(bearing - h))));
+        effR *= f;
       }
       // WHICH ONE DO WE POINT THE GUNS AT: nearest visible, and deliberately nothing cleverer.
       // Target priority (a flag carrier outranking a nearer hull) was built and removed — it can
@@ -12556,6 +12596,7 @@ window.RR = {
     textures: renderer && renderer.info ? renderer.info.memory.textures : null,
   }),
   setPerf: (on = true) => { PERF = !!on; return PERF; },   // switch the section timers on at runtime
+  setHullEyes: v => { HULL_EYES = Math.max(0, Math.min(1, +v || 0)); return HULL_EYES; },   // A/B: how well the driver sees along the hull heading (0 = turret-only, the old cone)
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
