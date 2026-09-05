@@ -500,6 +500,12 @@ let perfExpanded = false;      // the corner readout's [+] tier (replans / fx / 
 const _pfAcc = {};                                     // section → ms accumulated over the window
 const _pfFrameAcc = {};                                // section → ms for THIS frame alone (feeds the hitch log)
 let _pfFrames = 0, _pfWork = 0, _planCount = 0, _pfShownAt = 0;
+// CUMULATIVE, and nothing clears these. The counters above are a ~300ms DISPLAY window that
+// _pfRender resets every time it draws, so reading them from outside returns whatever fraction of
+// a window happened to have accrued — RR.perfDump's first attempt reported `frames: 0` with every
+// section at 0.0ms while the panel beside it was showing real numbers. A separate running tally is
+// the only honest answer to "what did this session actually cost".
+const _pfAccAll = {}; let _pfFramesAll = 0, _pfWorkAll = 0;
 function _pfT(k, fn) {
   if (!PERF) return fn();
   const t = performance.now(); fn(); const d = performance.now() - t;
@@ -12448,6 +12454,31 @@ window.RR = {
     flagStalls: flagRunStalls, flagStallList: flagRunStallList.slice(-8) }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
   setGunOnUs: (v, r) => setGunOnUs(v, r),   // A/B: (scale, radius) for the tower-proximity pull toward siege
+  // PERFORMANCE, READ FROM OUTSIDE. The hitch log and the section timers already existed but were
+  // only ever drawn into the ?perf panel, so the one question that matters off-screen — "what was
+  // the renderer DOING during the frames that stuttered" — could not be asked by a script or from
+  // a phone. Returns the worst frames kept this session with their section split, plus the running
+  // per-section totals. Needs ?perf (or RR.setPerf(true)) for the timers to be collecting at all.
+  perfDump: () => ({
+    collecting: PERF,
+    frames: _pfFramesAll,
+    avgFrameMs: _pfFramesAll ? +(_pfWorkAll / _pfFramesAll).toFixed(2) : null,
+    hitchOverMs: PF_HITCH_MS,
+    // atS ~0 is the first drawn frame (scene build + first real render), not a stutter anyone feels.
+    // Flagged rather than dropped: hiding it would make the log lie about what it saw.
+    hitches: _pfHitch.map(h => ({ ms: +h.ms.toFixed(1), atS: +h.at.toFixed(1), plans: h.plans,
+                                  units: h.units, fx: h.fx, doing: h.secs,
+                                  loadFrame: h.at < 1 })),
+    sections: Object.fromEntries(Object.entries(_pfAccAll)
+      .sort((x, y) => y[1] - x[1])
+      .map(([k, v]) => [k, +(v / Math.max(1, _pfFramesAll)).toFixed(2)])),   // ms per frame, whole session
+    draws: renderer && renderer.info ? renderer.info.render.calls : null,
+    tris: renderer && renderer.info ? renderer.info.render.triangles : null,
+    programs: renderer && renderer.info ? renderer.info.programs.length : null,
+    geometries: renderer && renderer.info ? renderer.info.memory.geometries : null,
+    textures: renderer && renderer.info ? renderer.info.memory.textures : null,
+  }),
+  setPerf: (on = true) => { PERF = !!on; return PERF; },   // switch the section timers on at runtime
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
@@ -13364,6 +13395,8 @@ function animate() {
     // frames) — measuring from 0 would bank the whole page uptime as one colossal fake hitch.
     const _fms = _pfStart ? performance.now() - _pfStart : 0;
     _pfWork += _fms; _pfFrames++;
+    _pfWorkAll += _fms; _pfFramesAll++;
+    for (const k in _pfFrameAcc) _pfAccAll[k] = (_pfAccAll[k] || 0) + _pfFrameAcc[k];
     if (_fms >= PF_HITCH_MS) _pfNoteHitch(_fms, clock.elapsedTime);
     for (const k in _pfFrameAcc) delete _pfFrameAcc[k];
     _planFrame = 0;
