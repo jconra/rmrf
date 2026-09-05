@@ -76,7 +76,25 @@ class Sap extends Mission {
   // Drive to the far end of a home-side FLANK, then lay mines on the way back (main.js sapTarget/
   // aiLayGadgets run the out→back→pod route). Off our own lane, so we don't mine our own advance.
   objective(cmd) { return cmd.unit ? cmd.sapTarget(cmd.unit) : cmd.homeBasePos(); }
-  label(cmd) { return 'a flank recon-and-mine run'; }
+  // THE RUN ENDS WHEN THE MINES ARE LAID. Sap had no `done()` at all, and the base Mission class
+  // does not define one — so the 'mission complete' trigger (`this.mission.done && ...`) could
+  // never fire for it. Meanwhile sapTarget returns homePos() once the phase reaches 'done', so a
+  // finished sapper drove back to its own elevator, arrived, and sat there: the driver reporting
+  // `advance:HOLD why="arrived — advance"` while the commander re-scored every second and kept
+  // picking the job it had already finished. Watched live at 64s of dwell; reproduced headlessly
+  // on seed 18 at 90s, ending at phase 'done' four units from home.
+  //
+  // Losing the unit ends it too — otherwise the mission outlives the sapper and the slot stays
+  // parked on a run nobody is making.
+  done(cmd) {
+    const v = cmd.unit;
+    if (!v || v.dead) return true;
+    if (v._sapPhase === 'done') return true;
+    // …or there is nothing left to place. At the team gadget cap `place` returns null, so a charge
+    // is never spent and the phase machine cannot advance on its own — without this the sapper
+    // circles a full minefield until something else preempts it.
+    return (cmd.sapRoom ? cmd.sapRoom() : 1) <= 0;
+  }
   cry(cmd) { return pickCry(cmd, [
     'Send a Firebrat wide — scout the flank and mine it on the way back.',
     'Recon the flank and seed it with mines before they probe it.',
@@ -1196,9 +1214,16 @@ const MSN_CANDS_BASE = ['scout', 'attack', 'siege', 'siege-back',
   'refuel', 'rearm', 'repair', 'shield', 'fight'];
 // Built per call rather than mutated, so the flag genuinely removes `fight` from the board when
 // off — a candidate scored at -50 would still show up in every breakdown and every near-tie log.
-const MSN_CANDS = () => {
+const MSN_CANDS = (cmd) => {
   let c = MSN_CANDS_BASE;
   if (FLEE_SCORE) c = c.concat('flee');
+  // A SAP THAT HAS ALREADY RUN IS NOT ON THE BOARD. Removed rather than scored down, for the same
+  // reason `flee` is added rather than penalised: a candidate parked at -50 still shows up in every
+  // breakdown and every near-tie log. And zeroing it in the switch is not enough on its own — the
+  // fleet-favour, persona and incumbent terms are all added AFTER the switch, so a finished sap
+  // still totalled enough to keep winning and the sapper stayed parked on its own elevator.
+  if (cmd && cmd.unit && (cmd.unit._sapPhase === 'done'
+      || ((cmd.unit._mineCharges || 0) <= 0 && cmd.unit._laidPod))) c = c.filter(k => k !== 'sap');
   return c;
 };
 
@@ -1593,7 +1618,17 @@ export function missionScore(cmd, key, running = null) {
       }
       break;
     case 'sap':
-      if (earlyB >= 0.1 && spareFB >= 0.5) add('opening sap', earlyB); break;
+      // SCALED BY WHETHER THERE IS ANYTHING LEFT TO LAY (Jacob). Two separate things can make this
+      // job pointless: the runner is out of mines and has dropped its pod, or the TEAM is at its
+      // gadget cap and nothing more may be placed. The second is also a hang — `place` returns null
+      // at the cap, so a charge is never spent and the route never leaves 'back'.
+      // Belt and braces with MSN_CANDS, which drops `sap` outright once the route is spent.
+      {
+        const room = cmd.sapRoom ? cmd.sapRoom() : 1;
+        if (room <= 0) break;
+        if (earlyB >= 0.1 && spareFB >= 0.5) add('opening sap', earlyB * room);
+      }
+      break;
     case 'trap':
       // "READY" HAS TO MEAN THE TRAP EXISTS. This scored on _trapMode — the INTENT, rolled once at
       // the opening — while `_trap` (the mine cluster's centroid) is only set when the sap sortie
@@ -1769,7 +1804,7 @@ export function missionPick(cmd, incumbent = null) {
   if (exp && !cmd._expForgave) { cmd._expForgave = true; for (const k in S) if (k === 'capture' || k.startsWith('capture-')) delete S[k]; }
   else if (!exp) cmd._expForgave = false;
   let best = null, bestV = -1e9; const all = [];
-  for (const key of MSN_CANDS()) {
+  for (const key of MSN_CANDS(cmd)) {
     const r = missionScore(cmd, key, incumbent);
     // INCUMBENT BONUS — now weighted by how much of the plan is already PAID FOR. Near-tied
     // scores must not flap the commander between missions every few seconds (autopsy: a

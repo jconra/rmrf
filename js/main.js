@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=3';
-import { setGunOnUs, setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=115';
+import { setGunOnUs, setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=116';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -3700,6 +3700,20 @@ function refuel(v, dt) {
   if (v.isPlayer) updatePlayerHud();
 }
 function rearm(v, dt) {
+  // MINES AND THE POD ARE AMMO TOO (Jacob, 2026-09-04: "maybe the sap needs a score to indicate
+  // that it has already used up its mines and sensor pod — maybe it could get more at the
+  // elevator"). A Firebrat was handed MINE.perTrip exactly once, lazily, the first time it ran a
+  // sortie, and `_laidPod` was never cleared — so a sapper was a single-use unit for the rest of
+  // its life. Restocking here means the same trip that tops up ammo makes it a sapper again, and
+  // it costs no new plumbing: the supply missions already drive it to the pad and hold it there
+  // until FULL. Reset the phase too, or the route resumes mid-way at 'done'.
+  //
+  // This cannot loop: mines are capped per TEAM (MINE.teamCap), and the sap score is scaled by how
+  // much of that allowance is actually free (see sapRoom), so a restocked runner with a full
+  // minefield simply does not want the job.
+  if (v.type === 'firebrat' && (v._mineCharges || 0) < MINE.perTrip) {
+    v._mineCharges = MINE.perTrip; v._laidPod = false; v._sapPhase = null;
+  }
   if (v.ammo >= v.maxAmmo) return;
   v._ammoAcc += AMMO_RATE * dt;
   if (v._ammoAcc >= 1) {
@@ -6716,6 +6730,18 @@ class AICommander {
     }
     if (this.unit) this._sapGeoC = g;   // base geometry is constant for the match; cache once we can snap
     return g;
+  }
+  // IS THERE ROOM TO LAY ANYTHING? 0..1, where 1 means the team can place a full trip's worth of
+  // mines. Both gadgets are capped per team (MINE.teamCap / POD.teamCap) and `place` simply returns
+  // null at the cap — which is also a real hang: a sapper at a full minefield never spends a charge,
+  // so `_mineCharges` never reaches 0 and the route never advances past 'back'. Scoring the mission
+  // on this makes the board stop wanting a job that cannot be done, instead of sending a runner out
+  // to stand in a field it is not allowed to add to.
+  sapRoom() {
+    const freeMines = Math.max(0, MINE.teamCap - minefield.count(this.team));
+    const freePods = Math.max(0, POD.teamCap - sensorNet.count(this.team));
+    const m = Math.min(1, freeMines / MINE.perTrip);   // a full trip's worth of room = 1
+    return Math.max(m, freePods > 0 ? 0.34 : 0);       // a pod alone is still worth the drive, but less
   }
   // Where the opening sapper should drive right now, by its route phase (out → back → pod → home).
   sapTarget(v) {
