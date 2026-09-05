@@ -24,6 +24,13 @@
   td { padding:2px 0; } td:last-child { text-align:right; font-variant-numeric:tabular-nums; }
   td.k { color:var(--dim); }
   .big { font-size:17px; color:var(--good); }
+  /* Range rows: label + live value on one line, slider under it. Sliders because the four wreck
+     numbers are things you judge by eye against each other, and a query-string reload per guess
+     makes that impossible (Jacob). */
+  .sl { margin-bottom:7px; }
+  .sl .t { display:flex; justify-content:space-between; font-size:10px; color:var(--dim); margin-bottom:2px; }
+  .sl .t b { color:var(--accent); font-weight:normal; font-variant-numeric:tabular-nums; }
+  .sl input { width:100%; accent-color:var(--accent); height:14px; }
   .big.warn { color:var(--warn); } .big.bad { color:var(--bad); }
   .note { font-size:10px; color:var(--dim); line-height:1.55; margin-top:9px;
           border-top:1px solid #223041; padding-top:8px; }
@@ -55,6 +62,10 @@
   <div class="row" id="tcount"></div>
   <div class="row" id="tstyle"></div>
 
+  <div class="lab">WRECK FIRE &middot; the real game effect (Fire.js) &mdash; main flame + spot fires</div>
+  <div class="row" id="wplay"></div>
+  <div id="wsliders"></div>
+
   <div class="lab">TEXTURES &middot; volumetric only</div>
   <div class="row" id="tex"></div>
   <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
@@ -85,6 +96,7 @@
 <script type="module">
 import * as THREE from 'three';
 import VolumetricFire from '../js/VolumetricFire.js';
+import { initFire, fireWreck, tickFire, drawFire, setFireLook, getFireLook, fireStatus } from '../js/Fire.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 // info resets on every render() by default, so with REPEAT>1 the readout showed the LAST render
@@ -668,6 +680,14 @@ function tick() {
       spawnBurst(Math.random() < 0.72 ? 'vehicle' : 'fuel', Math.cos(a) * r, Math.sin(a) * r);
     }
   }
+  // The game's wreck fires run their own lifecycle + draw, exactly as main.js drives them.
+  if (wreckOn) {
+    tickFire(dt); drawFire(t);
+    // Keep one burning while you tune: the pool empties as flames expire and an empty scene tells
+    // you nothing about a look you are trying to judge.
+    wreckT -= dt;
+    if (wreckAuto && wreckT <= 0) { wreckT = 3.2; lightWreck(); }
+  }
   billboardMat.uniforms.time.value = t;
   camera.position.x = Math.sin(t * 0.08) * 14;
   camera.lookAt(0, 3, 0);
@@ -748,6 +768,52 @@ buttons('tex', [['from files', 'file'], ['procedural', 'procedural']],
   () => texKind, v => { texKind = v; setTextureSource(v); });
 buttons('spacing', [['0.3', '0.3'], ['0.5', '0.5'], ['1.0', '1'], ['2.0', '2']],
   () => spacing, v => spacing = +v);
+
+// ── WRECK FIRE: the real game effect, with sliders ────────────────────────────
+// The lab used to build its own VolumetricFire instances, so it could measure the raw effect but
+// never showed what the GAME actually draws on a kill — a main flame plus buried spot fires, whose
+// four numbers were query-string only. Same module as the game (js/Fire.js) via setFireLook, so
+// what is judged here is what ships.
+let wreckOn = false, wreckAuto = true, wreckT = 0, wreckScale = 1;
+initFire(scene, camera);
+const lightWreck = () => { fireWreck(0, 0.2, 0, wreckScale, () => 0.2); };   // flat lab floor
+(() => {
+  const host = document.getElementById('wplay');
+  host.innerHTML = '<button style="flex:2">&#9654; LIGHT A WRECK</button>'
+                 + '<button data-t="auto" aria-pressed="true">relight</button>';
+  host.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.t === 'auto') { wreckAuto = !wreckAuto; b.setAttribute('aria-pressed', String(wreckAuto)); return; }
+    wreckOn = true; wreckT = 0; lightWreck();
+  });
+  // Slider spec: [key, label, min, max, step, hint]
+  const SPEC = [
+    ['sat',      'spot fire size',   0.2, 1.5, 0.05, 'vs the main flame'],
+    ['bury',     'spot fire sunk',   0,   0.9, 0.05, 'fraction underground'],
+    ['spread',   'spot fire spread', 0.2, 1.5, 0.05, 'how far out they sit'],
+    ['mainBury', 'main flame sunk',  0,   0.9, 0.05, '0 = sits on the wreck'],
+    ['lean',     'lean at camera',   0,   1.2, 0.02, 'radians; fights the donut'],
+    ['scale',    'wreck size',       0.5, 2.0, 0.05, 'jotun kills are 1.35'],
+  ];
+  const wrap = document.getElementById('wsliders');
+  const look = getFireLook();
+  wrap.innerHTML = SPEC.map(([k, lbl, mn, mx, st, hint]) => {
+    const v = k === 'scale' ? wreckScale : look[k];
+    return `<div class="sl"><div class="t"><span>${lbl} &middot; <span style="opacity:.6">${hint}</span></span>`
+         + `<b id="wv-${k}">${(+v).toFixed(2)}</b></div>`
+         + `<input type="range" id="ws-${k}" min="${mn}" max="${mx}" step="${st}" value="${v}"></div>`;
+  }).join('');
+  for (const [k] of SPEC) {
+    const el = document.getElementById('ws-' + k), out = document.getElementById('wv-' + k);
+    el.addEventListener('input', () => {
+      const v = +el.value; out.textContent = v.toFixed(2);
+      if (k === 'scale') wreckScale = v; else setFireLook({ [k]: v });
+      // Relight so the change is FELT, not waited for: bury and spread are decided at the moment a
+      // wreck is lit, so a live edit does nothing to flames already burning.
+      if (k !== 'lean') { wreckOn = true; wreckT = 0; lightWreck(); }
+    });
+  }
+})();
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();

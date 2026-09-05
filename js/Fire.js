@@ -262,13 +262,33 @@ const _fq_num = (k, dflt, lo, hi) => {
   const q = new URLSearchParams(location.search).get(k);
   return q == null ? dflt : Math.max(lo, Math.min(hi, +q || 0));
 };
-const SAT_SCALE  = _fq_num('firesat', 1.0, 0.2, 1.5);
-const SAT_BURY   = _fq_num('firebury', 0.45, 0, 0.9);
-const SAT_SPREAD = _fq_num('firespread', 0.55, 0.2, 1.5);
+let SAT_SCALE  = _fq_num('firesat', 1.0, 0.2, 1.5);
+let SAT_BURY   = _fq_num('firebury', 0.45, 0, 0.9);
+let SAT_SPREAD = _fq_num('firespread', 0.55, 0.2, 1.5);
 // …and the MAIN fire's own seating. Default 0 = unchanged, because a wreck fire belongs ON the
 // wreck; the knob exists because the big flame in the screenshot rings just as the small ones do,
 // and burying it is the same one-line experiment. ?firemainbury=0.25 to try it.
-const MAIN_BURY  = _fq_num('firemainbury', 0, 0, 0.9);
+let MAIN_BURY  = _fq_num('firemainbury', 0, 0, 0.9);
+let LEAN_LIVE = null;   // set by setFireLook; null = use the LEAN constant read from the query string
+
+// LIVE TUNING (Jacob, 2026-09-05: "adjust the fires in the fire lab with range inputs — it's too
+// difficult to do with url parameters"). Every one of these was query-string only, which meant a
+// reload per guess and no way to feel the difference between two nearby values. Sliders need to
+// move them on a running scene, so they are `let` and this is the one door in. Partial objects are
+// fine — pass only what you are changing.
+export function setFireLook(o = {}) {
+  const c = (v, lo, hi, cur) => (v == null ? cur : Math.max(lo, Math.min(hi, +v || 0)));
+  SAT_SCALE  = c(o.sat,      0.2, 1.5, SAT_SCALE);
+  SAT_BURY   = c(o.bury,     0,   0.9, SAT_BURY);
+  SAT_SPREAD = c(o.spread,   0.2, 1.5, SAT_SPREAD);
+  MAIN_BURY  = c(o.mainBury, 0,   0.9, MAIN_BURY);
+  if (o.lean != null) LEAN_LIVE = c(o.lean, 0, 1.2, LEAN_LIVE == null ? LEAN : LEAN_LIVE);
+  return getFireLook();
+}
+export function getFireLook() {
+  return { sat: SAT_SCALE, bury: SAT_BURY, spread: SAT_SPREAD, mainBury: MAIN_BURY,
+           lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE };
+}
 
 export function drawFire(elapsed) {
   if (!ready || !live.length) return;
@@ -304,7 +324,7 @@ export function drawFire(elapsed) {
       // Horizontal axis perpendicular to the camera bearing, so the tip goes toward the viewer
       // rather than sideways.
       _fax.set(dz / len, 0, -dx / len);
-      _fq.setFromAxisAngle(_fax, LEAN);
+      _fq.setFromAxisAngle(_fax, LEAN_LIVE == null ? LEAN : LEAN_LIVE);
       s.fire.mesh.quaternion.setFromEuler(_fe.set(0, s.yaw || 0, 0));
       s.fire.mesh.quaternion.premultiply(_fq);              // lean in WORLD space, after the yaw
     }
