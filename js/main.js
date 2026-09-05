@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setNoPursue, setBurstFix, FOF_DEFAULT } from './AI.js?v=114';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT } from './AI.js?v=115';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -38,8 +38,8 @@ import { Driver } from './Driver.js?v=1';
 // can run DIFFERENT weights in the same match to see which set actually wins.
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
-import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=2';
-import { setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=114';
+import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=3';
+import { setGunOnUs, setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=115';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=6';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1546,7 +1546,7 @@ let ROAD_SPEED_MUL = 1.25;   // ground vehicles drive this much faster on a road
 // ?oldkiller restores the map-wide "do they own a vehicle" proxy for runner-death blame (task #44).
 let KILLER_FIX = true;
 let FLAG_GRAB_TURRETS = 2;   // max enemy turrets still standing when a runner may commit to the grab (A/B via RR.setFlagGrab)
-const INTERCEPT_HOLD_R = 16;   // u — inside this of the camp we are STANDING IN THE DOOR: watch the lane home, and pursue is back on
+const INTERCEPT_HOLD_R = 16;   // u — inside this of the camp we are STANDING IN THE DOOR: watch the lane home
 const INTERCEPT_SWAP_R = 60;   // flag stolen: only recall home for a Valkyrie if a ground unit is within this of our FOB — else chase with what we've got
 // ONE radius for "a rival is too close to go and change vehicles". The recall had two — 52u to
 // refuse to start and 46u to give up once started — and the band between them was a place where a
@@ -4214,9 +4214,8 @@ function aiHandleGadgets(dt) {
         const p = m.group.position, dx = v.holder.position.x - p.x, dz = v.holder.position.z - p.z;
         if (dx * dx + dz * dz > MINE_DETECT * MINE_DETECT) continue;
         m.rolled.add(v);
-        // TARGET FIXATION: a unit locked on a chase (pursue) is tunnel-visioned — slimmer chance to
-        // notice the mine it's barrelling toward, so a hunter's bait can lure it right onto the trap.
-        const chance = v._aiState === 'pursue' ? 0.3 : MINE.spotChance;
+        // (A chase used to halve this — target fixation — but pursue is no longer a state.)
+        const chance = MINE.spotChance;
         if (Math.random() < chance) { m.spottedBy.add(v.team); bumpNavEpoch(); }   // a newly-known mine reroutes this team's paths
       }
     }
@@ -5765,17 +5764,14 @@ LEAD_FIX = !QS.has('oldlead');
 setBurstFix(!QS.has('oldburst'));
 KILLER_FIX = !QS.has('oldkiller');   // blame a dead runner on what actually shot it (task #44)
 BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
-// PURSUE IS OFF THE LADDER — SHIPPED 2026-08-11. The chase lives in the Fight and Attack missions,
-// which already do it properly and can END. ?ladderpursue puts it back on the reflex ladder.
-// 720 seeds, base vs this: resolved 715 -> 719, stalemates 5 -> 1, unreachable-GOTO contract
-// violations 3764 -> 1772 (-53%, and pursue was ~72% of them), idle-at-goal -16%, matches outside
-// the healthy 180-700s band 15 -> 7. Per-set resolution +2/0/+2 — positive or flat on every set,
-// no sign flip, which is the first change in this batch that can say that.
-// Measured ALONE it is also cheaper than pairing it with swapyield: nav alarms flat (61 -> 61)
-// rather than +19, mission switches DOWN 3% rather than up 4%, idle-at-goal -31% rather than -16%,
-// and it still fixes the mutual stare-down seeds (22937, 23357) on its own — because it removes the
-// latch rather than working around it.
-setNoPursue(!QS.has('ladderpursue'));
+// PURSUE CAME OFF THE LADDER 2026-08-11 and the rung was DELETED 2026-09-01. The chase lives in
+// the Fight and Attack missions, which do it properly and can END. Gate at the time, 720 seeds:
+// resolved 715 -> 719, stalemates 5 -> 1, unreachable-GOTO violations 3764 -> 1772 (-53%, pursue
+// was ~72% of them), idle-at-goal -16%, matches outside the healthy 180-700s band 15 -> 7, and
+// per-set resolution +2/0/+2 with no sign flip. It removed the latch rather than working around it.
+if (QS.has('gunonus') || QS.has('gunonusr'))
+  setGunOnUs(QS.has('gunonus') ? +QS.get('gunonus') : null,
+             QS.has('gunonusr') ? +QS.get('gunonusr') : null);   // scale (0 = off) and the falloff radius (0 = the gun's own reach)
 setFleeScore(aiFleeScore);          // …and for Flee joining it too
 let _navEpoch = 0;
 function bumpNavEpoch() { _navEpoch++; }
@@ -6354,7 +6350,7 @@ class AICommander {
     this.personality = randomPersonality(doctrineRng);
     this.archetype = archetype || pickArchetype(doctrineRng);   // named doctrine (Warrior/Turtle/...) — drives the whole plan
     // The doctrine shapes disposition: both archetypes FIGHT and finish a routed enemy
-    // (pursue needs aggression > 0.6). A Warrior presses hardest; a Turtle is still
+    // (Fight chases while it has eyes on). A Warrior presses hardest; a Turtle is still
     // willing to chase a repelled attacker — it just holds a defensive post to do it.
     const aggMin = this.archetype === 'warrior' ? 0.75 : this.archetype === 'turtle' ? 0.66 : 0;
     if (this.personality.aggression < aggMin) this.personality.aggression = aggMin;
@@ -7237,6 +7233,39 @@ class AICommander {
     }
     return best;
   }
+  // THE GUN THAT IS ACTUALLY ON US. Returns { d, range, frac, wall } for the nearest live enemy
+  // gun whose OWN reach covers this unit, or null. `frac` is 0 directly under the muzzle and 1 at
+  // the very edge of its arc, so callers can price how deeply we are committed rather than testing
+  // a threshold — the house rule on gradual weights.
+  //
+  // Fog-honest by construction: reads knownTowers (the intel notebook), never the board, so a gun
+  // the team has not discovered cannot pull anybody toward it. Each gun is measured against its
+  // OWN upgraded range, because an upgraded tower reaches meaningfully further than a fresh one
+  // and a single global radius is exactly the "one constant, many scales" bug.
+  // `radius` overrides what counts as "near" (Jacob, 2026-09-03: "we could also use a larger range,
+  // such as the distance a tower can be detected"). 0/omitted = the gun's OWN reach, which is the
+  // strictest reading — the gun is literally shooting at us. A wider radius sees the tower coming
+  // BEFORE we are under it, which is the only point at which a unit still has room to change plan:
+  // measured, 99.6% of the time spent inside a gun's actual reach is time already under fire, and
+  // raising the weight's strength 6x from there changed the tower kill rate not at all.
+  gunOnUs(v = this.unit, radius = 0) {
+    if (!v || v.dead || !v.holder) return null;
+    const px = v.holder.position.x, pz = v.holder.position.z;
+    let best = null, bd = Infinity;
+    for (const k of this.knownTowers.values()) {
+      if (!k.armed) continue;
+      const t = k.wall && k.wall.turret;
+      if (!t || t.dead || t.falling) continue;          // the notebook can be stale; the wreck is not a threat
+      const reach = towerStats(t.upg || 0).range;
+      const lim = radius > 0 ? radius : reach;
+      const d = Math.hypot(k.x - px, k.z - pz);
+      if (d >= lim || d >= bd) continue;
+      // `frac` is measured against whatever limit we were asked about, so the weight's falloff
+      // always spans exactly the band the caller cares about. `inReach` stays the honest fact.
+      bd = d; best = { d, range: lim, reach, frac: d / lim, inReach: d < reach, wall: k.wall };
+    }
+    return best;
+  }
   fortFrac() { return this.fortHp0 ? fortHpOf(this.targetTeam()) / this.fortHp0 : 1; }
   // Only the FLAG-HQ (main camp) turrets gate the win — they guard the flag. The
   // FOB/elevator turrets are optional (a unit still suppresses one that's shooting it,
@@ -7532,7 +7561,7 @@ class AICommander {
     if (d != null && d <= (SHOT_REACH[v.type] || 42)) return v.ai._fof;
     // A HIT IS ALSO A CONTACT (Jacob). _fof only exists for a rival we can SEE, so a unit shot from
     // outside its sight cone had no odds, `fight` scored 0, `flee` needed _bail, and the board had
-    // no answer at all — which is the entire reason `ambushed`/`threatened`/`pursuing`/`underAttack`
+    // no answer at all — which is the entire reason the `underAttack` reflex rung
     // still exist as reflex rungs. A round that landed is harder evidence than a sighting: we know
     // the hull that fired it and where it stood.
     //
@@ -8006,7 +8035,6 @@ class AICommander {
     // is what makes the log honest about "where is it trying to get to" (Jacob's ask).
     let dest = view.goal;
     if (cmd.state === 'resupply') dest = this._supply || view.goal;
-    else if (cmd.state === 'pursue') dest = (v.ai && v.ai.lastSeen) || view.goal;
     else if (cmd.state === 'engage') dest = view.enemy || view.goal;
     else if (cmd.state === 'suppress') dest = view.threatStand || view.threat || view.goal;
     const destDist = dest ? Math.round(Math.hypot(v.holder.position.x - dest.x, v.holder.position.z - dest.z)) : null;
@@ -8060,7 +8088,6 @@ class AICommander {
       switch (cmd.state) {
         case 'advance':  line = `Moving up — ${dest}!`; break;
         case 'flee':     line = `Taking fire — breaking off toward ${dest}!`; break;
-        case 'pursue':   line = 'Lost visual — pushing to their last-known spot!'; break;
         case 'resupply': line = v.ammo <= 0 ? 'Winchester — outta ammo! Heading back to rearm!' : `Running low, fuel ${Math.round(v.fuel / v.maxFuel * 100)}% — RTB to refuel!`; break;
         case 'engage':   line = `Contact! Enemy ${view.enemy ? view.enemy.type : 'vehicle'} in sight — engaging!`; break;
         case 'suppress': {
@@ -8165,7 +8192,6 @@ class AICommander {
     // and intercept detours), not the raw mission objective — else a ground unit's A* steers it
     // to the patrol/objective spot while it claims to be "grabbing a shield" and never gets there.
     if (st === 'advance') dest = view.goal || this.strategy.objective(this);
-    else if (st === 'pursue') dest = v.ai.lastSeen || this.strategy.objective(this);
     else if (st === 'resupply') dest = this._supply;       // nearest fuel/ammo (own base or a depot)
     else if (st === 'assault') { dest = this.strategy.objective(this); slack = (view.engageRange || 36) * 0.7 * 1.25; }
     // SUPPRESS far-travel: the trek TO a siege standoff can be 100u+ around terrain, and pure
@@ -8304,18 +8330,6 @@ class AICommander {
     // the tournament breakdown, handled at their source):
     if (ord.violated && !ord._handled) {
       ord._handled = true;
-      if (st === 'pursue' && v.ai && v.ai.lastSeen) {
-        // The ghost is across water/walls — no route will ever get there. Write the contact
-        // off; the state collapses back to the mission next think instead of chasing forever.
-        // Record WHERE we couldn't get to as well: clearing lastSeen alone is futile while we
-        // can still SEE the target, because perception rewrites it next tick and we end up
-        // re-deciding this every single frame (see `pursuing` in AI.js — the dancing lurchers).
-        v.ai.noReach = { x: v.ai.lastSeen.x, z: v.ai.lastSeen.z, t: v.ai.t };
-        v.ai.lastSeen = null;
-        aiLog(this.team, `${this.cname}: Can't reach that last contact — writing it off, back to the plan.`);
-        this._navBail = 'unreach:pursue';
-        return;
-      }
       if (isStand && this._siegePlan) {
         // The driver refused the planned firing spot. The plan vetted it with a real path check,
         // so this means the world changed under us (a wall went up, a route closed). Don't walk
@@ -8334,7 +8348,7 @@ class AICommander {
       // the way a firing position does — so the answer is neither "write it off" nor "re-solve".
       // The unit is already standing at the closest reachable point to it; treat THAT as arrival
       // so the mission proceeds from there, instead of failing to reach something forever.
-      else if (!isStand && st !== 'pursue') {
+      else if (!isStand) {
         const p = this._nav && this._nav.path;
         const end = p && p.length ? p[p.length - 1] : null;
         if (end) {
@@ -8672,7 +8686,7 @@ class AICommander {
     // the enemy. Routing combat through omni made engage orbit without shooting (tournament:
     // engage-stuck ×2.4). Combat keeps classic drive() until the footwork becomes explicit
     // ORBIT/KITE maneuvers that manage facing themselves (the Driver design).
-    const OMNI_STATES = { advance: 1, pursue: 1, retreat: 1, resupply: 1 };
+    const OMNI_STATES = { advance: 1, retreat: 1, resupply: 1 };
     driveChassis(v, out, dt, v._move.omni && OMNI_STATES[cmd.state]);
     applyAltitude(v, dt);
     decayAim(v, dt);
@@ -8788,7 +8802,7 @@ class AICommander {
     // tower on its list, which sat at the FOB in the opposite direction. Measured on seed 74: red
     // flattened the main fort at t600, walked to the FOB, and shelled it until t900+ while the
     // keep it needed to crack sat at 594hp, undefended and ignored. Restrict the kill order to
-    // the target camp; FOB guns are somebody else's problem (and `threatened` still answers one
+    // the target camp; FOB guns are somebody else's problem (and a sieging unit still answers one
     // that actually shoots at us).
     const towers = this.plannableTowers();
     if (!towers.length) return null;                       // nothing discovered yet — scout first
@@ -8830,7 +8844,7 @@ class AICommander {
     // fort is down to that many, stop naming towers: returning null promotes the enemy KEEP to
     // the suppress target (see hqThreat), which is the actual win condition — crack it, the flag
     // is exposed, and the grab is on. Answering a gun that actually shoots at us still works;
-    // that is `threatened`, not the siege plan.
+    // that is the `sieging` executor, not the siege plan.
     // …but the tolerance SHRINKS each time a runner dies to those guns (Jacob: "if siege goes out
     // again because the capture failed, it should go after another tower, not turn around because
     // two are already down"). First pass: leave two, crack the keep, send the runner. If towers
@@ -9551,7 +9565,7 @@ class AICommander {
     }
     if (!_locked) {
       // THE PLAN owns the target. Not gated on the siege mission any more: `suppress` is entered
-      // from ANY mission (the threatened transition — a tower is shelling us), and the old gate
+      // by the SIEGE and ATTACK missions (the `sieging` transition), and the old gate
       // meant every non-siege case fell through to a raw global nearest-turret scan with no
       // hysteresis, so the target flipped as the unit drove and the goal jumped with it.
       // NO KILL ORDER. The plan used to name WHICH tower to attack, and every ordering tried made
@@ -9575,7 +9589,7 @@ class AICommander {
         if (d2 < _kd) { _kd = d2; k = q; }
       }
       // PROXIMITY GATE (do not remove): the plan says WHICH tower we intend to kill — it does NOT
-      // say we are currently under threat. `threat` feeds AI.js's `threatened` transition, which
+      // say we are currently under threat. `threat` feeds AI.js's `sieging` transition, which
       // has no distance test of its own, so an ungated plan target put units into `suppress` over
       // towers on the far side of the map: a first cut of this change dropped resolution 20/20 →
       // 18/20 and TRIPLED suppress transit-stuck (units on intercept missions driving at a goal
@@ -9824,7 +9838,7 @@ class AICommander {
     // target. The symptom it was added for — grinding a gunless tower under repair while a live
     // gun kills you — is now covered by the target being COMMITTED to a chosen tower and by
     // the target being COMMITTED to a chosen tower until that tower is rubble.
-    // Being shot is a reason to re-examine the plan (the brain's `threatened`/`ambushed` rungs
+    // Being shot is a reason to re-examine the plan (the brain's `underAttack` rung
     // still respond, and taking fire is a re-score trigger); it is not a reason to silently
     // rewrite what we are shooting at.
     // (A REPAIR JEEP NEVER STEALS THE TARGET FROM A GUN. This used to swap onto the crew whenever
@@ -10014,6 +10028,10 @@ class AICommander {
       shotBlocked: (v._blockedShots || 0) >= 2 && (performance.now() - (v._lastBlockT || 0)) < 2000,
       enemyGone: this.enemyEliminated(),   // target fleet wiped → don't waste time ghost-chasing a dead sighting
       support: turretCountOf(this.team) > 0 ? this.homeBasePos() : null,   // rally toward own tower cover (ai_behavior duels)
+      // WHICH MISSION IS RUNNING. `suppress` is a mission's executor now, not a reflex, so the
+      // ladder has to be able to ask what job this hull is on. Base name ('siege' covers
+      // 'siege-back', 'capture' covers the four lanes) — see _msnKeyFor for why.
+      mission: this.strategy ? this.strategy.step : null,
       threat, threatLOS, flankSide, threatStand, demolishTarget, breakTarget, engageRange: ENGAGE_RANGE[v.type] || 36,
       // ACTIVE tower fire on this hull (last ~2.5s): the siege break-off's trigger. The doctrine
       // is "the maneuver depends on being FIRED ON" — proximity alone interrupted every siege of
@@ -10156,7 +10174,6 @@ function stateDetail(d, st) {
       return `${d.sap && SAP_LEG[d.sap] ? SAP_LEG[d.sap] : 'to the objective'} ${go}`;
     }
     case 'assault':  return `storming the objective ${go}`;
-    case 'pursue':   return `to their last-known spot ${go}`;
     case 'resupply': return `to top up ${go}`;
     case 'flee':     return d.foeT ? `from the ${d.foeT} ${d.foeD}u back` : `breaking contact ${go}`;
     case 'unstick':  return d.stuckWhy || 'jolting free';
@@ -10251,8 +10268,7 @@ function publishAILive(dt) {
       if (d) {
         if (d.fof != null) { const f = `fightScore ${d.fof > 0 ? '+' : ''}${d.fof}`; M.engaging = f; M.underAttack = f; }
         if (pu && pu.fuel != null) M.resupLatched = `fuel ${pu.fuel}% · ammo ${pu.ammo}%`;
-        if (d.turD != null) M.threatened = `tower ${d.turD}u out`;
-        if (d.foeD != null) M.pursuing = `contact ${d.foeD}u out`;
+        if (d.turD != null) M.sieging = `tower ${d.turD}u out`;
       }
       const dbg = d ? { gd: d.gd, gx: d.gx, gz: d.gz, px: d.px, pz: d.pz, blk: d.blk, fwd: d.fwd, turn: d.turn,
         distFob: d.distFob, towers: d.towers, foeT: d.foeT, foeD: d.foeD, turD: d.turD, heard: !!d.heard,
@@ -12405,6 +12421,7 @@ window.RR = {
     flagHeldAtEnd: flags.filter(f => f.carried && f.carrier && !f.carrier.dead).length,
     flagStalls: flagRunStalls, flagStallList: flagRunStallList.slice(-8) }),
   cellReach: (v, x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; },   // debug: can THIS hull drive to (x,z)?
+  setGunOnUs: (v, r) => setGunOnUs(v, r),   // A/B: (scale, radius) for the tower-proximity pull toward siege
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
@@ -12775,7 +12792,7 @@ let navLines = null;   // Map<commander, {line, posAttr, wp, dest, label, cells}
 // state (combat engage/suppress, unstick) the unit ignores nav.path and steers by the behavior —
 // so the overlay must NOT draw the stale path (it points wherever the unit last navigated, e.g.
 // back to base) and must NOT label it "A* route". Keep this in sync with _navOverride's switch.
-const NAV_ASTAR_STATES = new Set(['advance', 'pursue', 'resupply', 'assault']);
+const NAV_ASTAR_STATES = new Set(['advance', 'resupply', 'assault']);
 // ?nav auto-probe: the first time a FIREBRAT is trying to navigate but its A* came back empty,
 // freeze the sim and open the A* visualizer ON THAT FIREBRAT'S OWN COST from its cell to its goal
 // — so you can see whether a route actually exists and why the nav didn't take it. Fires once per

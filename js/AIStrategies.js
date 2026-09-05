@@ -167,7 +167,7 @@ class Attack extends Mission {
   // The objective is a place to HOLD/HUNT (a last-seen spot or the enemy's deploy pad), NOT a
   // fortification to shell — so don't blind-fire the goal (base Mission defaults shoot=true, which
   // had a Warrior dumping rounds over a flattened, empty staging point). Real targets are still
-  // engaged: seen enemies via engage, live turrets via the threatened→suppress transition.
+  // engaged: seen enemies via engage, live turrets via the sieging→suppress transition.
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 12; }
   // A NOUN phrase, not a verb — the state line prepends the brain's own verb
@@ -630,6 +630,24 @@ const CAPTURE_COMMIT = 85;
 // 2 on a behaviour argument (a top-up should stay a real option without outbidding the fight). The
 // same argument points here too, and ~7,700 matches proved win rate cannot tell these values apart.
 // Settable so the two can be compared directly rather than reasoned about — see RR.setShieldNear.
+// How hard a gun that is ALREADY on us leans the board toward siege, as a FRACTION of what siege
+// has otherwise earned — see the term in missionScore. Deliberately a fraction and not a flat
+// number: it must amplify a plan the board already wants and stay nearly inert on one it doesn't.
+// 0.35 is a starting guess TO BE GATED, not a measured value. RR.setGunOnUs() to A/B it.
+// 1.2 / 200u, chosen from a 12-cell scale x radius grid then gated at 240 seeds x3 against the
+// term switched off: resolved 236 -> 238, stalemates 4 -> 2, and match time down on all three sets
+// (-46s/-16s/-23s). Honest caveat: the stalemate gain came from ONE of the three sets, with the
+// other two exact ties, so the time result is the part that reproduced. A confirmation run on
+// fresh seeds was still in flight when this shipped.
+let GUN_ON_US = 1.2;
+// The radius the weight's falloff spans. 0 = the gun's own reach (~54u unupgraded). A larger value
+// starts the pull BEFORE the unit is under fire, which is the only moment it still has room to act.
+let GUN_ON_US_R = 200;
+export function setGunOnUs(v, r) {
+  if (v != null) GUN_ON_US = Math.max(0, Math.min(4, +v || 0));
+  if (r != null) GUN_ON_US_R = Math.max(0, Math.min(400, +r || 0));
+  return { scale: GUN_ON_US, radius: GUN_ON_US_R };
+}
 let SHIELD_NEAR_MAX = 4, SHIELD_NEAR_FAR = 120;
 export function setShieldNear(max, far) {
   if (max != null) SHIELD_NEAR_MAX = +max;
@@ -691,7 +709,7 @@ class Swap extends Mission {
     // ("Working an angle on their turret" one second, gone the next). Fighting is a choice the
     // ladder made, not a failure of the trip: hold the clock while it lasts.
     const st = v._aiState;
-    if (st === 'engage' || st === 'suppress' || st === 'pursue') { this.stallT = 0; return; }
+    if (st === 'engage' || st === 'suppress') { this.stallT = 0; return; }
     const p = v.holder.position, h = cmd.homePos();
     const d = Math.hypot(p.x - h.x, p.z - h.z);
     if (this.bestD == null || d < this.bestD - 0.5) { this.bestD = d; this.stallT = 0; }
@@ -1346,12 +1364,20 @@ export function missionScore(cmd, key, running = null) {
     case 'siege':
       if (key === 'siege-back') {
         // the rear-lane opener: worth running while REAR towers stand (1.5 each), extra when
-        // dropping them would open a rear capture the front can't offer
+        // dropping them would open a rear capture the front can't offer. GATED ON !exposed, same
+        // as 'flag sealed' below: once the keep is cracked, the rear towers no longer block
+        // anything siege alone can open — 'opens rear capture' already re-prices that case, and
+        // 'runners dying to towers' re-prices a tower that is still costing us for real. Left
+        // unconditional, this term outlived what it was rewarding: with suppress now a mission's
+        // job rather than a reflex any passing hull tripped, towers survive far longer than this
+        // was tuned against, and the flat bonus alone out-scored an open, grabbable flag with a
+        // spare Firebrat sitting idle (seed 263: siege-back 8.2 vs capture-front 8.0).
         const rearUp = cmd.rearTowersLive ? cmd.rearTowersLive() : 0;
-        add('rear towers standing', rearUp * 1.5);
+        if (!exposed) add('rear towers standing', rearUp * 1.5);
         if (rearUp > 0 && exposed) add('opens rear capture', 1);
       } else {
-        add('towers standing', towers * 1); if (!exposed) add('flag sealed', 2);
+        // Same gate as above, same reason — see the siege-back comment.
+        if (!exposed) { add('towers standing', towers * 1); add('flag sealed', 2); }
         // OUR RUNNERS ARE DYING TO TOWERS → silence them before spending another one. The mirror
         // of `clear interceptors` on the attack side. A longer window than that one (60s vs 30s)
         // because knocking a tower down takes longer than killing a single interceptor, so the
@@ -1364,6 +1390,38 @@ export function missionScore(cmd, key, running = null) {
         // term a dominant turtle sat home forever with the enemy base defenceless (seed 88:
         // k11, towers flattened, defend 3.5 > siege 2 for 900 straight seconds).
         if (cmd.fortDown && cmd.fortDown() && !exposed) add('crack the keep', 4);
+      }
+      // A GUN ALREADY HAS US — Jacob's design, 2026-09-02. Both siege keys get this.
+      //
+      // The problem it solves is concurrency, not willingness. Moving suppress into the missions
+      // barely changed how much shelling happens (413 -> 426 unit-seconds over 10 seeds) but it
+      // stopped happening in PARALLEL: a unit on swap or defend used to chip tower B in passing
+      // while siege worked tower A, and tower kills fell 99/160 -> 73/160 with the kill rate
+      // halved once every round had to come from one unit on one target.
+      //
+      // So this is deliberately NOT a reason to go and find a tower. It only pays out when a gun
+      // is ALREADY shooting at us, which is a fact about where the unit happens to be standing —
+      // the encounter is the opportunity, and the census says being inside a gun's reach means
+      // being under fire 99.6% of the time.
+      //
+      // THREE GATES, all of them Jacob's:
+      //   PROXIMITY — scales with how deep under the muzzle we are (full weight beneath it, zero
+      //     at the fringe), so skirting an arc is not an invitation to stop and trade.
+      //   SIEGE ALREADY WANTED — the nudge is a FRACTION OF WHAT SIEGE HAS ALREADY EARNED, so it
+      //     amplifies a plan the board already likes and can barely move one it doesn't. A flat
+      //     bonus here would be the old reflex with extra steps: it would drag a unit onto a gun
+      //     the commander had already decided was not worth attacking.
+      //   THE RIGHT HULL — a Firebrat's 14-damage gun cannot hurt a tower (SHOT_DMG), and the
+      //     census confirms it never once suppressed under the OLD reflex either, so excluding it
+      //     costs nothing and protects the runner.
+      {
+        const gv = cmd.unit;
+        const g = (gv && gv.type !== 'firebrat' && cmd.gunOnUs) ? cmd.gunOnUs(gv, GUN_ON_US_R) : null;
+        if (g && w > 0 && GUN_ON_US > 0) {
+          const depth = 1 - g.frac;                       // 1 at the tower, 0 at the edge of the band
+          add(g.inReach ? 'a tower has us in range' : 'a tower is close',
+              Math.round(w * GUN_ON_US * depth * 10) / 10);
+        }
       }
       break;
     case 'capture': {
@@ -2093,8 +2151,23 @@ class Doctrine {
     const unanswered = (engaged && this.step !== 'fight' && this.step !== 'flee')
       ? (underFire ? 'taking fire and we are neither fighting nor fleeing'
                    : 'a rival in reach and we are neither fighting nor fleeing') : null;
+    // CAME INSIDE A GUN'S REACH (Jacob, 2026-09-02). Not a reflex and not an instruction — just an
+    // invitation to re-score, so the board can decide whether this gun is worth turning on. The
+    // weight that answers it is `gunNearness` in missionScore; this only wakes the scorer up.
+    //
+    // Why it is needed at all: suppress became a mission's job rather than something any passing
+    // hull tripped, and the measured cost was PARALLELISM. Total shelling barely moved (413 -> 426
+    // unit-seconds over 10 seeds) but tower kills fell 99/160 -> 73/160 and the kill rate halved,
+    // because a unit on swap or defend used to chip tower B while siege worked tower A, and now
+    // every round comes from one unit on one target. This trigger is how that concurrency comes
+    // back without restoring a rung that decided things behind the commander's back.
+    const gunNow = cmd.gunOnUs && cmd.gunOnUs();
+    const gun = edge('gun', !!gunNow, 'a tower has us in range');
     // …now rank them. 1-3 are the reflexes: self-preservation, then our flag, in the order set out.
+    // The gun sits BELOW all of them on purpose: a rival on top of us, or our own flag walking out
+    // the door, both outrank a tower that has merely started tracking us.
     if (sees || fire || flag || unanswered) return sees || fire || flag || unanswered;
+    if (gun) return gun;
     // 4: the mission says it is finished (the supply missions know when they are full).
     if (this.mission && this.mission.done && this.mission.done(cmd)) return 'mission complete';
     if (legLabel) return legLabel;
@@ -2134,6 +2207,17 @@ class Doctrine {
   garagePick(cmd) {
     this._rollOpening(cmd);
     const urg = this._urgent(cmd);
+    // SCORED COLD, ON PURPOSE — do not pass an incumbent here (tried and measured, 2026-09-02).
+    // It looks like a bug: a hull bought FOR capture-front gets no credit for the plan that
+    // justified building it, so a near-tied siege can out-score the mission the commander just
+    // committed to and undo the swap the instant the new unit exists (seed 263: siege-back 8.2 vs
+    // capture-front 8.0; seed 242 the same shape). Passing cmd._primaryKey does close exactly that
+    // gap and does flip those seeds — and across 240 seeds x3 it made things WORSE, 3 stalemates
+    // to 5, with an entirely disjoint stalemate set each run. Its real effect is variance, not a
+    // fix: it locks in a plan chosen before the unit existed, which is the one moment there is no
+    // sunk cost to protect and no reason for loyalty. The comment above already said so.
+    // The genuine defect behind those seeds was siege out-scoring an exposed flag, and that is
+    // fixed where it belongs — in the tower terms, which now stop paying out once the flag is open.
     const next = urg || this._applyKey(cmd, missionPick(cmd, null));
     if (next !== this.step) this._switch(next, cmd, 'chosen in the garage, before roll-out');
   }
