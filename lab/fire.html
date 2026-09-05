@@ -871,7 +871,8 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     ['bury',     'spot fire sunk',   0,   0.9, 0.05, 'fraction underground'],
     ['spread',   'spot fire spread', 0.2, 1.5, 0.05, 'how far out they sit'],
     ['mainBury', 'main flame sunk',  0,   0.9, 0.05, '0 = sits on the wreck'],
-    ['lean',     'lean at camera',   0,   1.2, 0.02, 'radians; fights the donut'],
+    ['core',     'core fill',        0,   1.0, 0.02, 'THE donut fix - fills the hollow middle'],
+    ['lean',     'lean at camera',   -1.2, 1.2, 0.02, 'radians; tips the flame over'],
     ['scale',    'wreck size',       0.5, 2.0, 0.05, 'jotun kills are 1.35'],
     // The edge envelope — the three numbers behind the straight lines. Each slice is a polygon and
     // its edge shows as a brightness step; these say how far in from the box wall, the top and the

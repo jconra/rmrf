@@ -22,7 +22,7 @@
 // anything, so it is the first knob to turn back if a phone ever hitches — SIZE is the second,
 // since bigger flames are more transparent overdraw even though they are not more draw calls.
 import * as THREE from 'three';
-import VolumetricFire from './VolumetricFire.js?v=3';
+import VolumetricFire from './VolumetricFire.js?v=4';
 
 const POOL = 12;
 let LIFE = 7.0;            // seconds, whole burn
@@ -99,6 +99,16 @@ function makeNZW() {
 //   it must reach ZERO at the outer edge, because the sampler is ClampToEdge — any alpha left in
 //     the last column is what every sample beyond the flame returns, and the fire renders as long
 //     horizontal streaks trailing off whatever is burning.
+// CORE FILL — how much of the shell's hollow middle is filled in. This is what actually causes the
+// donut (Jacob), and leaning the flame at the camera only ever hid it: the profile's alpha peaks at
+// 80% of the radius and falls to 0.049 at the centre, so from the game's steep 68.8-degree view you
+// look straight down the hole and see a bright rim around a dark middle. Filling the core attacks
+// the cause, and unlike the lean it leaves the flame standing up.
+//
+// It stays a shell by default because the original comment is right — the shader accumulates
+// through every slice, so a solid white-hot profile sums to an over-bright blob. The fill is added
+// DIM and only near the axis, which is the part you cannot see from the side anyway.
+let CORE_FILL = 0;
 function makeFireProfile() {
   const W = 64, H = 128;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -116,6 +126,9 @@ function makeFireProfile() {
     for (let x = 0; x < W; x++) {
       const u = x / (W - 1), d = rad > 0.001 ? u / rad : 99;
       let a = Math.exp(-Math.pow((d - 0.80) / 0.46, 2));
+      // Fill the hole: a soft dome over the inner half, added rather than blended so the rim keeps
+      // its shape. Scaled well below the shell's peak — the goal is "not a ring", not "a blob".
+      if (CORE_FILL > 0) a = Math.min(1, a + CORE_FILL * 0.55 * Math.max(0, 1 - Math.pow(d / 0.85, 2)));
       a *= 1 - Math.min(1, Math.max(0, (d - 0.95) / 0.45));   // reach zero before the edge
       if (x === W - 1) a = 0;
       a *= 1 - Math.pow(v, 2.3);
@@ -299,7 +312,24 @@ export function setFireLook(o = {}) {
   SAT_BURY   = c(o.bury,     0,   0.9, SAT_BURY);
   SAT_SPREAD = c(o.spread,   0.2, 1.5, SAT_SPREAD);
   MAIN_BURY  = c(o.mainBury, 0,   0.9, MAIN_BURY);
-  if (o.lean != null) LEAN_LIVE = c(o.lean, 0, 1.2, LEAN_LIVE == null ? LEAN : LEAN_LIVE);
+  // NEGATIVE IS ALLOWED (Jacob asked for below zero): a positive lean tips the top toward the
+  // camera, so a negative one tips it away — worth being able to try, even though the core fill
+  // below is the honest fix for the ring.
+  if (o.lean != null) LEAN_LIVE = c(o.lean, -1.2, 1.2, LEAN_LIVE == null ? LEAN : LEAN_LIVE);
+  // The profile is a baked canvas texture, so a change means regenerating it and handing the new
+  // one to every material — they share it by reference, but the uniform holds the old object.
+  if (o.core != null) {
+    const nc = c(o.core, 0, 1, CORE_FILL);
+    if (nc !== CORE_FILL) {
+      CORE_FILL = nc;
+      const tex = makeFireProfile();
+      if (VolumetricFire.textures) VolumetricFire.textures.fireProfile = tex;
+      for (const s2 of pool) {
+        const u = s2.fire && s2.fire.mesh && s2.fire.mesh.material && s2.fire.mesh.material.uniforms;
+        if (u && u.fireProfile) u.fireProfile.value = tex;
+      }
+    }
+  }
   LIFE     = c(o.life,    1.5, 16,  LIFE);
   HOLD     = c(o.hold,    0.1, 0.95, HOLD);
   SAT_LIFE = c(o.satLife, 0.15, 1.3, SAT_LIFE);
@@ -310,7 +340,7 @@ export function getFireLook() {
   return { sat: SAT_SCALE, bury: SAT_BURY, spread: SAT_SPREAD, mainBury: MAIN_BURY,
            lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE,
            envR: ENV.x, envTop: ENV.y, envBot: ENV.z,
-           life: LIFE, hold: HOLD, satLife: SAT_LIFE, satLifeVar: SAT_LIFE_VAR };
+           life: LIFE, hold: HOLD, satLife: SAT_LIFE, satLifeVar: SAT_LIFE_VAR, core: CORE_FILL };
 }
 
 export function drawFire(elapsed) {
