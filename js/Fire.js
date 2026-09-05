@@ -154,11 +154,12 @@ export function initFire(sc, cam) {
 // Light something up. `scale` sizes it against a vehicle (1 = a vehicle-sized fire).
 // `lifeMul` shortens or lengthens this one's burn against LIFE — a spot fire in the debris should
 // gutter out well before the main blaze does, rather than the two ending in lockstep.
-export function fireBurst(x, y, z, scale = 1, lifeMul = 1) {
+export function fireBurst(x, y, z, scale = 1, lifeMul = 1, bury = 0) {
   if (!ready) return false;
   const slot = pool.find(s => !s.busy);
   if (!slot) return false;                    // pool exhausted — deliberately, see the note above
   slot.busy = true; slot.t = 0; slot.scale = scale; slot.life = LIFE * lifeMul;
+  slot.bury = bury;   // fraction of its own height it sits BELOW the ground, permanently
   // RE-ROLLED ON EVERY LIGHT, not once per slot: a pool of eight reused all match would otherwise
   // become the same eight recurring flames, which is the clone problem again wearing a hat.
   slot.phase = frnd() * 40; slot.jw = 0.82 + frnd() * 0.36; slot.jh = 0.85 + frnd() * 0.3;
@@ -197,7 +198,7 @@ const WRECK_RESERVE = 4;    // slots kept free for OTHER wrecks before a satelli
 const WRECK_GAP = 0.7;
 
 export function fireWreck(x, y, z, scale = 1, groundAt = null) {
-  const r0 = fireBurst(x, y, z, scale);       // …and how wide it turned out to be
+  const r0 = fireBurst(x, y, z, scale, 1, MAIN_BURY);   // …and how wide it turned out to be
   if (!r0) return 0;                          // no slot at all — nothing else to try
   let n = 1;
   // SPOT FIRES STAND CLEAR OF THE MAIN ONE. Scattering them 1.7-3.4u from the centre put every
@@ -210,15 +211,18 @@ export function fireWreck(x, y, z, scale = 1, groundAt = null) {
   const base = frnd() * Math.PI * 2;
   for (let i = 0; i < WRECK_SATS; i++) {
     if (pool.length - live.length - 1 < WRECK_RESERVE) break;   // leave the reserve alone
-    const sc = scale * (0.36 + frnd() * 0.22);
-    const d = r0 + fireRadius(sc, JW_MAX) + WRECK_GAP;
+    const sc = scale * SAT_SCALE;
+    // Space against the VISIBLE girth, not the true one. A buried flame only shows its upper
+    // part, so charging the full radius here would fling the satellites out to arm's length and
+    // the wreck would read as three separate fires instead of one burning machine.
+    const d = r0 + fireRadius(sc, JW_MAX) * SAT_SPREAD + WRECK_GAP;
     const a = base + i * Math.PI + (frnd() - 0.5) * 0.9;        // opposite sides, loosely
     const sx = x + Math.cos(a) * d, sz = z + Math.sin(a) * d;
     let sy = groundAt ? groundAt(sx, sz) : y;
     // An AIR kill (a Valkyrie shot down before it falls) leaves the terrain far below the wreck;
     // seating the spot fires on the ground there would strand them under a fire hanging in the sky.
     if (Math.abs(sy - y) > 4) sy = y;
-    if (fireBurst(sx, sy, sz, sc, 0.5 + frnd() * 0.25)) n++;
+    if (fireBurst(sx, sy, sz, sc, 0.5 + frnd() * 0.25, SAT_BURY)) n++;
   }
   return n;
 }
@@ -248,6 +252,24 @@ const _fax = new THREE.Vector3();
 const LEAN = (() => { const q = new URLSearchParams(location.search).get('firelean');
   return q == null ? 0.30 : Math.max(0, Math.min(1.2, +q || 0)); })();
 
+// SATELLITE SHAPE — the three numbers behind "the small ones look like donuts". Live-tunable for
+// the same reason LEAN is: the person who sees it in play is the one who should pick it.
+//   ?firesat=    satellite size against the main fire   (was 0.36-0.58 random; now full size)
+//   ?firebury=   how much of its height starts underground
+//   ?firespread= how far out to place it, against its own radius
+// The previous look is ?firesat=0.47&firebury=0&firespread=1.
+const _fq_num = (k, dflt, lo, hi) => {
+  const q = new URLSearchParams(location.search).get(k);
+  return q == null ? dflt : Math.max(lo, Math.min(hi, +q || 0));
+};
+const SAT_SCALE  = _fq_num('firesat', 1.0, 0.2, 1.5);
+const SAT_BURY   = _fq_num('firebury', 0.45, 0, 0.9);
+const SAT_SPREAD = _fq_num('firespread', 0.55, 0.2, 1.5);
+// …and the MAIN fire's own seating. Default 0 = unchanged, because a wreck fire belongs ON the
+// wreck; the knob exists because the big flame in the screenshot rings just as the small ones do,
+// and burying it is the same one-line experiment. ?firemainbury=0.25 to try it.
+const MAIN_BURY  = _fq_num('firemainbury', 0, 0, 0.9);
+
 export function drawFire(elapsed) {
   if (!ready || !live.length) return;
   for (const s of live) {
@@ -262,7 +284,14 @@ export function drawFire(elapsed) {
     const k = SIZE * s.scale * grow;                        // full size for the whole burn
     s.fire.mesh.scale.set(k * s.jw, k * s.jh, k * s.jw);
     const half = 3 * k * s.jh;                              // half of the 6-tall box at this size
-    s.fire.mesh.position.y = s.baseY + half - sink * (half * 2 + 0.5);   // fully under by the end
+    // BURY, DON'T SHRINK (Jacob, 2026-09-02: "maybe the smaller ones are actually the same size,
+    // but just lower — the flames look good when they are sinking into the ground"). A small
+    // flame reads as a donut because the camera looks down the column's axis and the volume's
+    // radial profile is hollow there; the tail already looks right for exactly the opposite
+    // reason — once it slides under the terrain you see only the tapering tip, which reads as
+    // flame rather than as a ring. So a satellite keeps its full girth and simply starts part
+    // way underground, and the terrain clips the annulus away for its whole life.
+    s.fire.mesh.position.y = s.baseY + half - (s.bury || 0) * half * 2 - sink * (half * 2 + 0.5);
     // LEAN TOWARD THE VIEWER (Jacob: "they kind of look like a donut"). The volume is a box sliced
     // against the view direction, so a camera looking down the column's axis sees the annulus
     // instead of the side of the flame. Tipping the top toward the camera restores a side-on read.
