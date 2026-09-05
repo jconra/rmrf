@@ -32,7 +32,7 @@ let HOLD = 0.10;           // fraction of life at full size before it starts goi
 // when the side fires fade versus the middle fire?"). They always died first — a wreck should
 // gutter down to one flame rather than all three ending together — but 0.5 + a 0.25 spread was
 // hardcoded at the call site with no way to feel a different answer.
-let SAT_LIFE = 0.85, SAT_LIFE_VAR = 0;   // spot fires outlast most of the main flame now
+let SAT_LIFE = 0.85, SAT_LIFE_VAR = 0.30;   // spot fires outlast most of the main flame, and vary
 let OUT_MODE = 'burn';   // 'burn' | 'sink' | 'shrink' — how a flame ends; see drawFire
 // HOW A WRECK LIGHTS (Jacob: "it would be awesome if they expanded and the side flames shot out
 // from the center ... some explosion effects"). Three parts, all on the birth side of the burn:
@@ -50,6 +50,9 @@ let SAT_SEED = 0.30, SAT_BLOOM = 0.45;
 // DEBRIS — a handful of chunks thrown clear of the blast, which fall and wink out. Geometry, not a
 // sprite: they tumble, and the silhouette against the flame is the point.
 let DEB_N = 12, DEB_SPEED = 15, DEB_LIFE = 1.25, DEB_GRAV = 26;
+// DEB_COLD biases how many chunks are cold plate rather than molten (higher = more black ones).
+// DEB_GLOW is the distance over which the fire's light falls off. DEB_HEAT is overall brightness.
+let DEB_COLD = 2.2, DEB_GLOW = 5.5, DEB_HEAT = 1.5;
 let DISSOLVE = 1;        // fully noise-driven: licks go out at their own pace, never an even dim
 // World scale of a `scale:1` (vehicle-sized) fire. The box is built 3×6×3, and the profile fades
 // out toward its top, so the FLAME you see is roughly two-thirds of the box — at 1.0 a burning
@@ -160,52 +163,103 @@ function makeFireProfile() {
 // One shared geometry and one shared material — they differ only by transform, so they cost a draw
 // call each and nothing else. Chunks shrink to nothing at the end of their life rather than fading,
 // which avoids transparency sorting against the additive flames entirely.
-const debris = [];
-let debGeo = null, debMat = null;
+const DEB_MAX = 40;
+const deb = [];                 // plain state; the mesh is instanced, so nothing here is a THREE object
+let debMesh = null, debGeo = null, debMat = null;
+const _dq = new THREE.Quaternion(), _de = new THREE.Euler(), _dv = new THREE.Vector3(), _dm = new THREE.Matrix4();
+const _dc = new THREE.Color();
 function initDebris() {
-  if (debGeo) return;
+  if (debMesh) return;
   debGeo = new THREE.TetrahedronGeometry(0.42);            // angular, reads as a fragment
-  debMat = new THREE.MeshStandardMaterial({ color: 0x2a2320, roughness: 0.85, metalness: 0.1,
-                                            emissive: 0x6b2a08, emissiveIntensity: 0.55 });
-  for (let i = 0; i < 40; i++) {
-    const m = new THREE.Mesh(debGeo, debMat);
-    m.visible = false; m.userData.t = 0; m.userData.life = 0;
-    scene.add(m); debris.push(m);
+  debMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.1,
+                                            emissive: 0xffffff, emissiveIntensity: 1 });
+  // LIT BY THE FIRE, without a light. A real PointLight per wreck is out of the question — the
+  // point-light COUNT is pinned for the whole match because three.js bakes it into every lit
+  // shader, and moving it recompiles the world (see updatePadLights in main.js). So the glow is
+  // carried in the per-instance colour instead: emissive is multiplied by it, which three does not
+  // do out of the box, hence the one-line patch. A chunk that is hot and close to the flame comes
+  // out bright; one that has cooled or flown clear goes black and is then lit only by the world.
+  debMat.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader.replace(
+      'vec3 totalEmissiveRadiance = emissive;',
+      'vec3 totalEmissiveRadiance = emissive * vColor;');
+  };
+  // ONE DRAW CALL for every chunk, instead of one each. This is why per-chunk colour costs nothing:
+  // instancing makes the whole effect cheaper than the dozen separate meshes it replaces.
+  debMesh = new THREE.InstancedMesh(debGeo, debMat, DEB_MAX);
+  debMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  debMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(DEB_MAX * 3), 3);
+  debMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  debMesh.frustumCulled = false;                          // they fly further than their origin bounds
+  debMesh.renderOrder = 19;                               // solid, just before the additive flames
+  scene.add(debMesh);
+  for (let i = 0; i < DEB_MAX; i++) deb.push({ live: false });
+  writeDebris();
+}
+// Compose every instance's matrix and colour. Dead ones are scaled to zero rather than removed —
+// an InstancedMesh draws a fixed count, so a zero-scale instance is the way to hide one.
+function writeDebris() {
+  if (!debMesh) return;
+  for (let i = 0; i < DEB_MAX; i++) {
+    const d = deb[i];
+    if (!d.live) { _dm.makeScale(0, 0, 0); debMesh.setMatrixAt(i, _dm); continue; }
+    _de.set(d.rx, d.ry, d.rz); _dq.setFromEuler(_de);
+    _dv.set(d.s, d.s, d.s);
+    _dm.compose({ x: d.x, y: d.y, z: d.z }, _dq, _dv);
+    debMesh.setMatrixAt(i, _dm);
+    debMesh.instanceColor.setXYZ(i, d.cr, d.cg, d.cb);
   }
+  debMesh.instanceMatrix.needsUpdate = true;
+  debMesh.instanceColor.needsUpdate = true;
 }
 function throwDebris(x, y, z, scale) {
-  if (!debGeo) return;
+  if (!debMesh) return;
   let n = 0;
-  for (const m of debris) {
+  for (const d of deb) {
     if (n >= DEB_N) break;
-    if (m.visible) continue;
+    if (d.live) continue;
     n++;
     const a = frnd() * Math.PI * 2, up = 0.55 + frnd() * 0.85;
     const sp = DEB_SPEED * (0.55 + frnd() * 0.9) * scale;
-    m.position.set(x + (frnd() - 0.5) * 0.6, y + 0.4, z + (frnd() - 0.5) * 0.6);
-    m.userData.v = { x: Math.cos(a) * sp, y: up * sp, z: Math.sin(a) * sp };
-    m.userData.spin = { x: (frnd() - 0.5) * 14, y: (frnd() - 0.5) * 14, z: (frnd() - 0.5) * 14 };
-    m.userData.t = 0; m.userData.life = DEB_LIFE * (0.7 + frnd() * 0.6);
-    m.userData.s0 = scale * (0.5 + frnd() * 0.9);
-    m.scale.setScalar(m.userData.s0);
-    m.rotation.set(frnd() * 6.28, frnd() * 6.28, frnd() * 6.28);
-    m.visible = true;
+    d.live = true; d.t = 0; d.life = DEB_LIFE * (0.7 + frnd() * 0.6);
+    d.x = x + (frnd() - 0.5) * 0.6; d.y = y + 0.4; d.z = z + (frnd() - 0.5) * 0.6;
+    d.ox = x; d.oy = y; d.oz = z;                          // the fire it was thrown from
+    d.vx = Math.cos(a) * sp; d.vy = up * sp; d.vz = Math.sin(a) * sp;
+    d.rx = frnd() * 6.28; d.ry = frnd() * 6.28; d.rz = frnd() * 6.28;
+    d.sx = (frnd() - 0.5) * 14; d.sy = (frnd() - 0.5) * 14; d.sz = (frnd() - 0.5) * 14;
+    d.s0 = scale * (0.5 + frnd() * 0.9); d.s = d.s0;
+    // HOW MOLTEN THIS ONE IS. Most chunks are cold hull plate and stay dark; a few came out of the
+    // fire itself and glow. Mixing the two is what stops a burst reading as uniform confetti.
+    d.hot = Math.pow(frnd(), DEB_COLD);
+    d.cr = d.cg = d.cb = 0;
   }
 }
 function tickDebris(dt) {
-  for (const m of debris) {
-    if (!m.visible) continue;
-    const u = m.userData;
-    u.t += dt;
-    if (u.t >= u.life) { m.visible = false; continue; }
-    u.v.y -= DEB_GRAV * dt;
-    m.position.x += u.v.x * dt; m.position.y += u.v.y * dt; m.position.z += u.v.z * dt;
-    m.rotation.x += u.spin.x * dt; m.rotation.y += u.spin.y * dt; m.rotation.z += u.spin.z * dt;
-    // GONE, not faded: shrink over the last third so it winks out without needing to sort against
-    // the additive flames.
-    const k = u.t / u.life;
-    m.scale.setScalar(u.s0 * (k < 0.66 ? 1 : 1 - (k - 0.66) / 0.34));
+  if (!debMesh) return;
+  let any = false;
+  for (const d of deb) {
+    if (!d.live) continue;
+    any = true;
+    d.t += dt;
+    if (d.t >= d.life) { d.live = false; continue; }
+    d.vy -= DEB_GRAV * dt;
+    d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+    d.rx += d.sx * dt; d.ry += d.sy * dt; d.rz += d.sz * dt;
+    const k = d.t / d.life;
+    // GONE, not faded: shrink over the last third so a chunk winks out without needing to sort
+    // against the additive flames.
+    d.s = d.s0 * (k < 0.66 ? 1 : 1 - (k - 0.66) / 0.34);
+    // COOL DOWN, AND DIM WITH DISTANCE FROM THE FIRE. Both terms matter: a chunk fades from
+    // white-hot through ember to black over its own life, and separately loses the flame's light
+    // as it flies clear. Together they read as debris genuinely lit by the fire it came out of.
+    const cool = Math.pow(1 - k, 1.7) * d.hot;
+    const dist = Math.hypot(d.x - d.ox, d.y - d.oy, d.z - d.oz);
+    const near = 1 / (1 + Math.pow(dist / Math.max(0.001, DEB_GLOW), 2));
+    const g = cool * (0.35 + 0.65 * near) * DEB_HEAT;
+    _dc.setRGB(1, 0.42, 0.13).multiplyScalar(g);           // ember, scaled by how hot it still is
+    d.cr = Math.min(4, _dc.r); d.cg = Math.min(4, _dc.g); d.cb = Math.min(4, _dc.b);
   }
+  if (any || debMesh.userData.dirty !== false) { writeDebris(); debMesh.userData.dirty = any; }
 }
 export function initFire(sc, cam) {
   scene = sc; camera = cam; pool = []; live = []; ready = false;
@@ -342,8 +396,8 @@ const _fq_num = (k, dflt, lo, hi) => {
   const q = new URLSearchParams(location.search).get(k);
   return q == null ? dflt : Math.max(lo, Math.min(hi, +q || 0));
 };
-let SAT_SCALE  = _fq_num('firesat', 0.75, 0.2, 1.5);
-let SAT_SPREAD = _fq_num('firespread', 0.20, 0.2, 1.5);
+let SAT_SCALE  = _fq_num('firesat', 0.55, 0.2, 1.5);
+let SAT_SPREAD = _fq_num('firespread', 1.0, 0.2, 1.5);
 let LEAN_LIVE = null;   // set by setFireLook; null = use the LEAN constant from the query string
 const ENV = new THREE.Vector2(0.99, 0.12);   // radial / bottom fade starts — see setFireLook
 
@@ -383,6 +437,9 @@ export function setFireLook(o = {}) {
   DEB_N     = Math.round(c(o.debN,     0, 40, DEB_N));
   DEB_SPEED = c(o.debSpeed, 0, 40, DEB_SPEED);
   DEB_LIFE  = c(o.debLife,  0.2, 4, DEB_LIFE);
+  DEB_COLD  = c(o.debCold,  0.2, 6, DEB_COLD);
+  DEB_GLOW  = c(o.debGlow,  0.5, 30, DEB_GLOW);
+  DEB_HEAT  = c(o.debHeat,  0, 4, DEB_HEAT);
   SHOOT = c(o.shoot, 0, 1, SHOOT);
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
@@ -394,7 +451,8 @@ export function getFireLook() {
            life: LIFE, hold: HOLD, satLife: SAT_LIFE, satLifeVar: SAT_LIFE_VAR, outMode: OUT_MODE, dissolve: DISSOLVE,
            birth: BIRTH, shoot: SHOOT, flash: FLASH,
            satSeed: SAT_SEED, satBloom: SAT_BLOOM,
-           debN: DEB_N, debSpeed: DEB_SPEED, debLife: DEB_LIFE };
+           debN: DEB_N, debSpeed: DEB_SPEED, debLife: DEB_LIFE,
+           debCold: DEB_COLD, debGlow: DEB_GLOW, debHeat: DEB_HEAT };
 }
 
 export function drawFire(elapsed) {
@@ -485,7 +543,8 @@ export function drawFire(elapsed) {
 export function clearFires() {
   for (const s2 of live) { s2.busy = false; if (s2.fire && s2.fire.mesh) s2.fire.mesh.visible = false; }
   live.length = 0;
-  for (const m of debris) m.visible = false;
+  for (const d of deb) d.live = false;
+  writeDebris();
 }
 export function fireStatus() {
   return {
