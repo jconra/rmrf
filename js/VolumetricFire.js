@@ -103,6 +103,10 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
 
     'const float magnatude = 1.3;',
     'uniform float time;',
+    // Where the edge envelope starts fading, as a fraction of the box: x = radial (1 = the wall),
+    // y = top, z = bottom. A uniform rather than constants so the lab can sweep them on a running
+    // scene — these are judged by eye, and a recompile per guess makes that impossible.
+    'uniform vec3 envFade;',
     'uniform sampler2D fireProfile;',
 
     /**
@@ -166,8 +170,8 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
       // Fading against the unturbulent box position closes that door: every slice now contributes
       // zero at its own clipped edge, so no step can exist to be seen, whatever the noise does.
       // Costs three smoothsteps and changes the silhouette only in the last ~10% of the volume.
-      'float env = smoothstep( 1.0, 0.80, boxR );',
-      'env *= smoothstep( 1.0, 0.86, boxH ) * smoothstep( 0.0, 0.05, boxH );',
+      'float env = smoothstep( 1.0, envFade.x, boxR );',
+      'env *= smoothstep( 1.0, envFade.y, boxH ) * smoothstep( 0.0, envFade.z, boxH );',
       'result *= env;',
 
       'return result;',
@@ -229,6 +233,10 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
         time: {
           type: 'f',
           value: 1.0
+        },
+        envFade: {
+          type: 'v3',
+          value: new THREE.Vector3( 0.80, 0.86, 0.05 )   // radial, top, bottom — see the shader
         }
       };
 

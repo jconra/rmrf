@@ -269,7 +269,8 @@ let SAT_SPREAD = _fq_num('firespread', 0.55, 0.2, 1.5);
 // wreck; the knob exists because the big flame in the screenshot rings just as the small ones do,
 // and burying it is the same one-line experiment. ?firemainbury=0.25 to try it.
 let MAIN_BURY  = _fq_num('firemainbury', 0, 0, 0.9);
-let LEAN_LIVE = null;   // set by setFireLook; null = use the LEAN constant read from the query string
+let LEAN_LIVE = null;   // set by setFireLook; null = use the LEAN constant from the query string
+const ENV = new THREE.Vector3(0.80, 0.86, 0.05);   // radial / top / bottom fade starts — see setFireLook
 
 // LIVE TUNING (Jacob, 2026-09-05: "adjust the fires in the fire lab with range inputs — it's too
 // difficult to do with url parameters"). Every one of these was query-string only, which meant a
@@ -278,6 +279,17 @@ let LEAN_LIVE = null;   // set by setFireLook; null = use the LEAN constant read
 // fine — pass only what you are changing.
 export function setFireLook(o = {}) {
   const c = (v, lo, hi, cur) => (v == null ? cur : Math.max(lo, Math.min(hi, +v || 0)));
+  // EDGE ENVELOPE — where each slice starts fading to nothing, so its clipped polygon edge cannot
+  // show as a brightness step (Jacob: "making the fire fade out in the bottom might reduce some of
+  // the lines at the bottom of each slice" — it does, and the same argument applies to the rim and
+  // the top). Lives on every pooled material because each fire owns its uniforms after cloning.
+  if (o.envR != null || o.envTop != null || o.envBot != null) {
+    ENV.set(c(o.envR, 0.3, 1, ENV.x), c(o.envTop, 0.3, 1, ENV.y), c(o.envBot, 0, 0.6, ENV.z));
+    for (const s2 of pool) {
+      const u = s2.fire && s2.fire.mesh && s2.fire.mesh.material && s2.fire.mesh.material.uniforms;
+      if (u && u.envFade) u.envFade.value.copy(ENV);
+    }
+  }
   SAT_SCALE  = c(o.sat,      0.2, 1.5, SAT_SCALE);
   SAT_BURY   = c(o.bury,     0,   0.9, SAT_BURY);
   SAT_SPREAD = c(o.spread,   0.2, 1.5, SAT_SPREAD);
@@ -287,7 +299,8 @@ export function setFireLook(o = {}) {
 }
 export function getFireLook() {
   return { sat: SAT_SCALE, bury: SAT_BURY, spread: SAT_SPREAD, mainBury: MAIN_BURY,
-           lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE };
+           lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE,
+           envR: ENV.x, envTop: ENV.y, envBot: ENV.z };
 }
 
 export function drawFire(elapsed) {

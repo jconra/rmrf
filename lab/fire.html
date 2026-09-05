@@ -836,6 +836,12 @@ const lightWreck = () => { fireWreck(0, 0.2, 0, wreckScale, () => 0.2); };   // 
     ['mainBury', 'main flame sunk',  0,   0.9, 0.05, '0 = sits on the wreck'],
     ['lean',     'lean at camera',   0,   1.2, 0.02, 'radians; fights the donut'],
     ['scale',    'wreck size',       0.5, 2.0, 0.05, 'jotun kills are 1.35'],
+    // The edge envelope — the three numbers behind the straight lines. Each slice is a polygon and
+    // its edge shows as a brightness step; these say how far in from the box wall, the top and the
+    // bottom the flame fades to nothing so that step cannot exist.
+    ['envBot',   'bottom fade',      0,   0.6, 0.01, 'lines at the base of a slice'],
+    ['envR',     'rim fade',         0.3, 1.0, 0.01, 'lines down the sides'],
+    ['envTop',   'top fade',         0.3, 1.0, 0.01, 'lines across the top'],
   ];
   const wrap = document.getElementById('wsliders');
   const look = getFireLook();
