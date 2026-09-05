@@ -932,7 +932,12 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     // How it LIGHTS: the expansion window, how far the spot fires are thrown, and the punch.
     ['birth',    'expand time',      0,   1.5, 0.02, 'seconds; overshoots then settles'],
     ['shoot',    'throw spot fires', 0,   1.0, 0.02, '1 = fired out of the centre'],
-    ['flash',    'ignition flash',   0,   5.0, 0.1,  'brightness punch on impact'],
+    ['satSeed',  'fireball size',    0.05, 1.0, 0.05, 'spot fire size while flying'],
+    ['satBloom', 'bloom on landing', 0,   2.0, 0.05, 'seconds to open up once it lands'],
+    ['debN',     'debris chunks',    0,   40,  1,    'geometry thrown clear'],
+    ['debSpeed', 'debris speed',     0,   40,  1,    'how hard they are thrown'],
+    ['debLife',  'debris life',      0.2, 4.0, 0.05, 'seconds before they wink out'],
+    ['flash',    'ignition flash',   0,   5.0, 0.1,  'brightness punch; 0 = off'],
     ['dissolve', 'break-up',        0,   1.0, 0.02, '0 even dim, 1 licks go out at random'],
     ['life',     'burn time',        1.5, 16,  0.5,  'seconds, whole wreck'],
     ['hold',     'sag starts at',    0.1, 0.95, 0.01, 'fraction of burn time'],

@@ -41,7 +41,15 @@ let OUT_MODE = 'burn';   // 'burn' | 'sink' | 'shrink' — how a flame ends; see
 //   SHOOT  how much of the way the spot fires TRAVEL from the wreck's centre to their spot. At 1
 //          they are thrown out of the explosion; at 0 they simply appear where they belong.
 //   FLASH  a brightness punch on the first moments, which is what reads as a detonation.
-let BIRTH = 0.42, SHOOT = 1, FLASH = 1.6;
+let BIRTH = 0.42, SHOOT = 1, FLASH = 0;
+// A spot fire travels as a small FIREBALL and only opens up once it lands (Jacob). Without this
+// it flew out at full size, which reads as three flames sliding apart rather than one wreck
+// throwing burning debris. SEED is its size in transit; BLOOM is how long it takes to reach full
+// size after arriving.
+let SAT_SEED = 0.30, SAT_BLOOM = 0.45;
+// DEBRIS — a handful of chunks thrown clear of the blast, which fall and wink out. Geometry, not a
+// sprite: they tumble, and the silhouette against the flame is the point.
+let DEB_N = 12, DEB_SPEED = 15, DEB_LIFE = 1.25, DEB_GRAV = 26;
 let DISSOLVE = 1;        // fully noise-driven: licks go out at their own pace, never an even dim
 // World scale of a `scale:1` (vehicle-sized) fire. The box is built 3×6×3, and the profile fades
 // out toward its top, so the FLAME you see is roughly two-thirds of the box — at 1.0 a burning
@@ -147,11 +155,64 @@ function makeFireProfile() {
 
 // Headless runs (the tournament harness) have no document and never draw, so the whole thing
 // stands down rather than throwing on a canvas that isn't there.
+// ── DEBRIS ────────────────────────────────────────────────────────────────────────────────────
+// Pooled like the flames are, for the same reason: a kill happens mid-fight and must not allocate.
+// One shared geometry and one shared material — they differ only by transform, so they cost a draw
+// call each and nothing else. Chunks shrink to nothing at the end of their life rather than fading,
+// which avoids transparency sorting against the additive flames entirely.
+const debris = [];
+let debGeo = null, debMat = null;
+function initDebris() {
+  if (debGeo) return;
+  debGeo = new THREE.TetrahedronGeometry(0.42);            // angular, reads as a fragment
+  debMat = new THREE.MeshStandardMaterial({ color: 0x2a2320, roughness: 0.85, metalness: 0.1,
+                                            emissive: 0x6b2a08, emissiveIntensity: 0.55 });
+  for (let i = 0; i < 40; i++) {
+    const m = new THREE.Mesh(debGeo, debMat);
+    m.visible = false; m.userData.t = 0; m.userData.life = 0;
+    scene.add(m); debris.push(m);
+  }
+}
+function throwDebris(x, y, z, scale) {
+  if (!debGeo) return;
+  let n = 0;
+  for (const m of debris) {
+    if (n >= DEB_N) break;
+    if (m.visible) continue;
+    n++;
+    const a = frnd() * Math.PI * 2, up = 0.55 + frnd() * 0.85;
+    const sp = DEB_SPEED * (0.55 + frnd() * 0.9) * scale;
+    m.position.set(x + (frnd() - 0.5) * 0.6, y + 0.4, z + (frnd() - 0.5) * 0.6);
+    m.userData.v = { x: Math.cos(a) * sp, y: up * sp, z: Math.sin(a) * sp };
+    m.userData.spin = { x: (frnd() - 0.5) * 14, y: (frnd() - 0.5) * 14, z: (frnd() - 0.5) * 14 };
+    m.userData.t = 0; m.userData.life = DEB_LIFE * (0.7 + frnd() * 0.6);
+    m.userData.s0 = scale * (0.5 + frnd() * 0.9);
+    m.scale.setScalar(m.userData.s0);
+    m.rotation.set(frnd() * 6.28, frnd() * 6.28, frnd() * 6.28);
+    m.visible = true;
+  }
+}
+function tickDebris(dt) {
+  for (const m of debris) {
+    if (!m.visible) continue;
+    const u = m.userData;
+    u.t += dt;
+    if (u.t >= u.life) { m.visible = false; continue; }
+    u.v.y -= DEB_GRAV * dt;
+    m.position.x += u.v.x * dt; m.position.y += u.v.y * dt; m.position.z += u.v.z * dt;
+    m.rotation.x += u.spin.x * dt; m.rotation.y += u.spin.y * dt; m.rotation.z += u.spin.z * dt;
+    // GONE, not faded: shrink over the last third so it winks out without needing to sort against
+    // the additive flames.
+    const k = u.t / u.life;
+    m.scale.setScalar(u.s0 * (k < 0.66 ? 1 : 1 - (k - 0.66) / 0.34));
+  }
+}
 export function initFire(sc, cam) {
   scene = sc; camera = cam; pool = []; live = []; ready = false;
   if (typeof document === 'undefined' || !sc || !cam) return false;
   try {
     VolumetricFire.textures = { nzw: makeNZW(), fireProfile: makeFireProfile() };
+  initDebris();
     for (let i = 0; i < POOL; i++) {
       const fire = new VolumetricFire(3, 6, 3, 0.5, cam);
       fire.mesh.visible = false;
@@ -217,6 +278,7 @@ const WRECK_GAP = 0.7;
 
 export function fireWreck(x, y, z, scale = 1, groundAt = null) {
   const r0 = fireBurst(x, y, z, scale);       // …and how wide it turned out to be
+  throwDebris(x, y, z, scale);                // chunks off the blast, before anything else moves
   if (!r0) return 0;                          // no slot at all — nothing else to try
   let n = 1;
   // SPOT FIRES STAND CLEAR OF THE MAIN ONE. Scattering them 1.7-3.4u from the centre put every
@@ -251,6 +313,7 @@ export function fireWreck(x, y, z, scale = 1, groundAt = null) {
 // explosions of a tournament match and never release. (The same trap the blood marks and crushable
 // tents hit — they have to be ticked from both the render loop and stepField.)
 export function tickFire(dt) {
+  tickDebris(dt);            // runs even with no flames left — chunks outlive a short burn
   if (!live.length) return;
   for (let i = live.length - 1; i >= 0; i--) {
     const s = live[i];
@@ -315,6 +378,11 @@ export function setFireLook(o = {}) {
   if (o.outMode && ['burn','sink','shrink'].includes(o.outMode)) OUT_MODE = o.outMode;
   DISSOLVE = c(o.dissolve, 0, 1, DISSOLVE);
   BIRTH = c(o.birth, 0, 1.5, BIRTH);
+  SAT_SEED  = c(o.satSeed,  0.05, 1, SAT_SEED);
+  SAT_BLOOM = c(o.satBloom, 0,    2, SAT_BLOOM);
+  DEB_N     = Math.round(c(o.debN,     0, 40, DEB_N));
+  DEB_SPEED = c(o.debSpeed, 0, 40, DEB_SPEED);
+  DEB_LIFE  = c(o.debLife,  0.2, 4, DEB_LIFE);
   SHOOT = c(o.shoot, 0, 1, SHOOT);
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
@@ -324,7 +392,9 @@ export function getFireLook() {
            lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE,
            envR: ENV.x, envBot: ENV.y,
            life: LIFE, hold: HOLD, satLife: SAT_LIFE, satLifeVar: SAT_LIFE_VAR, outMode: OUT_MODE, dissolve: DISSOLVE,
-           birth: BIRTH, shoot: SHOOT, flash: FLASH };
+           birth: BIRTH, shoot: SHOOT, flash: FLASH,
+           satSeed: SAT_SEED, satBloom: SAT_BLOOM,
+           debN: DEB_N, debSpeed: DEB_SPEED, debLife: DEB_LIFE };
 }
 
 export function drawFire(elapsed) {
@@ -337,7 +407,15 @@ export function drawFire(elapsed) {
     const bw = Math.max(GROW, BIRTH);
     const b0 = Math.min(1, s.t / bw);
     const back = 1 + 2.2 * Math.pow(1 - b0, 3) - 2.2 * Math.pow(1 - b0, 4);   // ease-out-back, peaks ~1.15
-    const grow = BIRTH > GROW ? Math.min(1.35, back) : Math.min(1, s.t / GROW);
+    let grow = BIRTH > GROW ? Math.min(1.35, back) : Math.min(1, s.t / GROW);
+    // A THROWN spot fire is a small fireball in transit and only opens up once it lands. Held
+    // small for the whole flight, then eased to full over SAT_BLOOM — so the wreck reads as
+    // burning debris arriving and catching, rather than three flames sliding apart.
+    if (s.from) {
+      const bloom = SAT_BLOOM > 0 ? Math.min(1, Math.max(0, (s.t - bw) / SAT_BLOOM)) : 1;
+      const e2 = 1 - Math.pow(1 - bloom, 3);
+      grow = Math.min(1, s.t / GROW) * (SAT_SEED + (1 - SAT_SEED) * e2);
+    }
     // THROWN OUT OF THE CENTRE. A spot fire walks from the wreck's middle to its own spot over the
     // birth window, so the wreck blooms outward instead of three flames appearing at once.
     if (s.from && s.to) {
@@ -407,6 +485,7 @@ export function drawFire(elapsed) {
 export function clearFires() {
   for (const s2 of live) { s2.busy = false; if (s2.fire && s2.fire.mesh) s2.fire.mesh.visible = false; }
   live.length = 0;
+  for (const m of debris) m.visible = false;
 }
 export function fireStatus() {
   return {
