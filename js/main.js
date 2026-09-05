@@ -451,6 +451,12 @@ function updateSpectateTeamButtons() {
 // `?shot` builds a small map (and skips foliage unless `&fol`) so the headless
 // render rig stays fast on the software-GL box. Gameplay defaults are untouched.
 const QS = new URLSearchParams(location.search);
+// ?shadernonce=N — DEBUG: prepend a comment to every built-in shader so the GPU's on-disk program
+// cache misses and every compile is a true cold compile, on a Chrome that has already cached them.
+// The only honest way to measure the at-start hold and the mid-game stalls a first-time visitor
+// gets, without asking for a relaunch. Custom ShaderMaterials (fire, force field) don't include
+// `common` and stay warm; everything lit, basic and sprite goes cold.
+if (QS.has('shadernonce')) THREE.ShaderChunk.common = `// nonce ${QS.get('shadernonce')}\n` + THREE.ShaderChunk.common;
 const SHOT = QS.has('shot');
 // ?units=N (1-3): procedural maps build N elevator pads per team — the main lift inside the
 // FOB plus satellite pads flanking it — and the unit cap (one fielded vehicle per lift, see
@@ -963,6 +969,22 @@ let matchWon = false;   // last match's result for the PLAYER team (VICTORY vs D
 let flagsCaptured = 0;  // enemy flags the player has extracted into the garage (score)
 let deploy = null;    // { type, colorIndex } captured when a deploy is confirmed
 let fieldFadeT = 0;   // counts up after handoff to fade the black deploy overlay out
+let _warmPending = false;   // the field's shader warm is in flight: hold the render and the fade behind the black overlay
+const _warmT = { load: null, field: null, fieldStart: null, fieldHeldMs: null };   // RR.warmState — measured, so the black hold can be verified rather than assumed
+const _warmKeep = [];   // warmed effect materials, held so their programs are never released
+// Warm the field's shaders with the world built and the light count pinned, and hold the screen
+// (the loading splash, or the black deploy overlay) until they are linked. Called from BOTH field
+// entries: the garage hand-off (enterField) and the no-garage boot (?aivsai / ?spectate), which
+// builds the world itself and never goes through enterField — the first version of this only ran
+// for a human deploy, so the mode every measurement was taken in got no field warm at all.
+// Capped at 6s so a driver that never reports completion cannot hold the screen.
+function beginFieldWarm() {
+  if (QS.has('noprewarm')) return;
+  _warmPending = true; _warmT.fieldStart = performance.now();
+  const release = why => { if (!_warmPending) return; _warmPending = false; _warmT.fieldHeldMs = Math.round(performance.now() - _warmT.fieldStart); _warmT.fieldRelease = why; };
+  const cap = setTimeout(() => release('cap'), 6000);
+  warmShaders('field').finally(() => { clearTimeout(cap); release('linked'); });
+}
 let garageFadeT = null; // when set, fades the garage in from black (on return)
 let _garageElevSnd = null; // handle for the garage deploy-lift servo whir (started on rise)
 let waterT = 0;         // elapsed seconds driving the animated water ripples (pauses with the game)
@@ -1406,24 +1428,41 @@ function vehicleHidden(v) {
 // PAD LIGHTS fill the gap to a fixed budget: intensity-0 lights parked under the map,
 // toggled so (live vehicle lights + visible pads) === LIGHT_BUDGET, so the shader
 // variant is compiled once and reused forever.
-const LIGHT_BUDGET = 16;
-let padLights = null;
+// ?noglow strips every vehicle glow light (Jacob's "fewer point lights"): the count is then a
+// constant zero for free, every lit fragment skips the point-light loop entirely, and the only
+// thing lost is the subtle team-coloured pool under each hull. Kept as a flag so the two looks
+// can be compared side by side before choosing.
+const NOGLOW = new URLSearchParams(location.search).has('noglow');
+const LIGHT_BUDGET = NOGLOW ? 0 : 16;
+let padLights = null, _padAlarmed = false;
 function updatePadLights() {
   if (!padLights) {
     padLights = [];
     for (let i = 0; i < LIGHT_BUDGET; i++) {
       const l = new THREE.PointLight(0xffffff, 0, 0.001);
       l.position.set(0, -500, 0);
+      l.userData.pad = true;
       scene.add(l); padLights.push(l);
     }
   }
+  // COUNT WHAT THREE.JS WILL COUNT, not what the game thinks is alive. The old count walked
+  // `combatants`, skipped the dead, and skipped a vehicle riding the lift — but three.js counts
+  // every visible PointLight in the graph, and both of those still had visible lights: a wreck
+  // burns with its glow on, and a hull rising in the pit is `vehicleHidden` yet `visible`. Each
+  // disagreement was one frame at the wrong count, and one frame is all it takes to compile a
+  // fresh variant of every lit material. Measured on the real machine (seed 11): the count
+  // walked 18 -> 16 -> 17 -> 16 -> 15 -> 17 -> 16, and four distinct counts x ~23 world
+  // materials is the 84 -> 160 program growth, with 4-5 second freezes on a cold shader cache.
+  // scene.traverseVisible is exactly three's rule (visible chain, lights never culled) and costs
+  // 0.036ms a frame on the 7900 XT.
   let live = 0;
-  for (const v of combatants) {
-    if (v.dead || !v.group.visible || vehicleHidden(v)) continue;   // hidden subtree lights don't render
-    v.group.traverse(o => { if (o.isPointLight && o.visible) live++; });
-  }
+  scene.traverseVisible(o => { if (o.isPointLight && !o.userData.pad) live++; });
   const pads = Math.max(0, LIGHT_BUDGET - live);
   for (let i = 0; i < padLights.length; i++) padLights[i].visible = i < pads;
+  if (live > LIGHT_BUDGET && !_padAlarmed) {   // LOUD, once: past the budget every lit shader recompiles again
+    _padAlarmed = true;
+    console.warn(`[lights] ${live} live point lights exceed LIGHT_BUDGET ${LIGHT_BUDGET} — the shader-compile stutter is back; raise the budget or cut a light`);
+  }
 }
 
 // Ground height a vehicle should rest at (terrain + a small clearance; or the deck).
@@ -1792,6 +1831,7 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
   const bank = rankBankFor(veh);
   veh.rankKills = (bank && bank[veh.type]) || 0;
   if (veh.rankKills) { applyRankHp(veh); updateRankStars(veh); if (veh.bar) updateHealthBar(veh); }
+  if (NOGLOW) for (const g of new Set([veh.group, veh.holder])) if (g) g.traverse(o => { if (o.isPointLight) o.visible = false; });
   combatants.push(veh);
   return veh;
 }
@@ -2765,6 +2805,11 @@ function promoteUnit(killer) {
 function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
   veh.dead = true;
+  // ITS LIGHTS GO OUT. A wreck keeps its group in the scene while it burns, and with the glow
+  // lights still on, every wreck on the field kept counting against the point-light budget —
+  // enough dead hulls in a 3v3 and the budget overflows, which recompiles every lit shader. A dead
+  // machine going dark is also simply right; the fire is the light now.
+  for (const g of new Set([veh.group, veh.holder])) if (g) g.traverse(o => { if (o.isPointLight) o.visible = false; });
   spawnExplosion(veh.holder.position, veh.type === 'jotun');
   // …and it burns for a few seconds afterwards. A Jotun is a bigger machine and gets a bigger
   // fire; everything else is one size for now (Jacob: "keep it all the same for now").
@@ -11504,6 +11549,7 @@ if (!GARAGE) {
   if (TEAM_CTRL[PLAYER_TEAM] === 'human' && !QS.has('noveh')) {
     deployToFOB(FOB_RIDER[PLAYER_TEAM], TEAM_CAMO[PLAYER_TEAM], false);
   }
+  beginFieldWarm();   // the world exists now — see beginFieldWarm for why this path needs its own call
   // Stand up the spatial engine bus now; it stays silent until a tap arms the
   // AudioContext (armFieldAudio) — covers AI-vs-AI spectating with no deploy.
   ensureSound().setSpatialActive(true);
@@ -11945,6 +11991,12 @@ function enterField() {
   setGarageOverlays(false);
   setFieldUI(true);
   ensureSound().setSpatialActive(true);   // hear enemy/AI engines (ctx already live from the deploy click)
+  // WARM THE FIELD'S SHADERS NOW — with the world built and the light count pinned — and keep the
+  // deploy overlay black until they are linked. The module-load warm could not do this: the world
+  // does not exist yet at that point, and the light count it compiled against was the stand-ins'
+  // own (five), a count the match never renders at, so nearly all of it was thrown away. Capped at
+  // 6s so a driver that never reports completion cannot hold the screen black.
+  beginFieldWarm();
 }
 
 // Vehicle drives back onto its own FOB and parks → lower it (the visible bit) and,
@@ -12459,6 +12511,7 @@ window.RR = {
   // the renderer DOING during the frames that stuttered" — could not be asked by a script or from
   // a phone. Returns the worst frames kept this session with their section split, plus the running
   // per-section totals. Needs ?perf (or RR.setPerf(true)) for the timers to be collecting at all.
+  warmState: () => ({ pending: _warmPending, ..._warmT, programs: renderer.info.programs.length }),   // debug: did the field warm run, and how long was the screen held
   perfDump: () => ({
     collecting: PERF,
     frames: _pfFramesAll,
@@ -13347,7 +13400,6 @@ function animate() {
       updateGadgets(dt);                     // mines (proximity detonate) + sensor pods (blink)
       updateRepairs(dt, camera);             // tower repair crews: jeep drives out, crew builds, tower heals
       updateRepairIcons();                   // player: clickable 🔧 over each damaged friendly tower
-      updatePadLights();                     // hold point-light count constant (shader-compile stutter fix)
       _pfT('turrets', () => updateWallTurrets(dt));  // base corner turrets fire on intruders in range
       updateTowerUpgrades();                         // treasure-box drop + partial rebuild on tower death/revive
       updateCrushables();                            // flatten a tent + blood mark when a tread rolls over it
@@ -13360,7 +13412,11 @@ function animate() {
     // Slice the fire volumes against the camera. Only here: this is the part that costs, and a
     // headless step has no camera worth slicing against and nothing to show for it.
     _pfT('fire', () => drawFire(clock.elapsedTime));
-    _pfT('render', () => renderer.render(scene, camera));
+    // PINNED LAST, RIGHT BEFORE THE RENDER. This used to run mid-frame, before the turrets,
+    // destructibles and the fire tick — so a kill in any of those changed the light set after the
+    // pads had been sized, and the render saw the wrong count for one frame. See updatePadLights.
+    updatePadLights();
+    if (!_warmPending) _pfT('render', () => renderer.render(scene, camera));
     if (fade) {
       if (returning && victoryReturn) {
         // Victory: stay clear so the confetti + descending Firebrat are visible,
@@ -13379,13 +13435,13 @@ function animate() {
         if (playerElev && playerElev.phase === 'down') returnToGarage();
       } else if (onField) {
         // After the deploy handoff, fade the black overlay back out as the lift rises.
-        fieldFadeT += dt;
+        if (!_warmPending) fieldFadeT += dt;   // stay black until the field's shaders are linked
         fade.style.opacity = Math.max(0, 1 - fieldFadeT / 1.3);
       }
     }
   }
 
-  if (!_splashHidden) {                    // first frame rendered → drop the loading splash
+  if (!_splashHidden && !_warmPending) {   // keep the loading splash up while the field's shaders link                    // first frame rendered → drop the loading splash
     _splashHidden = true;
     if (window.__rmrfHideSplash) window.__rmrfHideSplash();
   }
@@ -13427,41 +13483,66 @@ ensureVolumeControl();
 // It warms what is IN the scene now — terrain, water, grass, structures, which includes the
 // expensive one. Vehicle programs still compile on first spawn; warming those needs a hidden
 // instance of each hull, which is the obvious next step and is deliberately not bundled here.
-if (!QS.has('noprewarm') && renderer.compileAsync) {
-  const _t0 = performance.now();
-  // VEHICLE HULLS MUST BE WARMED EXPLICITLY. Their materials are built per instance in the model
-  // constructor, so a hull type that is not on the field yet HAS no material for compileAsync to
-  // find — and the first one to appear compiles mid-match. That is the elevator freeze: a Firebrat
-  // rising from the deck is the first Firebrat drawn, so it pays for its own programs right then.
-  //
-  // Hidden geometry is fine to warm — three's compile() walks with scene.traverse, not
-  // traverseVisible — so these only need to EXIST in the graph, not be on screen. Parked far below
-  // the world, warmed, then removed and disposed.
-  const _warm = [];
-  for (const _t of Object.keys(VEHICLE_TYPES)) {
+// Compile every program the scene will need, in parallel (KHR_parallel_shader_compile via
+// compileAsync), at the point-light count the match actually renders at. Called twice: at load,
+// for the hull types (their materials are built per instance, so a type not yet fielded has
+// nothing for compileAsync to find), and again from enterField once the world exists.
+function warmShaders(label) {
+  if (!renderer.compileAsync) return Promise.resolve();
+  const t0 = performance.now(), warm = [];
+  for (const t of Object.keys(VEHICLE_TYPES)) {
     try {
-      const _v = new Vehicle(_t);
-      // CAMO FIRST, OR THE WARMING IS WASTED. setCamo hangs map/roughnessMap/normalMap on the hull
-      // materials and flips needsUpdate, which changes USE_MAP / USE_ROUGHNESSMAP / USE_NORMALMAP —
-      // a different program. Warming a bare hull compiles a variant the game then discards and pays
-      // for the real one anyway. Only map PRESENCE keys the program, not which texture, so one
-      // colour index covers both teams.
-      if (_v.setCamo) _v.setCamo(0);
-      _v.holder.position.set(0, -4000, 0);
-      scene.add(_v.holder); _warm.push(_v);
-    } catch (e) { console.warn('[prewarm] could not build ' + _t + ' for warming:', e); }
+      const v = new Vehicle(t);
+      // CAMO FIRST, OR THE WARMING IS WASTED: setCamo hangs map/roughnessMap/normalMap on the hull
+      // and that changes the program. Only map PRESENCE keys it, so one colour index covers all.
+      if (v.setCamo) v.setCamo(0);
+      v.holder.position.set(0, -4000, 0);
+      // LIGHTS OFF on the stand-ins. Their glow lights would add to the point-light count during
+      // the warm, and the count is the one thing the warm has to get exactly right.
+      v.holder.traverse(o => { if (o.isPointLight) o.visible = false; });
+      scene.add(v.holder); warm.push(v);
+    } catch (e) { console.warn('[prewarm] could not build ' + t + ' for warming:', e); }
   }
-  renderer.compileAsync(scene, camera).then(() => {
-    for (const _v of _warm) {
-      scene.remove(_v.holder);
-      _v.holder.traverse(o => {
-        if (o.geometry) o.geometry.dispose();
-        // NOT material.dispose(): the whole point is that the compiled PROGRAM survives to be
-        // reused by the real hulls. Disposing the material releases it and undoes the warming.
-      });
+  // THE ONE-OFF EFFECT MATERIALS, too. After the hulls and the world were warm, five programs still
+  // compiled on first use in a match (measured, seed 11, real Chrome): the status lamp (a basic with
+  // toneMapped off, plus a mapped sprite for its halo), the force-field bubble (its cheap material
+  // and the fancy shader), the ground blob shadow (a black mapped transparent basic), a water wake
+  // (basic + alphaMap), and the bare transparent basic/sprite that muzzle flashes and tracers use.
+  // Each is 50-150ms cold, once. They are attached to the first stand-in hull so they compile in the
+  // same pass. The MATERIALS are kept for the life of the page (_warmKeep): three.js releases a
+  // program when its last material is disposed, and every one of these is normally created fresh
+  // and disposed per use — so a warm that let go of them would be undone by the first expiry.
+  const extras = [];
+  const w0 = warm[0];
+  if (w0) {
+    try {
+      if (w0.hitR == null) w0.hitR = 3;
+      if (typeof ensureStatusLight === 'function') { const L = ensureStatusLight(w0); if (L) { _warmKeep.push(L.mat, L.halomat); } }
+      if (typeof ensureShieldFx === 'function' && typeof makeShieldMaterial === 'function') {
+        ensureShieldFx(w0);
+        const b = w0._shieldFx;
+        if (b) { _warmKeep.push(b.material); const fm = makeShieldMaterial('#26aeff'); b.material = fm; _warmKeep.push(fm); }
+      }
+      const sh = makeBlobShadow(3, true); if (sh) { sh.position.set(0, -4000, 0); vehShadows.add(sh); extras.push({ obj: sh, parent: vehShadows }); _warmKeep.push(sh.material); }
+      const wake = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, alphaMap: foamTex(), depthWrite: false }));
+      const flash = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.9 }));
+      const spr = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xffe6a0, transparent: true, opacity: 0.5 }));
+      for (const o of [wake, flash, spr]) { o.position.set(0, -4000, 0); scene.add(o); extras.push({ obj: o, parent: scene }); _warmKeep.push(o.material); }
+    } catch (e) { console.warn('[prewarm] effect warm skipped:', e); }
+  }
+  updatePadLights();   // pin the count BEFORE compiling — a program compiled for any other count is never used
+  return renderer.compileAsync(scene, camera).then(() => {
+    for (const x of extras) { x.parent.remove(x.obj); if (x.obj.geometry) x.obj.geometry.dispose(); }
+    for (const v of warm) {
+      scene.remove(v.holder);
+      // GEOMETRY only. Disposing the material releases the compiled program, which undoes the warm.
+      v.holder.traverse(o => { if (o.geometry) o.geometry.dispose(); });
     }
-    console.log(`[prewarm] ${renderer.info.programs.length} shader programs ready in ${Math.round(performance.now() - _t0)}ms (incl. ${_warm.length} hull types)`);
-  }).catch(e => console.warn('[prewarm] failed, falling back to compile-on-first-use:', e));
+    console.log(`[prewarm:${label}] ${renderer.info.programs.length} shader programs ready in ${Math.round(performance.now() - t0)}ms`);
+    _warmT[label] = Math.round(performance.now() - t0);
+  }).catch(e => { console.warn('[prewarm:' + label + '] failed, falling back to compile-on-first-use:', e); });
 }
+if (!QS.has('noprewarm') && !fieldBuilt) warmShaders('load');   // garage boot only: the no-garage boot already warmed the whole field above
+
 animate();
 
