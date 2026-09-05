@@ -22,7 +22,7 @@
 // anything, so it is the first knob to turn back if a phone ever hitches — SIZE is the second,
 // since bigger flames are more transparent overdraw even though they are not more draw calls.
 import * as THREE from 'three';
-import VolumetricFire from './VolumetricFire.js?v=2';
+import VolumetricFire from './VolumetricFire.js?v=3';
 
 const POOL = 12;
 const LIFE = 7.0;          // seconds, whole burn

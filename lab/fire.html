@@ -918,6 +918,7 @@ setTimeout(() => {
   // The panel leads with the wreck, so open there — the grid is the measuring rig, not the view.
   enterWreck();
 }, 2500);
+window.__scene = scene;                       // test hook: walk the graph to assert material state
 window.__fireLive = () => fireStatus().live;   // test hook: how many flames are burning
 window.__gridCount = () => count;             // test hook: the rig's own fire grid
 window.__ready = true;

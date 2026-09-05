@@ -246,7 +246,19 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
         uniforms       : uniforms,
         side           : THREE.DoubleSide,
         blending       : THREE.AdditiveBlending,
-        transparent    : true
+        transparent    : true,
+        // NEVER WRITE DEPTH (RMRF). This was unset, and Material.depthWrite defaults to TRUE even
+        // for a transparent additive material — so every slice stamped the depth buffer, including
+        // the parts of it that render pure black. Two consequences, both visible:
+        //   - one fire punched a rectangle out of another. Jacob, on a wreck: "the 2 side flames
+        //     enforce a transparent box on the middle one" — the spot fires' invisible box regions
+        //     were occluding the main flame behind them.
+        //   - within a SINGLE fire, a nearer slice occluded the ones behind it, which is exactly
+        //     backwards for a volume that works by accumulating through every slice, and shows up
+        //     as hard polygon edges inside the flame.
+        // depthTest stays ON: that is what lets terrain clip a fire sinking into the ground, which
+        // the wreck effect depends on.
+        depthWrite     : false
       } );
 
       return material;
