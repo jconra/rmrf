@@ -36,6 +36,10 @@
   .sl .t { display:flex; justify-content:space-between; font-size:10px; color:var(--dim); margin-bottom:2px; }
   .sl .t b { color:var(--accent); font-weight:normal; font-variant-numeric:tabular-nums; }
   .sl input { width:100%; accent-color:var(--accent); height:14px; }
+  #wdump { width:100%; margin:5px 0 2px; background:#0d141c; color:var(--ink); border:1px solid #2a3a4d;
+           border-radius:5px; font-family:inherit; font-size:10px; padding:5px; resize:vertical;
+           display:none; }
+  #wdump.on { display:block; }
   .big.warn { color:var(--warn); } .big.bad { color:var(--bad); }
   #perfbits { margin:11px 0 4px; border-top:1px solid #223041; padding-top:8px; }
   #perfbits > summary { font-size:9.5px; color:var(--dim); letter-spacing:1px; cursor:pointer;
@@ -58,6 +62,11 @@
 
   <div class="lab">WRECK FIRE &middot; the real game effect (Fire.js) &mdash; main flame + spot fires</div>
   <div class="row" id="wplay"></div>
+  <div class="lab">HOW IT GOES OUT</div>
+  <div class="row" id="wout"></div>
+  <div class="row" id="wsave"></div>
+  <textarea id="wdump" readonly rows="4" spellcheck="false"
+            placeholder="press SHOW DEFAULTS to get the lines to paste into js/Fire.js"></textarea>
   <div id="wsliders"></div>
 
   <div class="lab">CAMERA &middot; the game looks down at 68.8&deg; &mdash; the donut only shows from above</div>
@@ -667,6 +676,32 @@ window.__transState = () => ({ live: !!trans, t: trans ? trans.t : 0, camera,
 // not preserved and a screenshot taken any later comes back black.
 let _grabWant = false, _grabCb = null;
 window.__grab = () => new Promise(r => { _grabWant = true; _grabCb = r; });
+// PATCHINESS, read on the same tick as the render (the drawing buffer is not preserved, so any
+// readPixels from outside the loop comes back black — the trap this whole hook exists for). Counts
+// lit pixels and how many SEPARATE lit runs they fall into per row: an even fade keeps one long run
+// and dims it, a flame breaking into licks keeps many short ones. Used to check the dissolve.
+let _patchWant = false, _patchCb = null;
+window.__patchiness = () => new Promise(r => { _patchWant = true; _patchCb = r; });
+function _doPatch() {
+  _patchWant = false;
+  const w = renderer.domElement.width, h = renderer.domElement.height;
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let lit = 0, runs = 0;
+  for (let y = 0; y < h; y += 3) {
+    let inRun = false;
+    for (let x = 0; x < w; x += 2) {
+      const i = (y * w + x) * 4;
+      // FIRE-COLOURED, not merely lit — the same test _doGrab uses. Counting "brighter than the
+      // background" counted the lit ground disc as flame and reported every sampled pixel on,
+      // which made the two settings look identical when they are not.
+      const r = px[i], g = px[i + 1], bl = px[i + 2];
+      const on = r > 70 && r > bl + 25;
+      if (on) { lit++; if (!inRun) { runs++; inRun = true; } } else inRun = false;
+    }
+  }
+  _patchCb({ lit, runs, perLit: lit ? +(runs / lit).toFixed(4) : null });
+}
 function _doGrab() {
   _grabWant = false;
   const w = renderer.domElement.width, h = renderer.domElement.height;
@@ -750,6 +785,7 @@ function tick() {
   // measuring instrument.
   gl.finish();
   if (_grabWant) _doGrab();   // same tick as the render — see __grab
+  if (_patchWant) _doPatch();   // same tick, same reason — see __patchiness
   measure();
 }
 
@@ -817,7 +853,8 @@ buttons('spacing', [['0.3', '0.3'], ['0.5', '0.5'], ['1.0', '1'], ['2.0', '2']],
     b.setAttribute('aria-pressed', String(Math.abs(camPitch - +b.dataset.p) < 0.02)));
   host.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
     camPitch = +b.dataset.p; document.getElementById('cs-pitch').value = camPitch;
-    document.getElementById('cv-pitch').textContent = (camPitch * 180 / Math.PI).toFixed(1) + '\u00b0'; sync(); });
+    document.getElementById('cv-pitch').textContent = (camPitch * 180 / Math.PI).toFixed(1) + '\u00b0'; sync();
+    if (window.__saveLook) window.__saveLook(); });
   const wrap = document.getElementById('csliders');
   wrap.innerHTML =
     `<div class="sl"><div class="t"><span>pitch &middot; <span style="opacity:.6">above horizontal</span></span>`
@@ -827,9 +864,11 @@ buttons('spacing', [['0.3', '0.3'], ['0.5', '0.5'], ['1.0', '1'], ['2.0', '2']],
   + `<input type="range" id="cs-dist" min="25" max="140" step="1" value="${camDist}"></div>`;
   document.getElementById('cs-pitch').addEventListener('input', e => {
     camPitch = +e.target.value;
-    document.getElementById('cv-pitch').textContent = (camPitch * 180 / Math.PI).toFixed(1) + '\u00b0'; sync(); });
+    document.getElementById('cv-pitch').textContent = (camPitch * 180 / Math.PI).toFixed(1) + '\u00b0'; sync();
+    if (window.__saveLook) window.__saveLook(); });
   document.getElementById('cs-dist').addEventListener('input', e => {
-    camDist = +e.target.value; document.getElementById('cv-dist').textContent = camDist; });
+    camDist = +e.target.value; document.getElementById('cv-dist').textContent = camDist;
+    if (window.__saveLook) window.__saveLook(); });
   sync();
 })();
 
@@ -865,13 +904,22 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     if (b.dataset.t === 'auto') { wreckAuto = !wreckAuto; b.setAttribute('aria-pressed', String(wreckAuto)); return; }
     enterWreck();
   });
+  // How a flame ends. Burning down happens entirely in the shader — nothing moves and nothing
+  // scales — which is the point: sinking dragged the terrain's clip line up through the fire.
+  const outHost = document.getElementById('wout');
+  outHost.innerHTML = [['burn down', 'burn'], ['sink', 'sink'], ['shrink', 'shrink']]
+    .map(o => `<button data-v="${o[1]}">${o[0]}</button>`).join('');
+  const syncOut = () => outHost.querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-pressed', String(getFireLook().outMode === b.dataset.v)));
+  outHost.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+    setFireLook({ outMode: b.dataset.v }); syncOut(); enterWreck();
+    if (window.__saveLook) window.__saveLook(); });
+  syncOut();
+
   // Slider spec: [key, label, min, max, step, hint]
   const SPEC = [
     ['sat',      'spot fire size',   0.2, 1.5, 0.05, 'vs the main flame'],
-    ['bury',     'spot fire sunk',   0,   0.9, 0.05, 'fraction underground'],
     ['spread',   'spot fire spread', 0.2, 1.5, 0.05, 'how far out they sit'],
-    ['mainBury', 'main flame sunk',  0,   0.9, 0.05, '0 = sits on the wreck'],
-    ['core',     'core fill',        0,   1.0, 0.02, 'THE donut fix - fills the hollow middle'],
     ['lean',     'lean at camera',   -1.2, 1.2, 0.02, 'radians; tips the flame over'],
     ['scale',    'wreck size',       0.5, 2.0, 0.05, 'jotun kills are 1.35'],
     // The edge envelope — the three numbers behind the straight lines. Each slice is a polygon and
@@ -879,9 +927,13 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     // bottom the flame fades to nothing so that step cannot exist.
     ['envBot',   'bottom fade',      0,   0.6, 0.01, 'lines at the base of a slice'],
     ['envR',     'rim fade',         0.3, 1.0, 0.01, 'lines down the sides'],
-    ['envTop',   'top fade',         0.3, 1.0, 0.01, 'lines across the top'],
     // Timing: how long a wreck burns, when it starts sagging, and how much sooner the spot fires
     // go out than the main flame.
+    // How it LIGHTS: the expansion window, how far the spot fires are thrown, and the punch.
+    ['birth',    'expand time',      0,   1.5, 0.02, 'seconds; overshoots then settles'],
+    ['shoot',    'throw spot fires', 0,   1.0, 0.02, '1 = fired out of the centre'],
+    ['flash',    'ignition flash',   0,   5.0, 0.1,  'brightness punch on impact'],
+    ['dissolve', 'break-up',        0,   1.0, 0.02, '0 even dim, 1 licks go out at random'],
     ['life',     'burn time',        1.5, 16,  0.5,  'seconds, whole wreck'],
     ['hold',     'sag starts at',    0.1, 0.95, 0.01, 'fraction of burn time'],
     ['satLife',  'spot fire life',   0.15, 1.3, 0.05, 'vs the main flame'],
@@ -895,6 +947,21 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
          + `<b id="wv-${k}">${(+v).toFixed(2)}</b></div>`
          + `<input type="range" id="ws-${k}" min="${mn}" max="${mx}" step="${st}" value="${v}"></div>`;
   }).join('');
+  // REMEMBER THE SETTINGS (Jacob: "I keep needing to set them all to my preferences"). Saved on
+  // every change and restored on load, so tuning survives a reload — which matters because judging
+  // these means coming back to them repeatedly.
+  const KEY = 'rmrf.firelab.v1';
+  const saveLook = window.__saveLook = () => { try {
+    localStorage.setItem(KEY, JSON.stringify({ ...getFireLook(), scale: wreckScale,
+                                               camPitch, camDist })); } catch (e) {} };
+  const restoreLook = () => { try {
+    const o = JSON.parse(localStorage.getItem(KEY) || 'null'); if (!o) return false;
+    setFireLook(o);
+    if (o.scale != null) wreckScale = o.scale;
+    if (o.camPitch != null) camPitch = o.camPitch;
+    if (o.camDist != null) camDist = o.camDist;
+    return true; } catch (e) { return false; } };
+
   for (const [k] of SPEC) {
     const el = document.getElementById('ws-' + k), out = document.getElementById('wv-' + k);
     el.addEventListener('input', () => {
@@ -903,8 +970,55 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
       // Relight so the change is FELT, not waited for: bury and spread are decided at the moment a
       // wreck is lit, so a live edit does nothing to flames already burning.
       if (k !== 'lean') { wreckOn = true; wreckT = 0; lightWreck(); }
+      saveLook();
     });
   }
+
+  // Pull saved values back into the sliders, then wire save/reset/export.
+  const syncSliders = () => {
+    const L = getFireLook();
+    for (const [k] of SPEC) {
+      const el = document.getElementById('ws-' + k), out = document.getElementById('wv-' + k);
+      if (!el) continue;
+      const v = k === 'scale' ? wreckScale : L[k];
+      if (v == null) continue;
+      el.value = v; out.textContent = (+v).toFixed(2);
+    }
+    const cp = document.getElementById('cs-pitch'), cd = document.getElementById('cs-dist');
+    if (cp) { cp.value = camPitch; document.getElementById('cv-pitch').textContent = (camPitch * 180 / Math.PI).toFixed(1) + '\u00b0'; }
+    if (cd) { cd.value = camDist; document.getElementById('cv-dist').textContent = camDist; }
+    // …and the BUTTONS, not just the sliders. Restoring set OUT_MODE correctly but left 'burn down'
+    // highlighted while the fire was actually shrinking — the panel lying about the state it is in
+    // is worse than not restoring at all, because you tune against what it says.
+    syncOut();
+  };
+  if (restoreLook()) syncSliders();
+
+  const save = document.getElementById('wsave');
+  save.innerHTML = '<button data-a="dump">SHOW DEFAULTS</button><button data-a="reset">RESET</button>';
+  save.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const box = document.getElementById('wdump');
+    if (b.dataset.a === 'reset') {
+      try { localStorage.removeItem(KEY); } catch (err) {}
+      location.reload(); return;
+    }
+    // Emit the exact lines to paste into js/Fire.js, so a look chosen here becomes the shipped
+    // default without anyone transcribing nine numbers by hand.
+    const L = getFireLook(), f = n => (+n).toFixed(2).replace(/\.00$/, '.0');
+    box.value =
+      `// fire look, chosen in lab/fire.html\n`
+    + `let SAT_SCALE = ${f(L.sat)}, SAT_SPREAD = ${f(L.spread)};\n`
+    + `let LIFE = ${f(L.life)}, HOLD = ${f(L.hold)};\n`
+    + `let SAT_LIFE = ${f(L.satLife)}, SAT_LIFE_VAR = ${f(L.satLifeVar)};\n`
+    + `let OUT_MODE = '${L.outMode}', DISSOLVE = ${f(L.dissolve)};\n`
+    + `const ENV = new THREE.Vector2(${f(L.envR)}, ${f(L.envBot)});\n`
+    + `// lean ${f(L.lean)}  ·  wreck scale ${f(wreckScale)} (a test value, not shipped)`;
+    box.classList.add('on'); box.select();
+    // Clipboard access is denied in some contexts (headless, no user-gesture chain). The textarea
+    // is selected either way, so ctrl-C always works — the copy is a convenience, not the feature.
+    try { const r = navigator.clipboard.writeText(box.value); if (r && r.catch) r.catch(() => {}); } catch (err) {}
+  });
 })();
 
 addEventListener('resize', () => {
@@ -925,6 +1039,7 @@ setTimeout(() => {
   // The panel leads with the wreck, so open there — the grid is the measuring rig, not the view.
   enterWreck();
 }, 2500);
+window.__look = () => getFireLook();          // test hook: what the shipped defaults are
 window.__scene = scene;                       // test hook: walk the graph to assert material state
 window.__fireLive = () => fireStatus().live;   // test hook: how many flames are burning
 window.__gridCount = () => count;             // test hook: the rig's own fire grid

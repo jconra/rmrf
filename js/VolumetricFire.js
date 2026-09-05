@@ -104,9 +104,19 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
     'const float magnatude = 1.3;',
     'uniform float time;',
     // Where the edge envelope starts fading, as a fraction of the box: x = radial (1 = the wall),
-    // y = top, z = bottom. A uniform rather than constants so the lab can sweep them on a running
-    // scene — these are judged by eye, and a recompile per guess makes that impossible.
-    'uniform vec3 envFade;',
+    // y = bottom. A uniform rather than constants so the lab can sweep them on a running scene —
+    // these are judged by eye, and a recompile per guess makes that impossible.
+    // There is no TOP term: the crown fade below is always on and strictly tighter, so a separate
+    // top fade was masked by it and changing it did nothing visible (checked, then measured).
+    'uniform vec2 envFade;',
+    // How far through going out this flame is: 0 alive, 1 fully out. It burns DOWN — the crown
+    // descends and the whole thing dims — instead of sliding under the terrain, which cut a hard
+    // horizontal line across the flame that travelled up through it as it sank (Jacob).
+    'uniform float dying;',
+    // 0 = fade out evenly, 1 = let the turbulence decide which licks survive longest.
+    'uniform float dissolve;',
+    // A brief brightness punch at ignition, so a wreck lights with a flash rather than easing in.
+    'uniform float flash;',
     'uniform sampler2D fireProfile;',
 
     /**
@@ -138,7 +148,10 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
       // We scale this by the sqrt of the height so that things are
       // relatively stable at the base of the fire and volital at the
       // top.
-      'float offset = sqrt( st.y ) * magnatude * turbulence( loc );',
+      // Keep the turbulence value: it already decides this flame's SHAPE, and reusing it to decide
+      // what goes out first is what makes dying look like fire rather than like a dimmer switch.
+      'float turb = turbulence( loc );',
+      'float offset = sqrt( st.y ) * magnatude * turb;',
       'st.y += offset;',
 
       // TODO: Update fireProfile texture to have a black row of pixels.
@@ -171,7 +184,25 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
       // zero at its own clipped edge, so no step can exist to be seen, whatever the noise does.
       // Costs three smoothsteps and changes the silhouette only in the last ~10% of the volume.
       'float env = smoothstep( 1.0, envFade.x, boxR );',
-      'env *= smoothstep( 1.0, envFade.y, boxH ) * smoothstep( 0.0, envFade.z, boxH );',
+      'env *= smoothstep( 0.0, envFade.y, boxH );',
+
+      // GOING OUT, CHAOTICALLY (Jacob: "the way it dims so evenly makes it look kind of
+      // unrealistic ... I wanted some licks of flames randomly getting smaller"). An even multiply
+      // reads as a dimmer switch because every fragment leaves at the same rate. So the noise that
+      // already shapes this flame also decides the ORDER things leave in: each fragment gets a
+      // doom score from its height and the live turbulence there, and a rising threshold takes the
+      // high scores first. Height is weighted in so it burns down from the crown, and because the
+      // noise scrolls, the surviving patches writhe and break up as they go instead of fading.
+      // `dissolve` blends between an even dim (0) and fully noise-driven (1).
+      'float doom = boxH * 0.60 + turb * 0.75;',
+      'float cut  = mix( 1.60, -0.30, dying );',
+      'float chaotic = 1.0 - smoothstep( cut, cut + 0.42, doom );',
+      'float even    = 1.0 - dying * 0.90;',
+      'env *= mix( even, chaotic, dissolve );',
+      // …and still burn down as a whole, so the silhouette drops even where a lick survives.
+      'float crown = 1.0 - dying * 0.55;',
+      'env *= smoothstep( crown, crown - 0.30, boxH );',
+
       'result *= env;',
 
       'return result;',
@@ -184,7 +215,7 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
 
       // Mapping texture coordinate to -1 => 1 for xy, 0=> 1 for y
       'vec3 color = sampleFire( texOut, vec4( 1.0, 2.0, 1.0, 0.5 ) ).xyz;',
-      'gl_FragColor = vec4( color * 1.5, 1 );',
+      'gl_FragColor = vec4( color * 1.5 * ( 1.0 + flash ), 1 );',
 
     '}',
 
@@ -235,8 +266,20 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
           value: 1.0
         },
         envFade: {
-          type: 'v3',
-          value: new THREE.Vector3( 0.80, 0.86, 0.05 )   // radial, top, bottom — see the shader
+          type: 'v2',
+          value: new THREE.Vector2( 0.99, 0.12 )   // radial, bottom — see the shader
+        },
+        dying: {
+          type: 'f',
+          value: 0.0
+        },
+        dissolve: {
+          type: 'f',
+          value: 0.85
+        },
+        flash: {
+          type: 'f',
+          value: 0.0
         }
       };
 
