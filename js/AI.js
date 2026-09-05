@@ -265,50 +265,30 @@ const CONDITIONS = {
     const reach = (v.engageRange || 36) * 1.05;
     return dx * dx + dz * dz <= reach * reach;
   },
-  // A wall-turret is shelling us and we still have teeth → silence it first. A FIREBRAT never does
-  // this: it's the flag runner, its pop-gun can't kill a turret, and stopping to trade just gets it
-  // shot to pieces (the "worked an angle on their turret and spun in circles" bug). It keeps running.
-  threatened: (v, m, p, cfg) => !!v.threat && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type) && v.self.type !== 'firebrat',
-  // AMBUSHED: rounds are landing on us from something we cannot see. Unlike 'pursuing' this is
-  // NOT a bravery check — every brain turns to face an attacker it never spotted, because the
-  // alternative is dying to one it never looked at. A runner still runs (a Firebrat's job is the
-  // flag, not the fight) and a hull too hurt to trade falls through to the retreat below.
-  ambushed: (v, m, p, cfg) => !!cfg.shotAware && !!v.incomingFire && !v.seesEnemy
-    && ammoFrac(v) > 0 && v.self.hpFrac > bailOf(p, cfg, v.self.type)
-    && !(v.runnerMode && v.self.type === 'firebrat'),
-  // Chase a recent sighting, but only brave brains bother — and never chase a ghost once
-  // the enemy fleet is gone (the commander redirects to the base instead of wasting time).
-  pursuing: (v, m, p) => {
-    if (v.enemyGone) return false;
-    // NEVER CHASE ON THE WAY TO THE DOOR. The carrier is faster than anything that could catch
-    // it, so a pursuit started from behind is a foot race we lose while it walks the flag in —
-    // and it was the biggest single source of wasted driving measured: an interceptor covered
-    // 100.3u in ten seconds for 1.0u of net progress, seven times in one match, because "the last
-    // place I saw them" moves every tick. Get to the door instead (interceptCampSpot).
-    //
-    // ONCE WE ARE STANDING IN IT, PURSUE. On the camp we are between the runner and the only
-    // place it can score, so closing is geometry rather than a race — and refusing there is pure
-    // waste: seed 669's camped Valkyrie saw the carrier on 16.4% of ticks across a whole match and
-    // acted on none of them. Chase from behind, never; close from in front, always.
-    // (A rival in weapons range is a separate case — `engaging` sits above this rung.)
-    if (v.intercepting && !v.atCamp) return false;
-    // DON'T RE-CHASE A CONTACT WE ALREADY KNOW WE CANNOT REACH. When the driver refuses a pursue
-    // goal the issuer clears lastSeen — but if we can still SEE the enemy (across water, across a
-    // wall), perception rewrites lastSeen on the very next tick, pursue re-triggers, the driver
-    // refuses again, and the unit burns EVERY TICK writing the same contact off instead of firing
-    // or moving. Two units doing this at each other across the same water mirror each other
-    // perfectly: the "dancing lurchers" (seed 1851068760 — 20 write-offs per second, i.e. every
-    // tick). Remembering the refusal is what breaks the loop; sight alone never could.
-    if (m.noReach && (m.t - m.noReach.t) < 12 && m.lastSeen) {
-      const ndx = m.lastSeen.x - m.noReach.x, ndz = m.lastSeen.z - m.noReach.z;
-      if (ndx * ndx + ndz * ndz < 20 * 20) return false;   // same contact, still unreachable → get on with the mission
-    }
-    // A RUNNER never chases a sighting — pursue drove the fleeing firebrat straight back at
-    // the enemy it had just escaped (flee to 100u → clear → pursue to 60u → flee …, the
-    // panic flap). Runners resume the mission; the flee latch handles real chasers.
-    if (v.runnerMode && v.self.type === 'firebrat') return false;
-    const seenRecently = m.lastSeen && (m.t - m.lastSeen.t) < (3 + p.aggression * 5);
-    return seenRecently && p.aggression > 0.6;
+  // SUPPRESS IS A MISSION'S EXECUTOR, NOT A REFLEX (Jacob, 2026-09-01: "there shouldn't be any
+  // 'threatened' in the code"). Standing off and shelling a gun is what a SIEGE does; it is not
+  // something that should happen to a unit doing another job. The old rung asked only "is a gun
+  // near me", so any hull that wandered inside a tower's sensing ring was pulled into a duel with
+  // it — a decision, taken every tick, that never consulted the commander.
+  //
+  // Being shot by a tower does NOT interrupt the mission you are on (Jacob): a runner keeps
+  // running for the flag, a scavenger keeps collecting. Missions price towers when they are
+  // CHOSEN — capture reads routeGuns to pick a lane, intercept holds a spot outside every live
+  // gun's reach — so the answer to tower fire belongs at that layer, not here.
+  //
+  // Two missions own this executor:
+  //   siege  — shelling the gun IS the job, so proximity is enough (the target and its firing
+  //            spot come from the siege plan, which vetted the spot with a real path check).
+  //   attack — answers a gun only once it is actually SHOOTING at us. A hull too hurt or too dry
+  //            to trade falls through to its mission goal instead, which walks it out of the arc.
+  // A FIREBRAT never trades with a tower under any mission: 14-damage pop-guns, and stopping to
+  // fight one is the "worked an angle on their turret and spun in circles" bug. It keeps running.
+  sieging: (v, m, p, cfg) => {
+    if (!v.threat || !(ammoFrac(v) > 0)) return false;
+    if (v.self.type === 'firebrat') return false;
+    if (v.self.hpFrac <= bailOf(p, cfg, v.self.type)) return false;
+    if (v.mission === 'siege') return true;
+    return v.mission === 'attack' && !!v.towerFire;
   },
 
   // --- latch triggers ---
@@ -920,7 +900,6 @@ export const DEFAULT_BRAIN = {
     ammoOK: 0.5,         // ammo that's "enough to carry on"
     topFull: 0.99,       // at an OWN BASE (heals too) don't leave until ammo, fuel AND hp are ALL maxed
     mustFight: 1,        // 1 = an inescapable enemy vehicle on top of us pre-empts the objective (see `underAttack`); 0 = old behaviour (A/B knob)
-    shotAware: 1,        // 1 = being hit by an unseen vehicle turns us to face it (see `ambushed`); 0 = old behaviour, only sight/hearing notice an attacker (A/B knob)
     siegeAmmoReserve: 0.2, // a CAUTIOUS commander sieging with no enemy in sight heads home to rearm at this ammo frac instead of 0 — banks a reserve for self-defense on the trip (0 = old spend-it-all; A/B knob). Fades to 0 as aggression rises to reserveMaxAggr; ignored when finishing the base off.
     reserveMaxAggr: 0.5,   // aggression at/above which a commander banks NO ammo reserve (spends it all) — the reserve is a low-aggression trait
   },
@@ -965,24 +944,8 @@ export const DEFAULT_BRAIN = {
     // old ordering where a flat "I'm hurt" latch pre-empted the weighted decision (and the
     // finishHim patch that existed only to poke a hole in that override).
     { when: 'engaging',     mode: 'engage',   target: 'enemyOrLastSeen' },
-    // BEING SHOT OUTRANKS TOPPING UP. This sat BELOW resupply, so a unit at a shield generator or a
-    // fuel dump that started taking rounds from something it could not see kept calmly resupplying
-    // — the resupply rung won every tick and `ambushed` was never reached. Watched: a full-health
-    // Lurcher at a generator, shot in the back by another Lurcher that had followed it, standing
-    // there taking it. Its own comment says it "sits below every state that already has a target",
-    // which is right — but a supply run is not a target, it is an errand, and an errand is exactly
-    // the thing a bullet should interrupt.
-    //
-    // This does not decide the fight; it turns the unit to FACE the shot. Facing is what makes the
-    // attacker visible, which makes fightOdds() non-null, which fires the engagement trigger and
-    // hands the actual fight-or-flee choice to the board where it belongs.
-    { when: 'ambushed',     mode: 'pursue',   target: 'lastSeen' },
     { when: 'resupLatched', mode: 'resupply', target: 'resupplyOrGoal' },
-    { when: 'threatened',   mode: 'suppress', target: 'threat' },
-    // SHOT BY SOMETHING WE CAN'T SEE — turn and find it. Sits below every state that already
-    // has a target (engage/suppress/retreat all outrank it) and above the mission goal, so it
-    // only fires when the alternative is driving on oblivious.
-    { when: 'pursuing',     mode: 'pursue',   target: 'lastSeen' },
+    { when: 'sieging',      mode: 'suppress', target: 'threat' },
     // SECURE THE SHIELD: committed to a close generator → grab the shield before picking a fight.
     // The commit is a real latch now (SHIELD_WANT trip / SHIELD_FULL clear, in _view) rather than
     // a value rebuilt every tick. DEMOTING this rung below engage/hurt/resupply was tried on
@@ -1015,10 +978,8 @@ export function recActive() { return REC_ON; }
 export function setBrainConfig(k, v) { if (k in DEFAULT_BRAIN.config) DEFAULT_BRAIN.config[k] = v; return DEFAULT_BRAIN.config[k]; }
 let AI_JOUST = true;   // the Valkyrie's jousting attack runs (off → legacy hover-strafe duel; A/B knob)
 let AI_ALIGN = true;   // plain duel footwork issued as an ALIGN order instead of steering itself (A/B knob)
-let NO_PURSUE = false;   // pursue comes off the reflex ladder; Fight and Attack own the chase (A/B knob)
 export function setAlign(on) { AI_ALIGN = !!on; return AI_ALIGN; }
 export function setJoust(on) { AI_JOUST = !!on; return AI_JOUST; }
-export function setNoPursue(on) { NO_PURSUE = !!on; return NO_PURSUE; }
 export function getBrainConfig(k) { return k ? DEFAULT_BRAIN.config[k] : { ...DEFAULT_BRAIN.config }; }
 function maybeRecord(view, mem, reason, state, out) {
   if (!REC_ON) return;
@@ -1093,7 +1054,7 @@ export function runBrain(graph, view, mem) {
     mem._unstickN = (mem._unstickN || 0) + 1; mem._unstickAt = mem.t;
   }
 
-  // Remember the last confirmed sighting (fuels the 'pursuing' condition).
+  // Remember the last confirmed sighting (Fight's objective reads it via cmd.lastEnemySeen).
   if (view.seesEnemy && view.enemy) mem.lastSeen = { x: view.enemy.x, z: view.enemy.z, t: mem.t };
   // BEING SHOT IS ALSO A CONTACT. Sight is a forward cone, so an attacker sitting behind us
   // never reaches the line above — and every combat trigger below keys off seesEnemy, so a unit
@@ -1183,24 +1144,16 @@ export function runBrain(graph, view, mem) {
         || (view.underFire && mem._fof != null && mem._fof < (cfg.fofBail ?? -1.2)));
 
   // Pick the active state: first transition whose condition holds.
-  // PURSUE IS NOT A REFLEX (Jacob, 2026-08-11). Both rungs that produce it — `pursuing` (chase a
-  // sighting) and `ambushed` (turn toward whatever just hit us) — are skipped when NO_PURSUE is on,
-  // which removes the mode from this ladder entirely. Nothing is lost:
-  //   · the CHASE already exists as a mission, twice over and built better. Fight refreshes its
-  //     objective while we have eyes on so a chase keeps closing, holds a foe VEHICLE so the duel
-  //     ends on a kill, and freezes at the last known spot when eyes are lost. Attack's objective
-  //     IS the enemy's last-known position, with a staging-point fallback and a real arrive
-  //     distance. This rung was a third implementation with no way to end.
-  //   · the INFORMATION ambushed was acting on is recorded by perception regardless — incoming fire
-  //     writes mem.lastSeen, and the commander's `sees` trigger counts a contact "seen, heard, or
-  //     shot at". So being ambushed still wakes MissionScore; it just no longer steers the hull.
-  // Why it had to go rather than be guarded: a ladder rung re-decides every tick and never consults
-  // the commander, so `pursue` could sit on top of a mission that had already correctly decided
-  // something else — a swap, in the case that found this. It is the only aggressive rung with no
-  // ammo check, so a dry hull fell past every other rung and landed here permanently.
+  // NO PURSUE RUNG (Jacob, 2026-08-11; the rung and its A/B flag removed 2026-09-01). Chasing is a
+  // MISSION, not a reflex: Fight refreshes its objective while we have eyes on so a chase keeps
+  // closing, holds a foe VEHICLE so the duel ends on a kill, and gives up once they open the range
+  // past 1.25x our gun. A rung re-decided every tick and never consulted the commander, so it could
+  // sit on top of a mission that had already correctly decided something else — and being the only
+  // aggressive rung with no ammo check, a dry hull fell past everything else and landed here for
+  // good. Gated at 720 seeds before it was switched off: resolved 715 -> 719, stalemates 5 -> 1,
+  // unreachable-GOTO violations -53% (pursue was ~72% of them), +2/0/+2 per set with no sign flip.
   let rule = graph.transitions[graph.transitions.length - 1];
   for (const t of graph.transitions) {
-    if (NO_PURSUE && t.mode === 'pursue') continue;
     if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; }
   }
   const mode = rule.mode;
@@ -1235,7 +1188,6 @@ export class Brain {
     this.t = 0;
     this.decideT = 0;
     this.lastSeen = null;     // { x, z, t } — last confirmed enemy sighting
-    this.noReach = null;      // { x, z, t } — a contact the driver said it cannot route to (see `pursuing`)
     this.wp = null;           // current patrol waypoint
     this.wpUntil = 0;
     this._dodgeTurn = 0;      // committed way around an obstacle (±1, 0 = none) — held, not re-picked each frame
