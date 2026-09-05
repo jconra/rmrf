@@ -37,6 +37,13 @@
   .sl .t b { color:var(--accent); font-weight:normal; font-variant-numeric:tabular-nums; }
   .sl input { width:100%; accent-color:var(--accent); height:14px; }
   .big.warn { color:var(--warn); } .big.bad { color:var(--bad); }
+  #perfbits { margin:11px 0 4px; border-top:1px solid #223041; padding-top:8px; }
+  #perfbits > summary { font-size:9.5px; color:var(--dim); letter-spacing:1px; cursor:pointer;
+                        list-style:none; padding:2px 0; }
+  #perfbits > summary::-webkit-details-marker { display:none; }
+  #perfbits > summary::before { content:'\25B8 '; color:var(--accent); }
+  #perfbits[open] > summary::before { content:'\25BE '; }
+  #perfbits > summary:hover { color:var(--ink); }
   .note { font-size:10px; color:var(--dim); line-height:1.55; margin-top:9px;
           border-top:1px solid #223041; padding-top:8px; }
   .note b { color:var(--warn); }
@@ -46,39 +53,46 @@
 <body>
 <div id="hud">
   <h1>FIRE LAB</h1>
-  <div class="sub">Is yomotsu's volumetric fire cheap enough to burn things in RMRF?
-    Measure it here, on a real GPU &mdash; a headless run tells you nothing.</div>
-
-  <div class="lab">EFFECT</div>
-  <div class="row" id="mode"></div>
-  <div class="lab">HOW MANY</div>
-  <div class="row" id="count"></div>
-  <div class="lab">REPEAT &middot; renders per frame, to beat vsync</div>
-  <div class="row" id="amp"></div>
-  <div class="lab">BURST RATE &middot; bursts mode &mdash; one every&hellip;</div>
-  <div class="row" id="rate"></div>
-  <div class="lab">VARIATION &middot; volumetric only &mdash; all off = every fire identical</div>
-  <div class="row" id="vphase"></div>
-  <div class="row" id="vyaw"></div>
-  <div class="row" id="vgirth"></div>
-  <div class="lab">DEATH TRANSITION &middot; flames swallow the screen, then the respawn</div>
-  <div class="row" id="tplay"></div>
-  <div class="row" id="tdur"></div>
-  <div class="row" id="tcount"></div>
-  <div class="row" id="tstyle"></div>
-
-  <div class="lab">CAMERA &middot; the game looks down at 68.8&deg; &mdash; the donut only shows from above</div>
-  <div class="row" id="cpreset"></div>
-  <div id="csliders"></div>
+  <div class="sub">Tune the wreck fire the game actually draws. The original cost-measuring rig is
+    folded away at the bottom &mdash; nothing removed.</div>
 
   <div class="lab">WRECK FIRE &middot; the real game effect (Fire.js) &mdash; main flame + spot fires</div>
   <div class="row" id="wplay"></div>
   <div id="wsliders"></div>
 
-  <div class="lab">TEXTURES &middot; volumetric only</div>
-  <div class="row" id="tex"></div>
-  <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
-  <div class="row" id="spacing"></div>
+  <div class="lab">CAMERA &middot; the game looks down at 68.8&deg; &mdash; the donut only shows from above</div>
+  <div class="row" id="cpreset"></div>
+  <div id="csliders"></div>
+
+  <!-- COLLAPSED, NOT DELETED. This lab was built to answer "is volumetric fire cheap enough to
+       burn things in RMRF", and those controls are that measurement — the modes to compare
+       against, the repeat count that beats vsync, the slice spacing that trades cost for quality.
+       They are not relevant to judging a wreck's LOOK, which is what the panel is for now, so they
+       fold away; the house rule is that minimising means collapsing, never cutting. -->
+  <details id="perfbits">
+    <summary>PERFORMANCE &amp; EFFECT LAB &middot; the original measuring rig</summary>
+    <div class="lab">EFFECT</div>
+    <div class="row" id="mode"></div>
+    <div class="lab">HOW MANY</div>
+    <div class="row" id="count"></div>
+    <div class="lab">REPEAT &middot; renders per frame, to beat vsync</div>
+    <div class="row" id="amp"></div>
+    <div class="lab">BURST RATE &middot; bursts mode &mdash; one every&hellip;</div>
+    <div class="row" id="rate"></div>
+    <div class="lab">VARIATION &middot; volumetric only &mdash; all off = every fire identical</div>
+    <div class="row" id="vphase"></div>
+    <div class="row" id="vyaw"></div>
+    <div class="row" id="vgirth"></div>
+    <div class="lab">DEATH TRANSITION &middot; flames swallow the screen, then the respawn</div>
+    <div class="row" id="tplay"></div>
+    <div class="row" id="tdur"></div>
+    <div class="row" id="tcount"></div>
+    <div class="row" id="tstyle"></div>
+    <div class="lab">TEXTURES &middot; volumetric only</div>
+    <div class="row" id="tex"></div>
+    <div class="lab">SLICE SPACING &middot; volumetric only, lower = denser</div>
+    <div class="row" id="spacing"></div>
+  </details>
 
   <table>
     <tr><td class="k">frame time</td><td><span class="big" id="ms">—</span> ms</td></tr>
@@ -105,7 +119,7 @@
 <script type="module">
 import * as THREE from 'three';
 import VolumetricFire from '../js/VolumetricFire.js';
-import { initFire, fireWreck, tickFire, drawFire, setFireLook, getFireLook, fireStatus } from '../js/Fire.js';
+import { initFire, fireWreck, tickFire, drawFire, setFireLook, getFireLook, clearFires, fireStatus } from '../js/Fire.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 // info resets on every render() by default, so with REPEAT>1 the readout showed the LAST render
@@ -708,8 +722,10 @@ function tick() {
     tickFire(dt); drawFire(t);
     // Keep one burning while you tune: the pool empties as flames expire and an empty scene tells
     // you nothing about a look you are trying to judge.
+    // Relight when the last flame has actually gone out, not on a fixed clock — so the whole
+    // lifecycle is visible, sink and all, and two wrecks can never overlap.
     wreckT -= dt;
-    if (wreckAuto && wreckT <= 0) { wreckT = 3.2; lightWreck(); }
+    if (wreckAuto && wreckT <= 0 && fireStatus().live === 0) { wreckT = 0.35; lightWreck(); }
   }
   billboardMat.uniforms.time.value = t;
   placeCam(t);
@@ -744,6 +760,7 @@ function buttons(host, opts, get, set) {
   const sync = () => el.querySelectorAll('button').forEach(b =>
     b.setAttribute('aria-pressed', String(get()) === b.dataset.v));
   el.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+    leaveWreck();   // picking a rig control means you want the rig, not the wreck
     set(b.dataset.v); sync(); rebuild(); });
   sync();
 }
@@ -823,7 +840,22 @@ buttons('spacing', [['0.3', '0.3'], ['0.5', '0.5'], ['1.0', '1'], ['2.0', '2']],
 // what is judged here is what ships.
 let wreckOn = false, wreckAuto = true, wreckT = 0, wreckScale = 1;
 initFire(scene, camera);
-const lightWreck = () => { fireWreck(0, 0.2, 0, wreckScale, () => 0.2); };   // flat lab floor
+// ONE EFFECT AT A TIME (Jacob: "there are bursts all over"). The lab used to run its own grid of
+// volumetric fires AND the wreck together, so a look being judged was drawn over by five unrelated
+// flames plus whatever the burst spawner was throwing. Entering either view now empties the other.
+function enterWreck() {
+  if (count !== 0) { count = 0; rebuild();
+    document.querySelectorAll('#count button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === '0')); }
+  mode = 'volumetric';                       // stop the burst spawner (see tick)
+  document.querySelectorAll('#mode button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === 'volumetric'));
+  wreckOn = true; wreckT = 0; lightWreck();
+}
+function leaveWreck() { if (!wreckOn) return; wreckOn = false; clearFires(); }
+// EXACTLY ONE WRECK ON SCREEN (Jacob). Relighting on a timer while the previous one was still
+// burning stacked three, six, nine flames on the same spot — additive blending turns that into a
+// bright smear that is not the effect the game draws and cannot be judged. Put the old one out
+// first: one wreck is one main flame plus its spot fires, and nothing else.
+const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 0.2); };   // flat lab floor
 (() => {
   const host = document.getElementById('wplay');
   host.innerHTML = '<button style="flex:2">&#9654; LIGHT A WRECK</button>'
@@ -831,7 +863,7 @@ const lightWreck = () => { fireWreck(0, 0.2, 0, wreckScale, () => 0.2); };   // 
   host.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.t === 'auto') { wreckAuto = !wreckAuto; b.setAttribute('aria-pressed', String(wreckAuto)); return; }
-    wreckOn = true; wreckT = 0; lightWreck();
+    enterWreck();
   });
   // Slider spec: [key, label, min, max, step, hint]
   const SPEC = [
@@ -883,10 +915,11 @@ count = 0; rebuild(); initTrans(); initGlow(); tick();
 setTimeout(() => {
   const s = [...samples].sort((a, b) => a - b);
   baseline = s.length ? s[s.length >> 1] : 16.7;
-  count = 5; rebuild();
-  document.querySelectorAll('#count button').forEach(b =>
-    b.setAttribute('aria-pressed', b.dataset.v === '5'));
+  // The panel leads with the wreck, so open there — the grid is the measuring rig, not the view.
+  enterWreck();
 }, 2500);
+window.__fireLive = () => fireStatus().live;   // test hook: how many flames are burning
+window.__gridCount = () => count;             // test hook: the rig's own fire grid
 window.__ready = true;
 </script>
 </body>

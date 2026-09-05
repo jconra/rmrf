@@ -349,6 +349,12 @@ export function drawFire(elapsed) {
   }
 }
 
+// Put every burning fire out at once. The lab needs it when switching away from the wreck view —
+// otherwise flames from the old view keep burning over the new one and neither can be judged.
+export function clearFires() {
+  for (const s2 of live) { s2.busy = false; if (s2.fire && s2.fire.mesh) s2.fire.mesh.visible = false; }
+  live.length = 0;
+}
 export function fireStatus() {
   return {
     ready, live: live.length, pool: POOL,
