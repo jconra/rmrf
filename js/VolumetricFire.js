@@ -119,6 +119,13 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
       // Convert to (radius, height) to sample fire profile texture.
       'vec2 st = vec2( sqrt( dot( loc.xz, loc.xz ) ), loc.y );',
 
+      // KEEP THE UNTURBULENT POSITION. Everything below mutates st.y (the noise scrolls it) and
+      // loc (it is rescaled into noise space), so the only chance to remember where this sample
+      // actually sits inside the BOX is here, before either happens. The envelope at the end needs
+      // exactly that. (RMRF)
+      'float boxR = st.x;',
+      'float boxH = st.y;',
+
       // Convert loc to 'noise' space
       'loc.y -= time * scale.w; // Scrolling noise upwards over time.',
       'loc *= scale.xyz; // Scaling noise space.',
@@ -145,6 +152,23 @@ const _mv = new THREE.Matrix4();   // scratch — see note 4 above
         'result *= st.y / 0.1;',
 
       '}',
+
+      // ── EDGE ENVELOPE (RMRF) — why the flame showed straight lines ──────────────────────────
+      // The volume is drawn as a stack of view-aligned quads clipped to the box, so each slice is
+      // a POLYGON — a hexagon, when a plane cuts a cube. Where that polygon ends, the number of
+      // overlapping slices drops by one, and with additive blending that step is a visible edge:
+      // "outlines of invisible boxes" (Jacob). It is not the box being drawn, it is the count of
+      // slices changing across it.
+      //
+      // The profile texture already reaches zero at radius 1 and at the top, which is why the box
+      // does not glow — but the turbulence offset moves st.y AFTER that, so a sample near a face
+      // can be pulled back into a lit part of the profile and light up right where a polygon ends.
+      // Fading against the unturbulent box position closes that door: every slice now contributes
+      // zero at its own clipped edge, so no step can exist to be seen, whatever the noise does.
+      // Costs three smoothsteps and changes the silhouette only in the last ~10% of the volume.
+      'float env = smoothstep( 1.0, 0.80, boxR );',
+      'env *= smoothstep( 1.0, 0.86, boxH ) * smoothstep( 0.0, 0.05, boxH );',
+      'result *= env;',
 
       'return result;',
 
