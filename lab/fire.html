@@ -11,8 +11,13 @@
   html, body { height:100%; background:var(--bg); color:var(--ink);
                font-family:'Courier New',monospace; overflow:hidden; }
   canvas { display:block; }
+  /* SCROLL, don't overflow. The panel grew past a laptop screen once the camera and wreck controls
+     landed, and the bottom rows simply could not be clicked — the button was off-screen. */
   #hud { position:fixed; top:10px; left:10px; z-index:10; background:rgba(12,17,24,.88);
-         border:1px solid #223041; border-radius:9px; padding:11px 13px; width:296px; }
+         border:1px solid #223041; border-radius:9px; padding:11px 13px; width:296px;
+         max-height:calc(100vh - 20px); overflow-y:auto; overscroll-behavior:contain; }
+  #hud::-webkit-scrollbar { width:8px; }
+  #hud::-webkit-scrollbar-thumb { background:#2a3a4d; border-radius:4px; }
   h1 { font-size:13px; letter-spacing:2px; color:var(--accent); }
   .sub { font-size:10px; color:var(--dim); margin:3px 0 9px; line-height:1.5; }
   .row { display:flex; gap:5px; margin-bottom:6px; flex-wrap:wrap; }
