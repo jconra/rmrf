@@ -158,6 +158,117 @@ function makeFireProfile() {
 
 // Headless runs (the tournament harness) have no document and never draw, so the whole thing
 // stands down rather than throwing on a canvas that isn't there.
+// ── SMOKE ─────────────────────────────────────────────────────────────────────────────────────
+// Instanced camera-facing puffs: ONE draw call for the lot, which is why this is affordable on a
+// phone where a second volumetric fire would not be. Billboards are wrong for fire — it has
+// churning internal motion and a silhouette a flat card cannot fake, which is why the volumetric
+// effect won — but they are right for smoke, which is soft, diffuse, and almost entirely
+// silhouette. Nothing here is a picture: the puff texture is generated, like everything else.
+//
+// Drawn BEFORE the flames (renderOrder 18 against the fire's 20) so the additive fire glows
+// through the smoke rather than being greyed out by it, and with depthWrite off so puffs never
+// cut each other or the flame — the mistake that made the fire show boxes.
+const SMOKE_MAX = 220;
+const smoke = [];
+let smkMesh = null, smkGeo = null, smkMat = null, smkTex = null, smkAcc = 0;
+const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sm = new THREE.Matrix4(), _sc2 = new THREE.Color();
+const _srq = new THREE.Quaternion(), _sax = new THREE.Vector3(0, 0, 1);
+let SMK_RATE = 14, SMK_RISE = 3.4, SMK_SPREAD = 1.6, SMK_LIFE = 2.2;
+let SMK_SIZE = 2.6, SMK_GROW = 2.4, SMK_OPACITY = 0.34, SMK_DARK = 0.72;
+function makeSmokeTex() {
+  const N = 64, c = document.createElement('canvas'); c.width = c.height = N;
+  const x = c.getContext('2d'), img = x.createImageData(N, N);
+  // A soft blob with a little low-frequency wobble on the edge, so a hundred of them do not read
+  // as a hundred identical circles. Alpha only; the colour comes from the instance.
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const u = (i / (N - 1)) * 2 - 1, v = (j / (N - 1)) * 2 - 1;
+    const r = Math.hypot(u, v), th = Math.atan2(v, u);
+    const wob = 1 + 0.16 * Math.sin(th * 3 + 1.1) + 0.10 * Math.sin(th * 5 - 0.4);
+    let a = Math.max(0, 1 - Math.pow(r / (0.92 * wob), 1.9));
+    a = a * a * (3 - 2 * a);                       // smoothstep — no hard rim
+    const k = (j * N + i) * 4;
+    img.data[k] = img.data[k + 1] = img.data[k + 2] = 255;
+    img.data[k + 3] = Math.round(a * 255);
+  }
+  x.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.magFilter = t.minFilter = THREE.LinearFilter;
+  return t;
+}
+function initSmoke() {
+  if (smkMesh) return;
+  smkTex = makeSmokeTex();
+  smkGeo = new THREE.PlaneGeometry(1, 1);
+  smkMat = new THREE.MeshBasicMaterial({ map: smkTex, transparent: true, depthWrite: false,
+                                         opacity: 1, color: 0xffffff });
+  // Per-puff alpha rides in the instance colour: a MeshBasicMaterial has one shared opacity, so
+  // fading each puff separately means folding the fade into its colour and letting it go to black.
+  // That works because smoke over a dark battlefield reads by its own brightness, not by occlusion.
+  smkMat.blending = THREE.NormalBlending;
+  smkMesh = new THREE.InstancedMesh(smkGeo, smkMat, SMOKE_MAX);
+  smkMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  smkMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(SMOKE_MAX * 3), 3);
+  smkMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  smkMesh.frustumCulled = false;
+  smkMesh.renderOrder = 18;
+  scene.add(smkMesh);
+  for (let i = 0; i < SMOKE_MAX; i++) smoke.push({ live: false });
+  writeSmoke();
+}
+function writeSmoke() {
+  if (!smkMesh) return;
+  for (let i = 0; i < SMOKE_MAX; i++) {
+    const q = smoke[i];
+    if (!q.live) { _sm.makeScale(0, 0, 0); smkMesh.setMatrixAt(i, _sm); continue; }
+    // FACE THE CAMERA, with its own roll so the puffs are not all the same way up.
+    // Camera rotation, then the puff's own roll about the view axis — composed into the quaternion
+    // rather than multiplied in afterwards, so this allocates nothing per puff per frame.
+    _sq.copy(camera.quaternion).multiply(_srq.setFromAxisAngle(_sax, q.roll));
+    _sv.set(q.s, q.s, q.s);
+    _sm.compose({ x: q.x, y: q.y, z: q.z }, _sq, _sv);
+    smkMesh.setMatrixAt(i, _sm);
+    smkMesh.instanceColor.setXYZ(i, q.cr, q.cg, q.cb);
+  }
+  smkMesh.instanceMatrix.needsUpdate = true;
+  smkMesh.instanceColor.needsUpdate = true;
+}
+function puff(x, y, z, scale) {
+  for (const q of smoke) {
+    if (q.live) continue;
+    q.live = true; q.t = 0; q.life = SMK_LIFE * (0.7 + frnd() * 0.6);
+    const a = frnd() * Math.PI * 2, r = frnd() * SMK_SPREAD * scale;
+    q.x = x + Math.cos(a) * r; q.y = y + 0.5 + frnd() * 0.8; q.z = z + Math.sin(a) * r;
+    q.vx = Math.cos(a) * SMK_SPREAD * 0.35 + (frnd() - 0.5) * 0.5;
+    q.vz = Math.sin(a) * SMK_SPREAD * 0.35 + (frnd() - 0.5) * 0.5;
+    q.vy = SMK_RISE * (0.7 + frnd() * 0.6);
+    q.s0 = SMK_SIZE * scale * (0.6 + frnd() * 0.7);
+    q.s = q.s0; q.roll = frnd() * Math.PI * 2; q.spin = (frnd() - 0.5) * 0.7;
+    q.hot = 1;                                   // starts lit by the fire it came off
+    return;
+  }
+}
+function tickSmoke(dt) {
+  if (!smkMesh) return;
+  for (const q of smoke) {
+    if (!q.live) continue;
+    q.t += dt;
+    if (q.t >= q.life) { q.live = false; continue; }
+    const k = q.t / q.life;
+    q.vy *= 1 - 0.55 * dt;                       // rise slows as it cools and spreads
+    q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt;
+    q.roll += q.spin * dt;
+    q.s = q.s0 * (1 + SMK_GROW * k);             // expands the whole way
+    // Bright and fire-lit at the base, cooling to a flat grey, then fading to nothing. The fade
+    // rides in the colour because one shared material cannot hold a per-puff opacity.
+    const lit = Math.pow(1 - k, 2.2);
+    const fade = Math.sin(Math.min(1, k / 0.12) * Math.PI / 2) * Math.pow(1 - k, 1.3);
+    const g = SMK_OPACITY * fade;
+    _sc2.setRGB(SMK_DARK + 0.55 * lit, SMK_DARK + 0.30 * lit, SMK_DARK + 0.14 * lit).multiplyScalar(g);
+    q.cr = _sc2.r; q.cg = _sc2.g; q.cb = _sc2.b;
+  }
+  writeSmoke();
+}
 // ── DEBRIS ────────────────────────────────────────────────────────────────────────────────────
 // Pooled like the flames are, for the same reason: a kill happens mid-fight and must not allocate.
 // One shared geometry and one shared material — they differ only by transform, so they cost a draw
@@ -272,6 +383,7 @@ export function initFire(sc, cam) {
   try {
     VolumetricFire.textures = { nzw: makeNZW(), fireProfile: makeFireProfile() };
   initDebris();
+  initSmoke();
     for (let i = 0; i < POOL; i++) {
       const fire = new VolumetricFire(3, 6, 3, 0.5, cam);
       fire.mesh.visible = false;
@@ -373,6 +485,20 @@ export function fireWreck(x, y, z, scale = 1, groundAt = null) {
 // tents hit — they have to be ticked from both the render loop and stepField.)
 export function tickFire(dt) {
   tickDebris(dt);            // runs even with no flames left — chunks outlive a short burn
+  tickSmoke(dt);             // …and so does smoke, which drifts on after the flame is out
+  // SMOKE COMES OFF A BURNING FIRE, continuously, not once at ignition. Rate is per second across
+  // the whole wreck, so it does not triple just because a wreck has three flames.
+  if (live.length && SMK_RATE > 0) {
+    smkAcc += SMK_RATE * dt;
+    while (smkAcc >= 1) {
+      smkAcc -= 1;
+      const s2 = live[(Math.random() * live.length) | 0];
+      if (s2 && s2.fire && s2.fire.mesh) {
+        const p2 = s2.fire.mesh.position;
+        puff(p2.x, s2.baseY, p2.z, s2.scale || 1);
+      }
+    }
+  }
   if (!live.length) return;
   for (let i = live.length - 1; i >= 0; i--) {
     const s = live[i];
@@ -445,6 +571,14 @@ export function setFireLook(o = {}) {
   DEB_COLD  = c(o.debCold,  0.2, 6, DEB_COLD);
   DEB_GLOW  = c(o.debGlow,  0.5, 30, DEB_GLOW);
   DEB_HEAT  = c(o.debHeat,  0, 4, DEB_HEAT);
+  SMK_RATE    = c(o.smkRate,    0, 60, SMK_RATE);
+  SMK_RISE    = c(o.smkRise,    0, 12, SMK_RISE);
+  SMK_SPREAD  = c(o.smkSpread,  0, 8,  SMK_SPREAD);
+  SMK_LIFE    = c(o.smkLife,    0.3, 8, SMK_LIFE);
+  SMK_SIZE    = c(o.smkSize,    0.3, 10, SMK_SIZE);
+  SMK_GROW    = c(o.smkGrow,    0, 6,  SMK_GROW);
+  SMK_OPACITY = c(o.smkOpacity, 0, 1,  SMK_OPACITY);
+  SMK_DARK    = c(o.smkDark,    0, 1,  SMK_DARK);
   SHOOT = c(o.shoot, 0, 1, SHOOT);
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
@@ -457,7 +591,9 @@ export function getFireLook() {
            birth: BIRTH, shoot: SHOOT, flash: FLASH,
            satSeed: SAT_SEED, satBloom: SAT_BLOOM,
            debN: DEB_N, debSpeed: DEB_SPEED, debLife: DEB_LIFE,
-           debCold: DEB_COLD, debGlow: DEB_GLOW, debHeat: DEB_HEAT };
+           debCold: DEB_COLD, debGlow: DEB_GLOW, debHeat: DEB_HEAT,
+           smkRate: SMK_RATE, smkRise: SMK_RISE, smkSpread: SMK_SPREAD, smkLife: SMK_LIFE,
+           smkSize: SMK_SIZE, smkGrow: SMK_GROW, smkOpacity: SMK_OPACITY, smkDark: SMK_DARK };
 }
 
 export function drawFire(elapsed) {
@@ -550,6 +686,8 @@ export function clearFires() {
   live.length = 0;
   for (const d of deb) d.live = false;
   writeDebris();
+  for (const q of smoke) q.live = false;
+  writeSmoke();
 }
 export function fireStatus() {
   return {

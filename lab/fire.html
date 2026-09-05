@@ -919,7 +919,7 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
   // Slider spec: [key, label, min, max, step, hint]
   // GROUPED AND FOLDED. Twenty-two sliders in one column is not a panel, it is a wall — and the
   // ones worth reaching for change as the work moves on. Each group collapses; nothing is removed.
-  const GROUPS = [['shape','SHAPE'],['time','TIMING'],['spawn','HOW IT LIGHTS'],['deb','DEBRIS']];
+  const GROUPS = [['shape','SHAPE'],['time','TIMING'],['spawn','HOW IT LIGHTS'],['deb','DEBRIS'],['smk','SMOKE']];
   const SPEC = [
     // [key, label, min, max, step, hint, group]
     ['sat',       'spot fire size',   0.2,  1.5,  0.05, 'vs the main flame',                    'shape'],
@@ -949,6 +949,15 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     ['debCold',   'debris cold mix',  0.2,  6.0,  0.1,  'higher = more black chunks',           'deb'],
     ['debHeat',   'debris glow',      0,    4.0,  0.05, 'how bright the hot ones start',        'deb'],
     ['debGlow',   'fire light reach', 0.5,  30,   0.5,  'how far the fire lights them',         'deb'],
+
+    ['smkRate',   'smoke rate',       0,    60,   1,    'puffs a second, whole wreck',          'smk'],
+    ['smkSize',   'puff size',        0.3,  10,   0.1,  'starting radius',                      'smk'],
+    ['smkGrow',   'puff growth',      0,    6,    0.1,  'how much it expands over its life',    'smk'],
+    ['smkRise',   'rise speed',       0,    12,   0.1,  'slows as it spreads',                  'smk'],
+    ['smkSpread', 'spread',           0,    8,    0.1,  'how wide it drifts off the wreck',     'smk'],
+    ['smkLife',   'smoke life',       0.3,  8,    0.1,  'seconds per puff',                     'smk'],
+    ['smkOpacity','smoke density',    0,    1,    0.01, 'how solid it reads',                   'smk'],
+    ['smkDark',   'smoke grey',       0,    1,    0.01, 'low = sooty black, high = pale',       'smk'],
   ];
   const wrap = document.getElementById('wsliders');
   const look = getFireLook();
