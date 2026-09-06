@@ -12416,6 +12416,61 @@ if (!GARAGE && QS.has('mapgen')) new Controls(DEFAULTS, rebuild);
 // so destructibility is verifiable on a phone with no console.
 const ray = new THREE.Raycaster();
 // Debug handle (headless verification / console poking).
+
+// ── SIGHT CONE OVERLAY (?cones, or RR.setConeViz) ─────────────────────────────────────────────
+// Draws each unit's ACTUAL detection lobe on the ground: the radius at every bearing is the range
+// that bearing really gets, base x coneFactor. It is not a tidy wedge — it is a fat teardrop with
+// a bite out of the back — and seeing the bite is the point. Two Lurchers walking past each other
+// at 56u with a clear line and neither reacting is impossible to argue about once the shape is on
+// screen (Jacob asked for exactly this after the third time it happened).
+//
+// Sized against a LURCHER as the reference target (VIS 1.0), so the lobes of different hulls are
+// comparable to each other rather than each being drawn for a different opponent.
+let coneViz = QS.has('cones');
+const _coneRings = new Map();          // vehicle -> LineLoop
+const CONE_SEGS = 72;
+function updateConeViz() {
+  if (!coneViz) {
+    if (_coneRings.size) { for (const [, l] of _coneRings) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); } _coneRings.clear(); }
+    return;
+  }
+  const seen = new Set();
+  for (const v of combatants) {
+    if (v.dead || !v.holder) continue;
+    seen.add(v);
+    let ring = _coneRings.get(v);
+    if (!ring) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array((CONE_SEGS + 1) * 3), 3));
+      const hex = (TEAM_COLORS[v.colorIndex] && TEAM_COLORS[v.colorIndex].hex) || '#8fd0ff';
+      ring = new THREE.LineLoop(g, new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: 0.75, depthTest: false }));
+      ring.renderOrder = 30;
+      scene.add(ring); _coneRings.set(v, ring);
+    }
+    const px = v.holder.position.x, pz = v.holder.position.z;
+    // The same look direction the detector uses: turret bearing for a turreted hull, else the hull.
+    const tRel = (sightCone && v.model && v.model.turretGroup) ? (v.model.turretGroup.rotation.y || 0) : 0;
+    const look = v.heading + tRel;
+    const base = AI_VISION * ((SIGHT[v.type] ?? 1) + 1.0) * 0.5;   // vs a Lurcher
+    const arr = ring.geometry.attributes.position.array;
+    for (let i = 0; i <= CONE_SEGS; i++) {
+      const off = (i / CONE_SEGS) * Math.PI * 2 - Math.PI;        // -pi..pi around the look direction
+      let r = base;
+      if (sightCone) {
+        let f = coneFactor(Math.abs(off));
+        if (HULL_EYES > 0) f = Math.max(f, HULL_EYES * coneFactor(Math.abs(wrapPi(off + tRel))));
+        r = base * f;
+      }
+      const bearing = look + off;
+      const x = px - Math.sin(bearing) * r, z = pz - Math.cos(bearing) * r;
+      arr[i * 3] = x; arr[i * 3 + 1] = map.heightAt(x, z) + 0.35; arr[i * 3 + 2] = z;
+    }
+    ring.geometry.attributes.position.needsUpdate = true;
+    ring.geometry.computeBoundingSphere();
+  }
+  for (const [v, l] of _coneRings) if (!seen.has(v)) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); _coneRings.delete(v); }
+}
+
 window.RR = {
   // `renderer` is here for SHADER-COST probes: renderer.info.programs lists every compiled program
   // with its cacheKey, which is the only way to see WHICH parameter is forking a material into
@@ -12612,6 +12667,15 @@ window.RR = {
   }),
   setPerf: (on = true) => { PERF = !!on; return PERF; },   // switch the section timers on at runtime
   setHullEyes: v => { HULL_EYES = Math.max(0, Math.min(1, +v || 0)); return HULL_EYES; },   // A/B: how well the driver sees along the hull heading (0 = turret-only, the old cone)
+  setConeViz: on => { coneViz = !!on; return coneViz; },   // debug: draw each unit's real detection lobe on the ground
+  setSnd: o => { if (o) for (const k in o) if (k in SND) SND[k] = +o[k]; return { ...SND }; },   // A/B the hearing model live (selfMask is the interesting one)
+  heardStats: (v) => {                                    // debug: what can THIS unit actually hear right now?
+    const u = v || (combatants.find(c => !c.dead) || null);
+    if (!u) return null;
+    return { unit: u.type, heardMin: AI_HEARD_MIN,
+             sources: soundSources(u).map(s2 => ({ type: s2.type, dist: Math.round(s2.dist),
+                                                   loud: +s2.loud.toFixed(3), acted: s2.loud > AI_HEARD_MIN })) };
+  },
   hasLOSAt: (ax, az, bx, bz) => hasLOS(ax, az, bx, bz),   // debug: is there a clean line between two points?
   standFailOf: (i = 0) => { const c = commanders[i]; return c ? (c._standFail || null) : null; },   // debug: the last [STANDOFF ALARM] breakdown   // units that reached the enemy base and never fired; recalls answered by the same chassis
   setNavScuttle: on => { aiNavScuttle = !!on; return aiNavScuttle; },   // pinned-past-grace self-destruct on/off
@@ -13211,6 +13275,11 @@ const ACOUSTIC = [
   { ref: 26, max: 175, gain: 1.15 },   // 3 Jotun
 ];
 const GUN_RANGE = 700;                 // gunfire carries far (matches SoundManager.fireGunAt)
+// selfMask is the one to watch. It is applied to the LISTENER's own output with the same throttle
+// curve as emission, so a moving vehicle deafens itself by 60% of whatever it is putting out —
+// which means making engines louder does not help two movers hear each other AT ALL, it raises the
+// mask in lockstep. Computed for two Lurchers 56u apart: heard 0.013 at idle, 0.043 at full
+// throttle, against a 0.18 threshold to act on. Louder is not the lever; the mask is.
 const SND = { idleEmit: 0.30, gunLoud: 1.6, gunDecay: 1.2, selfMask: 0.6, minAudible: 0.10 };
 const soundPings = [];                 // recent gun reports: { x, y, z, idx, team, life }
 function emitSoundPing(x, y, z, idx, team, colorIndex) {
@@ -13463,6 +13532,7 @@ function animate() {
       _pfT('ai', () => { if (!matchOver) updateCommanders(dt); });  // AI teams (fog-of-war) + A* nav + flag carry
       _pfT('structs', () => { for (const c of camps) c.update(dt); for (const w of placedWalls) w.update(dt); for (const e of elevators) { e.update(dt); updateElevatorSound(e); } for (const v of vehicles) v.idle(dt); updateSubmarines(dt); });
       _pfT('shadows', () => updateShadows());  // ground-projected vehicle silhouette shadows
+      updateConeViz();                       // ?cones — the sight lobes, when asked for
       _pfT('projectiles', () => { projectiles.update(dt); updateProjectileHits(); });
       if (foliage) foliage.update(dt);       // tree topple animations
       waterT += dt; map.tickWater(waterT); setWindTime(waterT);   // animate the water ripples + grass sway
