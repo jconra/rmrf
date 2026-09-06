@@ -378,14 +378,25 @@ function tickSmoke(dt) {
     // because 1.0 meant "dark end sits at white". Now 0 = no soot at all (uniformly pale) and
     // 1 = fully sooty, where a puff's own mix takes it all the way down to black. That is the only
     // arrangement in which the control can actually reach the colour its name promises.
-    const base = q.tone >= 0.5
-      ? SMK_DARK * (1 - SMK_SOOT * q.mix)
-      : SMK_DARK * (1 - SMK_SOOT * q.mix * 0.25);   // a trail is the pale one, barely sooted
+    // THE SHADE IS CHOSEN IN SCREEN TERMS, THEN CONVERTED. The renderer outputs sRGB
+    // (main.js sets outputColorSpace), so a value written straight into the instance colour is
+    // LINEAR and comes out far lighter than it reads in the source: 0.36 linear displays as 0.63,
+    // which is light grey. That is the whole reason soot could sit at full and the column still
+    // looked white — the slider was never able to reach a dark colour, whatever it said.
+    // So: pick the shade as the value wanted ON SCREEN, then square it into linear (2.2 gamma) on
+    // the way out. At full soot a mid-mix puff now lands near 0.10 linear, which displays dark.
+    // Soot has to span the WHOLE range or the control still cannot reach the colour it names:
+    // with the old curve a mid-mix puff bottomed out around 0.36 on screen, which is dark grey and
+    // not black. At full soot the pale level is scaled away entirely and the mix rides what is
+    // left, so most puffs land near black and a few stay smoky grey.
+    const pale = q.tone >= 0.5 ? SMK_DARK : SMK_DARK * 1.15;   // a trail is the paler of the two
+    const shade = pale * (1 - SMK_SOOT) + pale * SMK_SOOT * (1 - q.mix) * 0.5;
+    const base = Math.pow(Math.max(0, shade), 2.2);
     // WARMTH IS A GARNISH, NOT THE COLOUR. It used to add up to +0.45 to a young puff, and since
     // puffs are born constantly the smoke you actually see was dominated by fresh bright ones — so
     // soot could sit at full and the column still read white. Jacob, twice: "I have it on full soot
     // and it all looks white." Scaled right down and given its own control.
-    const w = SMK_WARMTH * lit * q.tone;
+    const w = Math.pow(SMK_WARMTH, 2.2) * lit * q.tone;
     _sc2.setRGB(base + w, base + w * 0.53, base + w * 0.24);
     q.cr = _sc2.r; q.cg = _sc2.g; q.cb = _sc2.b;
   }
