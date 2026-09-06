@@ -173,11 +173,12 @@ const smoke = [];
 let smkMesh = null, smkGeo = null, smkMat = null, smkTex = null, smkAcc = 0, smkAlpha = null;
 const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sm = new THREE.Matrix4(), _sc2 = new THREE.Color();
 const _srq = new THREE.Quaternion(), _sax = new THREE.Vector3(0, 0, 1);
+const _sd = new THREE.Vector3(), _sright = new THREE.Vector3(), _sup = new THREE.Vector3(), _sdir = new THREE.Vector3();
 let SMK_RATE = 14, SMK_RISE = 3.4, SMK_SPREAD = 1.6, SMK_LIFE = 2.2;
 let SMK_SIZE = 2.6, SMK_GROW = 2.4, SMK_OPACITY = 0.34, SMK_DARK = 0.72;
 // SOOT is the black end of the fire-smoke mix; DARK is its grey end, and the pale trail's base.
 // The TRAIL knobs scale a chunk's smoke against the fire's, so the two balance separately.
-let SMK_SOOT = 0.06, SMK_TRAIL = 9, SMK_TRAIL_OP = 0.55, SMK_TRAIL_SIZE = 0.45, SMK_TRAIL_LIFE = 0.7;
+let SMK_SOOT = 0.85, SMK_TRAIL = 5, SMK_TRAIL_OP = 0.55, SMK_TRAIL_SIZE = 0.45, SMK_TRAIL_LIFE = 0.7;
 // Slots kept back for the FIRE's own smoke. Trails are per chunk, so their rate multiplies by
 // twenty and they will happily eat the whole pool: measured at 26/chunk there were 121 pale puffs
 // and ZERO black ones, because the fire could never get a slot. The wreck's own smoke is the point
@@ -191,6 +192,9 @@ const SMOKE_RESERVE = 70;
 // A shared drift (slow, common to all puffs) carries most of the variation now, with only a small
 // per-puff jitter on top, so neighbours look related. FADE_IN is a real fraction of the life.
 let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34;
+// A trail instance is drawn LONG and NARROW along the direction of travel, so a handful of them
+// makes a streak instead of a string of circles.
+let SMK_TRAIL_LEN = 5.5, SMK_TRAIL_WID = 0.55;
 let _smkDrift = 0;
 const perfNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 function makeSmokeTex() {
@@ -252,11 +256,26 @@ function writeSmoke() {
     const q = smoke[i];
     if (!q.live) { _sm.makeScale(0, 0, 0); smkMesh.setMatrixAt(i, _sm); smkAlpha.setX(i, 0); continue; }
     // FACE THE CAMERA, with its own roll so the puffs are not all the same way up.
-    // Camera rotation, then the puff's own roll about the view axis — composed into the quaternion
-    // rather than multiplied in afterwards, so this allocates nothing per puff per frame.
-    _sq.copy(camera.quaternion).multiply(_srq.setFromAxisAngle(_sax, q.roll));
-    _sv.set(q.s, q.s, q.s);
-    _sm.compose({ x: q.x, y: q.y, z: q.z }, _sq, _sv);
+    if (q.stretch > 0) {
+      // A STREAK. Face the camera, but roll so the quad's local Y lies along the direction of
+      // travel as seen on screen, then scale it long and narrow. That is what turns a handful of
+      // instances into the long thick trails a blast actually throws — a round puff cannot, however
+      // many of them you spend.
+      _sd.set(q.dx, q.dy, q.dz);
+      _sright.set(1, 0, 0).applyQuaternion(camera.quaternion);
+      _sup.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      const ax = _sd.dot(_sright), ay = _sd.dot(_sup);
+      const roll = Math.atan2(ax, ay);                 // screen-space angle of the travel direction
+      _sq.copy(camera.quaternion).multiply(_srq.setFromAxisAngle(_sax, -roll));
+      _sv.set(q.s * SMK_TRAIL_WID, q.s * q.stretch, q.s);
+      _sm.compose({ x: q.x, y: q.y, z: q.z }, _sq, _sv);
+    } else {
+      // Camera rotation, then the puff's own roll about the view axis — composed into the
+      // quaternion rather than multiplied after, so this allocates nothing per puff per frame.
+      _sq.copy(camera.quaternion).multiply(_srq.setFromAxisAngle(_sax, q.roll));
+      _sv.set(q.s, q.s, q.s);
+      _sm.compose({ x: q.x, y: q.y, z: q.z }, _sq, _sv);
+    }
     smkMesh.setMatrixAt(i, _sm);
     smkMesh.instanceColor.setXYZ(i, q.cr, q.cg, q.cb);
     smkAlpha.setX(i, q.a);
@@ -268,7 +287,9 @@ function writeSmoke() {
 // TWO SOURCES, ONE POOL (Jacob's design). `tone` 0 = the pale trail a thrown chunk leaves behind,
 // 1 = the sooty smoke that boils off a burning fire. Everything else about a puff is identical, so
 // they share the pool and the single draw call.
-function puff(x, y, z, scale, tone = 1, rise = 1) {
+// `dir` (a unit vector) turns a puff into a STREAK stretched along it — how a trail is drawn. A
+// round billboard cannot make a long thick trail at any count; it just makes more circles.
+function puff(x, y, z, scale, tone = 1, rise = 1, dir = null) {
   // A trail may only use the pool down to the reserve; the fire always has room.
   if (tone < 0.5) {
     let free = 0;
@@ -288,6 +309,8 @@ function puff(x, y, z, scale, tone = 1, rise = 1) {
     q.s = q.s0; q.roll = frnd() * Math.PI * 2; q.spin = (frnd() - 0.5) * 0.7;
     // Mostly the shared drift, plus a little of its own — related to its neighbours, not random.
     q.mix = Math.max(0, Math.min(1, _smkDrift + (frnd() - 0.5) * 2 * SMK_MIXVAR));
+    if (dir) { q.dx = dir.x; q.dy = dir.y; q.dz = dir.z; q.stretch = SMK_TRAIL_LEN; }
+    else q.stretch = 0;
     q.a = 0;
     return;
   }
@@ -316,9 +339,14 @@ function tickSmoke(dt) {
     // A wreck's smoke is not one grey. Fire smoke is a nasty black shot through with medium grey —
     // each puff rolls its own place on that mix and keeps it — while a debris trail is pale. Both
     // pick up the fire's warmth while they are young.
+    // SOOT IS "HOW SOOTY", not "the value of the dark end". It read the other way round and the
+    // slider therefore worked backwards: Jacob turned it to full expecting black and got pale,
+    // because 1.0 meant "dark end sits at white". Now 0 = no soot at all (uniformly pale) and
+    // 1 = fully sooty, where a puff's own mix takes it all the way down to black. That is the only
+    // arrangement in which the control can actually reach the colour its name promises.
     const base = q.tone >= 0.5
-      ? SMK_SOOT + (SMK_DARK - SMK_SOOT) * q.mix
-      : SMK_DARK + (1 - SMK_DARK) * 0.55 * q.mix;
+      ? SMK_DARK * (1 - SMK_SOOT * q.mix)
+      : SMK_DARK * (1 - SMK_SOOT * q.mix * 0.25);   // a trail is the pale one, barely sooted
     _sc2.setRGB(base + 0.45 * lit * q.tone, base + 0.24 * lit * q.tone, base + 0.11 * lit * q.tone);
     q.cr = _sc2.r; q.cg = _sc2.g; q.cb = _sc2.b;
   }
@@ -422,7 +450,12 @@ function tickDebris(dt) {
     // the launch point so the trail follows the arc, and thinned over the chunk's life so it reads
     // as a streak behind a fast chunk rather than a cloud around a dying one.
     d.puffAcc = (d.puffAcc || 0) + SMK_TRAIL * dt * (1 - k);
-    while (d.puffAcc >= 1) { d.puffAcc -= 1; puff(d.x, d.y, d.z, d.s0 * 1.6, 0, 0.35); }
+    while (d.puffAcc >= 1) {
+      d.puffAcc -= 1;
+      const sp = Math.hypot(d.vx, d.vy, d.vz) || 1;
+      _sdir.set(d.vx / sp, d.vy / sp, d.vz / sp);
+      puff(d.x, d.y, d.z, d.s0 * 1.6, 0, 0.35, _sdir);
+    }
     // GONE, not faded: shrink over the last third so a chunk winks out without needing to sort
     // against the additive flames.
     d.s = d.s0 * (k < 0.66 ? 1 : 1 - (k - 0.66) / 0.34);
@@ -647,6 +680,8 @@ export function setFireLook(o = {}) {
   SMK_TRAIL_LIFE = c(o.smkTrailLife, 0.1, 2, SMK_TRAIL_LIFE);
   SMK_MIXVAR     = c(o.smkMixVar,    0, 1,   SMK_MIXVAR);
   SMK_FADEIN     = c(o.smkFadeIn,    0.02, 0.9, SMK_FADEIN);
+  SMK_TRAIL_LEN  = c(o.smkTrailLen,  1, 16,  SMK_TRAIL_LEN);
+  SMK_TRAIL_WID  = c(o.smkTrailWid,  0.1, 2, SMK_TRAIL_WID);
   SHOOT = c(o.shoot, 0, 1, SHOOT);
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
@@ -664,7 +699,8 @@ export function getFireLook() {
            smkSize: SMK_SIZE, smkGrow: SMK_GROW, smkOpacity: SMK_OPACITY, smkDark: SMK_DARK,
            smkSoot: SMK_SOOT, smkTrail: SMK_TRAIL, smkTrailOp: SMK_TRAIL_OP,
            smkTrailSize: SMK_TRAIL_SIZE, smkTrailLife: SMK_TRAIL_LIFE,
-           smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN };
+           smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN,
+           smkTrailLen: SMK_TRAIL_LEN, smkTrailWid: SMK_TRAIL_WID };
 }
 
 export function drawFire(elapsed) {
