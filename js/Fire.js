@@ -192,6 +192,9 @@ const SMOKE_RESERVE = 70;
 // A shared drift (slow, common to all puffs) carries most of the variation now, with only a small
 // per-puff jitter on top, so neighbours look related. FADE_IN is a real fraction of the life.
 let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34, SMK_WARMTH = 0.14;
+// How far into a flame's life it keeps making smoke, and how sharply that tails off. At 0.45 a
+// flame smokes hard early and is done well before it goes out.
+let SMK_STOP = 0.45, SMK_TAPER = 1.4;
 // A trail instance is drawn LONG and NARROW along the direction of travel, so a handful of them
 // makes a streak instead of a string of circles.
 let SMK_TRAIL_LEN = 5.5, SMK_TRAIL_WID = 0.55;
@@ -569,7 +572,7 @@ export function fireBurst(x, y, z, scale = 1, lifeMul = 1, from = null) {
   if (!ready) return false;
   const slot = pool.find(s => !s.busy);
   if (!slot) return false;                    // pool exhausted — deliberately, see the note above
-  slot.busy = true; slot.t = 0; slot.scale = scale; slot.life = LIFE * lifeMul;
+  slot.busy = true; slot.t = 0; slot.scale = scale; slot.life = LIFE * lifeMul; slot.smkAcc = 0;
   // Where it flies out FROM, if anywhere. Held with the destination so drawFire can walk between
   // them during the birth window; null means it is lit where it stands.
   slot.from = from ? { x: from.x, z: from.z } : null;
@@ -652,12 +655,22 @@ export function tickFire(dt) {
   tickSmoke(dt);             // …and so does smoke, which drifts on after the flame is out
   // SMOKE COMES OFF A BURNING FIRE, continuously, not once at ignition. Rate is per second across
   // the whole wreck, so it does not triple just because a wreck has three flames.
-  if (live.length && SMK_RATE > 0) {
-    smkAcc += SMK_RATE * dt;
-    while (smkAcc >= 1) {
-      smkAcc -= 1;
-      const s2 = live[(Math.random() * live.length) | 0];
-      if (s2 && s2.fire && s2.fire.mesh) {
+  // A DYING FIRE STOPS SMOKING (Jacob: "the smoke is still being generated too heavily when the
+  // fires are going out — they need to stop generating the smoke sooner"). Emission used to be a
+  // flat rate for as long as ANY flame was alive, which with HOLD at 0.10 means a wreck spends
+  // ninety percent of its burn guttering out while still pumping smoke at full strength. Now each
+  // flame carries its own budget, weighted by how much life it has left, and cuts out entirely
+  // past SMK_STOP — so the column thins and stops while the embers finish, instead of ending on a
+  // cliff when the last flame expires.
+  if (SMK_RATE > 0) {
+    for (const s2 of live) {
+      if (!s2.fire || !s2.fire.mesh) continue;
+      const u = s2.t / s2.life;
+      if (u >= SMK_STOP) continue;                       // past its smoking phase — embers only
+      const w = Math.pow(1 - u / SMK_STOP, SMK_TAPER);   // full early, easing to nothing at STOP
+      s2.smkAcc = (s2.smkAcc || 0) + (SMK_RATE / live.length) * w * dt;
+      while (s2.smkAcc >= 1) {
+        s2.smkAcc -= 1;
         const p2 = s2.fire.mesh.position;
         puff(p2.x, s2.baseY, p2.z, s2.scale || 1);
       }
@@ -751,6 +764,8 @@ export function setFireLook(o = {}) {
   SMK_MIXVAR     = c(o.smkMixVar,    0, 1,   SMK_MIXVAR);
   SMK_FADEIN     = c(o.smkFadeIn,    0.02, 0.9, SMK_FADEIN);
   SMK_WARMTH     = c(o.smkWarmth,    0, 1,   SMK_WARMTH);
+  SMK_STOP       = c(o.smkStop,      0.05, 1, SMK_STOP);
+  SMK_TAPER      = c(o.smkTaper,     0.2, 4,  SMK_TAPER);
   SMK_TRAIL_LEN  = c(o.smkTrailLen,  1, 16,  SMK_TRAIL_LEN);
   SMK_TRAIL_WID  = c(o.smkTrailWid,  0.1, 2, SMK_TRAIL_WID);
   SMK_DRAG       = c(o.smkDrag,      0, 4,   SMK_DRAG);
@@ -773,6 +788,7 @@ export function getFireLook() {
            smkSoot: SMK_SOOT, smkTrail: SMK_TRAIL, smkTrailOp: SMK_TRAIL_OP,
            smkTrailSize: SMK_TRAIL_SIZE, smkTrailLife: SMK_TRAIL_LIFE,
            smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN, smkWarmth: SMK_WARMTH,
+           smkStop: SMK_STOP, smkTaper: SMK_TAPER,
            smkTrailLen: SMK_TRAIL_LEN, smkTrailWid: SMK_TRAIL_WID,
            smkDrag: SMK_DRAG, smkTrailDrag: SMK_TRAIL_DRAG };
 }
