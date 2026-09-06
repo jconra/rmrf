@@ -963,6 +963,7 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     ['smkSoot',   'sootiness',        0,    1,    0.01, '1 = as black as it gets',              'smk'],
     ['smkMixVar', 'puff variation',   0,    1,    0.01, 'low = puffs match their neighbours',   'smk'],
     ['smkFadeIn', 'fade in',          0.02, 0.9,  0.01, 'fraction of life; low = pops in',      'smk'],
+    ['smkWarmth', 'fire warmth',      0,    1,    0.01, 'orange cast on young puffs; 0 = none',  'smk'],
     ['smkTrail',  'trail rate',       0,    80,   1,    'puffs a second per flying chunk',      'smk'],
     ['smkTrailOp','trail density',    0,    2,    0.01, 'against the fire smoke',               'smk'],
     ['smkTrailSize','trail size',     0.1,  2,    0.05, 'against the fire smoke',               'smk'],
@@ -1081,6 +1082,7 @@ setTimeout(() => {
   // The panel leads with the wreck, so open there — the grid is the measuring rig, not the view.
   enterWreck();
 }, 2500);
+window.__smokeDbg = () => (window.__FIRE_DBG ? window.__FIRE_DBG() : null);
 window.__look = () => getFireLook();          // test hook: what the shipped defaults are
 window.__scene = scene;                       // test hook: walk the graph to assert material state
 window.__fireLive = () => fireStatus().live;   // test hook: how many flames are burning

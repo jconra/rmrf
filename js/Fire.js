@@ -191,7 +191,7 @@ const SMOKE_RESERVE = 70;
 // is a puffy smoke shape" — the shape was never the problem, the popping was.
 // A shared drift (slow, common to all puffs) carries most of the variation now, with only a small
 // per-puff jitter on top, so neighbours look related. FADE_IN is a real fraction of the life.
-let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34;
+let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34, SMK_WARMTH = 0.14;
 // A trail instance is drawn LONG and NARROW along the direction of travel, so a handful of them
 // makes a streak instead of a string of circles.
 let SMK_TRAIL_LEN = 5.5, SMK_TRAIL_WID = 0.55;
@@ -269,7 +269,7 @@ function writeSmoke() {
       const ax = _sd.dot(_sright), ay = _sd.dot(_sup);
       const roll = Math.atan2(ax, ay);                 // screen-space angle of the travel direction
       _sq.copy(camera.quaternion).multiply(_srq.setFromAxisAngle(_sax, -roll));
-      _sv.set(q.s * SMK_TRAIL_WID, q.s * q.stretch, q.s);
+      _sv.set(q.s * SMK_TRAIL_WID, q.ray ? q.rayLen : q.s * q.stretch, q.s);
       _sm.compose({ x: q.x, y: q.y, z: q.z }, _sq, _sv);
     } else {
       // Camera rotation, then the puff's own roll about the view axis — composed into the
@@ -317,9 +317,31 @@ function puff(x, y, z, scale, tone = 1, rise = 1, dir = null) {
     q.mix = Math.max(0, Math.min(1, _smkDrift + (frnd() - 0.5) * 2 * SMK_MIXVAR));
     if (dir) { q.dx = dir.x; q.dy = dir.y; q.dz = dir.z; q.stretch = SMK_TRAIL_LEN; }
     else q.stretch = 0;
+    q.ray = false; q.owner = null;
     q.a = 0;
     return;
   }
+}
+// A RAY: a trail bound to one chunk. It does not rise, drift or grow — the chunk's flight is the
+// only thing that changes it, and once the chunk is gone it simply fades where it lies.
+function rayPuff(x, y, z, scale) {
+  let free = 0;
+  for (const q2 of smoke) if (!q2.live && ++free >= SMOKE_RESERVE) break;
+  if (free < SMOKE_RESERVE) return null;
+  for (let i = 0; i < SMOKE_MAX; i++) {
+    const q = smoke[i];
+    if (q.live) continue;
+    q.live = true; q.t = 0; q.tone = 0; q.ray = true; q.owner = null;
+    q.life = SMK_TRAIL_LIFE * (0.7 + frnd() * 0.6);
+    q.x = x; q.y = y; q.z = z;
+    q.vx = q.vy = q.vz = 0;
+    q.s0 = SMK_SIZE * scale * SMK_TRAIL_SIZE; q.s = q.s0;
+    q.roll = 0; q.spin = 0; q.stretch = 1; q.rayLen = 0.01;
+    q.mix = Math.max(0, Math.min(1, _smkDrift + (frnd() - 0.5) * 2 * SMK_MIXVAR));
+    q.a = 0;
+    return i;
+  }
+  return null;
 }
 function tickSmoke(dt) {
   if (!smkMesh) return;
@@ -334,10 +356,13 @@ function tickSmoke(dt) {
     // Fire smoke climbs hard and keeps climbing; a trail hangs where it was laid. Separate drag
     // per source, because "rise rapidly" and "stay for a few seconds" are opposite requirements
     // and one constant cannot serve both.
-    q.vy *= 1 - (q.tone >= 0.5 ? SMK_DRAG : SMK_TRAIL_DRAG) * dt;
-    q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt;
-    q.roll += q.spin * dt;
-    q.s = q.s0 * (1 + SMK_GROW * k);             // expands the whole way
+    if (!q.ray) {
+      q.vy *= 1 - (q.tone >= 0.5 ? SMK_DRAG : SMK_TRAIL_DRAG) * dt;
+      q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt;
+      q.roll += q.spin * dt;
+    }
+    // A ray holds its width and lets the chunk decide its length; only fire smoke expands.
+    if (!q.ray) q.s = q.s0 * (1 + SMK_GROW * k);
     // Bright and fire-lit at the base, cooling to a flat grey, then fading to nothing. The fade
     // rides in the colour because one shared material cannot hold a per-puff opacity.
     const lit = Math.pow(1 - k, 2.2);
@@ -356,7 +381,12 @@ function tickSmoke(dt) {
     const base = q.tone >= 0.5
       ? SMK_DARK * (1 - SMK_SOOT * q.mix)
       : SMK_DARK * (1 - SMK_SOOT * q.mix * 0.25);   // a trail is the pale one, barely sooted
-    _sc2.setRGB(base + 0.45 * lit * q.tone, base + 0.24 * lit * q.tone, base + 0.11 * lit * q.tone);
+    // WARMTH IS A GARNISH, NOT THE COLOUR. It used to add up to +0.45 to a young puff, and since
+    // puffs are born constantly the smoke you actually see was dominated by fresh bright ones — so
+    // soot could sit at full and the column still read white. Jacob, twice: "I have it on full soot
+    // and it all looks white." Scaled right down and given its own control.
+    const w = SMK_WARMTH * lit * q.tone;
+    _sc2.setRGB(base + w, base + w * 0.53, base + w * 0.24);
     q.cr = _sc2.r; q.cg = _sc2.g; q.cb = _sc2.b;
   }
   writeSmoke();
@@ -435,7 +465,7 @@ function throwDebris(x, y, z, scale) {
     d.vx = Math.cos(a) * sp; d.vy = up * sp; d.vz = Math.sin(a) * sp;
     d.rx = frnd() * 6.28; d.ry = frnd() * 6.28; d.rz = frnd() * 6.28;
     d.sx = (frnd() - 0.5) * 14; d.sy = (frnd() - 0.5) * 14; d.sz = (frnd() - 0.5) * 14;
-    d.s0 = scale * (0.5 + frnd() * 0.9); d.s = d.s0;
+    d.s0 = scale * (0.5 + frnd() * 0.9); d.s = d.s0; d.trail = null; d.puffAcc = 0;
     // HOW MOLTEN THIS ONE IS. Most chunks are cold hull plate and stay dark; a few came out of the
     // fire itself and glow. Mixing the two is what stops a burst reading as uniform confetti.
     d.hot = Math.pow(frnd(), DEB_COLD);
@@ -449,7 +479,10 @@ function tickDebris(dt) {
     if (!d.live) continue;
     any = true;
     d.t += dt;
-    if (d.t >= d.life) { d.live = false; continue; }
+    // The ray is CUT LOOSE when its chunk dies — it stops growing and just fades where it is.
+    if (d.t >= d.life) { d.live = false;
+      if (d.trail != null) { const q = smoke[d.trail]; if (q) q.owner = null; d.trail = null; }
+      continue; }
     d.vy -= DEB_GRAV * dt;
     d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
     d.rx += d.sx * dt; d.ry += d.sy * dt; d.rz += d.sz * dt;
@@ -458,12 +491,29 @@ function tickDebris(dt) {
     // fades, while the fires underneath boil off the black. Emitted along the FLIGHT rather than at
     // the launch point so the trail follows the arc, and thinned over the chunk's life so it reads
     // as a streak behind a fast chunk rather than a cloud around a dying one.
-    d.puffAcc = (d.puffAcc || 0) + SMK_TRAIL * dt * (1 - k);
-    while (d.puffAcc >= 1) {
-      d.puffAcc -= 1;
-      const sp = Math.hypot(d.vx, d.vy, d.vz) || 1;
-      _sdir.set(d.vx / sp, d.vy / sp, d.vz / sp);
-      puff(d.x, d.y, d.z, d.s0 * 1.6, 0, 0.35, _sdir);
+    // ONE RAY PER CHUNK, anchored at the blast. Jacob: "each one should have one end of the shape
+    // at the center of the explosion and the other end directly away from it." Emitting a stream of
+    // little streaks along the flight gave the opposite — a scatter of unrelated marks drifting
+    // above the wreck. A ray instead: it lives at the MIDPOINT between the origin and the chunk,
+    // points along that line, and is exactly as long as the chunk has travelled. It grows only
+    // because the chunk is still flying, never on its own, and it does not drift.
+    // BIND IT TO THE CHUNK. rayPuff cannot set the owner itself (it does not know which chunk asked)
+    // and the check below is `q.owner === d`, so without this every chunk dropped its ray on the
+    // very next line and allocated a fresh one EVERY FRAME: 149 rays instead of 20, all of them
+    // pale, which also drowned the fire's own dark smoke in the pool.
+    if (d.trail == null && SMK_TRAIL > 0) {
+      d.trail = rayPuff(d.ox, d.oy, d.oz, d.s0);
+      if (d.trail != null) smoke[d.trail].owner = d;
+    }
+    if (d.trail != null) {
+      const q = smoke[d.trail];
+      if (q && q.live && q.owner === d) {
+        const ex = d.x - d.ox, ey = d.y - d.oy, ez = d.z - d.oz;
+        const len = Math.hypot(ex, ey, ez) || 0.001;
+        q.x = d.ox + ex * 0.5; q.y = d.oy + ey * 0.5; q.z = d.oz + ez * 0.5;
+        q.dx = ex / len; q.dy = ey / len; q.dz = ez / len;
+        q.rayLen = len;
+      } else d.trail = null;
     }
     // GONE, not faded: shrink over the last third so a chunk winks out without needing to sort
     // against the additive flames.
@@ -689,6 +739,7 @@ export function setFireLook(o = {}) {
   SMK_TRAIL_LIFE = c(o.smkTrailLife, 0.3, 8, SMK_TRAIL_LIFE);   // SECONDS, not a multiplier
   SMK_MIXVAR     = c(o.smkMixVar,    0, 1,   SMK_MIXVAR);
   SMK_FADEIN     = c(o.smkFadeIn,    0.02, 0.9, SMK_FADEIN);
+  SMK_WARMTH     = c(o.smkWarmth,    0, 1,   SMK_WARMTH);
   SMK_TRAIL_LEN  = c(o.smkTrailLen,  1, 16,  SMK_TRAIL_LEN);
   SMK_TRAIL_WID  = c(o.smkTrailWid,  0.1, 2, SMK_TRAIL_WID);
   SMK_DRAG       = c(o.smkDrag,      0, 4,   SMK_DRAG);
@@ -710,7 +761,7 @@ export function getFireLook() {
            smkSize: SMK_SIZE, smkGrow: SMK_GROW, smkOpacity: SMK_OPACITY, smkDark: SMK_DARK,
            smkSoot: SMK_SOOT, smkTrail: SMK_TRAIL, smkTrailOp: SMK_TRAIL_OP,
            smkTrailSize: SMK_TRAIL_SIZE, smkTrailLife: SMK_TRAIL_LIFE,
-           smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN,
+           smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN, smkWarmth: SMK_WARMTH,
            smkTrailLen: SMK_TRAIL_LEN, smkTrailWid: SMK_TRAIL_WID,
            smkDrag: SMK_DRAG, smkTrailDrag: SMK_TRAIL_DRAG };
 }
@@ -808,6 +859,13 @@ export function clearFires() {
   for (const q of smoke) q.live = false;
   writeSmoke();
 }
+if (typeof window !== 'undefined') window.__FIRE_DBG = () => {
+  let live=0, rays=0, trailTone=0, fireTone=0, free=0;
+  for (const q of smoke) { if(!q.live){free++;continue;} live++; if(q.ray)rays++; if(q.tone<0.5)trailTone++; else fireTone++; }
+  let debLive=0, withTrail=0;
+  for (const d of deb) { if(d.live){debLive++; if(d.trail!=null)withTrail++;} }
+  return { live, free, rays, trailTone, fireTone, debLive, withTrail, RESERVE: SMOKE_RESERVE, MAX: SMOKE_MAX };
+};
 export function fireStatus() {
   return {
     ready, live: live.length, pool: POOL,
