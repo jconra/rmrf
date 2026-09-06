@@ -194,7 +194,7 @@ const SMOKE_RESERVE = 70;
 let SMK_MIXVAR = 1.0, SMK_FADEIN = 0.90, SMK_WARMTH = 0;
 // How far into a flame's life it keeps making smoke, and how sharply that tails off. At 0.45 a
 // flame smokes hard early and is done well before it goes out.
-let SMK_STOP = 0.45, SMK_TAPER = 1.4;
+let SMK_STOP = 0.70, SMK_TAPER = 1.4;
 // A trail instance is drawn LONG and NARROW along the direction of travel, so a handful of them
 // makes a streak instead of a string of circles.
 let SMK_TRAIL_WID = 0.45;
