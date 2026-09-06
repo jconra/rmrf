@@ -49,7 +49,7 @@ let BIRTH = 0.40, SHOOT = 1, FLASH = 0;
 let SAT_SEED = 0.15, SAT_BLOOM = 2.0;
 // DEBRIS — a handful of chunks thrown clear of the blast, which fall and wink out. Geometry, not a
 // sprite: they tumble, and the silhouette against the flame is the point.
-let DEB_N = 20, DEB_SPEED = 10, DEB_LIFE = 0.55, DEB_GRAV = 26;
+let DEB_N = 20, DEB_SPEED = 27, DEB_LIFE = 0.25, DEB_GRAV = 26;
 // DEB_COLD biases how many chunks are cold plate rather than molten (higher = more black ones).
 // DEB_GLOW is the distance over which the fire's light falls off. DEB_HEAT is overall brightness.
 let DEB_COLD = 6.0, DEB_GLOW = 9.5, DEB_HEAT = 4.0;
@@ -774,6 +774,26 @@ export function setFireLook(o = {}) {
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
 }
+// THE EXPORT'S SOURCE OF TRUTH. The lab writes pasteable defaults from this map rather than from
+// a hand-written template — the template had already shipped a look with half its values missing
+// twice, because every new parameter has to be remembered in two places and eventually is not.
+// Anything added to getFireLook and listed here is exported automatically.
+export const FIRE_KEYS = [
+  ['sat','SAT_SCALE'], ['spread','SAT_SPREAD'], ['life','LIFE'], ['hold','HOLD'],
+  ['satLife','SAT_LIFE'], ['satLifeVar','SAT_LIFE_VAR'], ['dissolve','DISSOLVE'],
+  ['birth','BIRTH'], ['shoot','SHOOT'], ['flash','FLASH'],
+  ['satSeed','SAT_SEED'], ['satBloom','SAT_BLOOM'],
+  ['debN','DEB_N'], ['debSpeed','DEB_SPEED'], ['debLife','DEB_LIFE'],
+  ['debCold','DEB_COLD'], ['debGlow','DEB_GLOW'], ['debHeat','DEB_HEAT'],
+  ['smkRate','SMK_RATE'], ['smkRise','SMK_RISE'], ['smkDrag','SMK_DRAG'],
+  ['smkSpread','SMK_SPREAD'], ['smkLife','SMK_LIFE'], ['smkSize','SMK_SIZE'],
+  ['smkGrow','SMK_GROW'], ['smkOpacity','SMK_OPACITY'], ['smkDark','SMK_DARK'],
+  ['smkSoot','SMK_SOOT'], ['smkWarmth','SMK_WARMTH'], ['smkMixVar','SMK_MIXVAR'],
+  ['smkFadeIn','SMK_FADEIN'], ['smkStop','SMK_STOP'], ['smkTaper','SMK_TAPER'],
+  ['smkTrail','SMK_TRAIL'], ['smkTrailOp','SMK_TRAIL_OP'], ['smkTrailSize','SMK_TRAIL_SIZE'],
+  ['smkTrailLife','SMK_TRAIL_LIFE'], ['smkTrailLen','SMK_TRAIL_LEN'],
+  ['smkTrailWid','SMK_TRAIL_WID'], ['smkTrailDrag','SMK_TRAIL_DRAG'],
+];
 export function getFireLook() {
   return { sat: SAT_SCALE, spread: SAT_SPREAD,
            lean: LEAN_LIVE == null ? LEAN : LEAN_LIVE,

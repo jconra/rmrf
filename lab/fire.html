@@ -128,7 +128,7 @@
 <script type="module">
 import * as THREE from 'three';
 import VolumetricFire from '../js/VolumetricFire.js';
-import { initFire, fireWreck, tickFire, drawFire, setFireLook, getFireLook, clearFires, fireStatus } from '../js/Fire.js';
+import { initFire, fireWreck, tickFire, drawFire, setFireLook, getFireLook, clearFires, fireStatus, FIRE_KEYS } from '../js/Fire.js';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 // info resets on every render() by default, so with REPEAT>1 the readout showed the LAST render
@@ -1047,18 +1047,26 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     // EVERY tunable, not just the ones that existed when this was written. The first version
     // silently omitted the whole spawn and debris block, so a look exported from here shipped with
     // someone else's values for half of it — the export has to be exhaustive or it is a trap.
-    box.value =
-      `// fire look, chosen in lab/fire.html\n`
-    + `let SAT_SCALE = ${f(L.sat)}, SAT_SPREAD = ${f(L.spread)};\n`
-    + `let LIFE = ${f(L.life)}, HOLD = ${f(L.hold)};\n`
-    + `let SAT_LIFE = ${f(L.satLife)}, SAT_LIFE_VAR = ${f(L.satLifeVar)};\n`
-    + `let OUT_MODE = '${L.outMode}', DISSOLVE = ${f(L.dissolve)};\n`
-    + `let BIRTH = ${f(L.birth)}, SHOOT = ${f(L.shoot)}, FLASH = ${f(L.flash)};\n`
-    + `let SAT_SEED = ${f(L.satSeed)}, SAT_BLOOM = ${f(L.satBloom)};\n`
-    + `let DEB_N = ${Math.round(L.debN)}, DEB_SPEED = ${f(L.debSpeed)}, DEB_LIFE = ${f(L.debLife)}, DEB_GRAV = 26;\n`
-    + `let DEB_COLD = ${f(L.debCold)}, DEB_GLOW = ${f(L.debGlow)}, DEB_HEAT = ${f(L.debHeat)};\n`
-    + `const ENV = new THREE.Vector2(${f(L.envR)}, ${f(L.envBot)});\n`
-    + `// lean ${f(L.lean)}  ·  wreck scale ${f(wreckScale)} (a test value, not shipped)`;
+    // GENERATED FROM FIRE_KEYS, never hand-listed. The template shipped a look missing half its
+    // values twice — once the whole spawn/debris block, then every smoke parameter — because a new
+    // tunable has to be remembered in two files and eventually is not. Now anything the module
+    // exports is exported here.
+    const lines = ['// fire look, chosen in lab/fire.html'];
+    let cur = [];
+    const flush = () => { if (cur.length) { lines.push('let ' + cur.join(', ') + ';'); cur = []; } };
+    let lastPrefix = null;
+    for (const [key, name] of FIRE_KEYS) {
+      const prefix = name.split('_')[0];
+      if (lastPrefix && prefix !== lastPrefix) flush();
+      lastPrefix = prefix;
+      cur.push(`${name} = ${f(L[key])}`);
+      if (cur.length >= 3) flush();
+    }
+    flush();
+    lines.push(`let OUT_MODE = '${L.outMode}';`);
+    lines.push(`const ENV = new THREE.Vector2(${f(L.envR)}, ${f(L.envBot)});`);
+    lines.push(`// lean ${f(L.lean)}  \u00b7  wreck scale ${f(wreckScale)} (a test value, not shipped)`);
+    box.value = lines.join('\n');
     box.classList.add('on'); box.select();
     // Clipboard access is denied in some contexts (headless, no user-gesture chain). The textarea
     // is selected either way, so ctrl-C always works — the copy is a convenience, not the feature.
@@ -1085,6 +1093,7 @@ setTimeout(() => {
   enterWreck();
 }, 2500);
 window.__smokeDbg = () => (window.__FIRE_DBG ? window.__FIRE_DBG() : null);
+window.__FIRE_KEYS = FIRE_KEYS;               // test hook: prove the export covers everything
 window.__look = () => getFireLook();          // test hook: what the shipped defaults are
 window.__scene = scene;                       // test hook: walk the graph to assert material state
 window.__fireLive = () => fireStatus().live;   // test hook: how many flames are burning
