@@ -174,11 +174,11 @@ let smkMesh = null, smkGeo = null, smkMat = null, smkTex = null, smkAcc = 0, smk
 const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sm = new THREE.Matrix4(), _sc2 = new THREE.Color();
 const _srq = new THREE.Quaternion(), _sax = new THREE.Vector3(0, 0, 1);
 const _sd = new THREE.Vector3(), _sright = new THREE.Vector3(), _sup = new THREE.Vector3(), _sdir = new THREE.Vector3();
-let SMK_RATE = 14, SMK_RISE = 3.4, SMK_SPREAD = 1.6, SMK_LIFE = 2.2;
+let SMK_RATE = 14, SMK_RISE = 8.5, SMK_SPREAD = 1.6, SMK_LIFE = 2.2;
 let SMK_SIZE = 2.6, SMK_GROW = 2.4, SMK_OPACITY = 0.34, SMK_DARK = 0.72;
 // SOOT is the black end of the fire-smoke mix; DARK is its grey end, and the pale trail's base.
 // The TRAIL knobs scale a chunk's smoke against the fire's, so the two balance separately.
-let SMK_SOOT = 0.85, SMK_TRAIL = 5, SMK_TRAIL_OP = 0.55, SMK_TRAIL_SIZE = 0.45, SMK_TRAIL_LIFE = 0.7;
+let SMK_SOOT = 0.85, SMK_TRAIL = 5, SMK_TRAIL_OP = 0.55, SMK_TRAIL_SIZE = 0.45, SMK_TRAIL_LIFE = 3.0;
 // Slots kept back for the FIRE's own smoke. Trails are per chunk, so their rate multiplies by
 // twenty and they will happily eat the whole pool: measured at 26/chunk there were 121 pale puffs
 // and ZERO black ones, because the fire could never get a slot. The wreck's own smoke is the point
@@ -195,6 +195,8 @@ let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34;
 // A trail instance is drawn LONG and NARROW along the direction of travel, so a handful of them
 // makes a streak instead of a string of circles.
 let SMK_TRAIL_LEN = 5.5, SMK_TRAIL_WID = 0.55;
+// How fast each source loses its climb. Low = keeps rising; high = stalls almost at once.
+let SMK_DRAG = 0.18, SMK_TRAIL_DRAG = 2.2;
 let _smkDrift = 0;
 const perfNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 function makeSmokeTex() {
@@ -299,7 +301,11 @@ function puff(x, y, z, scale, tone = 1, rise = 1, dir = null) {
   for (const q of smoke) {
     if (q.live) continue;
     q.live = true; q.t = 0; q.tone = tone;
-    q.life = SMK_LIFE * (0.7 + frnd() * 0.6) * (tone < 0.5 ? SMK_TRAIL_LIFE : 1);
+    // A TRAIL'S LIFE IS ITS OWN, in seconds, not a fraction of the fire smoke's. It was a
+    // multiplier, which capped a streak below the fire's own puffs and made "stay for a few
+    // seconds" unreachable — the streak is the slowest thing in the effect and needs to outlast
+    // the flame's smoke, not be bounded by it.
+    q.life = (tone < 0.5 ? SMK_TRAIL_LIFE : SMK_LIFE) * (0.7 + frnd() * 0.6);
     const a = frnd() * Math.PI * 2, r = frnd() * SMK_SPREAD * scale;
     q.x = x + Math.cos(a) * r; q.y = y + 0.5 + frnd() * 0.8; q.z = z + Math.sin(a) * r;
     q.vx = Math.cos(a) * SMK_SPREAD * 0.35 + (frnd() - 0.5) * 0.5;
@@ -325,7 +331,10 @@ function tickSmoke(dt) {
     q.t += dt;
     if (q.t >= q.life) { q.live = false; continue; }
     const k = q.t / q.life;
-    q.vy *= 1 - 0.55 * dt;                       // rise slows as it cools and spreads
+    // Fire smoke climbs hard and keeps climbing; a trail hangs where it was laid. Separate drag
+    // per source, because "rise rapidly" and "stay for a few seconds" are opposite requirements
+    // and one constant cannot serve both.
+    q.vy *= 1 - (q.tone >= 0.5 ? SMK_DRAG : SMK_TRAIL_DRAG) * dt;
     q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt;
     q.roll += q.spin * dt;
     q.s = q.s0 * (1 + SMK_GROW * k);             // expands the whole way
@@ -677,11 +686,13 @@ export function setFireLook(o = {}) {
   SMK_TRAIL      = c(o.smkTrail,     0, 80,  SMK_TRAIL);
   SMK_TRAIL_OP   = c(o.smkTrailOp,   0, 2,   SMK_TRAIL_OP);
   SMK_TRAIL_SIZE = c(o.smkTrailSize, 0.1, 2, SMK_TRAIL_SIZE);
-  SMK_TRAIL_LIFE = c(o.smkTrailLife, 0.1, 2, SMK_TRAIL_LIFE);
+  SMK_TRAIL_LIFE = c(o.smkTrailLife, 0.3, 8, SMK_TRAIL_LIFE);   // SECONDS, not a multiplier
   SMK_MIXVAR     = c(o.smkMixVar,    0, 1,   SMK_MIXVAR);
   SMK_FADEIN     = c(o.smkFadeIn,    0.02, 0.9, SMK_FADEIN);
   SMK_TRAIL_LEN  = c(o.smkTrailLen,  1, 16,  SMK_TRAIL_LEN);
   SMK_TRAIL_WID  = c(o.smkTrailWid,  0.1, 2, SMK_TRAIL_WID);
+  SMK_DRAG       = c(o.smkDrag,      0, 4,   SMK_DRAG);
+  SMK_TRAIL_DRAG = c(o.smkTrailDrag, 0, 8,   SMK_TRAIL_DRAG);
   SHOOT = c(o.shoot, 0, 1, SHOOT);
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
@@ -700,7 +711,8 @@ export function getFireLook() {
            smkSoot: SMK_SOOT, smkTrail: SMK_TRAIL, smkTrailOp: SMK_TRAIL_OP,
            smkTrailSize: SMK_TRAIL_SIZE, smkTrailLife: SMK_TRAIL_LIFE,
            smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN,
-           smkTrailLen: SMK_TRAIL_LEN, smkTrailWid: SMK_TRAIL_WID };
+           smkTrailLen: SMK_TRAIL_LEN, smkTrailWid: SMK_TRAIL_WID,
+           smkDrag: SMK_DRAG, smkTrailDrag: SMK_TRAIL_DRAG };
 }
 
 export function drawFire(elapsed) {
