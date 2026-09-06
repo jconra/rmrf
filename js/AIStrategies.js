@@ -733,7 +733,22 @@ class Swap extends Mission {
     if (st === 'engage' || st === 'suppress') { this.stallT = 0; return; }
     const p = v.holder.position, h = cmd.homePos();
     const d = Math.hypot(p.x - h.x, p.z - h.z);
-    if (this.bestD == null || d < this.bestD - 0.5) { this.bestD = d; this.stallT = 0; }
+    // STUCK MEANS NOT MOVING, NOT "NOT GETTING CLOSER". bestD is a high-water mark of straight-line
+    // distance home, so a unit that reached 40u and then had to go AROUND something — a wall, water,
+    // a friendly in the gate — had to claw back under 40u before the clock would reset. Ten seconds
+    // of honest detour and it was written off mid-drive. Jacob watched exactly that: "I didn't think
+    // it was stuck though. It seemed like it was moving and then it just disappeared."
+    // A route is not a straight line and a detour is not a failure, so covering real ground counts
+    // as progress too. What this still catches is the case it was built for: a unit that cannot
+    // reach the pad and is genuinely pinned, which covers no ground at all (seed 669, one swap
+    // lasting 547 seconds).
+    const moved = this._lastP
+      ? Math.hypot(p.x - this._lastP.x, p.z - this._lastP.z)
+      : 0;
+    this._lastP = { x: p.x, z: p.z };
+    this._ground = (this._ground || 0) + moved;
+    if (this.bestD == null || d < this.bestD - 0.5) { this.bestD = d; this.stallT = 0; this._ground = 0; }
+    else if (this._ground > SWAP_MOVED) { this.stallT = 0; this._ground = 0; }   // still driving — not stuck
     else this.stallT = (this.stallT || 0) + dt;
   }
   done(cmd) {
@@ -916,6 +931,9 @@ class Flee extends Mission {
 }
 const FLEE_REACH = 14;   // u — close enough to call a leg done and start the next
 const SWAP_STALL = 10;   // s of ZERO progress toward home before a swap gives up on the trip
+// …and how much ground a unit may cover WITHOUT getting closer before that counts as driving rather
+// than stalling. A detour round a wall easily runs this far; a pinned hull covers none of it.
+const SWAP_MOVED = 22;
 
 class Supply extends Mission {
   get what() { return 'fuel'; }
