@@ -170,11 +170,29 @@ function makeFireProfile() {
 // cut each other or the flame — the mistake that made the fire show boxes.
 const SMOKE_MAX = 220;
 const smoke = [];
-let smkMesh = null, smkGeo = null, smkMat = null, smkTex = null, smkAcc = 0;
+let smkMesh = null, smkGeo = null, smkMat = null, smkTex = null, smkAcc = 0, smkAlpha = null;
 const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sm = new THREE.Matrix4(), _sc2 = new THREE.Color();
 const _srq = new THREE.Quaternion(), _sax = new THREE.Vector3(0, 0, 1);
 let SMK_RATE = 14, SMK_RISE = 3.4, SMK_SPREAD = 1.6, SMK_LIFE = 2.2;
 let SMK_SIZE = 2.6, SMK_GROW = 2.4, SMK_OPACITY = 0.34, SMK_DARK = 0.72;
+// SOOT is the black end of the fire-smoke mix; DARK is its grey end, and the pale trail's base.
+// The TRAIL knobs scale a chunk's smoke against the fire's, so the two balance separately.
+let SMK_SOOT = 0.06, SMK_TRAIL = 9, SMK_TRAIL_OP = 0.55, SMK_TRAIL_SIZE = 0.45, SMK_TRAIL_LIFE = 0.7;
+// Slots kept back for the FIRE's own smoke. Trails are per chunk, so their rate multiplies by
+// twenty and they will happily eat the whole pool: measured at 26/chunk there were 121 pale puffs
+// and ZERO black ones, because the fire could never get a slot. The wreck's own smoke is the point
+// of the effect, so it gets a reserve the trails cannot touch — the same shape as WRECK_RESERVE.
+const SMOKE_RESERVE = 70;
+// HOW MUCH PUFFS DIFFER FROM EACH OTHER, and how fast one arrives. Both were wrong and together
+// they made the black smoke flicker: every puff rolled its own place on a soot(0.06)-to-grey(0.72)
+// mix INDEPENDENTLY, so neighbours could be near-black or mid-grey at random, and each reached full
+// strength in a tenth of its life. Jacob: "the black smoke rapidly appears and disappears, but it
+// is a puffy smoke shape" — the shape was never the problem, the popping was.
+// A shared drift (slow, common to all puffs) carries most of the variation now, with only a small
+// per-puff jitter on top, so neighbours look related. FADE_IN is a real fraction of the life.
+let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34;
+let _smkDrift = 0;
+const perfNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 function makeSmokeTex() {
   const N = 64, c = document.createElement('canvas'); c.width = c.height = N;
   const x = c.getContext('2d'), img = x.createImageData(N, N);
@@ -202,14 +220,26 @@ function initSmoke() {
   smkGeo = new THREE.PlaneGeometry(1, 1);
   smkMat = new THREE.MeshBasicMaterial({ map: smkTex, transparent: true, depthWrite: false,
                                          opacity: 1, color: 0xffffff });
-  // Per-puff alpha rides in the instance colour: a MeshBasicMaterial has one shared opacity, so
-  // fading each puff separately means folding the fade into its colour and letting it go to black.
-  // That works because smoke over a dark battlefield reads by its own brightness, not by occlusion.
   smkMat.blending = THREE.NormalBlending;
+  // PER-PUFF ALPHA, as a real attribute. The first version folded the fade into the instance COLOUR
+  // and let a dying puff go to black — but the texture's alpha is identical for every instance, so
+  // a "faded" puff was not transparent at all, it was an opaque BLACK disc painted over the scene.
+  // Jacob saw it exactly: the pale smoke rises and looks right, "then it seems like the black smoke
+  // starts flashing around it". Colour and opacity are different things and smoke needs both.
+  smkMat.onBeforeCompile = (sh) => {
+    sh.vertexShader = 'attribute float aAlpha;\nvarying float vAlpha;\n' +
+      sh.vertexShader.replace('void main() {', 'void main() {\n  vAlpha = aAlpha;');
+    sh.fragmentShader = 'varying float vAlpha;\n' +
+      sh.fragmentShader.replace('#include <opaque_fragment>',
+        'gl_FragColor = vec4( outgoingLight, diffuseColor.a * vAlpha );');
+  };
   smkMesh = new THREE.InstancedMesh(smkGeo, smkMat, SMOKE_MAX);
   smkMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   smkMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(SMOKE_MAX * 3), 3);
   smkMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  smkAlpha = new THREE.InstancedBufferAttribute(new Float32Array(SMOKE_MAX), 1);
+  smkAlpha.setUsage(THREE.DynamicDrawUsage);
+  smkGeo.setAttribute('aAlpha', smkAlpha);
   smkMesh.frustumCulled = false;
   smkMesh.renderOrder = 18;
   scene.add(smkMesh);
@@ -220,7 +250,7 @@ function writeSmoke() {
   if (!smkMesh) return;
   for (let i = 0; i < SMOKE_MAX; i++) {
     const q = smoke[i];
-    if (!q.live) { _sm.makeScale(0, 0, 0); smkMesh.setMatrixAt(i, _sm); continue; }
+    if (!q.live) { _sm.makeScale(0, 0, 0); smkMesh.setMatrixAt(i, _sm); smkAlpha.setX(i, 0); continue; }
     // FACE THE CAMERA, with its own roll so the puffs are not all the same way up.
     // Camera rotation, then the puff's own roll about the view axis — composed into the quaternion
     // rather than multiplied in afterwards, so this allocates nothing per puff per frame.
@@ -229,27 +259,44 @@ function writeSmoke() {
     _sm.compose({ x: q.x, y: q.y, z: q.z }, _sq, _sv);
     smkMesh.setMatrixAt(i, _sm);
     smkMesh.instanceColor.setXYZ(i, q.cr, q.cg, q.cb);
+    smkAlpha.setX(i, q.a);
   }
   smkMesh.instanceMatrix.needsUpdate = true;
   smkMesh.instanceColor.needsUpdate = true;
+  smkAlpha.needsUpdate = true;
 }
-function puff(x, y, z, scale) {
+// TWO SOURCES, ONE POOL (Jacob's design). `tone` 0 = the pale trail a thrown chunk leaves behind,
+// 1 = the sooty smoke that boils off a burning fire. Everything else about a puff is identical, so
+// they share the pool and the single draw call.
+function puff(x, y, z, scale, tone = 1, rise = 1) {
+  // A trail may only use the pool down to the reserve; the fire always has room.
+  if (tone < 0.5) {
+    let free = 0;
+    for (const q2 of smoke) if (!q2.live && ++free >= SMOKE_RESERVE) break;
+    if (free < SMOKE_RESERVE) return;
+  }
   for (const q of smoke) {
     if (q.live) continue;
-    q.live = true; q.t = 0; q.life = SMK_LIFE * (0.7 + frnd() * 0.6);
+    q.live = true; q.t = 0; q.tone = tone;
+    q.life = SMK_LIFE * (0.7 + frnd() * 0.6) * (tone < 0.5 ? SMK_TRAIL_LIFE : 1);
     const a = frnd() * Math.PI * 2, r = frnd() * SMK_SPREAD * scale;
     q.x = x + Math.cos(a) * r; q.y = y + 0.5 + frnd() * 0.8; q.z = z + Math.sin(a) * r;
     q.vx = Math.cos(a) * SMK_SPREAD * 0.35 + (frnd() - 0.5) * 0.5;
     q.vz = Math.sin(a) * SMK_SPREAD * 0.35 + (frnd() - 0.5) * 0.5;
-    q.vy = SMK_RISE * (0.7 + frnd() * 0.6);
-    q.s0 = SMK_SIZE * scale * (0.6 + frnd() * 0.7);
+    q.vy = SMK_RISE * (0.7 + frnd() * 0.6) * rise;
+    q.s0 = SMK_SIZE * scale * (0.6 + frnd() * 0.7) * (tone < 0.5 ? SMK_TRAIL_SIZE : 1);
     q.s = q.s0; q.roll = frnd() * Math.PI * 2; q.spin = (frnd() - 0.5) * 0.7;
-    q.hot = 1;                                   // starts lit by the fire it came off
+    // Mostly the shared drift, plus a little of its own — related to its neighbours, not random.
+    q.mix = Math.max(0, Math.min(1, _smkDrift + (frnd() - 0.5) * 2 * SMK_MIXVAR));
+    q.a = 0;
     return;
   }
 }
 function tickSmoke(dt) {
   if (!smkMesh) return;
+  // The shared soot/grey drift, wandering slowly. This is what makes a WREATH of smoke read as one
+  // column that darkens and lightens over seconds, instead of a swarm of unrelated puffs.
+  _smkDrift = 0.5 + 0.5 * Math.sin(perfNow() * 0.00042) * 0.9;
   for (const q of smoke) {
     if (!q.live) continue;
     q.t += dt;
@@ -262,9 +309,17 @@ function tickSmoke(dt) {
     // Bright and fire-lit at the base, cooling to a flat grey, then fading to nothing. The fade
     // rides in the colour because one shared material cannot hold a per-puff opacity.
     const lit = Math.pow(1 - k, 2.2);
-    const fade = Math.sin(Math.min(1, k / 0.12) * Math.PI / 2) * Math.pow(1 - k, 1.3);
-    const g = SMK_OPACITY * fade;
-    _sc2.setRGB(SMK_DARK + 0.55 * lit, SMK_DARK + 0.30 * lit, SMK_DARK + 0.14 * lit).multiplyScalar(g);
+    // ALPHA fades it out; COLOUR only says what shade it is. Keeping those apart IS the fix —
+    // folding the fade into the colour is what produced opaque black discs.
+    q.a = SMK_OPACITY * Math.sin(Math.min(1, k / SMK_FADEIN) * Math.PI / 2) * Math.pow(1 - k, 1.4)
+        * (q.tone < 0.5 ? SMK_TRAIL_OP : 1);
+    // A wreck's smoke is not one grey. Fire smoke is a nasty black shot through with medium grey —
+    // each puff rolls its own place on that mix and keeps it — while a debris trail is pale. Both
+    // pick up the fire's warmth while they are young.
+    const base = q.tone >= 0.5
+      ? SMK_SOOT + (SMK_DARK - SMK_SOOT) * q.mix
+      : SMK_DARK + (1 - SMK_DARK) * 0.55 * q.mix;
+    _sc2.setRGB(base + 0.45 * lit * q.tone, base + 0.24 * lit * q.tone, base + 0.11 * lit * q.tone);
     q.cr = _sc2.r; q.cg = _sc2.g; q.cb = _sc2.b;
   }
   writeSmoke();
@@ -362,6 +417,12 @@ function tickDebris(dt) {
     d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
     d.rx += d.sx * dt; d.ry += d.sy * dt; d.rz += d.sz * dt;
     const k = d.t / d.life;
+    // IT LEAVES A TRAIL. The chunks thrown by the blast draw pale smoke behind them which rises and
+    // fades, while the fires underneath boil off the black. Emitted along the FLIGHT rather than at
+    // the launch point so the trail follows the arc, and thinned over the chunk's life so it reads
+    // as a streak behind a fast chunk rather than a cloud around a dying one.
+    d.puffAcc = (d.puffAcc || 0) + SMK_TRAIL * dt * (1 - k);
+    while (d.puffAcc >= 1) { d.puffAcc -= 1; puff(d.x, d.y, d.z, d.s0 * 1.6, 0, 0.35); }
     // GONE, not faded: shrink over the last third so a chunk winks out without needing to sort
     // against the additive flames.
     d.s = d.s0 * (k < 0.66 ? 1 : 1 - (k - 0.66) / 0.34);
@@ -579,6 +640,13 @@ export function setFireLook(o = {}) {
   SMK_GROW    = c(o.smkGrow,    0, 6,  SMK_GROW);
   SMK_OPACITY = c(o.smkOpacity, 0, 1,  SMK_OPACITY);
   SMK_DARK    = c(o.smkDark,    0, 1,  SMK_DARK);
+  SMK_SOOT       = c(o.smkSoot,      0, 1,   SMK_SOOT);
+  SMK_TRAIL      = c(o.smkTrail,     0, 80,  SMK_TRAIL);
+  SMK_TRAIL_OP   = c(o.smkTrailOp,   0, 2,   SMK_TRAIL_OP);
+  SMK_TRAIL_SIZE = c(o.smkTrailSize, 0.1, 2, SMK_TRAIL_SIZE);
+  SMK_TRAIL_LIFE = c(o.smkTrailLife, 0.1, 2, SMK_TRAIL_LIFE);
+  SMK_MIXVAR     = c(o.smkMixVar,    0, 1,   SMK_MIXVAR);
+  SMK_FADEIN     = c(o.smkFadeIn,    0.02, 0.9, SMK_FADEIN);
   SHOOT = c(o.shoot, 0, 1, SHOOT);
   FLASH = c(o.flash, 0, 5, FLASH);
   return getFireLook();
@@ -593,7 +661,10 @@ export function getFireLook() {
            debN: DEB_N, debSpeed: DEB_SPEED, debLife: DEB_LIFE,
            debCold: DEB_COLD, debGlow: DEB_GLOW, debHeat: DEB_HEAT,
            smkRate: SMK_RATE, smkRise: SMK_RISE, smkSpread: SMK_SPREAD, smkLife: SMK_LIFE,
-           smkSize: SMK_SIZE, smkGrow: SMK_GROW, smkOpacity: SMK_OPACITY, smkDark: SMK_DARK };
+           smkSize: SMK_SIZE, smkGrow: SMK_GROW, smkOpacity: SMK_OPACITY, smkDark: SMK_DARK,
+           smkSoot: SMK_SOOT, smkTrail: SMK_TRAIL, smkTrailOp: SMK_TRAIL_OP,
+           smkTrailSize: SMK_TRAIL_SIZE, smkTrailLife: SMK_TRAIL_LIFE,
+           smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN };
 }
 
 export function drawFire(elapsed) {
