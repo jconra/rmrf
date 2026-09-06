@@ -13,9 +13,16 @@ import JEEP_CFG from './jeep.config.js?v=1';
 import { Destructible } from './Destructible.js?v=7';
 
 const DRIVE_SPEED = 8;      // jeep ground speed (u/s)
-const HEAL_RATE   = 0.01;   // fraction of maxHp healed per SECOND (so a scratch is quick, a
+// 0.02, not 0.01 (gated 2026-09-05). Crews heal 29% more HP per match (275 -> 354), complete 14%
+// more sorties (653 -> 742), and lose FEWER jeeps (203 -> 197) — each job takes half as long, so
+// the crew spends less time exposed. Stalemates 11 -> 8, never worse on any of three seed sets,
+// match time unchanged. A change that is simply better rather than a trade.
+let HEAL_RATE     = 0.02;   // fraction of maxHp healed per SECOND (so a scratch is quick, a
                             // half-wrecked tower takes ~a minute — and the crew stays until it's
                             // full, so damage taken mid-repair just extends the job).
+// A `let` + setter so the rate can be A/B'd: at 0.01 a half-wrecked tower is a 50-second job and
+// the crew is exposed for all of it, which may be why sieges out-pace repairs.
+export function setHealRate(r) { if (r != null) HEAL_RATE = +r; return HEAL_RATE; }
 const GUN_INSTALL_T = 20;   // seconds of crew work to mount a purchased gun (after the body's full)
 const UPGRADE_T   = 5;      // seconds of crew work to pin one upgrade star on a healthy tower (fast, by design)
 const CREW_N      = 3;      // soldiers dismounted per job

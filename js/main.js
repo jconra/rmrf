@@ -13,7 +13,7 @@ import { applyStaging } from './AssetStaging.js?v=1';
 import { BuildGrid } from './BuildGrid.js';
 import { Camp, Wall, resetWallInstances, wallInstancesGroup } from './Walls.js?v=68';
 import { SoldierCorps } from './Soldiers.js?v=4';
-import { RepairJob, makeJeepMesh } from './RepairCrew.js?v=8';
+import { RepairJob, makeJeepMesh, setHealRate } from './RepairCrew.js?v=9';
 import { Minefield, SensorNet, MINE, POD } from './Gadgets.js?v=4';
 import { makeFlagHQ } from './Buildings.js?v=9';   // decoy HQ buildings on designed maps
 import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
@@ -23,13 +23,13 @@ import { Foliage } from './Foliage.js?v=5';
 import { setWindTime } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=69';
-import { Elevator } from './Elevator.js?v=3';
+import { Elevator } from './Elevator.js?v=4';
 import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT } from './AI.js?v=115';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=117';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,9 +39,9 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=117';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=119';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
-import { astarGrid } from './astar.js?v=6';
+import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
@@ -2364,7 +2364,19 @@ function raycastDamage(origin, dir, maxDist, dmg, blast, team, shooter) {
 // Corner turrets defend their camp: they track the nearest enemy vehicle in range
 // with line of sight and fire on a cadence, damage falling off with distance — so
 // you can't just waltz into a base. Destroying the turret head silences it.
-const TURRET_RANGE = 54, TURRET_CD = 1.6, TURRET_DMG = 18;   // shorter reach — don't shred units from across the map
+const TURRET_RANGE = 54, TURRET_CD = 1.6;   // shorter reach — don't shred units from across the map
+// Tower gun damage per hit. A `let` with a setter because towerStats() is evaluated at FIRE time,
+// not baked into the tower when it is built, so this can be A/B'd on a loaded page.
+// 22, not 18 (gated 2026-09-05, 720 matches x 3 disjoint seed sets). Raising tower damage costs
+// resolution, but NOT here: at 22 the stalemate count went 6/6/4 against a control of 2/3/6 — the
+// sign flips on the third set and the two ranges overlap, so 22 is not distinguishable from 18.
+// 26 and 30 are, and badly: 31 and 35 stalemates against 11, worse on every set, +163s and +192s
+// per match. The cost appears between 22 and 26.
+// WHY 22 IS THE FREE ONE: shots to kill a Firebrat (90 hull) go 5 at damage 18, 5 at 22, 4 at 26,
+// 3 at 30 — so 22 leaves the flag runner untouched while cutting three shots off a Lurcher and
+// three off a Jotun. It is close to a pure anti-siege change, which is why it does not move the
+// win condition. Jacob: "I think towers are a little weak.. a FB may disagree with me."
+let TURRET_DMG = 22;
 const TURRET_FALLOFF = { near: 16, far: 54, farMult: 0.45 };
 // How far an AI unit can SENSE an enemy turret to suppress/snipe it — wider than the
 // turret's own fire range so heavies (Jotun) can pick towers off from safely outside.
@@ -3070,13 +3082,19 @@ function updateHealthBars() {
 //
 // The lamp rides in v.holder (unscaled, so it inherits hull position AND heading) and is UNLIT
 // (MeshBasicMaterial) so it reads the same in shadow, at night, and against a bright sea.
+// NAMED FOR THE MISSIONS THEY MEAN (Jacob, 2026-09-05: "I'd prefer to have the colors indicate
+// missions... I don't know what 'on the move' means, it doesn't really tell me anything"). Each
+// key is a mission the game already has a word for, and the on-screen legend prints that same
+// word — no second vocabulary to learn. Blue stays, but on Swap, which is the OTHER reason a unit
+// is driving home and was previously indistinguishable from Flee.
 const STATUS_COLORS = {
-  attack:   0xff3b30,   // red    — fighting another vehicle
-  siege:    0xff9500,   // orange — shelling a tower or the keep
-  flee:     0x2f7bff,   // blue   — broken off, heading home
-  supply:   0x34c759,   // green  — refuelling / rearming / repairing / shielding
+  fight:    0xff3b30,   // red    — Fight
+  siege:    0xff9500,   // orange — Siege
+  flee:     0xff5fc8,   // pink   — Flee
+  swap:     0x2f7bff,   // blue   — Swap (going home to change chassis)
+  supply:   0x34c759,   // green  — Resupply (the four top-ups read the same from outside a hull)
   carry:    0xffffff,   // white  — carrying the flag (the only thing that wins)
-  travel:   0x8899a6,   // grey   — driving, nothing tactical
+  travel:   0x8899a6,   // grey   — the remaining field missions
 };
 // The mission steps that mean "I am at/heading to a depot". Kept as a set because the mission
 // layer names four separate errands that all read the same from outside the vehicle.
@@ -3102,8 +3120,11 @@ function statusKeyFor(v) {
   if (v._fleeing) return 'flee';
   const step = v._msnStep;
   if (step === 'flee') return 'flee';
+  // Swap is a committed trip home, same as Flee, and reads identically from outside the hull —
+  // which is why it got its own colour rather than falling through to the catch-all.
+  if (step === 'swap') return 'swap';
   const st = v._aiState;
-  if (st === 'engage') return 'attack';
+  if (st === 'engage') return 'fight';
   if (st === 'suppress' || st === 'assault') return 'siege';
   if (st === 'resupply' || SUPPLY_STEPS.has(step)) return 'supply';
   return 'travel';
@@ -3154,12 +3175,13 @@ function ensureLightKey() {
     + 'background:rgba(12,18,24,0.55);border:1px solid rgba(120,150,180,0.25);border-radius:8px;'
     + 'padding:7px 9px;line-height:1.55;text-shadow:0 1px 2px rgba(0,0,0,0.7);';
   const rows = [
-    ['#ff3b30', 'fighting a vehicle'],
-    ['#ff9500', 'shelling a tower / keep'],
-    ['#2f7bff', 'broken off, heading home'],
-    ['#34c759', 'fuel / ammo / repair'],
-    ['#ffffff', 'carrying the flag'],
-    ['#8899a6', 'on the move'],
+    ['#ff3b30', 'Fight'],
+    ['#ff9500', 'Siege'],
+    ['#ff5fc8', 'Flee'],
+    ['#2f7bff', 'Swap'],
+    ['#34c759', 'Resupply'],
+    ['#ffffff', 'Carrying the flag'],
+    ['#8899a6', 'Attack / Defend / Scout / Scavenge / Intercept / Harass / Sap / Trap'],
   ].map(([c, t]) => `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;`
     + `background:${c};box-shadow:0 0 6px ${c};margin-right:7px;vertical-align:middle"></span>${t}</div>`).join('');
   _lightKey.innerHTML = rows + '<div style="margin-top:4px;opacity:0.65">pulsing = enemy in sight</div>';
@@ -5567,6 +5589,19 @@ let _astarFrameNodes = 0;
 // spacing. Cells are centred on multiples of `cell`, so cell i spans [(i-0.5)c, (i+0.5)c) — the
 // +0.5 shift below moves that onto integer boundaries where the traversal maths is standard.
 // The callback returning false stops the walk early (used to bail on the first blocked cell).
+// CLEARANCE FOR A HULL ALONG A STRAIGHT LINE. Lifted out of _smooth so the FOLLOWER can ask the
+// same question the smoother asks: "can this 3u-wide body drive this line?" A cell being passable
+// is a fact about a point; this walks the line and demands all eight neighbours of every cell on
+// it be clear, which is what a body actually needs.
+// The smoother has always used this to approve a shortcut. Until now the follower used nothing at
+// all — it drove a rounded-off version of the route that no test had ever seen.
+function hullHasRoom(v, a, b) {
+  return walkCells(a.x, a.z, b.x, b.z, (i, j) => {
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++)
+      if ((di || dj) && cellBlocked(v, i + di, j + dj)) return false;
+    return true;
+  });
+}
 function walkCells(ax, az, bx, bz, cb) {
   const c = grid.cell;
   let ux = ax / c + 0.5, uz = az / c + 0.5;
@@ -5635,11 +5670,7 @@ function smoothPath(v, pts) {
   //
   // Note this does not change what A* may route through: a one-cell corridor stays navigable, it
   // just keeps its staircase. Only the SHORTCUT has to earn the room.
-  const hasRoom = (a, b) => walkCells(a.x, a.z, b.x, b.z, (i, j) => {
-    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++)
-      if ((di || dj) && cellBlocked(v, i + di, j + dj)) return false;
-    return true;
-  });
+  const hasRoom = (a, b) => hullHasRoom(v, a, b);
   const out = [pts[0]];
   let i = 0;
   while (i < pts.length - 1) {
@@ -5799,6 +5830,9 @@ const REACH_TTL = 2;
 // Treat the closest reachable point as arrival when the driver proves a goal unreachable, instead
 // of re-issuing the impossible order until the unit is scuttled. A/B via RR.setReachArrive.
 const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
+// …and how long a FLAG CARRIER honours one. It is holding the win condition in the enemy's base,
+// so the cost of one more A* is nothing against the cost of standing still.
+const REACHCAP_CARRY_TTL = 1;
 setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
 // MEASURED 2026-08-10, three independent 240-seed sets each. See
 // VERDICT_2026-08-10_overnight_summary.txt.
@@ -5899,6 +5933,63 @@ const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
 // 0.1% of samples, so the two ladders almost never differ. Too rare to pay for.
 // Default ON: this closes a SILENT deadlock (no alarm, no stuck sample, no re-score), and a silent
 // failure that the harness cannot see is the worst kind to leave switched off.
+
+// ── PURE PURSUIT: follow the LINE, not the corners ───────────────────────────────────────────
+// The follower below consumes a waypoint within `c * 1.2` = 6u on a 5u grid, so a hull declares a
+// corner "reached" from more than a full cell away and immediately turns toward the next one. That
+// matters more than it sounds, because of what it throws away:
+//   A* guarantees clearance along the path. _smooth guarantees clearance along any shortcut it
+//   takes (hasRoom checks all eight neighbours of every cell on the line). The follower then drives
+//   NEITHER of those lines — it drives a rounded-off version that cuts up to 6u off every corner,
+//   and nothing validates that line at all.
+// So every clearance guarantee in the navigator is computed for a path the vehicle does not follow.
+//
+// Pure pursuit (Jacob's lerp idea) fixes the shape rather than the number: project the hull onto
+// the route to find where it actually is on the line, then aim at a point a lookahead distance
+// FURTHER ALONG that line. The aim point slides continuously instead of jumping node to node, so
+// the hull tracks the path. Corner cutting becomes bounded by the lookahead instead of unbounded.
+//
+// LOOKAHEAD IS PER-CHASSIS AND DERIVED, NOT GUESSED. Turning radius is speed/turn from the vehicle
+// table, and a lookahead SHORTER than the radius makes a nose-first hull orbit its own aim point:
+//   lurcher  14/2.2 = 6.4u   but omni — it translates sideways, so it has no turning circle at all
+//   firebrat 20/3.0 = 6.7u   strafes, so it needs less than the full radius
+//   valkyrie 22/2.0 = 11.0u  flies; its route is a straight line anyway
+//   jotun     8/1.2 = 6.7u   treads, nose-first, pays the full radius
+// Note what this says about the CURRENT code: 6u sits just under every chassis's turning radius, so
+// a nose-first hull cannot physically make the corner it just declared reached.
+const PURSUIT_LOOK = { lurcher: 3.0, firebrat: 5.5, valkyrie: 12.5, jotun: 7.7 };
+let OUTRANGED_CONTACT = QS.has('outranged');   // A/B: a rival that can shoot US counts as contact, even if we cannot reach it
+let PURE_PURSUIT = QS.has('purepursuit');
+let PURSUIT_FREE = QS.has('pursuitfree');   // A/B: skip the clearance clamp (plain fixed-lookahead pursuit)
+// Aim point: `look` metres along the polyline from wherever the hull actually sits on it.
+function pursuitPoint(v, path, idx, look) {
+  const px = v.holder.position.x, pz = v.holder.position.z;
+  // WHERE ARE WE ON THE LINE. Scan a short window from the current index rather than the whole
+  // route: a route that doubles back can pass near itself, and a global nearest-point search would
+  // teleport the aim point onto the wrong limb (the same failure the index walk below avoids).
+  let bestSeg = Math.max(0, Math.min(idx, path.length - 2)), bestT = 0, bestD2 = Infinity;
+  const from = bestSeg, to = Math.min(path.length - 1, from + 3);
+  for (let k = from; k < to; k++) {
+    const a = path[k], b = path[k + 1];
+    const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (pz - a.z) * dz) / len2)) : 0;
+    const d2 = (px - (a.x + dx * t)) ** 2 + (pz - (a.z + dz * t)) ** 2;
+    if (d2 < bestD2) { bestD2 = d2; bestSeg = k; bestT = t; }
+  }
+  // …then walk forward that far along the remaining legs.
+  let rem = look, k = bestSeg, t = bestT;
+  while (k < path.length - 1) {
+    const a = path[k], b = path[k + 1];
+    const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+    const avail = segLen * (1 - t);
+    if (avail >= rem || segLen < 1e-6) {
+      const tt = Math.min(1, t + rem / Math.max(segLen, 1e-6));
+      return { x: a.x + (b.x - a.x) * tt, z: a.z + (b.z - a.z) * tt };
+    }
+    rem -= avail; k++; t = 0;
+  }
+  return path[path.length - 1];   // ran off the end of the route — aim at the destination itself
+}
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
@@ -5979,6 +6070,25 @@ function navWaypoint(nav, v, dest, dt) {
       return null;
     }
   } else if (nav.retryN) { nav.retryN = 0; }   // got somewhere real — the escalation resets
+  // AIM ALONG THE LINE, not at the corner. nav.idx still advances exactly as before, so every
+  // downstream reader of it is untouched; only the point we STEER AT changes.
+  if (PURE_PURSUIT && nav.path.length > 1) {
+    const look = PURSUIT_LOOK[v.type] || 6;
+    // CONSTRAINED. Plain pursuit aims a FIXED distance ahead, which cuts corners by design — and
+    // measured, that traded a tighter line on straights for MORE time outside the corridor
+    // (7.6% -> 12.1% off seed 11): better where it never mattered, worse exactly where it did.
+    // So the aim point has to earn its distance. Pull it back until the straight line from the
+    // hull to it passes the same clearance test the smoother uses to approve a shortcut. Then
+    // aiming ahead can never cut a corner the navigator would have refused.
+    if (!PURSUIT_FREE) {
+      for (let L = look; L > 0.9; L *= 0.6) {
+        const aim = pursuitPoint(v, nav.path, nav.idx, L);
+        if (hullHasRoom(v, v.holder.position, aim)) return aim;
+      }
+      return nav.path[nav.idx];   // nothing clear ahead — fall back to the waypoint itself
+    }
+    return pursuitPoint(v, nav.path, nav.idx, look);
+  }
   return nav.path[nav.idx];
 }
 // Steer a vehicle toward a world point — now a thin wrapper over the ONE locomotion
@@ -7675,7 +7785,22 @@ class AICommander {
     // Symmetric with Fight.done, which ends the mission at 1.25x this reach — so the mission
     // covers exactly the window where a duel is actually possible.
     const d = v.ai._fofD;
-    if (d != null && d <= (SHOT_REACH[v.type] || 42)) return v.ai._fof;
+    // OUTRANGED IS STILL A CONTACT (Jacob, 2026-09-05: "simply sensing an enemy should trigger a
+    // mission score & FoF... then they can either flee before it is too late or start trying to get
+    // a smart attack on the enemy").
+    //
+    // This test used only OUR OWN reach, which quietly assumes both hulls carry the same gun. They
+    // do not: a Jotun and a Valkyrie reach 80u, a Lurcher 42 and a Firebrat 40. So a Lurcher facing
+    // a Jotun has a 38-unit band where it is being shelled, can see the shooter, and the board is
+    // offered no decision at all — `fight` scores 0, and the only thing that eventually wakes it is
+    // a shell actually landing. It can never initiate; it can only respond after being hit.
+    //
+    // Being outranged is precisely when breaking off early, or working an angle, is the right
+    // answer — so it has to be a question the board gets asked. Take the wider of the two reaches.
+    const myReach = SHOT_REACH[v.type] || 42;
+    const foe = v.ai._fofType || (v.enemy && v.enemy.type) || null;
+    const reach = OUTRANGED_CONTACT ? Math.max(myReach, (foe && SHOT_REACH[foe]) || 0) : myReach;
+    if (d != null && d <= reach) return v.ai._fof;
     // A HIT IS ALSO A CONTACT (Jacob). _fof only exists for a rival we can SEE, so a unit shot from
     // outside its sight cone had no odds, `fight` scored 0, `flee` needed _bail, and the board had
     // no answer at all — which is the entire reason the `underAttack` reflex rung
@@ -8459,10 +8584,19 @@ class AICommander {
     // closest ground the unit can actually stand on — instead of the impossible one. The cap is
     // tied to _navEpoch, so a wall coming down or a gate opening clears it and the real goal is
     // tried again; it also ages out on its own.
+    // A CARRIER DOES NOT WAIT. The cap is honoured for REACHCAP_TTL so a unit ordered somewhere
+    // impossible stops grinding at it — right for a scout, badly wrong for the flag. Watched at
+    // 413s: a Firebrat holding the enemy flag, parked in their base with throttle 0, capped 15s
+    // earlier and nine seconds still to run, while A* could produce a complete 16-waypoint route
+    // home THAT INSTANT. Jacob: "it just grabbed the flag and it's not in any hurry."
+    // The cap's whole justification is that retrying is wasteful; for the unit carrying the win
+    // condition it is the cheapest thing in the match, so it retries every second instead.
+    const carryingFlag = !!(this.flag && this.flag() && this.flag().carrier === v);
+    const capTTL = carryingFlag ? REACHCAP_CARRY_TTL : REACHCAP_TTL;
     const rcap = this._reachCap;
     if (rcap && rcap.by === st && rcap.epoch === _navEpoch
-        && this._matchT - rcap.t < REACHCAP_TTL) { dest = { x: rcap.x, z: rcap.z }; }
-    else if (rcap && (rcap.epoch !== _navEpoch || this._matchT - rcap.t >= REACHCAP_TTL)) this._reachCap = null;
+        && this._matchT - rcap.t < capTTL) { dest = { x: rcap.x, z: rcap.z }; }
+    else if (rcap && (rcap.epoch !== _navEpoch || this._matchT - rcap.t >= capTTL)) this._reachCap = null;
     const isStand = this._destIsStand; this._destIsStand = false;
     const ord = this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, by: st });
     const s = this._driver.tick(dt);
@@ -10211,6 +10345,10 @@ class AICommander {
       // shield generator / intercept spot it's heading for. It still engages real enemies via
       // the combat transitions; this only stops it firing at the detour waypoint.
       shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
+      // THE MISSION'S OWN MOVEMENT. Read every tick because the mission may change gear (Siege
+      // swaps between shelling a gun and shelling the objective); the mission decides that once,
+      // in one place, rather than two table rows trading whenever their inputs flicker.
+      msnMove: this.strategy.movement ? this.strategy.movement(this) : null,
       finishing: this.fortDown() || this.enemyEliminated(),   // decisive phase (cracking the HQ / mopping up) → spend the ammo reserve, don't hold back
       rushBase: this._gambit && !this.flagExposed(),   // stalemate gambit: IGNORE the enemy, slip around and crack the HQ (suppresses engaging)
       // THE MISSION DECIDES whether we are on a supply run. Two layers each answering "do I need
@@ -12529,6 +12667,24 @@ function updateConeViz() {
     }
     ring.geometry.attributes.position.needsUpdate = true;
     ring.geometry.computeBoundingSphere();
+    // FLASH ON A SENSE (Jacob, 2026-09-05: "I keep seeing them walk by each other"). The lobe drew
+    // the SHAPE of what a unit could detect but never said whether it was detecting anything, so
+    // "did it see that?" still had to be inferred from behaviour — which is the exact question
+    // being investigated. Now the ring answers it directly.
+    //   thin + dim  = nothing sensed
+    //   bright pulse = a rival is being sensed RIGHT NOW (the same _seesEnemy test that gates
+    //                  firing, so the ring and the guns cannot disagree)
+    //   white       = sensed AND inside our own weapon reach, i.e. the board is being offered a
+    //                 fight-or-flight decision. If a ring goes white and the mission does not
+    //                 change, that is the bug, visible without a console.
+    const sees = !!v._seesEnemy;
+    let inReach = false;
+    if (sees && v.ai && v.ai._fofD != null) inReach = v.ai._fofD <= (SHOT_REACH[v.type] || 42);
+    const pulse = sees ? 0.55 + 0.45 * Math.sin(performance.now() * 0.012) : 0;
+    ring.material.opacity = sees ? 0.6 + 0.4 * pulse : 0.28;
+    const hex = (TEAM_COLORS[v.colorIndex] && TEAM_COLORS[v.colorIndex].hex) || '#8fd0ff';
+    if (inReach) ring.material.color.setHex(0xffffff);
+    else ring.material.color.set(hex);
   }
   for (const [v, l] of _coneRings) if (!seen.has(v)) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); _coneRings.delete(v); }
 }
@@ -12551,6 +12707,160 @@ window.RR = {
   },
   walkCells: (ax, az, bx, bz, cb) => walkCells(ax, az, bx, bz, cb),   // exact cell traversal, for probes
   vehCellCost: (v, i, j) => vehCellCost(v, i, j),                // nav benchmark: equivalence checking
+  // ONE CALL, THE WHOLE AUTOPSY. Jacob watches games and pauses when he sees a unit "just
+  // chillin"; the answer has to be capturable in that moment, because the state is gone a second
+  // later. Finds every unit that is stopped or carrying a violated order and reports, for each,
+  // the things that took a whole session to learn were the ones that matter:
+  //   - is it standing on a BLOCKED cell, and what obstacle is doing it (alive or dead)
+  //   - what the search actually did: popped / cells / frontier, and exhausted vs budgetHit
+  //     (exhausted = no route exists; budgetHit = it ran out of nodes and gave up mid-flight)
+  //   - whether a search with the SAME start but 20x budget finds a complete route. If it does,
+  //     "unreachable" was a lie and the budget is the bug. If it does not, the goal really is
+  //     cut off and the map is the bug.
+  //   - the team it pathed as: a wrong team is an enemy to every gate, which seals both keeps.
+  stallReport: () => {
+    const out = [];
+    for (const v of combatants) {
+      if (!v || v.dead) continue;
+      const cmd = commanders.find(k => k.unit === v);
+      const ord = cmd && cmd._driver && cmd._driver.o;
+      const moving = (v._throttle || 0) > 0.05;
+      if (moving && !(ord && ord.violated)) continue;
+      const p = v.holder.position;
+      const dest = ord ? { x: ord.x, z: ord.z } : null;
+      const rec = {
+        team: v.team, type: v.type, at: { x: Math.round(p.x), z: Math.round(p.z) },
+        throttle: +(v._throttle || 0).toFixed(2),
+        carrying: !!(flags || []).some(f => f.carrier === v),
+        mission: cmd && cmd.strategy ? cmd.strategy.step : null,
+        order: ord ? { type: ord.type, to: { x: Math.round(ord.x), z: Math.round(ord.z) },
+                       violated: !!ord.violated, by: ord.by } : null,
+        reachCap: cmd && cmd._reachCap ? { x: Math.round(cmd._reachCap.x), z: Math.round(cmd._reachCap.z),
+                                           ageS: cmd._matchT != null ? +(cmd._matchT - cmd._reachCap.t).toFixed(1) : null,
+                                           by: cmd._reachCap.by } : null,
+        navPathLen: cmd && cmd._nav && cmd._nav.path ? cmd._nav.path.length : 0,
+        retryN: cmd && cmd._nav ? (cmd._nav.retryN || 0) : 0,
+        standingOn: RR.whatBlocks(p, v.type),
+      };
+      if (dest) {
+        rec.search1  = RR.astarProbe(p, dest, 1,  v.type, false, v.team);
+        rec.search20 = RR.astarProbe(p, dest, 20, v.type, false, v.team);
+        rec.verdict = rec.search1.complete ? 'route EXISTS at normal budget — the stall is NOT pathfinding'
+          : rec.search20.complete ? 'BUDGET BUG: 20x budget finds a complete route, normal budget does not'
+          : rec.search20.exhausted ? 'genuinely unreachable even uncapped — the goal is cut off'
+          : 'still budget-limited at 20x — enormous or pathological search';
+      }
+      out.push(rec);
+    }
+    return out;
+  },
+  // DOES DESTROYING A STRUCTURE ACTUALLY FREE THE GROUND IT STOOD ON? (Jacob, 2026-09-05: "the
+  // flaghq was destroyed... the issue is that it being destroyed is not being seen by the A*
+  // algorithm.") Kills the obstacle covering a point, then re-asks cellBlocked and re-runs the
+  // search, so the before/after is measured rather than reasoned about. Debug only.
+  killAt: (pt, alsoDamage = true) => {
+    const c = grid.cell, gi = Math.round(pt.x / c), gj = Math.round(pt.z / c);
+    const near = obsBuckets.get(gi + ',' + gj) || [];
+    const killed = [];
+    for (const o of near) {
+      if (!o.body) { killed.push({ kind: o.kind || '?', note: 'obstacle has NO body — the dead check can never skip it' }); continue; }
+      const before = { dead: !!o.body.dead, hp: o.body.hp };
+      if (alsoDamage && o.body.damage) o.body.damage((o.body.hp || 0) + 1000);
+      killed.push({ kind: (o.body.type) || o.kind || '?', before,
+                    after: { dead: !!o.body.dead, hp: o.body.hp } });
+    }
+    return { gi, gj, nObstacles: near.length, killed };
+  },
+  // WHAT IS BLOCKING THIS CELL (Jacob, 2026-09-05: "it must be the actual flaghq building that is
+  // saying they are blocked"). Names every obstacle whose radius covers a world point, with its
+  // radius, distance, and whether its body is dead — because cellBlocked SKIPS dead obstacles, so
+  // a structure that has been destroyed should stop sealing the ground it stood on.
+  whatBlocks: (pt, vehType = 'firebrat') => {
+    const c = grid.cell, gi = Math.round(pt.x / c), gj = Math.round(pt.z / c);
+    const x = gi * c, z = gj * c, key = gi + ',' + gj;
+    const near = obsBuckets.get(key) || [];
+    const margin = VEH_R * 0.9;
+    const hits = [];
+    for (const o of near) {
+      const dx = x - o.x, dz = z - o.z, d = Math.hypot(dx, dz), rr = o.r + margin;
+      hits.push({ kind: (o.body && o.body.type) || o.kind || o.type || '?', r: +o.r.toFixed(1),
+                  dist: +d.toFixed(1), reach: +rr.toFixed(1), covers: d < rr,
+                  dead: !!(o.body && o.body.dead),
+                  hp: o.body && o.body.hp != null ? Math.round(o.body.hp) : null,
+                  maxHp: o.body && o.body.maxHp != null ? Math.round(o.body.maxHp) : null });
+    }
+    return { gi, gj, cellWorld: { x, z }, nObstacles: near.length,
+             blocking: hits.filter(h => h.covers && !h.dead), all: hits };
+  },
+  // HOW BOXED IN IS THIS SPOT. Walks outward from a world point and reports the ring at which the
+  // first PASSABLE cell appears, plus how much of each ring is blocked. planPath's boxed-in-start
+  // fallback searches only to R=4 cells (20u), so anything deeper than that returns no route at all
+  // and the caller reads it as "unreachable".
+  cellScan: (pt, vehType = 'firebrat', R = 12, team = null) => {
+    const c = grid.cell;
+    const rep = { _move: VEH_MOVE[vehType] || VEH_MOVE.lurcher, _archetype: 'warrior', type: vehType, team,
+                  holder: { position: { x: pt.x, z: pt.z } } };
+    const gi = Math.round(pt.x / c), gj = Math.round(pt.z / c);
+    const rings = [];
+    let firstOpen = null;
+    for (let r = 0; r <= R; r++) {
+      let open = 0, total = 0;
+      for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
+        if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
+        total++;
+        if (!cellBlocked(rep, gi + di, gj + dj)) { open++; if (firstOpen == null) firstOpen = r; }
+      }
+      rings.push({ r, open, total });
+    }
+    return { cell: c, gi, gj, selfBlocked: cellBlocked(rep, gi, gj),
+             firstOpenRing: firstOpen, firstOpenWorld: firstOpen == null ? null : firstOpen * c,
+             fallbackR: 4, fallbackWouldFind: firstOpen != null && firstOpen <= 4, rings };
+  },
+  // A* AUTOPSY (Jacob, 2026-09-05: "Do we have access to the openlist and closedlist? Do we know
+  // how large they are?"). Runs ONE search between two world points with the real unit cost
+  // function, at whatever node budget you name, and reports why it stopped. Read-only: it never
+  // touches a unit's nav state, so it can be fired mid-match from the console.
+  // The premise this exists to test is Jacob's: on static terrain a unit that DROVE somewhere
+  // has proved a route exists, so any "no path" home is a bug, not a fact about the map.
+  astarProbe: (from, to, nodeMul = 1, vehType = 'firebrat', snapStart = false, team = null) => {
+    const c = grid.cell;
+    // The REAL movement profile for this chassis — a Firebrat crosses water and a Jotun sinks,
+    // so probing with the wrong one would answer a question about a vehicle that doesn't exist.
+    const mv = VEH_MOVE[vehType] || VEH_MOVE.lurcher;
+    // TEAM MATTERS. cellBlocked -> gateBlocks(gw, v.team): a gate is passable to its OWNER and
+    // solid to everyone else. A representative with no team is an enemy to every gate on the map,
+    // which seals both keeps and makes any route into a base look unreachable. (LAND_SNAP carries
+    // the same warning: ".team is set per-use so the gate check reads right.")
+    const rep = { _move: mv, _archetype: 'warrior', type: vehType, team,
+                  holder: { position: { x: from.x, z: from.z } } };
+    const cost = (i, j) => vehCellCost(rep, i, j);
+    const iMax = Math.ceil(map.worldW / 2 / c) + 10, jMax = Math.ceil(map.worldH / 2 / c) + 10;
+    const inBounds = (i, j) => i >= -iMax && i <= iMax && j >= -jMax && j <= jMax;
+    const gridArea = (2 * iMax + 1) * (2 * jMax + 1);
+    const maxNodes = Math.round(Math.min(16000, Math.max(9000, Math.round(gridArea * 0.4))) * nodeMul);
+    // MIRROR planPath EXACTLY or the probe answers a different question than the game asks.
+    // planPath snaps the GOAL to open ground at radius 7 before searching (a destination inside a
+    // building is otherwise unsettleable and the search exhausts the whole map looking for it), and
+    // snaps the START only AFTER a failure, at radius 4. That asymmetry is reproduced here.
+    const start0 = { i: Math.round(from.x / c), j: Math.round(from.z / c) };
+    let goal = { i: Math.round(to.x / c), j: Math.round(to.z / c) };
+    const goalSnapped = nearestOpenCell(rep, goal.i, goal.j, 7);
+    const goalMoved = !!(goalSnapped && (goalSnapped.i !== goal.i || goalSnapped.j !== goal.j));
+    goal = goalSnapped || goal;
+    const startSnapped = snapStart ? nearestOpenCell(rep, start0.i, start0.j, 4, cellBlocked(rep, start0.i, start0.j) ? 1 : 0) : null;
+    const start = startSnapped || start0;
+    const startMoved = !!(startSnapped && (startSnapped.i !== start0.i || startSnapped.j !== start0.j));
+    const stats = {};
+    const t0 = performance.now();
+    const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true,
+                             maxNodes, partial: true, hScale: NAV_HSCALE, stats });
+    return { complete: !!(path && !path.budgetHit && path.length &&
+                          path[path.length - 1].i === goal.i && path[path.length - 1].j === goal.j),
+             pathLen: path ? path.length : 0, budgetHit: !!(path && path.budgetHit),
+             goalMoved, startMoved, startBlocked: cellBlocked(rep, start0.i, start0.j),
+             gridCells: gridArea, distWorld: Math.round(Math.hypot(to.x - from.x, to.z - from.z)),
+             ms: +(performance.now() - t0).toFixed(1), ...stats };
+  },
   navStats: () => ({ obstacles: obstacles.length, gates: gates.length, cell: grid.cell,
     cells: Math.ceil(map.worldW / grid.cell) * Math.ceil(map.worldH / grid.cell) }),
   mapCfg: () => MAP_CFG,                                       // debug: the decoded ?mapcfg (designed map), or null
@@ -12611,6 +12921,14 @@ window.RR = {
   // Multi-unit slots (elevator = one fielded unit)
   setShieldNear: (max, far) => setShieldNear(max, far),   // DUEL the shield top-up's distance curve (max, far)
   setSupplyW: (team, w) => setSupplyW(team, w),   // A/B: per-team repair weights (hpUrge, nearMax, nearFar)
+  // TONIGHT'S BATCH (2026-09-05). Four knobs, all live on a loaded page so the tournament KNOB
+  // argument can set them without a rebuild.
+  setOutranged: on => { OUTRANGED_CONTACT = !!on; return OUTRANGED_CONTACT; },   // A/B: offer the fight-or-flight decision when EITHER hull can shoot
+  setAmmoCount: on => setAmmoCount(on),   // A/B: 'nothing to shoot with' counts rounds instead of magazine fraction
+  setSeesLevel: on => setSeesLevel(on),   // A/B: re-score every second while a rival is SENSED, not just on the edge
+  setSupplyWAll: w => setSupplyWAll(w),   // A/B: the SAME repair weights on both sides (hpUrge, nearMax, nearFar)
+  setTurretDmg: d => { if (d != null) TURRET_DMG = +d; return TURRET_DMG; },   // A/B: tower gun damage per hit (default 18)
+  setHealRate: r => setHealRate(r),       // A/B: jeep crew tower heal, fraction of maxHp per second (default 0.01)
   setHomeW: (team, w) => setHomeW(team, w),      // DUEL: per-team home-defence weights (save, kill, tSave, tKill)
   setHomeScore: on => setHomeScore(on),
   // Home-defence trip outcomes, summed over both teams' commanders. contact/(contact+futile) is
@@ -12672,6 +12990,38 @@ window.RR = {
   deepDangerR: () => DEEP_DANGER_R,                             // debug: radius past which subs patrol
   setSubs: (v) => { subsOn = !!v; return subsOn; },            // A/B: enable/disable the deep-water sub hazard
   get player() { return player; },
+  // CROSS-TRACK ERROR: how far each hull is from the route it was actually given. This is the
+  // number pure pursuit exists to move — the navigator guarantees clearance along the path, so a
+  // hull that is 6u off it is driving through ground nothing ever checked.
+  trackError: () => {
+    const out = [];
+    for (const v of combatants) {
+      if (v.dead || !v.holder) continue;
+      const cmd = commanders.find(k => k.unit === v);
+      const path = cmd && cmd._nav && cmd._nav.path;
+      if (!path || path.length < 2) continue;
+      const px = v.holder.position.x, pz = v.holder.position.z;
+      let best = Infinity;
+      for (let k = 0; k < path.length - 1; k++) {
+        const a = path[k], b = path[k + 1];
+        const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
+        const t = len2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (pz - a.z) * dz) / len2)) : 0;
+        const d2 = (px - (a.x + dx * t)) ** 2 + (pz - (a.z + dz * t)) ** 2;
+        if (d2 < best) best = d2;
+      }
+      // ONLY UNITS ACTUALLY FOLLOWING THE ROUTE. Combat footwork (engage) and the anti-wedge jolt
+      // deliberately ignore the path, so their distance from it is large and says nothing about the
+      // follower. Pooling them in measures the mix of behaviours, not the thing under test.
+      const st = (v.ai && v.ai.state) || '';
+      if (st === 'engage' || st === 'unstick') continue;
+      if (isFinite(best)) out.push({ type: v.type, state: st, err: Math.sqrt(best) });
+    }
+    return out;
+  },
+  setMsnMove: on => setMsnMove(on),   // A/B: missions own their own movement; bypasses the AI.js priority table
+  setPurePursuit: on => { PURE_PURSUIT = !!on; return PURE_PURSUIT; },   // A/B: follow the route line (pure pursuit) instead of capturing waypoints at 6u
+  pursuitLook: () => ({ ...PURSUIT_LOOK }),
+  setPursuitFree: on => { PURSUIT_FREE = !!on; return PURSUIT_FREE; },   // A/B: unclamped pursuit (cuts corners by design)
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   navNodes: () => _astarFrameNodes,
@@ -13346,7 +13696,15 @@ const GUN_RANGE = 700;                 // gunfire carries far (matches SoundMana
 // which means making engines louder does not help two movers hear each other AT ALL, it raises the
 // mask in lockstep. Computed for two Lurchers 56u apart: heard 0.013 at idle, 0.043 at full
 // throttle, against a 0.18 threshold to act on. Louder is not the lever; the mask is.
-const SND = { idleEmit: 0.30, gunLoud: 1.6, gunDecay: 1.2, selfMask: 0.6, minAudible: 0.10 };
+// idleEmit 0.60, not 0.30 (gated 2026-09-05): stalemates 11 -> 4 per 720 matches, resolved
+// 709 -> 716, better on ALL THREE disjoint seed sets (-1, -2, -4), match time unchanged.
+// Hearing is the one detection channel that works from BEHIND, where the sight cone is blind and
+// a unit cannot see what is on its back. At 0.30 two vehicles could pass without either
+// registering the other — Jacob, watching: "2 lurchers just walked by each other."
+// Honest caveat kept here because the number is small: 11 against 4 out of 720 is roughly two
+// sigma on its own. What carries it is the sign holding across three disjoint sets. A confirmation
+// run on fresh seeds is still worth doing.
+const SND = { idleEmit: 0.60, gunLoud: 1.6, gunDecay: 1.2, selfMask: 0.6, minAudible: 0.10 };
 const soundPings = [];                 // recent gun reports: { x, y, z, idx, team, life }
 function emitSoundPing(x, y, z, idx, team, colorIndex) {
   soundPings.push({ x, y, z, idx, team, colorIndex, life: 1 });

@@ -8,7 +8,18 @@
 // onStep (optional) is a visualizer hook: it fires once per node popped off the
 // heap, with { cur:{i,j}, open:[{i,j}...] (the live frontier), path:[{i,j}...]
 // (best route to cur so far) }. It's guarded so normal pathfinding pays nothing.
-export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false, hScale = 1 }) {
+// `stats` (optional, out-param): if an object is passed, the search fills it in with everything
+// needed to answer "why did this search stop". Costs nothing when omitted.
+//   popped      — nodes taken off the heap (this is what maxNodes caps)
+//   states      — entries in g: (cell, arrival-direction) pairs, NOT cells
+//   cells       — DISTINCT grid cells reached. states/cells is the direction multiplier, and it is
+//                 the number that says how much of the budget went on re-expanding the same ground.
+//   frontier    — heap length when the search stopped. A big frontier at a budget stop means the
+//                 search was cut off mid-flight with plenty left to explore; a frontier of 0 means
+//                 the open set EMPTIED, which is the only honest "unreachable".
+//   exhausted   — true if the open set emptied (genuinely no route), false if the budget stopped it
+//   h0 / bestH  — heuristic at the start vs at the closest node settled: how much ground was gained
+export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false, hScale = 1, stats = null }) {
   // Default is 4-connected (orthogonal) — road LAYOUT needs clean right-angle, connected
   // grids. allowDiagonal adds the 4 diagonals so UNIT NAV can cut straight across open
   // ground instead of staircasing. A diagonal step travels √2 as far, so it costs √2× the
@@ -52,12 +63,22 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   // (the caller then walks toward it along passable cells rather than beelining straight into terrain).
   let best = null, bestH = Infinity;
   let popped = 0, budgetHit = false;
+  // Filled at EVERY exit (goal found, budget stop, open set emptied) so a caller can never
+  // mistake one for another. `cells` walks g's keys once — only when stats were asked for.
+  const fillStats = (exhausted) => {
+    if (!stats) return;
+    const seen = new Set();
+    for (const k of g.keys()) { const c = k.lastIndexOf(','); seen.add(k.slice(0, c)); }
+    stats.popped = popped; stats.states = g.size; stats.cells = seen.size;
+    stats.frontier = heap.length; stats.exhausted = !!exhausted; stats.budgetHit = budgetHit;
+    stats.h0 = h(start.i, start.j); stats.bestH = bestH; stats.maxNodes = maxNodes;
+  };
   while (heap.length) {
     const cur = pop();
     // SEARCH BOUND: an UNREACHABLE goal would otherwise expand the entire reachable grid
     // (tens of thousands of cellBlocked calls) — and unit nav re-runs that constantly, which
     // was the perf sawtooth. Give up past the bound and return the best partial (below) / back off.
-    if (++popped > maxNodes) { budgetHit = true; break; }
+    if (++popped > maxNodes) { budgetHit = true; push(cur); popped--; break; }   // put it back: the frontier count must reflect what was LEFT to explore
     const curK = key(cur.i, cur.j, cur.d);
     if (cur.g > (g.get(curK) ?? Infinity)) continue;
     const ch = h(cur.i, cur.j);
@@ -70,7 +91,7 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
       pth.reverse();
       onStep({ cur: { i: cur.i, j: cur.j }, open: heap.map(n => ({ i: n.i, j: n.j })), path: pth });
     }
-    if (cur.i === goal.i && cur.j === goal.j) { const p = buildPath(cur); p.nodes = popped; return p; }
+    if (cur.i === goal.i && cur.j === goal.j) { const p = buildPath(cur); p.nodes = popped; fillStats(false); return p; }
     for (let di = 0; di < DIRS.length; di++) {
       const ddi = DIRS[di][0], ddj = DIRS[di][1];
       const ni = cur.i + ddi, nj = cur.j + ddj;
@@ -102,6 +123,7 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   // may be perfectly reachable, just far — a long trek on a big map); budgetHit=false means the
   // open set EMPTIED — every reachable cell was settled and the goal wasn't among them: genuinely
   // unreachable. Callers judging a "contract violation" must only trust the second kind.
+  fillStats(!budgetHit);
   if (partial && best && bestH < h(start.i, start.j) - 0.5) { const p = buildPath(best); p.budgetHit = budgetHit; p.nodes = popped; return p; }
   return null;
 }

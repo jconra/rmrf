@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=114';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=119';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -377,16 +377,8 @@ function duelTactic(selfType, enemyType) {
 // motor command. ctx.err is the (jittered) heading error toward the target; the
 // behaviors own all the steering geometry.
 const BEHAVIORS = {
-  // Leaving the FOB: rotate IN PLACE until lined up on the gate, then drive straight
-  // out. No dodge overlay here (the graph marks this state skipWhiskers).
-  exit(ctx) {
-    const { err, mem, cfg } = ctx;
-    const turn = clamp(err * cfg.exitTurnGain, -1, 1);
-    const fwd = Math.abs(err) < cfg.exitAlign ? 1 : 0;
-    mem._wantMove = fwd > 0.3;
-    return { fwd, turn, fire: false, state: ctx.mode };
-  },
-
+  // DELETED 2026-09-05: `exit`. It steered a unit out of the FOB gate, and it was reachable only
+  // from a `mustGo` rung that no longer exists — no state in the graph names behavior:'exit'.
   // Hold at effective range and shoot rather than charging the kill zone. Shared by
   // 'engage' (mobile duel — aggressive brains press closer) and 'suppress' (keep a
   // wall-turret at arm's length and arc around its flank to find a clean line).
@@ -917,10 +909,14 @@ export const DEFAULT_BRAIN = {
     resupply: { behavior: 'seek' },
     engage:   { behavior: 'combat' },
     suppress: { behavior: 'combat' },
-    pursue:   { behavior: 'seek' },
     assault:  { behavior: 'assault' },
     advance:  { behavior: 'seek' },
-    unstick:  { behavior: 'unstick' },   // entered only via the anti-wedge reflex
+    // DELETED 2026-09-05, both unreachable and one of them a landmine:
+    //   `pursue`  — no transition has selected it since the pursuing rung was removed.
+    //   `unstick` — named behavior:'unstick', and BEHAVIORS HAS NO `unstick`. The anti-wedge jolt
+    //               returns early (see mem._unstick above the dispatch) and never reaches the
+    //               behaviour lookup, so this entry was harmless only by never being used. Had any
+    //               mode ever routed here, BEHAVIORS['unstick'](ctx) is undefined(ctx): a crash.
   },
   // Priority ladder: clear the gate first, then self-preservation, then fighting,
   // then the objective. `target` says what the chosen behavior aims at.
@@ -1004,6 +1000,8 @@ function maybeRecord(view, mem, reason, state, out) {
 // the Brain instance). Reproduces the original think() order of operations exactly,
 // including the order of rng() draws, so behavior is identical to the hand-written
 // version when run with DEFAULT_BRAIN.
+let MSN_MOVE = false;
+export function setMsnMove(on) { MSN_MOVE = !!on; return MSN_MOVE; }
 export function runBrain(graph, view, mem) {
   const cfg = graph.config, p = mem.p, self = view.self;
   mem.t += view.dt;
@@ -1106,6 +1104,11 @@ export function runBrain(graph, view, mem) {
   // and "there is an enemy we can shoot" are two different facts for the two commonest chassis.
   mem._fofD = (view.seesEnemy && view.enemy && view.self)
     ? Math.hypot(view.enemy.x - view.self.x, view.enemy.z - view.self.z) : null;
+  // …and WHICH HULL it is, stamped in the same breath for the same reason. Reach is per-chassis
+  // (Jotun and Valkyrie 80u, Lurcher 42, Firebrat 40), so "can this rival shoot ME" cannot be
+  // answered from the distance alone — and a unit being shelled from outside its own reach is
+  // exactly the case that had no decision to make. See fightOdds' outranged branch.
+  mem._fofType = (view.seesEnemy && view.enemy) ? (view.enemy.type || null) : null;
   // COMMITMENT BIAS (anti-flap): a score hovering AT the fight/flee boundary used to strobe the
   // state every tick or two (richwatch: resupply↔engage ×38, pursue↔engage ×26 in 6s) — each
   // tiny hp/distance change flipped the sign. Once fighting, it takes a clearly BAD score to
@@ -1152,9 +1155,25 @@ export function runBrain(graph, view, mem) {
   // aggressive rung with no ammo check, a dry hull fell past everything else and landed here for
   // good. Gated at 720 seeds before it was switched off: resolved 715 -> 719, stalemates 5 -> 1,
   // unreachable-GOTO violations -53% (pursue was ~72% of them), +2/0/+2 per set with no sign flip.
-  let rule = graph.transitions[graph.transitions.length - 1];
-  for (const t of graph.transitions) {
-    if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; }
+  // MISSIONS OWN MOVEMENT (?msnmove). The priority table below answered "how do I move" for every
+  // mission from the outside, re-picking a row every tick with no dwell and no latch — the one
+  // per-tick decider left in the system, and the closest one to the wheels. When a mission answers
+  // for itself there is nothing left to trade against, so the advance/assault flapping cannot
+  // happen: it was two rows of this table, and now it is one method on Siege.
+  //
+  // GATE THIS WITH THE CONTACT TRIGGERS, NOT ALONE. The table's `underAttack` row is the one thing
+  // here that was a genuine DECISION — "an inescapable rival is on us, answer it" — and bypassing
+  // the table drops it. Its replacement is the board being asked to re-score when a rival is
+  // sensed (setSeesLevel) and when either hull can shoot. Without those, a unit under attack waits
+  // for the next ordinary trigger instead of answering immediately.
+  let rule = null;
+  if (MSN_MOVE && view.msnMove && graph.states[view.msnMove.mode]) {
+    rule = { when: 'mission:' + (view.msnKey || 'mission'), mode: view.msnMove.mode, target: view.msnMove.target };
+  } else {
+    rule = graph.transitions[graph.transitions.length - 1];
+    for (const t of graph.transitions) {
+      if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; }
+    }
   }
   const mode = rule.mode;
   mem.state = mode;

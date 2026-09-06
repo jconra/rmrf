@@ -205,6 +205,23 @@ class Attack extends Mission {
 
 // SIEGE — level the enemy base, turret-first, until the flag is exposed.
 class Siege extends Mission {
+  // SIEGE OWNS ITS OWN TWO GEARS. This was two separate rows in the table (`sieging` -> suppress
+  // and `shootGoal` -> assault) that traded places whenever their inputs flickered — watched live
+  // as advance/assault/advance/assault with ten heading reversals in forty seconds. As one method
+  // there is nothing to trade: the mission asks its own question once and answers it.
+  //
+  // The hp and ammo tests that used to gate `sieging` are deliberately NOT here. A hurt or empty
+  // unit is a question for the board, where `flee` and `rearm` are already scored and are already
+  // the right answers. A movement routine has no business overruling them.
+  movement(cmd) {
+    const v = cmd && cmd.unit;
+    // A Firebrat's gun cannot hurt a structure, so it never stands and trades with one.
+    if (v && v.type === 'firebrat') return { mode: 'advance', target: 'goal' };
+    // A gun we are actually working: stand off and shell it.
+    if (v && v.threat) return { mode: 'suppress', target: 'threat' };
+    // Otherwise the objective itself is the thing to break.
+    return { mode: 'assault', target: 'goal' };
+  }
   get key() { return 'siege'; }
   // CLOSER: once the enemy is ELIMINATED (out for good — no units, roster empty) there's
   // no return fire to fear, so mobility/stealth stop mattering and raw demolition wins.
@@ -566,6 +583,26 @@ export function incumbentBonus(cmd) {
   if (INCUMB_DIR && INCUMBENT_INBOUND[running]) f = 1 - f;
   return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
 }
+// SENSING IS A LEVEL, NOT AN EDGE (Jacob, 2026-09-05: "when an enemy is in sensing range then the
+// trigger should be going off every second, not just an edge... the whole point of the game is to
+// destroy your enemy and I keep seeing them walk by each other").
+//
+// `sees` is an edge on "any contact within 12s", so it fires ONCE and then stays latched for as
+// long as contacts keep refreshing — a new rival closing on a unit that saw anything recently
+// produces no trigger at all. `unanswered` is a level but demands the rival be in weapon REACH,
+// which leaves the whole band between reach and sight range silent.
+//
+// This fills that gap: while a rival is SENSED and we are doing something that is neither fighting
+// nor fleeing, the plan is worth re-examining every time we are asked. MSN_RESCORE_MIN still floors
+// that at once per second, so it cannot become per-tick scoring.
+//
+// OFF BY DEFAULT and gated: it widens how often the board re-scores, which is exactly the kind of
+// change that has measured badly before (scoring off a sighting once sent pursue-stuck 1->11).
+// RR.setSeesLevel(true) or ?seeslevel to A/B it.
+let AMMO_COUNT = false;   // A/B: "nothing to shoot with" measured in rounds, not as a magazine fraction
+export function setAmmoCount(on) { AMMO_COUNT = !!on; return AMMO_COUNT; }
+let SEES_LEVEL = false;
+export function setSeesLevel(on) { SEES_LEVEL = !!on; return SEES_LEVEL; }
 let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/shield (A/B knob)
 export function setSwapSupply(on) { SWAP_SUPPLY = !!on; return SWAP_SUPPLY; }
 let INCUMB_DIR = false;   // incumbency counts an inbound trip's progress correctly (A/B knob)
@@ -611,10 +648,16 @@ export function setSupplyW(team, w) {
   teamSupplyW[team] = { ...(teamSupplyW[team] || {}), ...w };
   return teamSupplyW[team];
 }
-export function supplyWOf(team) { return teamSupplyW[team] || null; }
+// BOTH SIDES AT ONCE. The per-team form above exists to DUEL two weight sets in one match; a
+// tournament A/B needs the opposite — the same set on both sides, compared against a control run.
+// Applied as a fallback rather than by writing every team key, so it works without the caller
+// knowing what the teams are called this match, and a per-team override still wins over it.
+let allSupplyW = null;
+export function setSupplyWAll(w) { allSupplyW = w ? { ...(allSupplyW || {}), ...w } : null; return allSupplyW; }
+export function supplyWOf(team) { return teamSupplyW[team] || allSupplyW || null; }
 function supplyNearness(cmd) {
   const v = cmd.unit; if (!v || v.dead || !cmd._home) return 1;
-  const w = teamSupplyW[cmd.team] || null;
+  const w = teamSupplyW[cmd.team] || allSupplyW || null;
   const nearMax = w && w.nearMax != null ? w.nearMax : NEAR_MAX;
   const nearFar = w && w.nearFar != null ? w.nearFar : NEAR_FAR;
   const p = v.holder.position;
@@ -799,7 +842,25 @@ class Swap extends Mission {
 // incumbent bonus and the capture never came back.
 //
 // As a mission the duel becomes a thing that STARTS and ENDS, and the plan underneath survives it.
+// HOW A MISSION MOVES (2026-09-05). Every mission answers this for itself, replacing the priority
+// table in AI.js that used to answer it for all of them from the outside.
+//
+// The answer is small because the steering itself is small: AI.js has exactly four routines —
+// seek, combat, assault, unstick — and the seven-row table only ever chose between three of them.
+// So a mission says WHICH routine and WHAT to aim at, and the routines stay where they are, as the
+// vehicle's shared movement code. Nothing about the driving changes; only who decides.
+//
+//   mode 'advance'  -> seek    : drive at a point
+//   mode 'resupply' -> seek    : same, but the state reads as a supply run
+//   mode 'engage'   -> combat  : duel footwork against a hull
+//   mode 'suppress' -> combat  : the same footwork, against a structure
+//   mode 'assault'  -> assault : stand and shell what is in front of us
+// target keys are resolveTarget's: 'goal', 'enemy', 'enemyOrLastSeen', 'threat', 'resupplyOrGoal'.
+Mission.prototype.movement = function () { return { mode: 'advance', target: 'goal' }; };
+
 class Fight extends Mission {
+  // A duel is combat footwork against the hull the guns are on. Was the `engaging` rung.
+  movement() { return { mode: 'engage', target: 'enemyOrLastSeen' }; }
   get key() { return 'fight'; }
   get garageOK() { return false; }            // decided in the field, mid-contact — never buy a hull for it
   wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }   // fight with what we brought
@@ -893,6 +954,8 @@ const FIGHT_LOST_MS = 8000; // …and they are OUT of it entirely once we have n
                             // without it the frozen last-seen position makes a duel unendable.
 
 class Flee extends Mission {
+  // Leaving is just driving the escape route. Was the `fleeing` rung, which did exactly this.
+  movement() { return { mode: 'advance', target: 'goal' }; }
   get key() { return 'flee'; }
   get garageOK() { return false; }          // a decision taken in the field; never buy a chassis for it
   wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }
@@ -936,6 +999,9 @@ const SWAP_STALL = 10;   // s of ZERO progress toward home before a swap gives u
 const SWAP_MOVED = 22;
 
 class Supply extends Mission {
+  // A top-up is a drive to the depot. Was the `resupLatched` rung, whose own condition already
+  // said "the mission layer answers this now — this rung only executes".
+  movement() { return { mode: 'resupply', target: 'resupplyOrGoal' }; }
   get what() { return 'fuel'; }
   get supplyWant() { return 'fuel'; }
   // Never buy a chassis for a top-up: these are things a unit ALREADY in the field decides to
@@ -1702,7 +1768,7 @@ export function missionScore(cmd, key, running = null) {
       // nobody walks home over a scratch.
       const nearMul = key === 'repair' ? supplyNearness(cmd)
                     : key === 'shield' ? shieldNearness(cmd) : 1;
-      const tw = teamSupplyW[cmd.team];
+      const tw = teamSupplyW[cmd.team] || allSupplyW;
       const urgeW = (tw && key === 'repair' && tw.hpUrge != null) ? tw.hpUrge : SUPPLY_URGE[what];
       add('low ' + what, supplyUrge(frac, low, urgeW) * nearMul);
       // CANNOT DO THE JOB AT ALL. A dry unit is not a weak unit, it is furniture: it parks at the
@@ -1713,7 +1779,17 @@ export function missionScore(cmd, key, running = null) {
       // siege`, and one valkyrie sat dry from t316s while its fuel drained to 2%).
       // +10 is the same number the design gives fight/flight and the desperate grab: the moments
       // where one option has to win rather than argue. Being unable to act is one of them.
-      if (what === 'ammo' && frac <= 0.02) add('nothing to shoot with', 10);
+      // A COUNT, NOT A FRACTION (Jacob, 2026-09-05). This term is the fix for units sieging on an
+      // empty magazine, and it shipped with a gate two chassis can never reach. One round as a
+      // fraction of the magazine:
+      //     firebrat 1/90 = 0.011   lurcher 1/68 = 0.015   jotun 1/16 = 0.063   valkyrie 1/12 = 0.083
+      // At 0.02 the two big hulls are excluded outright. Watched live: a Jotun with one shell left
+      // scored rearm 5.2 against siege 10.8 and kept sieging; it becomes eligible only at literally
+      // zero, and then only at the next trigger, up to 15s later.
+      // "Can I still shoot?" is a question about ROUNDS, so ask it in rounds. This is the same
+      // one-constant-many-scales shape as BURST_FRAC, which already exists for the same reason.
+      const dry = AMMO_COUNT ? ((v.ammo || 0) <= 1) : (frac <= 0.02);
+      if (what === 'ammo' && dry) add('nothing to shoot with', 10);
       // A DRY TANK DOES NOT STRAND ANYTHING (Jacob, 2026-08-18). This was +10 named 'about to be a
       // statue', sat beside the ammo term as if the two were the same kind of fact. They are not:
       // `nothing to shoot with` is a genuine binary — no rounds, no fight — while main.js has
@@ -1903,6 +1979,7 @@ class Doctrine {
     // means in code, and it is the difference between this and every flapping version before it.
     if (this.step === 'flee') {
       if (this.mission.done(cmd)) {
+        this._recordScore('made it home from a flee');
         this._switch(this._applyKey(cmd, missionPick(cmd, null)) || 'attack', cmd, 'made it home — picking up the next job');
         return;
       }
@@ -1916,6 +1993,10 @@ class Doctrine {
         const then = this._swapThen || 'attack';
         this._swapThen = null;
         cmd.completeSwap(this.mission.want, this.mission.ditched);
+        // No missionPick here — the follow-up job was decided when the swap was ordered — but it
+        // IS the moment a new plan starts running, so the panel has to say so rather than keep
+        // showing the trigger that started the trip.
+        this._recordScore('swapped at the pad');
         this._switch(then, cmd, 'swapped at the pad — getting on with it');
         return;
       }
@@ -1957,6 +2038,7 @@ class Doctrine {
         // returns as the INCUMBENT and keeps the travel bonus it had already earned. That is what
         // makes winning a fight resume the job instead of handing the board to whatever was second —
         // seed 3362's runner was re-tasked onto a siege it then died on, having just won its duel.
+        this._recordScore('the fight ended (foe dead or out of reach)');
         this._switch(this._applyKey(cmd, missionPick(cmd, cmd._primaryKey || null)) || 'attack', cmd,
           'contact dealt with — back to the job');
         return;
@@ -2057,7 +2139,7 @@ class Doctrine {
         const trig = TRIG_FIX ? this._trigNow : this._triggers(cmd, dt);
         if (!SCORE_CLOCK) this._scoreT = (this._scoreT || 0) + dt;
         if (trig && this._scoreT >= MSN_RESCORE_MIN) {
-          this._scoreT = 0; this._lastTrig = trig;
+          this._recordScore(trig);
           // MID-SWAP RE-SCORE LEDGER. A swap is DERIVED, never scored: MissionScore picks a job,
           // the job asks for a chassis we are not driving, and swap is swapped in to go and get it
           // (see _applyKey). Nothing holds the unit to that trip — which is the design, because a
@@ -2222,7 +2304,11 @@ class Doctrine {
     // …now rank them. 1-3 are the reflexes: self-preservation, then our flag, in the order set out.
     // The gun sits BELOW all of them on purpose: a rival on top of us, or our own flag walking out
     // the door, both outrank a tower that has merely started tracking us.
-    if (sees || fire || flag || unanswered) return sees || fire || flag || unanswered;
+    // A RIVAL WE CAN SEE, while we are doing something else — see SEES_LEVEL above. Ranked with
+    // the other contact triggers, below our own flag walking out the door.
+    const sensed = (SEES_LEVEL && v && v._seesEnemy && this.step !== 'fight' && this.step !== 'flee')
+      ? 'a rival is in sight and we are neither fighting nor fleeing' : null;
+    if (sees || fire || flag || unanswered || sensed) return sees || fire || flag || unanswered || sensed;
     if (gun) return gun;
     // 4: the mission says it is finished (the supply missions know when they are full).
     if (this.mission && this.mission.done && this.mission.done(cmd)) return 'mission complete';
@@ -2234,6 +2320,18 @@ class Doctrine {
     if ((this._scoreT || 0) >= MSN_RESCORE_MAX) return 'nothing has happened for a while';
     return null;
   }
+  // EVERY SCORE IS A RECORDED SCORE (Jacob, 2026-09-05). `_scoreT` and `_lastTrig` are what the
+  // ai-lab publishes as `sinceScore` and `lastTrig` (main.js), and until now they were written in
+  // exactly ONE place: the trigger branch. Every other caller of missionPick — a fight ending, a
+  // flee arriving, a swap completing, the garage pick — re-scored the board and left both fields
+  // untouched. So a duel that ended in a kill re-picked the mission and the console kept showing
+  // the trigger from before the duel, with the clock still counting up through it. Watched live:
+  // "it never did another mission score after killing the lurcher" — it did, twice over, and there
+  // was no way to see it.
+  // Resetting the clock matters as much as the label: `_scoreT` is usually already past
+  // MSN_RESCORE_MAX when a fight ends, so the "nothing has happened for a while" backstop fired on
+  // the very next tick and the post-fight decision was taken twice in a row.
+  _recordScore(trig) { this._scoreT = 0; this._lastTrig = trig; }
   _applyKey(cmd, key) {
     cmd._msnKey = key;
     // THE PRIMARY MISSION — the JOB this unit is out doing, as opposed to the errand it is
@@ -2274,6 +2372,7 @@ class Doctrine {
     // sunk cost to protect and no reason for loyalty. The comment above already said so.
     // The genuine defect behind those seeds was siege out-scoring an exposed flag, and that is
     // fixed where it belongs — in the tower terms, which now stop paying out once the flag is open.
+    this._recordScore(urg ? `garage: ${urg}` : 'chosen in the garage, before roll-out');
     const next = urg || this._applyKey(cmd, missionPick(cmd, null));
     if (next !== this.step) this._switch(next, cmd, 'chosen in the garage, before roll-out');
   }
@@ -2433,6 +2532,8 @@ class Doctrine {
   wantVehicle(cmd) { return this.mission.wantVehicle(cmd); }
   objective(cmd) { return this.mission.objective(cmd); }
   shoot(cmd) { return this.mission.shoot(cmd); }
+  // The running mission's own answer to "how do I move" — see Mission.prototype.movement.
+  movement(cmd) { return this.mission.movement ? this.mission.movement(cmd) : { mode: 'advance', target: 'goal' }; }
   arriveDist(cmd) { return this.mission.arriveDist(cmd); }
   lurePoint(cmd) { return this.mission.lurePoint ? this.mission.lurePoint(cmd) : null; }     // trap kite anchor (view.lure)
   signalShot(cmd) { return this.mission.signalShot ? this.mission.signalShot(cmd) : null; }  // trap noise-bait aim point

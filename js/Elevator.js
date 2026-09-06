@@ -50,20 +50,37 @@ export class Elevator {
     // Shaft liner: four inward walls + a dark floor, so you don't see through the
     // carved terrain seams. Wall TOPS sit flush with the surface (groundY) — any
     // higher and the dark lip buries the hazard collar that rings the mouth.
-    const wallH = this.depth + 0.4;
-    const cy = this.groundY - wallH / 2;
-    const span = shaftHalf * 2;
+    // DEPTH AND CORNERS ARE LOAD-BEARING, not cosmetic (Jacob, 2026-09-05: "it looks like we can
+    // see the ocean inside there"). The sea is kept out of the pit by a STENCIL mask at the mouth
+    // (_maskWater), and a flat mask only hides what sits directly behind it in SCREEN space. Viewed
+    // from the shallow game camera you look diagonally down the shaft and see PAST the mask's
+    // footprint to the sea surface below — sharks included. Solid liner geometry has no such
+    // failure mode, so the liner is what actually seals the hole and the stencil is the backup.
+    //
+    // Three changes, all downward or outward, none of them touching the wall TOPS: those stay
+    // flush at groundY because cy is derived from wallH, and a lip above the surface would bury
+    // the hazard collar that rings the mouth.
+    //   deeper  — the walls run well past the pit floor, so no sightline slips under them
+    //   longer  — each wall overruns the corner by a full thickness, so the four of them overlap
+    //             instead of merely meeting (a meeting joint leaves a diagonal pinhole)
+    //   floor   — widened to the same footprint so it seals UNDER the walls, not just between them
     const t = 0.8;
+    const wallH = this.depth + 6;              // was depth + 0.4: it ended level with the floor
+    const cy = this.groundY - wallH / 2;       // top stays at groundY — extension is all downward
+    const span = shaftHalf * 2;
+    const outer = span + t * 4;                // overrun past each corner
     for (const [sx, sz] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
       const horiz = sz !== 0;
-      const w = horiz ? span + t * 2 : t;
-      const d = horiz ? t : span + t * 2;
+      const w = horiz ? outer : t;
+      const d = horiz ? t : outer;
       const wall = box(w, wallH, d, LINER_MAT);
       wall.position.set(center.x + sx * (shaftHalf + t / 2), cy, center.z + sz * (shaftHalf + t / 2));
       this.group.add(wall);
     }
-    const floor = box(span, 0.6, span, LINER_MAT);
-    floor.position.set(center.x, this.bottomY - 0.1, center.z);
+    // Sits low enough to be under the walls' full span and thick enough that the sea floor, which
+    // is below it, cannot z-fight through.
+    const floor = box(outer, 1.2, outer, LINER_MAT);
+    floor.position.set(center.x, this.bottomY - 0.5, center.z);
     this.group.add(floor);
 
     // Hazard collar: a striped frame ringing the shaft mouth. Its INNER edge tucks
@@ -208,7 +225,11 @@ export class Elevator {
     mat.stencilRef = 1;
     mat.stencilFunc = THREE.AlwaysStencilFunc;
     mat.stencilZPass = THREE.ReplaceStencilOp;
-    const q = new THREE.Mesh(new THREE.PlaneGeometry(shaftHalf * 2, shaftHalf * 2), mat);
+    // Sized to the COLLAR's outer edge (7.6), not the shaft mouth: the collar is part of the
+    // footprint the sea must skip, and a mask that stopped at the shaft left a ring of water
+    // showing between the mouth and the stripes.
+    const maskHalf = Math.max(shaftHalf, 7.8);
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(maskHalf * 2, maskHalf * 2), mat);
     q.rotation.x = -Math.PI / 2;
     q.position.set(this.center.x, this.groundY + 0.02, this.center.z);
     q.renderOrder = -10;            // mark the stencil before anything reads it
