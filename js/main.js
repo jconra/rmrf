@@ -12429,6 +12429,68 @@ const ray = new THREE.Raycaster();
 let coneViz = QS.has('cones');
 const _coneRings = new Map();          // vehicle -> LineLoop
 const CONE_SEGS = 72;
+// ── NOISE RINGS (?noise, or RR.setNoiseViz) ───────────────────────────────────────────────────
+// How far each vehicle's engine actually carries, drawn as TWO circles because the answer depends
+// entirely on who is listening. Noise is omnidirectional, so unlike the sight lobe these are plain
+// rings — the interesting part is the gap between them.
+//   OUTER (solid)  what a STOPPED listener would hear and act on.
+//   INNER (faint)  what a listener at full throttle would hear — it deafens itself by 60% of its
+//                  own output, so this ring is far smaller and frequently does not exist at all.
+// That gap IS the self-masking finding made visible: two moving vehicles are the worst case for
+// hearing each other, and raising engine volume moves both rings together rather than closing it.
+let noiseViz = QS.has('noise');
+const _noiseRings = new Map();          // vehicle -> [outer, inner]
+// Distance at which `v` is still loud enough for a listener of the given throttle to ACT on.
+// Solves loud(d) = emit*acFall(d) - selfNoise = AI_HEARD_MIN for d. Returns 0 when never audible.
+function noiseRadius(v, listenerThrottle) {
+  const a = ACOUSTIC[v.def.soundIndex] || ACOUSTIC[0];
+  const emit = a.gain * (SND.idleEmit + (1 - SND.idleEmit) * (v._throttle || 0));
+  if (emit <= 0) return 0;
+  const pa = a;   // assume a like-for-like listener; the mask is dominated by its own class anyway
+  const self = pa.gain * (SND.idleEmit + (1 - SND.idleEmit) * listenerThrottle) * SND.selfMask;
+  const need = (AI_HEARD_MIN + self) / emit;            // required acFall
+  if (need >= 1) return 0;                              // masked out even on top of it
+  if (need <= 0) return a.max;
+  return a.max - need * (a.max - a.ref);
+}
+function updateNoiseViz() {
+  if (!noiseViz) {
+    if (_noiseRings.size) { for (const [, ls] of _noiseRings) for (const l of ls) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); } _noiseRings.clear(); }
+    return;
+  }
+  const seen = new Set();
+  for (const v of combatants) {
+    if (v.dead || !v.holder) continue;
+    seen.add(v);
+    let pair = _noiseRings.get(v);
+    if (!pair) {
+      const hex = (TEAM_COLORS[v.colorIndex] && TEAM_COLORS[v.colorIndex].hex) || '#ffd08a';
+      pair = [0.85, 0.30].map(op => {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array((CONE_SEGS + 1) * 3), 3));
+        const l = new THREE.LineLoop(g, new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: op, depthTest: false }));
+        l.renderOrder = 31; scene.add(l); return l;
+      });
+      _noiseRings.set(v, pair);
+    }
+    const px = v.holder.position.x, pz = v.holder.position.z;
+    const radii = [noiseRadius(v, 0), noiseRadius(v, 1)];
+    for (let k = 0; k < 2; k++) {
+      const r = radii[k], ring = pair[k];
+      ring.visible = r > 0.5;
+      if (!ring.visible) continue;
+      const arr = ring.geometry.attributes.position.array;
+      for (let i = 0; i <= CONE_SEGS; i++) {
+        const th = (i / CONE_SEGS) * Math.PI * 2;
+        const x = px + Math.cos(th) * r, z = pz + Math.sin(th) * r;
+        arr[i * 3] = x; arr[i * 3 + 1] = map.heightAt(x, z) + 0.3; arr[i * 3 + 2] = z;
+      }
+      ring.geometry.attributes.position.needsUpdate = true;
+      ring.geometry.computeBoundingSphere();
+    }
+  }
+  for (const [v, ls] of _noiseRings) if (!seen.has(v)) { for (const l of ls) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); } _noiseRings.delete(v); }
+}
 function updateConeViz() {
   if (!coneViz) {
     if (_coneRings.size) { for (const [, l] of _coneRings) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); } _coneRings.clear(); }
@@ -12668,6 +12730,10 @@ window.RR = {
   setPerf: (on = true) => { PERF = !!on; return PERF; },   // switch the section timers on at runtime
   setHullEyes: v => { HULL_EYES = Math.max(0, Math.min(1, +v || 0)); return HULL_EYES; },   // A/B: how well the driver sees along the hull heading (0 = turret-only, the old cone)
   setConeViz: on => { coneViz = !!on; return coneViz; },   // debug: draw each unit's real detection lobe on the ground
+  setNoiseViz: on => { noiseViz = !!on; return noiseViz; },   // debug: draw how far each engine carries (outer = heard by a stopped listener, inner = by a moving one)
+  noiseStats: () => combatants.filter(v => !v.dead).map(v => ({
+    type: v.type, throttle: +(v._throttle || 0).toFixed(2),
+    heardByStopped: Math.round(noiseRadius(v, 0)), heardByMoving: Math.round(noiseRadius(v, 1)) })),
   setSnd: o => { if (o) for (const k in o) if (k in SND) SND[k] = +o[k]; return { ...SND }; },   // A/B the hearing model live (selfMask is the interesting one)
   heardStats: (v) => {                                    // debug: what can THIS unit actually hear right now?
     const u = v || (combatants.find(c => !c.dead) || null);
@@ -13533,6 +13599,7 @@ function animate() {
       _pfT('structs', () => { for (const c of camps) c.update(dt); for (const w of placedWalls) w.update(dt); for (const e of elevators) { e.update(dt); updateElevatorSound(e); } for (const v of vehicles) v.idle(dt); updateSubmarines(dt); });
       _pfT('shadows', () => updateShadows());  // ground-projected vehicle silhouette shadows
       updateConeViz();                       // ?cones — the sight lobes, when asked for
+      updateNoiseViz();                      // ?noise — how far each engine carries
       _pfT('projectiles', () => { projectiles.update(dt); updateProjectileHits(); });
       if (foliage) foliage.update(dt);       // tree topple animations
       waterT += dt; map.tickWater(waterT); setWindTime(waterT);   // animate the water ripples + grass sway
