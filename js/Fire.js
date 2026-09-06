@@ -174,11 +174,11 @@ let smkMesh = null, smkGeo = null, smkMat = null, smkTex = null, smkAcc = 0, smk
 const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sm = new THREE.Matrix4(), _sc2 = new THREE.Color();
 const _srq = new THREE.Quaternion(), _sax = new THREE.Vector3(0, 0, 1);
 const _sd = new THREE.Vector3(), _sright = new THREE.Vector3(), _sup = new THREE.Vector3(), _sdir = new THREE.Vector3();
-let SMK_RATE = 14, SMK_RISE = 8.5, SMK_SPREAD = 1.6, SMK_LIFE = 2.2;
-let SMK_SIZE = 2.6, SMK_GROW = 2.4, SMK_OPACITY = 0.34, SMK_DARK = 0.72;
+let SMK_RATE = 24, SMK_RISE = 8.5, SMK_SPREAD = 0.30, SMK_LIFE = 4.2;
+let SMK_SIZE = 2.8, SMK_GROW = 1.9, SMK_OPACITY = 0.79, SMK_DARK = 1.0;
 // SOOT is the black end of the fire-smoke mix; DARK is its grey end, and the pale trail's base.
 // The TRAIL knobs scale a chunk's smoke against the fire's, so the two balance separately.
-let SMK_SOOT = 0.85, SMK_TRAIL = 5, SMK_TRAIL_OP = 0.55, SMK_TRAIL_SIZE = 0.45, SMK_TRAIL_LIFE = 3.0;
+let SMK_SOOT = 0.99, SMK_TRAIL = 1, SMK_TRAIL_OP = 0.75, SMK_TRAIL_SIZE = 0.70, SMK_TRAIL_LIFE = 3.0;
 // Slots kept back for the FIRE's own smoke. Trails are per chunk, so their rate multiplies by
 // twenty and they will happily eat the whole pool: measured at 26/chunk there were 121 pale puffs
 // and ZERO black ones, because the fire could never get a slot. The wreck's own smoke is the point
@@ -191,13 +191,13 @@ const SMOKE_RESERVE = 70;
 // is a puffy smoke shape" — the shape was never the problem, the popping was.
 // A shared drift (slow, common to all puffs) carries most of the variation now, with only a small
 // per-puff jitter on top, so neighbours look related. FADE_IN is a real fraction of the life.
-let SMK_MIXVAR = 0.28, SMK_FADEIN = 0.34, SMK_WARMTH = 0.14;
+let SMK_MIXVAR = 1.0, SMK_FADEIN = 0.90, SMK_WARMTH = 0;
 // How far into a flame's life it keeps making smoke, and how sharply that tails off. At 0.45 a
 // flame smokes hard early and is done well before it goes out.
 let SMK_STOP = 0.45, SMK_TAPER = 1.4;
 // A trail instance is drawn LONG and NARROW along the direction of travel, so a handful of them
 // makes a streak instead of a string of circles.
-let SMK_TRAIL_LEN = 5.5, SMK_TRAIL_WID = 0.55;
+let SMK_TRAIL_WID = 0.45;
 // How fast each source loses its climb. Low = keeps rising; high = stalls almost at once.
 let SMK_DRAG = 0.18, SMK_TRAIL_DRAG = 2.2;
 let _smkDrift = 0;
@@ -318,7 +318,7 @@ function puff(x, y, z, scale, tone = 1, rise = 1, dir = null) {
     q.s = q.s0; q.roll = frnd() * Math.PI * 2; q.spin = (frnd() - 0.5) * 0.7;
     // Mostly the shared drift, plus a little of its own — related to its neighbours, not random.
     q.mix = Math.max(0, Math.min(1, _smkDrift + (frnd() - 0.5) * 2 * SMK_MIXVAR));
-    if (dir) { q.dx = dir.x; q.dy = dir.y; q.dz = dir.z; q.stretch = SMK_TRAIL_LEN; }
+    if (dir) { q.dx = dir.x; q.dy = dir.y; q.dz = dir.z; q.stretch = 1; }
     else q.stretch = 0;
     q.ray = false; q.owner = null;
     q.a = 0;
@@ -766,7 +766,6 @@ export function setFireLook(o = {}) {
   SMK_WARMTH     = c(o.smkWarmth,    0, 1,   SMK_WARMTH);
   SMK_STOP       = c(o.smkStop,      0.05, 1, SMK_STOP);
   SMK_TAPER      = c(o.smkTaper,     0.2, 4,  SMK_TAPER);
-  SMK_TRAIL_LEN  = c(o.smkTrailLen,  1, 16,  SMK_TRAIL_LEN);
   SMK_TRAIL_WID  = c(o.smkTrailWid,  0.1, 2, SMK_TRAIL_WID);
   SMK_DRAG       = c(o.smkDrag,      0, 4,   SMK_DRAG);
   SMK_TRAIL_DRAG = c(o.smkTrailDrag, 0, 8,   SMK_TRAIL_DRAG);
@@ -791,7 +790,7 @@ export const FIRE_KEYS = [
   ['smkSoot','SMK_SOOT'], ['smkWarmth','SMK_WARMTH'], ['smkMixVar','SMK_MIXVAR'],
   ['smkFadeIn','SMK_FADEIN'], ['smkStop','SMK_STOP'], ['smkTaper','SMK_TAPER'],
   ['smkTrail','SMK_TRAIL'], ['smkTrailOp','SMK_TRAIL_OP'], ['smkTrailSize','SMK_TRAIL_SIZE'],
-  ['smkTrailLife','SMK_TRAIL_LIFE'], ['smkTrailLen','SMK_TRAIL_LEN'],
+  ['smkTrailLife','SMK_TRAIL_LIFE'],
   ['smkTrailWid','SMK_TRAIL_WID'], ['smkTrailDrag','SMK_TRAIL_DRAG'],
 ];
 export function getFireLook() {
@@ -809,7 +808,7 @@ export function getFireLook() {
            smkTrailSize: SMK_TRAIL_SIZE, smkTrailLife: SMK_TRAIL_LIFE,
            smkMixVar: SMK_MIXVAR, smkFadeIn: SMK_FADEIN, smkWarmth: SMK_WARMTH,
            smkStop: SMK_STOP, smkTaper: SMK_TAPER,
-           smkTrailLen: SMK_TRAIL_LEN, smkTrailWid: SMK_TRAIL_WID,
+           smkTrailWid: SMK_TRAIL_WID,
            smkDrag: SMK_DRAG, smkTrailDrag: SMK_TRAIL_DRAG };
 }
 
