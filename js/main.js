@@ -5990,6 +5990,33 @@ function pursuitPoint(v, path, idx, look) {
   }
   return path[path.length - 1];   // ran off the end of the route — aim at the destination itself
 }
+// How far the hull is from the route it is meant to be on. Scans a window around the current
+// waypoint rather than the whole polyline: a route that doubles back passes near itself, and a
+// global nearest-point search would report a small gap for a hull that is nowhere near the leg it
+// is actually driving.
+function pathGap(v, path, idx) {
+  const px = v.holder.position.x, pz = v.holder.position.z;
+  const from = Math.max(0, Math.min(idx, path.length - 1) - 1);
+  const to = Math.min(path.length - 1, from + 3);
+  let best = Infinity;
+  for (let k = from; k <= to; k++) {
+    const a = path[k], b = path[k + 1];
+    if (!b) { const d = (px - a.x) ** 2 + (pz - a.z) ** 2; if (d < best) best = d; continue; }
+    const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (pz - a.z) * dz) / len2)) : 0;
+    const d = (px - (a.x + dx * t)) ** 2 + (pz - (a.z + dz * t)) ** 2;
+    if (d < best) best = d;
+  }
+  return isFinite(best) ? Math.sqrt(best) : 0;
+}
+const NAV_OFF_PATH = 15;        // u — three cells off our own route means we are not on it
+const NAV_OFF_COOL = 1.0;       // s between displacement replans, so a wedged hull cannot search every frame
+// DEFAULT ON (2026-09-06). Gated over 720 paired seeds: outcome-neutral (6 seeds rescued against
+// 11 wrecked — a coin flip at 17 disagreements) but consistently better on the metric it targets,
+// SCUTTLED 52 -> 39 across all three sets, for +6% searches. The defect is not arguable: a hull
+// holding a 14-unit stub planned 144 units away, beelining cross-country with none of the
+// clearance A* and the smoother spent their effort guaranteeing.
+let OFF_PATH_REPLAN = true;     // RR.setOffPathReplan(false) restores the goal-only triggers
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
@@ -6000,7 +6027,41 @@ function navWaypoint(nav, v, dest, dt) {
   // trigger below re-ran a full-grid A* search EVERY FRAME while a unit was stuck — ~80% of
   // CPU in cellBlocked (the perf sawtooth). failT gates retries after a failure so we search
   // at most a few times a second instead of 60×; a valid path (or a forced null) replans as before.
-  if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || nav.epoch !== _navEpoch || moved2 > (c * 2) ** 2) && !(nav.failT > 0)) {
+  // THE HULL MOVING IS ALSO A REASON TO REPLAN (2026-09-05). Every trigger below watches the
+  // GOAL — has it moved, has the map changed, has the route run out, has the timer expired. None
+  // of them watches the UNIT. So a hull that is DISPLACED rather than driven (respawned at the FOB,
+  // carried up the lift) keeps a route planned from wherever the last one stood.
+  //
+  // Measured on seed 39: a Lurcher at (97,94) holding a 2-point path [(-45,75) -> (-55,65)] whose
+  // END matched its order exactly — so every staleness test passed — while its START sat 144u
+  // away. With idx already on the last waypoint the consumption loop is `while (1 < 1)`, so idx
+  // never advances and `idx >= length` never fires either. For the full 7s TTL the unit steers
+  // straight at a destination across the map with no route at all: no terrain, no walls, none of
+  // the clearance A* and the smoother spent their effort guaranteeing. That is not a follower
+  // tracking a path badly, it is a hull with no path, and it is the shape behind units driving
+  // into the corner of their own base.
+  //
+  // OFF_PATH is generous on purpose. Legitimate deviation happens constantly — the whisker dodge
+  // commits around an obstacle, combat footwork throws the hull wide — and none of that should
+  // cost a search. Three cells is far enough that only a real displacement trips it.
+  // TWO GUARDS, both learned the hard way on the first version of this check, which took replans
+  // from 0.32/sim-sec to 3.13 — a 10x rise, past the 2/s ceiling, and the same shape as the perf
+  // sawtooth this file already fought once.
+  //   ROUTE-FOLLOWING ONLY. Of the modes the brain can pick, only `advance` and `resupply` drive
+  //     the nav route. `engage` kites, `suppress` orbits a structure at standoff, `assault` stands
+  //     and shells. Being far from the path in those is not displacement, it is the behaviour
+  //     working — and asking them to replan was most of that 10x.
+  //   COOLDOWN. Same pattern as failT above: if a replan does not close the gap (a hull genuinely
+  //     wedged off-route), this must not re-fire every frame.
+  if (nav.offT > 0) nav.offT -= dt;
+  const st = (v.ai && v.ai.state) || '';
+  const following = st === 'advance' || st === 'resupply';
+  const offPath = (OFF_PATH_REPLAN && following && nav.path && nav.path.length)
+    ? pathGap(v, nav.path, nav.idx) : 0;
+  const displaced = offPath > NAV_OFF_PATH && !(nav.offT > 0);
+  if (displaced) nav.offT = NAV_OFF_COOL;
+  if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || nav.epoch !== _navEpoch
+       || moved2 > (c * 2) ** 2 || displaced) && !(nav.failT > 0)) {
     const hasUsablePath = nav.path && nav.idx < nav.path.length;
     if (hasUsablePath && _astarFrameMs >= NAV_FRAME_BUDGET_MS) {
       // Per-frame A* budget spent: keep following the current route and retry the refresh next
@@ -12993,6 +13054,77 @@ window.RR = {
   // CROSS-TRACK ERROR: how far each hull is from the route it was actually given. This is the
   // number pure pursuit exists to move — the navigator guarantees clearance along the path, so a
   // hull that is 6u off it is driving through ground nothing ever checked.
+  // IS THE PATH WE ARE MEASURING AGAINST EVEN THE CURRENT ONE? A hull far from "its" route is
+  // either steering badly or holding a route to somewhere it is no longer going, and those are
+  // completely different bugs. Compare the route's END against the destination the driver is
+  // actually ordered to: if they disagree, the path is stale and distance-from-path means nothing.
+  // DOES THE FIX LEAVE UNITS WITH NO ROUTE AT ALL? The old behaviour, holding a stub planned from
+  // somewhere else, meant the unit BEELINED at its goal — terrain-blind, but it moved. If a
+  // displacement replan then fails (planPath returns null), the unit has no path instead of a bad
+  // one, and standing still can be worse than blundering. That is the obvious way this fix could
+  // cost matches, so measure it rather than argue about it.
+  pathless: () => {
+    let n = 0, none = 0, failing = 0;
+    for (const v of combatants) {
+      if (v.dead || !v.holder) continue;
+      const cmd = commanders.find(k => k.unit === v);
+      if (!cmd || !cmd._nav) continue;
+      const st = (v.ai && v.ai.state) || '';
+      if (st !== 'advance' && st !== 'resupply') continue;
+      n++;
+      if (!cmd._nav.path) none++;
+      if (cmd._nav.failT > 0) failing++;
+    }
+    return { n, none, failing };
+  },
+  staleCheck: () => {
+    const out = [];
+    for (const v of combatants) {
+      if (v.dead || !v.holder) continue;
+      const cmd = commanders.find(k => k.unit === v);
+      const path = cmd && cmd._nav && cmd._nav.path;
+      const ord = cmd && cmd._driver && cmd._driver.o;
+      if (!path || path.length < 2 || !ord || ord.type !== 'GOTO') continue;
+      const end = path[path.length - 1];
+      const p = v.holder.position;
+      // how far the route's destination is from the order's destination
+      const drift = Math.hypot(end.x - ord.x, end.z - ord.z);
+      let best = Infinity;
+      for (let k = 0; k < path.length - 1; k++) {
+        const a = path[k], b = path[k + 1];
+        const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
+        const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2)) : 0;
+        const d2 = (p.x - (a.x + dx * t)) ** 2 + (p.z - (a.z + dz * t)) ** 2;
+        if (d2 < best) best = d2;
+      }
+      // ONLY THE STATES THAT ACTUALLY DRIVE A ROUTE. Of the modes AI.js can pick, exactly two use
+      // the `seek` behaviour that follows nav waypoints: advance and resupply. `engage` kites,
+      // `suppress` orbits a structure at standoff range, `assault` stands still and shells, and
+      // `unstick` reverses out of a wedge — all four deliberately ignore the path, so their
+      // distance from it measures the behaviour, not the follower. Filtering only engage+unstick
+      // (the first attempt) still pooled in two combat modes and produced a 156u "following error"
+      // that was a unit standing off a tower with a long route it was not driving.
+      const st = (v.ai && v.ai.state) || '';
+      if (st !== 'advance' && st !== 'resupply') continue;
+      const e = Math.sqrt(best);
+      const rec = { type: v.type, state: st, err: +e.toFixed(1),
+                 drift: +drift.toFixed(1), stale: drift > 10,
+                 navAge: cmd._nav.t != null ? +cmd._nav.t.toFixed(1) : null,
+                 by: ord.by || null, capped: !!cmd._reachCap };
+      // FULL DETAIL on the outliers only — the ones that have to be explained one by one.
+      if (e > 20) {
+        rec.at = { x: Math.round(p.x), z: Math.round(p.z) };
+        rec.pathFrom = { x: Math.round(path[0].x), z: Math.round(path[0].z) };
+        rec.pathTo = { x: Math.round(end.x), z: Math.round(end.z) };
+        rec.order = { x: Math.round(ord.x), z: Math.round(ord.z) };
+        rec.len = path.length; rec.idx = cmd._nav.idx;
+        rec.distFromPathStart = Math.round(Math.hypot(p.x - path[0].x, p.z - path[0].z));
+        rec.msn = cmd.strategy && cmd.strategy.step;
+      }
+      out.push(rec);
+    }
+    return out;
+  },
   trackError: () => {
     const out = [];
     for (const v of combatants) {
@@ -13013,12 +13145,13 @@ window.RR = {
       // deliberately ignore the path, so their distance from it is large and says nothing about the
       // follower. Pooling them in measures the mix of behaviours, not the thing under test.
       const st = (v.ai && v.ai.state) || '';
-      if (st === 'engage' || st === 'unstick') continue;
+      if (st !== 'advance' && st !== 'resupply') continue;   // see staleCheck: only these follow a route
       if (isFinite(best)) out.push({ type: v.type, state: st, err: Math.sqrt(best) });
     }
     return out;
   },
   setMsnMove: on => setMsnMove(on),   // A/B: missions own their own movement; bypasses the AI.js priority table
+  setOffPathReplan: on => { OFF_PATH_REPLAN = !!on; return OFF_PATH_REPLAN; },   // A/B: replan when the HULL is off its route, not only when the goal moves
   setPurePursuit: on => { PURE_PURSUIT = !!on; return PURE_PURSUIT; },   // A/B: follow the route line (pure pursuit) instead of capturing waypoints at 6u
   pursuitLook: () => ({ ...PURSUIT_LOOK }),
   setPursuitFree: on => { PURSUIT_FREE = !!on; return PURSUIT_FREE; },   // A/B: unclamped pursuit (cuts corners by design)

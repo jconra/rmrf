@@ -599,7 +599,13 @@ export function incumbentBonus(cmd) {
 // OFF BY DEFAULT and gated: it widens how often the board re-scores, which is exactly the kind of
 // change that has measured badly before (scoring off a sighting once sent pursue-stuck 1->11).
 // RR.setSeesLevel(true) or ?seeslevel to A/B it.
-let AMMO_COUNT = false;   // A/B: "nothing to shoot with" measured in rounds, not as a magazine fraction
+// DEFAULT ON (2026-09-06). Gated over 720 paired seeds: outcome-neutral — 8 seeds rescued against
+// 9 wrecked, a coin flip — and scuttles did not rise (25 -> 22). It ships on Jacob's rule that
+// smarter decisions beat win-rate, because the behaviour it fixes is plainly wrong to watch: a
+// Jotun carrying one shell of sixteen cannot reach a 0.02 magazine-fraction gate, so the term that
+// exists to send a dry hull home was unreachable on the two low-capacity chassis and it stood in a
+// siege with nothing to fire. Counting rounds asks the question the term was always asking.
+let AMMO_COUNT = true;
 export function setAmmoCount(on) { AMMO_COUNT = !!on; return AMMO_COUNT; }
 let SEES_LEVEL = false;
 export function setSeesLevel(on) { SEES_LEVEL = !!on; return SEES_LEVEL; }
