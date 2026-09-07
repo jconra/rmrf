@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=117';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=118';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=119';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=122';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5958,7 +5958,11 @@ const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
 // Note what this says about the CURRENT code: 6u sits just under every chassis's turning radius, so
 // a nose-first hull cannot physically make the corner it just declared reached.
 const PURSUIT_LOOK = { lurcher: 3.0, firebrat: 5.5, valkyrie: 12.5, jotun: 7.7 };
-let OUTRANGED_CONTACT = QS.has('outranged');   // A/B: a rival that can shoot US counts as contact, even if we cannot reach it
+// DEFAULT ON (2026-09-07). The reach test used only OUR OWN gun, which silently assumes both hulls
+// carry the same one: a 42u Lurcher facing an 80u Jotun had a 38-unit band where it was being
+// shelled, could see the shooter, and the board was offered no decision at all — it could never
+// initiate, only respond after being hit. RR.setOutranged(false) to A/B.
+let OUTRANGED_CONTACT = true;
 let PURE_PURSUIT = QS.has('purepursuit');
 let PURSUIT_FREE = QS.has('pursuitfree');   // A/B: skip the clearance clamp (plain fixed-lookahead pursuit)
 // Aim point: `look` metres along the polyline from wherever the hull actually sits on it.

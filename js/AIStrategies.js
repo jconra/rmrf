@@ -213,14 +213,11 @@ class Siege extends Mission {
   // The hp and ammo tests that used to gate `sieging` are deliberately NOT here. A hurt or empty
   // unit is a question for the board, where `flee` and `rearm` are already scored and are already
   // the right answers. A movement routine has no business overruling them.
-  movement(cmd) {
-    const v = cmd && cmd.unit;
-    // A Firebrat's gun cannot hurt a structure, so it never stands and trades with one.
-    if (v && v.type === 'firebrat') return { mode: 'advance', target: 'goal' };
-    // A gun we are actually working: stand off and shell it.
-    if (v && v.threat) return { mode: 'suppress', target: 'threat' };
-    // Otherwise the objective itself is the thing to break.
-    return { mode: 'assault', target: 'goal' };
+  movement() {
+    // Two gears, declared as a preference rather than a branch: shell the gun in front of us if
+    // there IS one, otherwise break the objective. The brain drops the first entry when
+    // resolveTarget('threat') comes back empty, so this mission never has to see a threat.
+    return [{ mode: 'suppress', target: 'threat' }, { mode: 'assault', target: 'goal' }];
   }
   get key() { return 'siege'; }
   // CLOSER: once the enemy is ELIMINATED (out for good — no units, roster empty) there's
@@ -607,7 +604,11 @@ export function incumbentBonus(cmd) {
 // siege with nothing to fire. Counting rounds asks the question the term was always asking.
 let AMMO_COUNT = true;
 export function setAmmoCount(on) { AMMO_COUNT = !!on; return AMMO_COUNT; }
-let SEES_LEVEL = false;
+// DEFAULT ON (2026-09-07), and gated WITH setMsnMove rather than alone. On its own it measured as
+// noise, but that test was worthless: the `underAttack` rung was still present and still doing its
+// job. It is the replacement for that rung, so it only means anything once the rung is gone —
+// `engage` runs 97 with msnmove alone against control's 214, and 308 with this on.
+let SEES_LEVEL = true;
 export function setSeesLevel(on) { SEES_LEVEL = !!on; return SEES_LEVEL; }
 let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/shield (A/B knob)
 export function setSwapSupply(on) { SWAP_SUPPLY = !!on; return SWAP_SUPPLY; }
@@ -862,11 +863,16 @@ class Swap extends Mission {
 //   mode 'suppress' -> combat  : the same footwork, against a structure
 //   mode 'assault'  -> assault : stand and shell what is in front of us
 // target keys are resolveTarget's: 'goal', 'enemy', 'enemyOrLastSeen', 'threat', 'resupplyOrGoal'.
-Mission.prototype.movement = function () { return { mode: 'advance', target: 'goal' }; };
+// Returns a LIST in priority order, not a single choice. The brain walks it and takes the first
+// entry whose TARGET actually resolves, because the brain is the only layer that can see whether
+// there is a threat or an enemy — a mission holds `cmd`, which has no perception on it at all.
+// That was the bug in the first version: Siege branched on `cmd.unit.threat`, a VIEW field the
+// Vehicle does not carry, so it read undefined forever and `suppress` went 217 -> 0.
+Mission.prototype.movement = function () { return [{ mode: 'advance', target: 'goal' }]; };
 
 class Fight extends Mission {
   // A duel is combat footwork against the hull the guns are on. Was the `engaging` rung.
-  movement() { return { mode: 'engage', target: 'enemyOrLastSeen' }; }
+  movement() { return [{ mode: 'engage', target: 'enemyOrLastSeen' }]; }
   get key() { return 'fight'; }
   get garageOK() { return false; }            // decided in the field, mid-contact — never buy a hull for it
   wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }   // fight with what we brought
@@ -961,7 +967,7 @@ const FIGHT_LOST_MS = 8000; // …and they are OUT of it entirely once we have n
 
 class Flee extends Mission {
   // Leaving is just driving the escape route. Was the `fleeing` rung, which did exactly this.
-  movement() { return { mode: 'advance', target: 'goal' }; }
+  movement() { return [{ mode: 'advance', target: 'goal' }]; }
   get key() { return 'flee'; }
   get garageOK() { return false; }          // a decision taken in the field; never buy a chassis for it
   wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }
@@ -1005,9 +1011,17 @@ const SWAP_STALL = 10;   // s of ZERO progress toward home before a swap gives u
 const SWAP_MOVED = 22;
 
 class Supply extends Mission {
-  // A top-up is a drive to the depot. Was the `resupLatched` rung, whose own condition already
-  // said "the mission layer answers this now — this rung only executes".
-  movement() { return { mode: 'resupply', target: 'resupplyOrGoal' }; }
+  // NO OVERRIDE. A top-up is just a drive, and the base `advance -> goal` already is that.
+  //
+  // Two versions of this were wrong and both jammed the shield mission (8 occurrences -> 255/564):
+  // aiming at 'resupplyOrGoal' sent every top-up to the DEPOT when a ShieldUp wants the generator,
+  // and forcing mode 'resupply' was wrong even with the right target. `view.goal` is not simply
+  // the mission's objective — main.js overrides it for a committed shield run (see _shieldRun,
+  // main.js ~9782) — and the old `resupLatched` rung only produced `resupply` mode when the supply
+  // LATCH was set, which a shield run does not set. So control mostly drove these on `advance`,
+  // and declaring `resupply` here made the mission claim a mode it never actually had.
+  // The lesson generalises: a mission may declare what it wants to DO, but it must not assert
+  // facts about the world or about state it does not own.
   get what() { return 'fuel'; }
   get supplyWant() { return 'fuel'; }
   // Never buy a chassis for a top-up: these are things a unit ALREADY in the field decides to
@@ -2292,7 +2306,18 @@ class Doctrine {
     // rounds. Watched: a Lurcher shot in the back while topping up at a shield generator, not
     // reacting at all.
     const engaged = (cmd.fightOdds && cmd.fightOdds() != null) || underFire;
-    const unanswered = (engaged && this.step !== 'fight' && this.step !== 'flee')
+    // CAPTURE IS A COMMITMENT TOO (2026-09-07). This excluded fight and flee — the two plans already
+    // taken — but not capture, and `outranged` widens `engaged` enough to expose that: fightOdds
+    // now answers for a rival that can shoot US, so a flag run gets asked "fight or capture?" every
+    // second in a band where it was never asked before. Measured at 3360 then 960 paired seeds:
+    // 63 and then 21 `capture<->fight` strobe episodes, against ZERO in control — a runner
+    // abandoning its run and returning to it, repeatedly. Neither fix does this alone; they
+    // interact.
+    // Guarding the `sensed` trigger alone did nothing, because this is the trigger that fires.
+    // A carrier is not refusing to fight: shouldFlee still preempts above this, so the one thing
+    // that should break a run — this run is about to die — still breaks it.
+    const committedPlan = this.step === 'fight' || this.step === 'flee' || this.step === 'capture';
+    const unanswered = (engaged && !committedPlan)
       ? (underFire ? 'taking fire and we are neither fighting nor fleeing'
                    : 'a rival in reach and we are neither fighting nor fleeing') : null;
     // CAME INSIDE A GUN'S REACH (Jacob, 2026-09-02). Not a reflex and not an instruction — just an
@@ -2312,7 +2337,16 @@ class Doctrine {
     // the door, both outrank a tower that has merely started tracking us.
     // A RIVAL WE CAN SEE, while we are doing something else — see SEES_LEVEL above. Ranked with
     // the other contact triggers, below our own flag walking out the door.
-    const sensed = (SEES_LEVEL && v && v._seesEnemy && this.step !== 'fight' && this.step !== 'flee')
+    // A COMMITTED RUN IS NOT RE-OPENED BY A SIGHTING. Gated at 3360 paired seeds: this level
+    // trigger created 63 `capture<->fight` strobe episodes from ZERO in control — a runner being
+    // asked "fight or capture?" once a second and ping-ponging between them, which is the runner
+    // abandoning its run and returning to it over and over. (The same trigger HALVED
+    // `fight<->siege`, 42 -> 21, so the idea is right; it just must not interrupt a commitment.)
+    // `capture` joins fight and flee for the same reason they are here: all three are decisions
+    // already taken and committed to. Self-preservation still interrupts a runner — shouldFlee
+    // preempts above this — so the one thing that should break a run still can.
+    const committed = this.step === 'fight' || this.step === 'flee' || this.step === 'capture';
+    const sensed = (SEES_LEVEL && v && v._seesEnemy && !committed)
       ? 'a rival is in sight and we are neither fighting nor fleeing' : null;
     if (sees || fire || flag || unanswered || sensed) return sees || fire || flag || unanswered || sensed;
     if (gun) return gun;

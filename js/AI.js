@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=119';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=122';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -1000,7 +1000,13 @@ function maybeRecord(view, mem, reason, state, out) {
 // the Brain instance). Reproduces the original think() order of operations exactly,
 // including the order of rng() draws, so behavior is identical to the hand-written
 // version when run with DEFAULT_BRAIN.
-let MSN_MOVE = false;
+// DEFAULT ON (2026-09-07). Missions answer "how do I move"; the priority table below is now only
+// reachable via RR.setMsnMove(false), kept one release as an escape hatch before deletion.
+// Gated at 3360 paired seeds: outcome-neutral (48 rescued against 38 wrecked, z=0.97) while
+// unreachable-GOTO violations fell 14%, transit-stuck 15%, mission switches 1.8%, and the
+// `fight<->siege` strobe — two table rows trading places, the flapping watched live as a Lurcher
+// doing ten heading reversals in forty seconds — HALVED, 42 -> 21.
+let MSN_MOVE = true;
 export function setMsnMove(on) { MSN_MOVE = !!on; return MSN_MOVE; }
 export function runBrain(graph, view, mem) {
   const cfg = graph.config, p = mem.p, self = view.self;
@@ -1167,9 +1173,25 @@ export function runBrain(graph, view, mem) {
   // sensed (setSeesLevel) and when either hull can shoot. Without those, a unit under attack waits
   // for the next ordinary trigger instead of answering immediately.
   let rule = null;
-  if (MSN_MOVE && view.msnMove && graph.states[view.msnMove.mode]) {
-    rule = { when: 'mission:' + (view.msnKey || 'mission'), mode: view.msnMove.mode, target: view.msnMove.target };
-  } else {
+  if (MSN_MOVE && view.msnMove) {
+    // Walk the mission's preference list and take the first entry whose TARGET resolves. The
+    // resolution has to happen HERE because this is the only layer holding the view — that is the
+    // whole reason a mission returns a list of intents rather than deciding for itself.
+    const opts = Array.isArray(view.msnMove) ? view.msnMove : [view.msnMove];
+    for (const o of opts) {
+      if (!o || !graph.states[o.mode]) continue;
+      const t = resolveTarget(o.target, view, mem);
+      if (t && isFinite(t.x) && isFinite(t.z)) {
+        rule = { when: 'mission:' + (view.msnKey || 'mission'), mode: o.mode, target: o.target };
+        break;
+      }
+    }
+    // Nothing the mission asked for is available (no threat, no enemy, no goal yet). Drive at the
+    // objective — never fall back into the table, or the rungs are back in play through the side
+    // door and this stops being one decision-maker.
+    if (!rule) rule = { when: 'mission:fallback', mode: 'advance', target: 'goal' };
+  }
+  if (!rule) {
     rule = graph.transitions[graph.transitions.length - 1];
     for (const t of graph.transitions) {
       if (CONDITIONS[t.when](view, mem, p, cfg)) { rule = t; break; }
