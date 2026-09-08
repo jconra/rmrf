@@ -1141,10 +1141,9 @@ const TRAP_BUDGET = 120; // s a hunter tends its mine trap (bait/lure) before re
 // Chance a commander opens with a recon-and-mine sapper sortie, by persona (rolled once at start).
 // Not every match pays the opening tax — hunters/turtles favour it, warriors mostly just push.
 const SAP_CHANCE = { hunter: 0.7, turtle: 0.6, rogue: 0.4, warrior: 0.2 };
-// Odds a persona breaks off its field plan when its own base is being shelled (rolled once
-// per 25s raid window in tick()). Identity, not balance: the turtle is a homebody, the
-// rogue's whole doctrine is "their base falls before ours does" — it plays the race.
-const HOME_RESPONSE = { turtle: 1.0, warrior: 0.7, hunter: 0.55, rogue: 0.25 };
+// (HOME_RESPONSE, the per-persona dice table for the home-defence preempt, was deleted
+//  2026-09-08 along with the rung that rolled it. Whether a commander turns back is now the
+//  persona weights in HOME_W, priced against travel time — see homeDefenceScore.)
 // ---- SCORED HOME DEFENCE (?homescore) ----------------------------------------------------------
 // Replaces the dice roll above. The roll limits how OFTEN a unit turns back and says nothing about
 // whether the trip can accomplish anything — a 55% chance of a pointless two-minute drive is still a
@@ -2191,35 +2190,9 @@ class Doctrine {
       why = loose ? 'our flag is lying in the field — recover it before they re-grab' : 'our flag is on the move — run the thief down';
       fk = loose ? 'flag_loose' : 'flag_stolen';   // which doctrine rung justified the decision (ai-lab decision-path)
     }
-    // PRESERVATION (any persona): losing the attrition war → hold under tower cover instead
-    // of trading the last of the army out in the open — UNLESS we can win right now by
-    // grabbing an exposed flag. Sits above the persona's own plan so every archetype turtles
-    // up when it's getting wiped, then resumes its doctrine once it's back on even footing.
-    // HOME UNDER ATTACK (persona-weighted): enemy rounds are hitting our structures. The
-    // tower's radio call used to be consumed only by a commander ALREADY in defend, so any
-    // offense-minded persona simply never heard it: a Hunter idled at a stale mid-field goal
-    // for 141s while a lone valkyrie levelled its whole main base (census seeds 151/123 —
-    // 187s/234s zero-kill stomps). But an ALWAYS-enforced retreat would be its own exploit
-    // (poke a tower every few seconds and the enemy commander yo-yos home forever) and it
-    // outlaws the base RACE — a legitimate play. So it's a dice roll per raid window,
-    // weighted by who the commander IS: a turtle always turns back, a rogue almost never
-    // breaks off its own attack. And a commander whose assault is about to pay off (their
-    // towers down / keep cracked / flag grabbable) stays committed regardless of the dice —
-    // winning the race beats saving towers.
-    // ?homescore RETIRES THIS WHOLE RUNG. It is a preempt: it sets `next` BEFORE the trigger-driven
-    // re-score, so the commander never weighs travel time or the progress of the job it is already
-    // doing against turning back. Scoring it in `defend` is the same move that fixed pursue (#45) and
-    // the flag carrier — state the fact once, where facts are compared, instead of jumping the queue.
-    if (!HOME_SCORE && !next && cmd.homeAttack && cmd.homeAttack()
-        && !cmd.flagGrabbable() && !(cmd.fortDown && cmd.fortDown()) && !cmd.flagExposed()) {
-      const now = performance.now();
-      if (!cmd._homeRollAt || now - cmd._homeRollAt > 25000) {   // one decision per raid window, not per tick (mood can shift on the next window)
-        cmd._homeRollAt = now;
-        cmd._homeRollGo = this.rng() < (HOME_RESPONSE[cmd.archetype] ?? 0.6);
-        if (!cmd._homeRollGo && this.log) this.log(`They're shelling our base — let them! We finish THEIRS first.`);
-      }
-      if (cmd._homeRollGo) { next = 'defend'; why = 'our base is under fire — get back there and stop them'; fk = 'home_under_fire'; }
-    }
+    // DELETED 2026-09-08: the home-defence preempt. It set `next = 'defend'` before any scoring,
+    // on a dice roll, and only in tick() — never in garagePick(). Home defence is scored now
+    // (homeDefenceScore), so the fact competes on the board instead of jumping the queue.
     // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
     // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
     // without a firebrat to actually grab the exposed flag).
@@ -2318,7 +2291,8 @@ class Doctrine {
     // a safer road, and arriving still wins the match.
     // …unless flee is being SCORED, in which case preempting here would short-circuit the very
     // comparison the change exists to make (the board would never see fight and flee side by side).
-    if (!FLEE_SCORE && cmd.shouldFlee && cmd.shouldFlee()) return 'flee';
+    // (The flee preempt that lived here was deleted 2026-09-08: FLEE_SCORE has shipped on since
+    //  2026-08-18, so `!FLEE_SCORE && ...` had been unreachable for three weeks.)
     if (cmd.flag() && cmd.flag().carrier === cmd.unit) return null;
     if (cmd.ourFlagStolen()) return 'intercept';
     if (cmd.ourFlagLoose && cmd.ourFlagLoose()) return 'intercept';

@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=118';
+import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=119';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=124';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5940,66 +5940,16 @@ const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
 // Default ON: this closes a SILENT deadlock (no alarm, no stuck sample, no re-score), and a silent
 // failure that the harness cannot see is the worst kind to leave switched off.
 
-// ── PURE PURSUIT: follow the LINE, not the corners ───────────────────────────────────────────
-// The follower below consumes a waypoint within `c * 1.2` = 6u on a 5u grid, so a hull declares a
-// corner "reached" from more than a full cell away and immediately turns toward the next one. That
-// matters more than it sounds, because of what it throws away:
-//   A* guarantees clearance along the path. _smooth guarantees clearance along any shortcut it
-//   takes (hasRoom checks all eight neighbours of every cell on the line). The follower then drives
-//   NEITHER of those lines — it drives a rounded-off version that cuts up to 6u off every corner,
-//   and nothing validates that line at all.
-// So every clearance guarantee in the navigator is computed for a path the vehicle does not follow.
-//
-// Pure pursuit (Jacob's lerp idea) fixes the shape rather than the number: project the hull onto
-// the route to find where it actually is on the line, then aim at a point a lookahead distance
-// FURTHER ALONG that line. The aim point slides continuously instead of jumping node to node, so
-// the hull tracks the path. Corner cutting becomes bounded by the lookahead instead of unbounded.
-//
-// LOOKAHEAD IS PER-CHASSIS AND DERIVED, NOT GUESSED. Turning radius is speed/turn from the vehicle
-// table, and a lookahead SHORTER than the radius makes a nose-first hull orbit its own aim point:
-//   lurcher  14/2.2 = 6.4u   but omni — it translates sideways, so it has no turning circle at all
-//   firebrat 20/3.0 = 6.7u   strafes, so it needs less than the full radius
-//   valkyrie 22/2.0 = 11.0u  flies; its route is a straight line anyway
-//   jotun     8/1.2 = 6.7u   treads, nose-first, pays the full radius
-// Note what this says about the CURRENT code: 6u sits just under every chassis's turning radius, so
-// a nose-first hull cannot physically make the corner it just declared reached.
-const PURSUIT_LOOK = { lurcher: 3.0, firebrat: 5.5, valkyrie: 12.5, jotun: 7.7 };
+// (PURE PURSUIT was tried here and deleted 2026-09-08. Aiming a fixed distance along the route
+//  cuts corners by definition: measured as time spent outside the 2.7u corridor the navigator
+//  actually guarantees, it went 13.5% -> 19.3% unclamped and 15.8% clamped to the smoother's own
+//  clearance test. Both worse than the waypoint follower already here. The real defect that
+//  investigation found was elsewhere — see the off-path replan in navWaypoint.)
 // DEFAULT ON (2026-09-07). The reach test used only OUR OWN gun, which silently assumes both hulls
 // carry the same one: a 42u Lurcher facing an 80u Jotun had a 38-unit band where it was being
 // shelled, could see the shooter, and the board was offered no decision at all — it could never
 // initiate, only respond after being hit. RR.setOutranged(false) to A/B.
 let OUTRANGED_CONTACT = true;
-let PURE_PURSUIT = QS.has('purepursuit');
-let PURSUIT_FREE = QS.has('pursuitfree');   // A/B: skip the clearance clamp (plain fixed-lookahead pursuit)
-// Aim point: `look` metres along the polyline from wherever the hull actually sits on it.
-function pursuitPoint(v, path, idx, look) {
-  const px = v.holder.position.x, pz = v.holder.position.z;
-  // WHERE ARE WE ON THE LINE. Scan a short window from the current index rather than the whole
-  // route: a route that doubles back can pass near itself, and a global nearest-point search would
-  // teleport the aim point onto the wrong limb (the same failure the index walk below avoids).
-  let bestSeg = Math.max(0, Math.min(idx, path.length - 2)), bestT = 0, bestD2 = Infinity;
-  const from = bestSeg, to = Math.min(path.length - 1, from + 3);
-  for (let k = from; k < to; k++) {
-    const a = path[k], b = path[k + 1];
-    const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
-    const t = len2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (pz - a.z) * dz) / len2)) : 0;
-    const d2 = (px - (a.x + dx * t)) ** 2 + (pz - (a.z + dz * t)) ** 2;
-    if (d2 < bestD2) { bestD2 = d2; bestSeg = k; bestT = t; }
-  }
-  // …then walk forward that far along the remaining legs.
-  let rem = look, k = bestSeg, t = bestT;
-  while (k < path.length - 1) {
-    const a = path[k], b = path[k + 1];
-    const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-    const avail = segLen * (1 - t);
-    if (avail >= rem || segLen < 1e-6) {
-      const tt = Math.min(1, t + rem / Math.max(segLen, 1e-6));
-      return { x: a.x + (b.x - a.x) * tt, z: a.z + (b.z - a.z) * tt };
-    }
-    rem -= avail; k++; t = 0;
-  }
-  return path[path.length - 1];   // ran off the end of the route — aim at the destination itself
-}
 // How far the hull is from the route it is meant to be on. Scans a window around the current
 // waypoint rather than the whole polyline: a route that doubles back passes near itself, and a
 // global nearest-point search would report a small gap for a hull that is nowhere near the leg it
@@ -6021,12 +5971,6 @@ function pathGap(v, path, idx) {
 }
 const NAV_OFF_PATH = 15;        // u — three cells off our own route means we are not on it
 const NAV_OFF_COOL = 1.0;       // s between displacement replans, so a wedged hull cannot search every frame
-// DEFAULT ON (2026-09-06). Gated over 720 paired seeds: outcome-neutral (6 seeds rescued against
-// 11 wrecked — a coin flip at 17 disagreements) but consistently better on the metric it targets,
-// SCUTTLED 52 -> 39 across all three sets, for +6% searches. The defect is not arguable: a hull
-// holding a 14-unit stub planned 144 units away, beelining cross-country with none of the
-// clearance A* and the smoother spent their effort guaranteeing.
-let CAP_REACH = true;   // A/B: flag reachability measured FOB->flag as a Firebrat (RR.setCapReach)
 let OFF_PATH_REPLAN = true;     // RR.setOffPathReplan(false) restores the goal-only triggers
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
@@ -6147,25 +6091,6 @@ function navWaypoint(nav, v, dest, dt) {
       return null;
     }
   } else if (nav.retryN) { nav.retryN = 0; }   // got somewhere real — the escalation resets
-  // AIM ALONG THE LINE, not at the corner. nav.idx still advances exactly as before, so every
-  // downstream reader of it is untouched; only the point we STEER AT changes.
-  if (PURE_PURSUIT && nav.path.length > 1) {
-    const look = PURSUIT_LOOK[v.type] || 6;
-    // CONSTRAINED. Plain pursuit aims a FIXED distance ahead, which cuts corners by design — and
-    // measured, that traded a tighter line on straights for MORE time outside the corridor
-    // (7.6% -> 12.1% off seed 11): better where it never mattered, worse exactly where it did.
-    // So the aim point has to earn its distance. Pull it back until the straight line from the
-    // hull to it passes the same clearance test the smoother uses to approve a shortcut. Then
-    // aiming ahead can never cut a corner the navigator would have refused.
-    if (!PURSUIT_FREE) {
-      for (let L = look; L > 0.9; L *= 0.6) {
-        const aim = pursuitPoint(v, nav.path, nav.idx, L);
-        if (hullHasRoom(v, v.holder.position, aim)) return aim;
-      }
-      return nav.path[nav.idx];   // nothing clear ahead — fall back to the waypoint itself
-    }
-    return pursuitPoint(v, nav.path, nav.idx, look);
-  }
   return nav.path[nav.idx];
 }
 // Steer a vehicle toward a world point — now a thin wrapper over the ONE locomotion
@@ -7638,13 +7563,6 @@ class AICommander {
   flagExposed() {
     const f = this.flag();
     if (!(f && f.revealed) || !f.home) return false;
-    if (!CAP_REACH) {   // A/B control arm: the old "measure from whatever is fielded" behaviour
-      const v0 = this.unit;
-      if (!v0 || v0.dead) return true;
-      const F0 = reachFrom(v0);
-      const k0 = navIdx(Math.round(f.home.x / grid.cell), Math.round(f.home.z / grid.cell));
-      return k0 >= 0 && !!F0[k0];
-    }
     // A representative RUNNER standing on the pad. Held on the commander rather than rebuilt per
     // call, so reachFrom's flood memo (keyed on the start cell) keeps hitting instead of flooding
     // the grid every time the board is scored.
@@ -13051,7 +12969,7 @@ window.RR = {
   // TONIGHT'S BATCH (2026-09-05). Four knobs, all live on a loaded page so the tournament KNOB
   // argument can set them without a rebuild.
   setOutranged: on => { OUTRANGED_CONTACT = !!on; return OUTRANGED_CONTACT; },   // A/B: offer the fight-or-flight decision when EITHER hull can shoot
-  abFlags: () => ({ ...abFlags(), MSN_MOVE: undefined, CAP_REACH, OFF_PATH_REPLAN, OUTRANGED_CONTACT, PURE_PURSUIT }),   // READ-ONLY — the setters all write on read
+  abFlags: () => ({ ...abFlags(), MSN_MOVE: undefined, OFF_PATH_REPLAN, OUTRANGED_CONTACT }),   // READ-ONLY — the setters all write on read
   setDefendW: w => setDefendW(w),   // defend's shape: {on, near, lurcher, firebrat}
   setAmmoCount: on => setAmmoCount(on),   // A/B: 'nothing to shoot with' counts rounds instead of magazine fraction
   setSeesLevel: on => setSeesLevel(on),   // A/B: re-score every second while a rival is SENSED, not just on the edge
@@ -13219,11 +13137,7 @@ window.RR = {
     return out;
   },
   setMsnMove: on => setMsnMove(on),   // A/B: missions own their own movement; bypasses the AI.js priority table
-  setCapReach: on => { CAP_REACH = !!on; return CAP_REACH; },   // A/B: false restores reachability-from-the-fielded-hull
   setOffPathReplan: on => { OFF_PATH_REPLAN = !!on; return OFF_PATH_REPLAN; },   // A/B: replan when the HULL is off its route, not only when the goal moves
-  setPurePursuit: on => { PURE_PURSUIT = !!on; return PURE_PURSUIT; },   // A/B: follow the route line (pure pursuit) instead of capturing waypoints at 6u
-  pursuitLook: () => ({ ...PURSUIT_LOOK }),
-  setPursuitFree: on => { PURSUIT_FREE = !!on; return PURSUIT_FREE; },   // A/B: unclamped pursuit (cuts corners by design)
   setNavHScale: (h) => { NAV_HSCALE = Math.max(0.1, +h || 1); return NAV_HSCALE; },      // A* greediness; 1.0 reverts to admissible
   setNavBudget: (ms) => { NAV_FRAME_BUDGET_MS = Math.max(0, +ms || 0); return NAV_FRAME_BUDGET_MS; },  // per-AI-pass A* ms budget; 1e9 = effectively off
   navNodes: () => _astarFrameNodes,

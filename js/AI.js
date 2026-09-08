@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=124';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=125';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -877,8 +877,8 @@ export const DEFAULT_BRAIN = {
     dodgeClear: 0.6,     // seconds the path must stay clear before forgetting which way we were going round
     dodgeFlip: 3.0,      // seconds stuck circling one way before flipping to the other (escape a trap)
     breakPatience: 2.4,  // max seconds a PATIENT brain skirts a destructible before it gives up and shoots it (triggerHappy scales this down toward 0)
-    exitAlign: 0.30,     // |heading error| under which the exit state drives straight
-    exitTurnGain: 2.2,   // steer gain while lining up on the gate
+    // (exitAlign / exitTurnGain were deleted 2026-09-08 with BEHAVIORS.exit, the FOB-gate
+    //  steering routine that no state had referenced since the mustGo rung was removed.)
     bailBase: 0.30,      // hp pull-out threshold = bailBase - aggression*bailAggr. 0.45 sent a
                          // 90-hull Firebrat home after one or two tower hits: 115/120 -> 118/120,
                          // nav alarms 71 -> 33, swap loops 201 -> 152. Still one number for four
