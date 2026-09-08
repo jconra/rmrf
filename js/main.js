@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -938,7 +938,6 @@ let aiScrapTightArrive = true;   // salvage-detouring units close to within the 
 // — it went -15 / +2 / -6 over three sets, net -19 on 720 seeds. The +2 was the same seed territory
 // BIG3v3 measured, which is precisely why one set was never enough.
 // Still opt-in via ?flat&?reqveh; it is not disproven, it just has not earned a default.
-let aiReqVehicle = QS.has('reqveh');     // MissionScore prices whether the fleet can actually CREW each plan (A/B knob — see requiredVehicle)
 // SHIPPED DEFAULT 2026-08-18 (?nofleescore reverts). Flee was a hard PREEMPT — it returned from
 // _urgent() before the scorer ran, so `fight` was never compared against it. Watched live: a lurcher
 // broke off at t82s and drove past an enemy sitting at 17% hp, because nothing asked the question.
@@ -5833,7 +5832,6 @@ const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retrie
 // …and how long a FLAG CARRIER honours one. It is holding the win condition in the enemy's base,
 // so the cost of one more A* is nothing against the cost of standing still.
 const REACHCAP_CARRY_TTL = 1;
-setReqVehicle(aiReqVehicle);        // ditto for the can-we-crew-it term (module flag, same pattern)
 // MEASURED 2026-08-10, three independent 240-seed sets each. See
 // VERDICT_2026-08-10_overnight_summary.txt.
 // SHIPPED: resolution 237 -> 237 exactly, every stuck column within 7 samples, against a baseline
@@ -5873,9 +5871,9 @@ setSwapYield(QS.has('swapyield'));
 // frozen at the moment the trip began. That is also why trigfix measured as nothing on its own —
 // it was shelved with a note saying it would matter once something raised its exposure. This is it.
 // Opt-in again as of 2026-08-17 — see the note on aiReqVehicle for the three-set evidence.
-const FLAT_ON = QS.has('flat');
-setFlatMissions(FLAT_ON);
-if (FLAT_ON) setTrigFix(true);
+// (?flat / FLAT_MISSIONS deleted 2026-09-08. Tried as the default and reverted 2026-08-17, net
+//  -19 on 720 seeds. Its three terminal guards are now unconditional, except swap's, which
+//  SWAP_YIELD still opens.)
 // FIXES FOR THE ABANDONED-TRIP PROBLEM the flattening exposed. These only do anything while the
 // terminal guards are OPEN — a swap that cannot be interrupted cannot be stolen — which is now the
 // default, so they are live rather than gated behind ?flat as they were when first written.
@@ -13242,8 +13240,6 @@ window.RR = {
     return Object.keys(AIM_DIFFICULTY).find(k => AIM_DIFFICULTY[k] === aimDiff); },
   getDifficulty: () => Object.keys(AIM_DIFFICULTY).find(k => AIM_DIFFICULTY[k] === aimDiff),
   setFleeScore: on => { aiFleeScore = !!on; setFleeScore(aiFleeScore); return aiFleeScore; },   // flee scored rather than preempting (A/B)
-  setReqVehicle: on => { aiReqVehicle = !!on; setReqVehicle(aiReqVehicle); return aiReqVehicle; },   // price whether the fleet can crew each plan (A/B)
-  crewFor: key => commanders.map(c => ({ team: c.team, key, ...requiredVehicle(c, key) })),          // what would roll out for `key`, and what it costs — probe/ai-lab readout
   primaryKey: () => commanders.map(c => ({ team: c.team, step: c.strategy && c.strategy.step, msnKey: c._msnKey, primary: c._primaryKey })),   // attribution readout for probes/ai-lab
   smoothStats: () => ({ cut: smoothCut, kept: smoothKept }),               // waypoints the smoothing pass removed vs kept
   setDeepLog: on => { aiDeepLog = !!on; setDeepLogStrategies(!!on); return aiDeepLog; },   // raw console.log tracing at the silent-fallback decision points

@@ -1184,7 +1184,7 @@ export function setHomeScore(on) { HOME_SCORE = !!on; return HOME_SCORE; }
 // in one night (a "both arms identical" that was really "both arms off"). Reading must not write.
 export function abFlags() {
   return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY, INCUMB_DIR, HQ_FINISHER,
-           REQ_VEHICLE, TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, FLAT_MISSIONS, DEFEND_SHAPE };
+           TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, DEFEND_SHAPE };
 }
 // Nominal chassis speeds, mirroring the vehicle table in Vehicles.js. Needed here only to price a
 // trip for a hull that does not exist yet — the garage asking "if I build this, can it get back in
@@ -1401,86 +1401,12 @@ const MSN_CANDS = (cmd) => {
   return c;
 };
 
-// ---- requiredVehicle — CAN WE ACTUALLY CREW THIS PLAN? --------------------------------------
-// MissionScore priced everything about a mission except whether the fleet can execute it, so an
-// impossible plan could outrank the plan that would MAKE it possible: seed 3362 ran `capture` for
-// 885s with no Firebrat alive or buildable, beating the siege that would have cleared the tower
-// eating its runners. The same blind spot let a Firebrat be re-tasked onto a siege and killed.
-//
-// ONE VALUE carries both meanings (Jacob's call, and he was right — if a mission is impossible the
-// graded part is irrelevant, and if it is possible the binary part is zero, so they never need to
-// compose differently). The magnitude says which: 0 ideal, small negative workable, -50 impossible.
-//
-// Deliberately asks missionWants() for the ideal rather than carrying its own mission×chassis
-// table: wantVehicle is already persona-aware (a Warrior sieges with a Jotun, a Rogue with a
-// Valkyrie) and board-aware (enemy eliminated → Jotun, gambit → Valkyrie), and a parallel table
-// would drift out of sync with it within a month.
-const FIGHTERS = new Set(['jotun', 'lurcher', 'valkyrie']);   // interchangeable; the runner stands alone
-const NO_SUBSTITUTE = new Set(['capture', 'sap']);            // only a Firebrat carries a flag / lays mines
-// URGENCY BEATS FIT (Jacob): "anything can and should intercept — you use what you have because
-// you don't have the time." A thief is leaving with our flag; charging the wrong chassis a
-// penalty here would price a delay we cannot afford as if it were free.
-const URGENT_FIT = new Set(['intercept']);
-const REQV_IMPOSSIBLE = -50;   // the fleet cannot do this job at all
-const REQV_SAME_ROLE = -2;     // a stand-in from the same role pool
-const REQV_CROSS_ROLE = -6;    // a runner sent to fight, or a fighter sent to run
-const REQV_RECALL_MAX = -3;    // …at the objective; 0 at the pad (mirrors INCUMBENT_MAX)
-
-export function requiredVehicle(cmd, key) {
-  const have = (cmd.unit && !cmd.unit.dead) ? cmd.unit.type : null;
-  const ideal = missionWants(key, cmd);
-  if (!ideal) return { score: 0, chassis: have };              // the mission does not care what it drives
-  const base = key.split('-')[0];
-
-  // WHAT WOULD ACTUALLY ROLL OUT. Ask _pickAvailableType — the same ladder deploy() walks,
-  // including "save the last of a type" — so the scorer and the swapper cannot give different
-  // answers. Guessing separately is the bug behind a firing spot solved for a Jotun's 80u gun and
-  // handed to the Lurcher that replaced it.
-  let chassis = have, recall = false;
-  if (have !== ideal) {
-    const pick = (cmd._pickAvailableType && cmd._pickAvailableType(ideal)) || null;
-    // THE BANK IS PART OF THE FLEET. _pickAvailableType only reads what is parked; a commander
-    // holding the scrap to build the right chassis is not short of it, it just has not spent yet.
-    const buyable = (!cmd.roster || (cmd.roster[ideal] || 0) === 0)
-      && cmd.canAfford && cmd.canAfford(ideal);
-    // ORDER MATTERS, and getting it wrong inverts the whole term. With an empty Firebrat roster
-    // _pickAvailableType('firebrat') does NOT return null — its last resort is "whatever we have
-    // most of", so it hands back a Lurcher. Taking that answer first would score a capture as
-    // IMPOSSIBLE for a commander sitting on the scrap to build a runner.
-    if (pick === ideal) chassis = ideal;                            // the ladder already gives us the right one
-    else if (!NO_SUBSTITUTE.has(base) && pick) chassis = pick;      // a stand-in is acceptable for this job
-    else if (buyable) chassis = ideal;                              // no stand-in will do — buy the real thing
-    else chassis = pick || have;                                    // stuck with whatever we can field
-    recall = !!chassis && chassis !== have;
-  }
-
-  // Tier A — no substitute exists and none can be bought. A genuine binary, the same kind the
-  // board already carries ("flag sealed" -10, "only way we win" +10), so the house rule allows it.
-  if (chassis !== ideal && NO_SUBSTITUTE.has(base)) return { score: REQV_IMPOSSIBLE, chassis: null };
-
-  let score = 0;
-  // Tier B — how well can we crew it. The IDEAL scores 0, which is what makes this change
-  // one-sided: a mission crewed correctly scores exactly what it scored before, so nothing on the
-  // existing board needs rebalancing and only mismatches move.
-  if (chassis !== ideal && !URGENT_FIT.has(base)) {
-    const sameRole = FIGHTERS.has(chassis) === FIGHTERS.has(ideal);
-    score += sameRole ? REQV_SAME_ROLE : REQV_CROSS_ROLE;
-  }
-  // Tier C — the trip. Only when the hull must change, and it must VANISH at the pad: that is what
-  // makes the arrival re-score settle instead of recalling again. When the unit gets home the cost
-  // is gone and the new chassis is in the roster, so the mission that sent it improves by exactly
-  // what the trip cost — which is the whole reason this cannot become a recall treadmill.
-  if (recall) score += REQV_RECALL_MAX * travelFraction(cmd);
-
-  return { score: Math.round(score * 10) / 10, chassis };
-}
+// (requiredVehicle was deleted 2026-09-08 with REQ_VEHICLE, its only caller.)
 
 // A/B for the last-runner term, set from main.js so both halves of the change — this and the
 // substitution guard in deploy — toggle together. Module flag rather than a window.RR lookup:
 // missionScore runs for all 13 candidates every decision, and the persona
 // pattern right here is the house way to pass a knob across this boundary.
-let REQ_VEHICLE = false;   // A/B knob (?reqveh) — score whether the fleet can crew each plan (default tried and reverted 2026-08-17)
-export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 // ONE RUNNING PLAN, ONE NAME (?msnkeyfix). _msnKey is written only by _applyKey, but three forced
 // transitions switch by bare literal and never touch it, so it goes on naming the mission the unit
 // ABANDONED. That is not only the ai-lab lighting two cards: incumbentBonus() reads _msnKey
@@ -1491,7 +1417,7 @@ export function setReqVehicle(on) { REQ_VEHICLE = !!on; return REQ_VEHICLE; }
 // flee/swap/fight return before reaching it at all. For the whole duration of a flee, a swap or a
 // duel, every edge memory is frozen at whatever the board looked like when the unit last decided.
 // This refreshes the memories every tick; the DECISION stays exactly where it was.
-let TRIG_FIX = false;   // rides with FLAT_MISSIONS (?flat turns both on); useless on its own
+let TRIG_FIX = false;   // ?trigfix — see the note in main.js: measured as nothing alone, and SCORE_CLOCK alone is worse
 export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
 // …and the same freeze on the re-score clock (?scoreclock). _scoreT accumulates only inside that
 // same block, so time spent in a duel does not count toward "it has been a while, look again".
@@ -1523,8 +1449,6 @@ export function setStatueFix(on) { STATUE_FIX = !!on; return STATUE_FIX; }
 //
 // Completion is untouched — arriving home, finishing a swap at the pad, and winning a duel all
 // still end their mission exactly as before, and Fight keeps its one self-preservation exit.
-let FLAT_MISSIONS = false;  // A/B knob (?flat) — default tried and reverted 2026-08-17, net -19 on 720 seeds
-export function setFlatMissions(on) { FLAT_MISSIONS = !!on; return FLAT_MISSIONS; }
 export function setSwapYield(on) { SWAP_YIELD = !!on; return SWAP_YIELD; }
 
 // Score one mission → { total, terms:[[label,val],…] } (terms drive the troubleshooting log).
@@ -1962,19 +1886,14 @@ export function missionScore(cmd, key, running = null) {
   // Lurcher at an open enemy flag until the clock ran out (seed 116). Price it out of contention
   // instead — this mission cannot produce a win no matter how good the board looks. The fielded
   // unit counts too: a Firebrat already on the field can finish the job with an empty roster.
-  // SUPERSEDED BY requiredVehicle when that is on: this is the same statement ("we cannot crew
-  // this plan") for one mission and one chassis, and requiredVehicle makes it for all of them.
-  // Leaving both would stack -14 and -50 on the same fact.
-  if (!REQ_VEHICLE && base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')
+  if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')
       && !(cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat')) add('nothing can carry the flag', -14);
   // CAN THE FLEET ACTUALLY CREW THIS PLAN — and what would roll out if it did. One value: 0 for
   // the ideal chassis (so a correctly-crewed mission scores exactly what it always did), a small
   // negative for a stand-in plus the trip home, -50 for a job nothing we own or can buy can do.
-  if (REQ_VEHICLE) {
-    const rv = requiredVehicle(cmd, key);
-    if (rv.score) add(rv.chassis ? `crew: ${rv.chassis}` : 'nothing can crew this', rv.score);
-    (cmd._msnChassis || (cmd._msnChassis = {}))[key] = rv.chassis;   // the swapper reads this — one answer, not two
-  }
+  // (The REQ_VEHICLE / requiredVehicle crew-pricing term was deleted 2026-09-08. Tried as the
+  //  default and reverted 2026-08-17; it superseded the `nothing can carry the flag` term above,
+  //  which is the one that shipped.)
   // THE LAST RUNNER IS A ONE-SHOT BET — the mirror of spareFB above. That term pays for having
   // SPARE runners, so holding exactly one produced no signal either way, and the fleet-comp term
   // is bonus-only (`if (b > 0)`) so being down to a last runner never discouraged capture at all:
@@ -2098,7 +2017,7 @@ class Doctrine {
         this._switch(this._applyKey(cmd, missionPick(cmd, null)) || 'attack', cmd, 'made it home — picking up the next job');
         return;
       }
-      if (!FLAT_MISSIONS) return;
+      return;   // terminal: once we are leaving, we are leaving
     }
     // SWAP is terminal for the same reason Flee is: it is a trip, and a trip half-taken is worse
     // than either end of it. Home → hand the chassis change to the commander (it owns despawn and
@@ -2134,7 +2053,7 @@ class Doctrine {
       // from the commander being asked too often. The fix for thrash is a steady signal, never a
       // deaf commander: MissionScore is free to pick anything and is expected to pick sensibly.
       // If it thrashes, that is a bug in the scoring, and it wants finding rather than muffling.
-      if (!SWAP_YIELD && !FLAT_MISSIONS) return;
+      if (!SWAP_YIELD) return;
     }
     // A FIGHT IS A COMMITMENT TOO — and until this guard existed it was not one. Fight had no
     // terminal clause, so its done() was dead code and the duel survived only while it kept
@@ -2162,7 +2081,7 @@ class Doctrine {
           'contact dealt with — back to the job');
         return;
       }
-      if (!FLAT_MISSIONS) return;
+      return;   // terminal: a duel is a commitment
     }
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
