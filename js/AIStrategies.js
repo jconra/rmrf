@@ -226,15 +226,15 @@ class Siege extends Mission {
   // long-range chip fire (which the audit showed barely dents a structure, so a decided
   // match just stalled with a lone flyer idling at the wall). _pickAvailableType falls
   // back (jotun → lurcher → valkyrie) if we're out of railguns.
-  // HQ FINISHER: turrets are down but the walled HQ still stands. A GROUND unit (a Warrior's
-  // Jotun) can't hit the keep through the surrounding walls — it clears every turret and then
-  // stalls at 85 dmg on a 600hp HQ (measured). Only a FLYER lifts over the walls for a clean
-  // shot, so once the fort is down we field a Valkyrie to actually crack it (data: the HQ only
-  // ever dies with sustained Valkyrie presence). Toggle via RR.setHqFinisher for A/B.
+  // (HQ FINISHER deleted 2026-09-08. It fielded a Valkyrie once the fort was down, because a
+  //  ground unit "stalls at 85 dmg on a 600hp HQ" through the surrounding walls. True when it was
+  //  written on 2026-07-03; superseded on 2026-08-06 by losBlocker, which finds the wall in the
+  //  way so demolishTarget shoots THAT — every gun can break a wall, so no chassis is special
+  //  here. Gated at 960 paired seeds: 0 discordant pairs, every counter identical.
+  //  The Valkyrie's real speciality is the REAR siege, which is untouched.)
   wantVehicle(cmd) {
     if (cmd.enemyEliminated()) return 'jotun';                                  // unopposed → railgun closes in + demolishes fast
     if (cmd._gambit && !cmd.flagExposed()) return 'valkyrie';                   // stalemate gambit → send the flyer around the back
-    if (HQ_FINISHER && cmd.fortDown() && !cmd.flagExposed()) return 'valkyrie';  // turrets down, HQ walled → send the flyer
     return this.doc.role(this.key);
   }
   // ROGUE SIEGE (from behind): a Rogue's Valkyrie doesn't slug it out at the front — it curls AROUND
@@ -1185,7 +1185,7 @@ export function setHomeScore(on) { HOME_SCORE = !!on; return HOME_SCORE; }
 // out what a flag IS sets it to false — which has silently invalidated three separate measurements
 // in one night (a "both arms identical" that was really "both arms off"). Reading must not write.
 export function abFlags() {
-  return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY, HQ_FINISHER,
+  return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY,
            TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, DEFEND_SHAPE };
 }
 // Nominal chassis speeds, mirroring the vehicle table in Vehicles.js. Needed here only to price a
@@ -1282,8 +1282,6 @@ export function setRunnerMode(m) { RUNNER_MODE = m; }
 // Valkyrie can't out-DPS the 600hp HQ before dying, so it's resolution-neutral and just adds
 // recall churn — it needs pairing with a balance change (lower HQ hp / higher structure DPS).
 // A/B via RR.setHqFinisher.
-let HQ_FINISHER = false;
-export function setHqFinisher(v) { HQ_FINISHER = !!v; return HQ_FINISHER; }
 
 // Rogue rear-siege — Valkyrie flanks to the back of the enemy base to shell the HQ from behind,
 // staying out of the defender's reach (walls block a chasing ground unit; the flyer lifts over).

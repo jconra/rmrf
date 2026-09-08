@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1551,12 +1551,11 @@ const SHOT_REACH = { lurcher: 42, firebrat: 40, valkyrie: 80, jotun: 80 };
 // actually shooting at us outranks it for as long as that is true. The old rule was a queue with
 // the keep as a fallback — it could only ever be reached by running out of towers, which is how a
 // Lurcher spent 650s grinding two turrets while an untouched 600hp HQ decided the match.
-const PRIO = {
-  hq: 10,        // the win condition: crack it and the flag is exposed
-  tower: 6,      // dangerous, but only worth it when it is the thing hurting us
-  wall: 2,       // low on its own — rises when it stands between us and something better
-  inReach: 5,    // …and a gun we can shoot FROM HERE also outranks it (6+5 > 10) — see below
-};
+// (PRIO deleted 2026-09-08. It read {hq:10, tower:6, wall:2, inReach:5} with wall documented as
+//  "rises when it stands between us and something better" — and nothing ever read it; all three
+//  references were comments. The rule it describes IS what the code does, by other means: the
+//  keep is promoted to the siege target once the towers are down, and losBlocker finds the wall
+//  on the line so demolishTarget shoots it.)
 // WHY "IN REACH" AND NOT JUST "SHOOTING AT US" (Jacob: "shouldn't the keep have higher priority
 // unless the tower is in range?"). The keep is the win condition so it stays the default pick —
 // but a tower only outranked it while actively firing, which meant a quiet tower scored 6 against
@@ -13431,7 +13430,6 @@ window.RR = {
   setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
-  setHqFinisher: (v) => setHqFinisher(v),   // A/B: field a Valkyrie to crack the HQ once the fort is down
   get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
   setFlagGrab: (n) => { FLAG_GRAB_TURRETS = Math.max(0, n | 0); return FLAG_GRAB_TURRETS; },   // max turrets standing for a grab
   setRoadSpeed: (m) => { ROAD_SPEED_MUL = m; return ROAD_SPEED_MUL; },   // tune the on-road speed boost (1 = off)
