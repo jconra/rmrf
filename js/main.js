@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5861,7 +5861,7 @@ setScoreClock(QS.has('scoreclock'));
 // anti-wedge jolts from a chassis-blind stillEps. Both are known bugs with tasks against them.
 // Re-gate this once those are fixed, not before — the design intent (a trip is not a blindfold)
 // stands on its own.
-setSwapYield(QS.has('swapyield'));
+setSwapYield(!QS.has('noswapyield'));   // SHIPPED — the param disables
 // FLATTEN THE MISSION SPACE (?flat). Opens all three terminal guards at once — flee, swap and
 // fight stop switching the commander off for their duration and become ordinary missions that
 // MissionScore can replace. Commitment survives as `incumbentBonus` + dwell, which is where it
@@ -5879,7 +5879,6 @@ setSwapYield(QS.has('swapyield'));
 // default, so they are live rather than gated behind ?flat as they were when first written.
 // swapsupply stays OFF and is not a candidate: measured twice AFTER the dominant abandonment bug
 // was fixed (so its mechanism was reachable) at +31% and +21% abandoned swaps. It is not masked.
-setIncumbDir(QS.has('incumbdir'));    // an inbound trip is best defended when it is nearly done
 setSwapSupply(QS.has('swapsupply'));
 setSwapCommit(!QS.has('noswapcommit'));
 setCapCarry(!QS.has('nocapcarry'));   // a carrier scores capture with flee's +6 — see the capture case

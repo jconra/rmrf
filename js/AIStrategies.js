@@ -566,7 +566,11 @@ export function travelFraction(cmd) {
 // Measured under ?flat: 26 swaps lost to the home-defence recall and ~30 more to rearm/repair —
 // missions that interrupted a trip home in order to go home.
 // For these, invested fraction is 1 - travelFraction. Same weight, correct in both directions.
-const INCUMBENT_INBOUND = { swap: 1, flee: 1 };
+// (INCUMBENT_INBOUND and INCUMB_DIR deleted 2026-09-08. The flip only applied while the running
+//  mission was swap or flee, and incumbentBonus is reached only from missionPick — which those
+//  missions' terminal guards skipped, so it was unreachable. Opening the swap guard (SWAP_YIELD)
+//  made it reachable and it STILL did nothing: 960 paired seeds, swap loops -111 with it against
+//  -112 without. That is the verdict it never had in four weeks of being parked.)
 export function incumbentBonus(cmd) {
   const key = (cmd._msnKey || '').split('-')[0];
   if (INCUMBENT_FLAT[key]) return INCUMBENT_BASE;
@@ -587,7 +591,7 @@ export function incumbentBonus(cmd) {
   // one — which is why a third of swaps are abandoned once ?flat removes it. See task #33.
   // The direction below is still correct and stays; it starts mattering the moment swap is scored.
   const running = (cmd.strategy && cmd.strategy.step) || '';
-  if (INCUMB_DIR && INCUMBENT_INBOUND[running]) f = 1 - f;
+  // (INCUMB_DIR deleted 2026-09-08 — see below.)
   return Math.round((INCUMBENT_BASE + (INCUMBENT_MAX - INCUMBENT_BASE) * f) * 10) / 10;
 }
 // SENSING IS A LEVEL, NOT AN EDGE (Jacob, 2026-09-05: "when an enemy is in sensing range then the
@@ -622,8 +626,6 @@ let SEES_LEVEL = true;
 export function setSeesLevel(on) { SEES_LEVEL = !!on; return SEES_LEVEL; }
 let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/shield (A/B knob)
 export function setSwapSupply(on) { SWAP_SUPPLY = !!on; return SWAP_SUPPLY; }
-let INCUMB_DIR = false;   // incumbency counts an inbound trip's progress correctly (A/B knob)
-export function setIncumbDir(on) { INCUMB_DIR = !!on; return INCUMB_DIR; }
 export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
@@ -1183,7 +1185,7 @@ export function setHomeScore(on) { HOME_SCORE = !!on; return HOME_SCORE; }
 // out what a flag IS sets it to false — which has silently invalidated three separate measurements
 // in one night (a "both arms identical" that was really "both arms off"). Reading must not write.
 export function abFlags() {
-  return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY, INCUMB_DIR, HQ_FINISHER,
+  return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY, HQ_FINISHER,
            TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, DEFEND_SHAPE };
 }
 // Nominal chassis speeds, mirroring the vehicle table in Vehicles.js. Needed here only to price a
@@ -1423,7 +1425,13 @@ export function setTrigFix(on) { TRIG_FIX = !!on; return TRIG_FIX; }
 // same block, so time spent in a duel does not count toward "it has been a while, look again".
 let SCORE_CLOCK = false;
 export function setScoreClock(on) { SCORE_CLOCK = !!on; return SCORE_CLOCK; }
-let SWAP_YIELD = false;   // a swap still in progress no longer blocks the re-score (A/B knob)
+// DEFAULT ON (2026-09-08). A swap in progress no longer returns terminally, so the commander is
+// asked again during the trip instead of being deaf for its whole duration — and `swap` is 13% of
+// all unit time, so that was a large blind window.
+// Gated at 960 paired seeds twice, on DISJOINT seed sets: swap loops -120 (seeds 1.9M) and -112
+// (seeds 2.1M), roughly 2.1 sigma each and agreeing. Outcomes identical (952 resolved, 8
+// stalemates), good swaps +5, scuttles -2. Cost: unreachable-GOTO violations +2.7%.
+let SWAP_YIELD = true;
 // A trip in progress is not re-validated against an errand (?noswapcommit reverts). Default ON:
 // it wires up missionGarageOK, which the file already defined for this exact purpose.
 let SWAP_COMMIT = true;
