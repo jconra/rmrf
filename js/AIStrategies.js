@@ -2012,6 +2012,10 @@ class Doctrine {
       if (this.mission.done(cmd)) {
         const then = this._swapThen || 'attack';
         this._swapThen = null;
+        // Hand the JOB to the commander before it is cleared — completeSwap counts the swap-loop
+        // alarm and by then _swapThen is gone, so every wasted trip was being filed under "swap"
+        // instead of under the mission that ordered it.
+        cmd._swapLoopThen = then;
         cmd.completeSwap(this.mission.want, this.mission.ditched);
         // No missionPick here — the follow-up job was decided when the swap was ordered — but it
         // IS the moment a new plan starts running, so the panel has to say so rather than keep

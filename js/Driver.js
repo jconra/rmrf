@@ -323,6 +323,13 @@ export class Driver {
     if (short > Math.max(UNREACH_SLACK, o.arrive || 0)) {
       o.violated = true; this.violations++; Driver.violationsTotal++;
       Driver.violationsBy[o.by || '?'] = (Driver.violationsBy[o.by || '?'] || 0) + 1;   // WHO orders the impossible (Slice-2 targeting data)
+      // WAS THIS CONVICTION EARNED? budgetHit false normally means the search emptied its open
+      // set — real proof. But main.js force-clears the flag after NAV_PARTIAL_TRIES to force a
+      // verdict, and a route wearing that badge proves nothing at all. Counted separately so the
+      // difference is a number instead of an argument.
+      if (path.budgetForced) { Driver.violationsForced = (Driver.violationsForced || 0) + 1;
+        Driver.violationsForcedBy = Driver.violationsForcedBy || {};
+        Driver.violationsForcedBy[o.by || '?'] = (Driver.violationsForcedBy[o.by || '?'] || 0) + 1; }
       this.hooks.log(this.team, `[NAV CONTRACT] ${this.cname}: ${this.v.type} ordered to unreachable `
         + `(${Math.round(dest.x)},${Math.round(dest.z)}) by ${o.by || '?'} — route ends ${Math.round(short)}u short. `
         + `Walking the partial route; the ORDER is the bug.`);

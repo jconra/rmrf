@@ -6020,6 +6020,7 @@ const NAV_OFF_COOL = 1.0;       // s between displacement replans, so a wedged h
 // SCUTTLED 52 -> 39 across all three sets, for +6% searches. The defect is not arguable: a hull
 // holding a 14-unit stub planned 144 units away, beelining cross-country with none of the
 // clearance A* and the smoother spent their effort guaranteeing.
+let CAP_REACH = true;   // A/B: flag reachability measured FOB->flag as a Firebrat (RR.setCapReach)
 let OFF_PATH_REPLAN = true;     // RR.setOffPathReplan(false) restores the goal-only triggers
 function navWaypoint(nav, v, dest, dt) {
   nav.t -= dt;
@@ -6093,7 +6094,12 @@ function navWaypoint(nav, v, dest, dt) {
       // "we don't know" becomes "we could not get there" and the contract is allowed to speak.
       const _mul = !nav.retryN ? 1 : 1 + nav.retryN;
       nav.path = planPath(v, dest, _mul > 1 ? { nodeMul: _mul } : undefined);
-      if (nav.path && nav.retryN > NAV_PARTIAL_TRIES) nav.path.budgetHit = false;
+      // MARKED, not silent. Clearing budgetHit here hands the Driver a budget-truncated route
+      // wearing a complete route's badge, and the Driver's whole reachability contract is built on
+      // trusting that badge ("a budget-truncated search proves NOTHING about reachability... acting
+      // on budget partials was the false-conviction bug"). Keep the behaviour for now, but record
+      // that the verdict was MANUFACTURED so the census can say how many convictions rest on it.
+      if (nav.path && nav.retryN > NAV_PARTIAL_TRIES) { nav.path.budgetHit = false; nav.path.budgetForced = true; }
       nav.idx = 0; nav.t = NAV_TTL; nav.dx = dest.x; nav.dz = dest.z;
       nav.epoch = _navEpoch;
       _astarFrameMs += performance.now() - _s;
@@ -6490,6 +6496,8 @@ const flagRunStallList = [];  // the autopsies, like the scuttle list: seed-leve
 const CARRY_STALL_S = 45;     // seconds without closing on the delivery point
 const CARRY_STALL_D = 10;     // …and "closing" means beating our own best by this much (u)
 let swapLoopsTotal = 0;
+const swapLoopsBy = {};      // wasted swaps, by the JOB the trip was ordered for
+const swapLoopsPair = {};    // …and the full shape: job:wanted->got
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
 let aiNavScuttle = true;                    // RR.setNavScuttle(false) to keep pinned units alive
 // WHAT WAS THIS UNIT DOING? Shared by the alarm and the scuttle records — both are autopsies,
@@ -7407,6 +7415,9 @@ class AICommander {
       ? `${this.cname}: ${v.type} couldn't get home to swap — ditching it and rolling out a ${want}.`
       : `${this.cname}: ${v.type} is home — swapping it out for a ${want}.`);
     this._swapFrom = v.type; this._swapWant = want;   // SWAP-LOOP alarm reads these at the next deploy
+    // …and the JOB the trip is for, captured HERE because the strategy clears _swapThen the moment
+    // the swap completes, which is before the garage picks and long before the loop is counted.
+    if (!this._swapLoopThen) this._swapLoopThen = (this.strategy && this.strategy._swapThen) || '?';   // set by the strategy just before completeSwap; this is the fallback
     this._endTour(v);
     removeCombatant(v); scene.remove(v.group); this.unit = null; this.respawnT = 1.0;
   }
@@ -7596,12 +7607,47 @@ class AICommander {
   // finish — the fix belongs in the definition, not in a guard bolted onto Capture.
   // Cheap: reachFrom() memoises per vehicle per cell with its own TTL, so this is a flood fill
   // only when the unit has actually moved cells or the map changed.
+  // CAN A RUNNER GET TO IT — measured from the FOB, with a FIREBRAT, always (Jacob, 2026-09-07:
+  // "it should always be a measure of the A* path from fob to flag").
+  //
+  // This used to read reachability off whatever hull happened to be fielded, with `return true`
+  // when nothing was. Both halves were wrong, and together they produced an infinite loop that
+  // burned the last 500s of a won match (seed 1041670):
+  //   - measuring from the CURRENT unit answers "can THIS hull get there", which is not the
+  //     question. The flag is carried by a Firebrat and nothing else (see the only-carrier note
+  //     at the last-firebrat guard), so a Jotun's reachability is irrelevant to whether a capture
+  //     is on offer.
+  //   - `return true` with nothing fielded is optimistic, and the GARAGE PICK runs in exactly
+  //     that one-second gap between the old hull despawning and the new one existing. So the team
+  //     BUILT on "flag OPEN=4" and then ACTED on "flag sealed=2" a second later, every cycle:
+  //     roll out a Firebrat -> truth returns -> siege wins -> siege wants a Jotun -> swap ->
+  //     despawn -> the lie returns -> roll out another Firebrat. Forty seconds, forever.
+  //
+  // The match that exposed it is worth recording, because "HQ destroyed but flag sealed" sounds
+  // impossible and is not: blue's HQ was dead (hp -17/600) with 26 of 30 walls standing, its gate
+  // intact and two towers still live. A Valkyrie ignores walls, so it can kill a 600hp HQ without
+  // ever breaching one. The flag reads `revealed` and is still physically sealed to the only
+  // chassis that could carry it — and siege, the answer the board gives whenever a unit is
+  // fielded, was correct the whole time.
   flagExposed() {
     const f = this.flag();
-    if (!(f && f.revealed)) return false;
-    const v = this.unit;
-    if (!v || v.dead || !f.home) return true;   // nothing fielded → don't claim the flag is shut
-    const F = reachFrom(v);
+    if (!(f && f.revealed) || !f.home) return false;
+    if (!CAP_REACH) {   // A/B control arm: the old "measure from whatever is fielded" behaviour
+      const v0 = this.unit;
+      if (!v0 || v0.dead) return true;
+      const F0 = reachFrom(v0);
+      const k0 = navIdx(Math.round(f.home.x / grid.cell), Math.round(f.home.z / grid.cell));
+      return k0 >= 0 && !!F0[k0];
+    }
+    // A representative RUNNER standing on the pad. Held on the commander rather than rebuilt per
+    // call, so reachFrom's flood memo (keyed on the start cell) keeps hitting instead of flooding
+    // the grid every time the board is scored.
+    if (!this._capProbe) this._capProbe = { _move: VEH_MOVE.firebrat, _archetype: 'warrior',
+      type: 'firebrat', team: this.team, holder: { position: { x: 0, y: 0, z: 0 } } };
+    const hp = this.homePos();
+    this._capProbe.holder.position.x = hp.x;
+    this._capProbe.holder.position.z = hp.z;
+    const F = reachFrom(this._capProbe);
     const k = navIdx(Math.round(f.home.x / grid.cell), Math.round(f.home.z / grid.cell));
     return k >= 0 && !!F[k];
   }
@@ -8202,13 +8248,23 @@ class AICommander {
     if (this._swapFrom && type !== this._swapFrom) this._swapLoops = 0;
     if (this._swapFrom && type === this._swapFrom && type !== this._swapWant) {
       swapLoopsTotal++;
+      // WHICH JOB ORDERED THE WASTED TRIP. A swap is placed FOR a mission, and the garage then
+      // re-scores from scratch — so a job that can only ever be reached by a PREEMPT (home
+      // defence) or by a reason that expires mid-trip can never win the pick when the lift
+      // arrives, and every swap it orders is guaranteed to loop. Watched: `defend` orders a
+      // Lurcher while the board reads siege 8.1 / defend absent, and ten seconds later the
+      // garage scores defend at 4.0 against siege 7.8 and rolls out the same Jotun.
+      // Counting by job turns "3 wasted trips a match" into a list of who is ordering them.
+      const job = this._swapLoopThen || '?';
+      swapLoopsBy[job] = (swapLoopsBy[job] || 0) + 1;
+      swapLoopsPair[`${job}:${this._swapWant}->${type}`] = (swapLoopsPair[`${job}:${this._swapWant}->${type}`] || 0) + 1;
       this._swapLoops = (this._swapLoops || 0) + 1;
       if (this._swapLoops === SWAP_LOOP_ALARM) {
         aiLog(this.team, `[SWAP-LOOP ALARM] ${this.cname}: ${SWAP_LOOP_ALARM}x now we've brought a ${type} home to swap it `
           + `for a ${this._swapWant} and rolled out another ${type}. The swap wants something the garage won't build.`);
       }
     }
-    this._swapFrom = null; this._swapWant = null;
+    this._swapFrom = null; this._swapWant = null; this._swapLoopThen = null;
     const sub = type !== want ? ` (${want}s are gone)` : '';
     aiLog(this.team, `${this.cname}: Rolling out a fresh ${type}${sub} — ${this.fleetLeft()} in reserve!`);
     // FLAVOUR: narrate the Rogue's signature play — sending the Valkyrie around the back to rocket the
@@ -13155,6 +13211,7 @@ window.RR = {
     return out;
   },
   setMsnMove: on => setMsnMove(on),   // A/B: missions own their own movement; bypasses the AI.js priority table
+  setCapReach: on => { CAP_REACH = !!on; return CAP_REACH; },   // A/B: false restores reachability-from-the-fielded-hull
   setOffPathReplan: on => { OFF_PATH_REPLAN = !!on; return OFF_PATH_REPLAN; },   // A/B: replan when the HULL is off its route, not only when the goal moves
   setPurePursuit: on => { PURE_PURSUIT = !!on; return PURE_PURSUIT; },   // A/B: follow the route line (pure pursuit) instead of capturing waypoints at 6u
   pursuitLook: () => ({ ...PURSUIT_LOOK }),
@@ -13178,7 +13235,8 @@ window.RR = {
   tgtEvents: () => tgtEvents,                                  // target-decision trace (was the old target still alive when we left it?)
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
-  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
+  swapLoopWhy: () => ({ total: swapLoopsTotal, byJob: { ...swapLoopsBy }, pairs: { ...swapLoopsPair } }),
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, violationsForced: Driver.violationsForced || 0, violationsForcedBy: { ...(Driver.violationsForcedBy || {}) }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
   decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal,
     // How every flag run ENDED. scored + runnerDied + heldAtEnd should account for flagCarries;
