@@ -381,7 +381,17 @@ class Capture extends Mission {
 // towers are gone there's no cover to hold, so switch to a Valkyrie's mobility.
 class Defend extends Mission {
   get key() { return 'defend'; }
-  wantVehicle(cmd) { return cmd.ownTowersDown() ? 'valkyrie' : this.doc.role('defend'); }
+  // ANY HULL CAN DEFEND; a Lurcher is merely preferred (Jacob). This only decides what the GARAGE
+  // builds — a unit already in the field defends in whatever it is driving, because the score's
+  // `close to home` term is what put it on this mission and turning that into a swap order is how
+  // three quarters of the game's wasted trips happened.
+  wantVehicle(cmd) {
+    if (cmd.ownTowersDown && cmd.ownTowersDown()) return 'valkyrie';   // towers gone: we need reach
+    const v = cmd.unit;
+    if (v && !v.dead) return v.type;                 // already out — defend with what we have
+    if ((cmd.roster && cmd.roster.lurcher) > 0) return 'lurcher';      // building fresh: prefer one
+    return this.doc.role('defend');
+  }
   objective(cmd) {
     // Both `atk` and `p` are raw remembered coordinates (a tower's radio call, a sighting) with
     // NO reachability guarantee anywhere in this function — traced tonight (seed 130) to a unit
@@ -1153,8 +1163,52 @@ const HOME_RESPONSE = { turtle: 1.0, warrior: 0.7, hunter: 0.55, rogue: 0.25 };
 // Vehicles.js (`def.speed`, u/s: valkyrie 22, firebrat 20, lurcher 14, jotun 8) and NOT from AI.js's
 // SPEED table, which is a RANK (firebrat 4 > valkyrie 3) and disagrees with the real order. Task #49
 // read that rank as a speed and concluded a sieging Jotun was "minutes" from home; it is ~25s.
-let HOME_SCORE = false;
+// DEFAULT ON (2026-09-08). This retires the last preempt that could choose a mission without
+// MissionScore — see the rung it disables in tick(), which set `next = 'defend'` on a DICE ROLL
+// before any scoring happened.
+//
+// Why it matters more than it looks: that preempt runs in tick() and NOT in garagePick(). So the
+// field could choose `defend` through a door the garage cannot see, `defend` asks for a Lurcher,
+// the unit drives ten seconds home, and the garage — scoring honestly — picks siege at 7.8 against
+// defend's 4.0 and rolls out the same Jotun. Defend can never win a garage pick on merit, so
+// EVERY swap it orders is guaranteed to loop. Measured: 75% of all wasted swaps in the game are
+// `defend` asking for a Lurcher and being handed something else, at ~3 wasted round trips per
+// match, with `swap` already 13% of all unit time.
+//
+// Scored, the same fact competes instead of jumping the queue, and it prices the two things the
+// preempt could not: how long this hull takes to get back (travel = dist / chassis speed, so a
+// Jotun scores itself down automatically) and what the persona actually wants out of it.
+let HOME_SCORE = true;
 export function setHomeScore(on) { HOME_SCORE = !!on; return HOME_SCORE; }
+// READ-ONLY STATE. Every setter here is `on => { X = !!on; return X; }`, so calling one to find
+// out what a flag IS sets it to false — which has silently invalidated three separate measurements
+// in one night (a "both arms identical" that was really "both arms off"). Reading must not write.
+export function abFlags() {
+  return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY, INCUMB_DIR, HQ_FINISHER,
+           REQ_VEHICLE, TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, FLAT_MISSIONS, DEFEND_SHAPE };
+}
+// Nominal chassis speeds, mirroring the vehicle table in Vehicles.js. Needed here only to price a
+// trip for a hull that does not exist yet — the garage asking "if I build this, can it get back in
+// time". A live unit always uses its own def.speed instead, so this is the no-unit path only.
+// DEFEND'S SHAPE (Jacob, 2026-09-08). Starting values, to be gated then tuned — not measured
+// optima. NEAR_R is a little over half the map diagonal so "close to home" means genuinely near,
+// not "on our side of the island".
+// OFF until it has its own gate. Bundled with HOME_SCORE it read 58 swap loops against 7; the
+// cause was an unconditional `close to home` bonus, maximal at the pad, which made defend win every
+// garage pick and lose it again the moment the hull drove out. That term is gone and the remainder
+// (a chassis preference, gated on a real reason to defend) measured 11 against 8 on eight matches —
+// small, unproven, and not something to ship on the back of a different change.
+let DEFEND_SHAPE = false;
+const DEFEND_NEAR_R = 140;   // u — beyond this, proximity contributes nothing
+let DEFEND_NEAR = 3;         // …and standing on the pad contributes this
+let DEFEND_LURCHER = 1.5;    // the chassis a defence wants is already fielded
+let DEFEND_FIREBRAT = 2.5;   // the flag runner has better things to do (subtracted)
+export function setDefendW(w) {
+  if (w) { if (w.near != null) DEFEND_NEAR = +w.near; if (w.lurcher != null) DEFEND_LURCHER = +w.lurcher;
+           if (w.firebrat != null) DEFEND_FIREBRAT = +w.firebrat; if (w.on != null) DEFEND_SHAPE = !!w.on; }
+  return { on: DEFEND_SHAPE, near: DEFEND_NEAR, lurcher: DEFEND_LURCHER, firebrat: DEFEND_FIREBRAT };
+}
+const VEH_SPEED = { lurcher: 14, firebrat: 20, valkyrie: 22, jotun: 8 };
 const T_SAVE = 20, T_KILL = 45;                 // seconds — the two deadlines
 // Per-persona pull, by what that commander actually wants. Same shape as teamSupplyW so two weight
 // sets can be played on OPPOSITE TEAMS IN ONE MATCH and the sides flipped — weights get DUELLED,
@@ -1172,13 +1226,27 @@ export function homeWOf(team) { return teamHomeW[team] || null; }
 // does not apply at all, so `defend` can fall through to its old flat value under ?nohomescore.
 export function homeDefenceScore(cmd) {
   const pt = cmd.homeAttack && cmd.homeAttack();
-  const v = cmd.unit;
-  if (!pt || !v || v.dead) return null;
-  const p = v.holder.position;
-  const dist = Math.hypot(pt.x - p.x, pt.z - p.z);
+  if (!pt) return null;
+  const v = cmd.unit && !cmd.unit.dead ? cmd.unit : null;
+  // NO UNIT IS NOT NO ANSWER (2026-09-08). This returned null when nothing was fielded, so the
+  // term vanished exactly where it is most load-bearing: garagePick runs in the gap between the
+  // old hull despawning and the new one existing. `defend` therefore scored ZERO at the pad while
+  // scoring 4+ in the field a second earlier — the same shape as flagExposed's optimistic default,
+  // and the reason turning this on did not stop the loop on its own.
+  //
+  // With nothing fielded the honest question is "if I roll a hull out NOW, can it get back in
+  // time" — so measure from the PAD, at the speed of the chassis this mission would ask for.
+  // That is the question the garage is actually asking.
+  const from = v ? v.holder.position : cmd.homePos();
+  const dist = Math.hypot(pt.x - from.x, pt.z - from.z);
   // Straight-line over nominal speed. Deliberately an ESTIMATE: the real path is longer, but asking
   // the pathfinder for a route we may not take costs more than the precision is worth here.
-  const spd = (v.def && v.def.speed) || 10;
+  let spd = v && v.def && v.def.speed;
+  if (!spd) {
+    const want = cmd.strategy && cmd.strategy.doc && cmd.strategy.doc.role
+      ? cmd.strategy.doc.role('defend') : 'lurcher';
+    spd = (VEH_SPEED && VEH_SPEED[want]) || 10;
+  }
   const travel = dist / spd;
   const tw = teamHomeW[cmd.team] || null;
   const base = HOME_W[cmd.archetype] || HOME_W.warrior;
@@ -1704,7 +1772,35 @@ export function missionScore(cmd, key, running = null) {
       // a deficit of 3 — starting the lean at 1 made every slightly-behind team cagey and gave
       // back five head-to-head wins. Now: down 2 → +1, down 3 → +2, down 4+ → +3 (capped).
       const deficit = cmd.fleetDeficit ? cmd.fleetDeficit() : 0;
-      if (deficit >= 2) add('losing', Math.min(3, (deficit - 1) * 1)); break;
+      if (deficit >= 2) add('losing', Math.min(3, (deficit - 1) * 1));
+      // WHO IS IN A POSITION TO DEFEND — but only while there is something to defend AGAINST.
+      //
+      // The first draft of this made `close to home` an unconditional bonus, maximal at the pad and
+      // decaying with distance. Measured: swap loops 7 -> 58 over eight matches. It is the same
+      // garage-versus-field disagreement this whole week has been about, built deliberately: defend
+      // always looked best at the garage, won the pick, built a Lurcher, drove out, watched the
+      // bonus decay, lost to siege, and swapped. Paying a unit for standing near home is paying it
+      // for doing nothing.
+      //
+      // Proximity only means something when there is a raid to answer, and homeDefenceScore already
+      // prices exactly that — as travel time to the actual attack, which IS proximity, measured
+      // against a deadline. So there is no separate distance term; these two only adjust the hull
+      // once a real reason to defend exists.
+      const dReason = (HOME_SCORE ? homeDefenceScore(cmd) : (cmd.homeAttack && cmd.homeAttack()))
+        || (cmd.fleetDeficit && cmd.fleetDeficit() >= 2);
+      if (DEFEND_SHAPE && dReason) {
+        const dv = cmd.unit && !cmd.unit.dead ? cmd.unit : null;
+        const R = cmd.roster || {};
+        // The hull that would do the job: the one we are driving, or the best one we could field.
+        // Answerable with or without a unit, which is the property the rest of this file kept
+        // getting wrong — garagePick runs in the gap where nothing is fielded.
+        const type = dv ? dv.type
+          : (R.lurcher > 0 ? 'lurcher' : R.jotun > 0 ? 'jotun' : R.valkyrie > 0 ? 'valkyrie'
+             : R.firebrat > 0 ? 'firebrat' : null);
+        if (type === 'lurcher') add(dv ? 'a lurcher is already out' : 'a lurcher is available', DEFEND_LURCHER);
+        if (type === 'firebrat') add('only our runner is left to guard', -DEFEND_FIREBRAT);
+      }
+      break;
     }
     case 'intercept':
       add('base', -5);

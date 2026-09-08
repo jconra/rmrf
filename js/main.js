@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=122';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setHqFinisher, setRearSneakGate, setTurtleGuard, setHunterHarass, setReqVehicle, requiredVehicle, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setFlatMissions, setIncumbDir, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=124';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5888,7 +5888,13 @@ setCapCarry(!QS.has('nocapcarry'));   // a carrier scores capture with flee's +6
 // SCORED HOME DEFENCE — default OFF, gated deliberately (task #49). Shipping an untested default is
 // exactly what cost 15 resolutions with flat&reqveh this morning; this one earns its default or
 // does not get one.
-setHomeScore(QS.has('homescore'));
+// SHIPPED ON, so the URL param DISABLES rather than enables (same shape as ?nofleescore).
+// This line used to read `setHomeScore(QS.has('homescore'))`, which overrode the module default
+// unconditionally at boot — so `let HOME_SCORE = true` was dead on arrival and the flag was false
+// in every match, including both arms of its own gate. A source audit cannot see that: the file
+// says shipped, the game says off. Any flag meant to ship must either lose its boot override or
+// invert it, as here.
+setHomeScore(!QS.has('nohomescore'));
 // A dry tank does not strand a unit (LIMP = 0.35) — ?statuefix replaces the +10 'about to be a
 // statue' with a gradual mobility cost. Default OFF, unmeasured.
 // SHIPPED DEFAULT 2026-08-18 (?nostatuefix reverts). Unmeasured, and shipped anyway because the term
@@ -13045,6 +13051,8 @@ window.RR = {
   // TONIGHT'S BATCH (2026-09-05). Four knobs, all live on a loaded page so the tournament KNOB
   // argument can set them without a rebuild.
   setOutranged: on => { OUTRANGED_CONTACT = !!on; return OUTRANGED_CONTACT; },   // A/B: offer the fight-or-flight decision when EITHER hull can shoot
+  abFlags: () => ({ ...abFlags(), MSN_MOVE: undefined, CAP_REACH, OFF_PATH_REPLAN, OUTRANGED_CONTACT, PURE_PURSUIT }),   // READ-ONLY — the setters all write on read
+  setDefendW: w => setDefendW(w),   // defend's shape: {on, near, lurcher, firebrat}
   setAmmoCount: on => setAmmoCount(on),   // A/B: 'nothing to shoot with' counts rounds instead of magazine fraction
   setSeesLevel: on => setSeesLevel(on),   // A/B: re-score every second while a rival is SENSED, not just on the edge
   setSupplyWAll: w => setSupplyWAll(w),   // A/B: the SAME repair weights on both sides (hpUrge, nearMax, nearFar)
