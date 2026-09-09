@@ -386,9 +386,12 @@ class Defend extends Mission {
   // `close to home` term is what put it on this mission and turning that into a swap order is how
   // three quarters of the game's wasted trips happened.
   wantVehicle(cmd) {
-    if (cmd.ownTowersDown && cmd.ownTowersDown()) return 'valkyrie';   // towers gone: we need reach
     const v = cmd.unit;
+    // ORDER MATTERS, and I had it wrong: the towers-down rule below used to run FIRST, so a
+    // fielded hull was still ordered home for a Valkyrie — contradicting the comment above it.
+    // A hull already defending defends in what it is driving, whatever the towers are doing.
     if (v && !v.dead) return v.type;                 // already out — defend with what we have
+    if (cmd.ownTowersDown && cmd.ownTowersDown()) return 'valkyrie';   // building fresh, towers gone: reach
     if ((cmd.roster && cmd.roster.lurcher) > 0) return 'lurcher';      // building fresh: prefer one
     return this.doc.role('defend');
   }
@@ -466,11 +469,24 @@ class Harass extends Mission {
   ]); }
 }
 
-// INTERCEPT — our flag's been lifted: only a Valkyrie is mobile enough to run the thief
-// down before it reaches their elevator. Drop everything and chase (ai_behavior Defend).
+// INTERCEPT — our flag's been lifted: chase the thief down before it reaches their elevator.
 class Intercept extends Mission {
   get key() { return 'intercept'; }
-  wantVehicle(cmd) { return 'valkyrie'; }
+  // CHASE WITH WHAT WE HAVE (Jacob, 2026-09-08: "for an intercept it should be able to use
+  // whatever vehicle is currently out. There is no time to swap.").
+  //
+  // This returned 'valkyrie' unconditionally, on the reasoning that only a flyer is mobile enough
+  // to catch the thief. But the thief is always a Firebrat (nothing else carries a flag) and the
+  // speeds are valkyrie 22 against firebrat 20 — a 10% edge, bought with a ten-second round trip
+  // to the pad while the flag walks away. Worse, wantVehicle is consulted by swapWanted on EVERY
+  // mission change with a hull fielded, not just at the garage, so this ordered a live chase to
+  // break off and go shopping. Fight and Flee have always returned cmd.unit.type for exactly this
+  // reason ("fight with what we brought"); intercept has the same claim on it and a harder clock.
+  wantVehicle(cmd) {
+    const v = cmd.unit;
+    if (v && !v.dead) return v.type;                 // already chasing — no time to change hulls
+    return (cmd.roster && cmd.roster.valkyrie) > 0 ? 'valkyrie' : this.doc.role('defend');
+  }
   objective(cmd) { return cmd.interceptSpot(); }
   // Chase the carrier (interceptSpot tracks it), but don't blind-fire the chase point — kill the
   // thief when we actually SEE it (the engage transition, with lead-aim). Stops shooting at the
@@ -1200,14 +1216,12 @@ export function abFlags() {
 // (a chassis preference, gated on a real reason to defend) measured 11 against 8 on eight matches —
 // small, unproven, and not something to ship on the back of a different change.
 let DEFEND_SHAPE = false;
-const DEFEND_NEAR_R = 140;   // u — beyond this, proximity contributes nothing
-let DEFEND_NEAR = 3;         // …and standing on the pad contributes this
 let DEFEND_LURCHER = 1.5;    // the chassis a defence wants is already fielded
 let DEFEND_FIREBRAT = 2.5;   // the flag runner has better things to do (subtracted)
 export function setDefendW(w) {
-  if (w) { if (w.near != null) DEFEND_NEAR = +w.near; if (w.lurcher != null) DEFEND_LURCHER = +w.lurcher;
+  if (w) { if (w.lurcher != null) DEFEND_LURCHER = +w.lurcher;
            if (w.firebrat != null) DEFEND_FIREBRAT = +w.firebrat; if (w.on != null) DEFEND_SHAPE = !!w.on; }
-  return { on: DEFEND_SHAPE, near: DEFEND_NEAR, lurcher: DEFEND_LURCHER, firebrat: DEFEND_FIREBRAT };
+  return { on: DEFEND_SHAPE, lurcher: DEFEND_LURCHER, firebrat: DEFEND_FIREBRAT };
 }
 const VEH_SPEED = { lurcher: 14, firebrat: 20, valkyrie: 22, jotun: 8 };
 const T_SAVE = 20, T_KILL = 45;                 // seconds — the two deadlines

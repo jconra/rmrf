@@ -77,10 +77,16 @@ export class Elevator {
       wall.position.set(center.x + sx * (shaftHalf + t / 2), cy, center.z + sz * (shaftHalf + t / 2));
       this.group.add(wall);
     }
-    // Sits low enough to be under the walls' full span and thick enough that the sea floor, which
-    // is below it, cannot z-fight through.
-    const floor = box(outer, 1.2, outer, LINER_MAT);
-    floor.position.set(center.x, this.bottomY - 0.5, center.z);
+    // THE BLUE IS THE PIT FLOOR ITSELF, not a water plane (Jacob: "I still see what looks like
+    // ocean"). There IS no water plane — IslandMap sets this.water = null and paints the sea into
+    // the TERRAIN by depth-splatting, so a shaft carved 18u down is terrain painted deep blue.
+    // _maskWater's stencil therefore never had anything to mask here; it only ever touched the
+    // distant seaFloor plane. What hides the blue is this slab, and it has to sit clearly ON TOP
+    // of the carved floor rather than beneath it — the old placement left its top 0.1u above
+    // bottomY, which is nothing across uneven carved ground.
+    const FLOOR_T = 1.2, FLOOR_LIFT = 0.35;   // top sits this far proud of the carved floor
+    const floor = box(outer, FLOOR_T, outer, LINER_MAT);
+    floor.position.set(center.x, this.bottomY + FLOOR_LIFT - FLOOR_T / 2, center.z);
     this.group.add(floor);
 
     // Hazard collar: a striped frame ringing the shaft mouth. Its INNER edge tucks

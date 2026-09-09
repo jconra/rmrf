@@ -23,7 +23,7 @@ import { Foliage } from './Foliage.js?v=5';
 import { setWindTime } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=69';
-import { Elevator } from './Elevator.js?v=4';
+import { Elevator } from './Elevator.js?v=5';
 import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
