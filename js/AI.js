@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=125';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=126';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -869,7 +869,7 @@ export const DEFAULT_BRAIN = {
     kitePivot: 0.55,     // hull fraction the kite urge scales from (was a hard `hpFrac < 0.55` step)
     kiteMin: 0.18,       // kite urge needed to actually fall back — below this, hold and fight
     kiteFallback: 34,    // MAX world units to fall back per kite order. view.support is the home base, which can be 200u+ away; uncapped it marched duelling units off the map
-    stillLimit: 1.8,     // seconds wedged before the unstick jolt fires
+    stillLimit: 1.8,     // seconds wedged before the unstick jolt fires (a FLOOR — see PIVOT_SLACK)
     wedgeLimit: 1.6,     // seconds PRESSED on an obstacle with no gain on the goal before the jolt (a unit sliding along a wall/turret is "moving" but going nowhere)
     wedgeGain: 0.4,      // goal distance must shrink by at least this to count as progress
     unstickDur: 0.7,     // jolt duration (seconds)
@@ -1008,6 +1008,10 @@ function maybeRecord(view, mem, reason, state, out) {
 // doing ten heading reversals in forty seconds — HALVED, 42 -> 21.
 let MSN_MOVE = true;
 export function setMsnMove(on) { MSN_MOVE = !!on; return MSN_MOVE; }
+// Margin over a hull's worst-case 180 pivot before the anti-wedge reflex may fire.
+// Settable so the fix can be A/B'd against the old flat limit: 0 restores it exactly.
+let PIVOT_SLACK = 1.4;
+export function setPivotSlack(n) { PIVOT_SLACK = n == null ? 1.4 : +n; return PIVOT_SLACK; }
 export function runBrain(graph, view, mem) {
   const cfg = graph.config, p = mem.p, self = view.self;
   mem.t += view.dt;
@@ -1048,7 +1052,23 @@ export function runBrain(graph, view, mem) {
   // that exit outranked everything and a jolt would have fought it. The exit is gone — a unit now
   // leaves through the gate on its A* route like any other leg — so the reflex applies everywhere,
   // including at its own doorway, which is where it was most often needed and least often allowed.
-  if (mem._stillT > cfg.stillLimit || mem._wedgeT > cfg.wedgeLimit) {
+  // A PIVOT IS NOT A WEDGE (Jacob, 2026-09-08: a Jotun "just twitching every once in a while...
+  // makes it super slow"). A tank chassis with its goal more than PIVOT (0.6 rad) off the nose gets
+  // ZERO forward throttle and turns on the spot — so `moved` reads zero for the entire pivot and
+  // _stillT accrues through a manoeuvre that is working perfectly.
+  //
+  // Worst case is a 180: (pi - 0.6) / turnRate.
+  //     lurcher 1.16s   firebrat 0.85s   valkyrie 1.27s   JOTUN 2.12s
+  // against a flat stillLimit of 1.8s. Three hulls clear it; the Jotun cannot, so it gets jolted
+  // mid-turn, reversed for 0.7s, and left facing further from its goal than when it started —
+  // which forces another long pivot. That is the twitch, and it feeds itself.
+  //
+  // One constant, many scales: 1.8 was fine for every chassis it was tuned on. The floor now comes
+  // from the hull's own turn rate, so it is derived rather than guessed, and nothing changes for
+  // the three that already fit.
+  const pivotWorst = (Math.PI - 0.6) / Math.max(0.1, view.turnRate || 2.0);
+  const stillLim = Math.max(cfg.stillLimit, pivotWorst * PIVOT_SLACK);
+  if (mem._stillT > stillLim || mem._wedgeT > cfg.wedgeLimit) {
     mem._unstick = cfg.unstickDur; mem._unstickTurn = mem.rng() < 0.5 ? -1 : 1;
     mem._stillT = 0; mem._wedgeT = 0; mem._bestGoalD = null;
     // Escalation counter: jolts within ~8s of each other are the SAME stuck episode. The

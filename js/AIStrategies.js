@@ -1932,6 +1932,10 @@ export function missionScore(cmd, key, running = null) {
 // Pick the top-scoring mission. The success memory decays +1 every 8 SECONDS (not per call —
 // missionPick runs every tick, so a per-call decay let a −4 recover in a fifth of a second
 // and the anti-repeat barely bit; a failed plan should stay benched for ~half a minute).
+// ?msnlog — print one line for EVERY mission score. Off by default: it fires on every trigger for
+// every commander, which is roughly twice a second, and a feed that outruns reading is noise.
+let MSN_LOG = false;
+export function setMsnLog(on) { MSN_LOG = !!on; return MSN_LOG; }
 export function missionPick(cmd, incumbent = null) {
   const S = cmd._missionSuccess || (cmd._missionSuccess = {});
   // success memory forgives CONTINUOUSLY (+1 per 8s, smooth — the gradual-weights rule),
@@ -1982,6 +1986,18 @@ export function missionPick(cmd, incumbent = null) {
     const gap = +(all[0][1] - all[1][1]).toFixed(1);
     dlog2(`missionPick:${cmd.team}`, { picked: best, runnerUp: all[1][0], gap, incumbent, changed: incumbent != null && best !== incumbent },
       `${cmd.cname}: mission pick = ${best} (runner-up ${all[1][0]}, gap ${gap})${gap < 1.5 ? ' — NEAR-TIE, thrash risk' : ''}${incumbent && best !== incumbent ? ` — CHANGED from ${incumbent}` : ''}.`);
+  }
+  // EVERY SCORE, PRINTED (Jacob, 2026-09-08: "I am seeing so much that doesn't make sense").
+  // One compact line per score: what won, what it beat, and the top few with their values, so a
+  // decision that looks wrong on screen can be read straight out of the feed instead of inferred.
+  // Behind ?msnlog rather than on by default, for the reason the firing-spot alarm just
+  // demonstrated: this fires on every trigger for every commander, and a log that prints faster
+  // than it can be read hides more than it shows.
+  const _lg = (cmd.strategy && cmd.strategy.log) || cmd.log;   // the doctrine holds the logger, not the commander
+  if (MSN_LOG && _lg) {
+    const top = all.slice(0, 4).map(e => `${e[0]} ${e[1]}`).join(' · ');
+    const unit = cmd.unit && !cmd.unit.dead ? cmd.unit.type : 'none';
+    _lg(`SCORE [${unit}] -> ${best}${incumbent && best !== incumbent ? ` (was ${incumbent})` : ''}  |  ${top}`);
   }
   return best;
 }
@@ -2329,7 +2345,20 @@ class Doctrine {
     // Guarding the `sensed` trigger alone did nothing, because this is the trigger that fires.
     // A carrier is not refusing to fight: shouldFlee still preempts above this, so the one thing
     // that should break a run — this run is about to die — still breaks it.
-    const committedPlan = this.step === 'fight' || this.step === 'flee' || this.step === 'capture';
+    // …and `capture` counts as committed only once the run ACTUALLY IS one. Exempting every
+    // capture was too broad and Jacob caught it live: a full-health Lurcher on capture, fof +5.5,
+    // with a Valkyrie duelling it 17u away — well inside its 42u reach — and 252u still to run.
+    // Nothing about that is a committed dash; it is a unit refusing an obviously winnable fight.
+    // A run is committed when we are CARRYING, or once inside CAPTURE_COMMIT of the flag, which is
+    // the same "grab or die trying" line the desperate-grab term already uses. Outside that, a
+    // rival in reach is a question the board should answer like any other.
+    const _fl = cmd.flag && cmd.flag();
+    const _carrying = !!(_fl && _fl.carrier === cmd.unit);
+    const _uPos = cmd.unit && !cmd.unit.dead ? cmd.unit.holder.position : null;
+    const _nearFlag = !!(_fl && _fl.home && _uPos
+      && Math.hypot(_fl.home.x - _uPos.x, _fl.home.z - _uPos.z) < CAPTURE_COMMIT);
+    const committedPlan = this.step === 'fight' || this.step === 'flee'
+      || (this.step === 'capture' && (_carrying || _nearFlag));
     const unanswered = (engaged && !committedPlan)
       ? (underFire ? 'taking fire and we are neither fighting nor fleeing'
                    : 'a rival in reach and we are neither fighting nor fleeing') : null;
@@ -2358,7 +2387,8 @@ class Doctrine {
     // `capture` joins fight and flee for the same reason they are here: all three are decisions
     // already taken and committed to. Self-preservation still interrupts a runner — shouldFlee
     // preempts above this — so the one thing that should break a run still can.
-    const committed = this.step === 'fight' || this.step === 'flee' || this.step === 'capture';
+    const committed = this.step === 'fight' || this.step === 'flee'
+      || (this.step === 'capture' && (_carrying || _nearFlag));
     const sensed = (SEES_LEVEL && v && v._seesEnemy && !committed)
       ? 'a rival is in sight and we are neither fighting nor fleeing' : null;
     if (sees || fire || flag || unanswered || sensed) return sees || fire || flag || unanswered || sensed;

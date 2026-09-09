@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=119';
+import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=121';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver } from './Driver.js?v=1';
 
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=125';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -5860,6 +5860,7 @@ setScoreClock(QS.has('scoreclock'));
 // anti-wedge jolts from a chassis-blind stillEps. Both are known bugs with tasks against them.
 // Re-gate this once those are fixed, not before — the design intent (a trip is not a blindfold)
 // stands on its own.
+setMsnLog(QS.has('msnlog'));   // one log line per mission score — see missionPick
 setSwapYield(!QS.has('noswapyield'));   // SHIPPED — the param disables
 // FLATTEN THE MISSION SPACE (?flat). Opens all three terminal guards at once — flee, swap and
 // fight stop switching the commander off for their duration and become ordinary missions that
@@ -6418,6 +6419,7 @@ const flagRunStallList = [];  // the autopsies, like the scuttle list: seed-leve
 const CARRY_STALL_S = 45;     // seconds without closing on the delivery point
 const CARRY_STALL_D = 10;     // …and "closing" means beating our own best by this much (u)
 let swapLoopsTotal = 0;
+const joltsBy = {};   // anti-wedge jolts by chassis — see joltStats
 const swapLoopsBy = {};      // wasted swaps, by the JOB the trip was ordered for
 const swapLoopsPair = {};    // …and the full shape: job:wanted->got
 const navAlarmsByTeam = {};                 // running per-team alarm tally (navAlarms is capped; this isn't) — RR.navAlarmsByTeam()
@@ -8537,7 +8539,11 @@ class AICommander {
         `${this.cname} ${v.type}: routing to its firing position, ${Math.round(Math.sqrt(d2s))}u out.`);
     }
     else {
+      if (st !== 'unstick') v._joltSeen = 0;
       if (st === 'unstick') {
+        // COUNT THE EPISODE, NOT THE TICK. `unstick` holds for unstickDur, so a per-tick tally
+        // would just measure the jolt's length. The latch counts each jolt once, by chassis.
+        if (!v._joltSeen) { v._joltSeen = 1; joltsBy[v.type] = (joltsBy[v.type] || 0) + 1; }
         this._nav.path = null;   // drop the route so it replans fresh after the jolt (not straight back into the wall)
         // JOLT ESCALATION: the reverse-pivot used to loop forever (reverse, drive back into
         // the same snag, reverse…) because the backward hop counts as movement and resets
@@ -9139,7 +9145,14 @@ class AICommander {
     // the gun, not just the tower — the ring is sized from SHOT_REACH/TURRET_HOLD — so a spot is
     // only reusable by a chassis whose gun is at least as long. See the read sites below.
     this._siegePlan = { order, idx: 0, mode, fobOnApproach, builtT: this._matchT, spots: new Map(), spotReach: new Map(), tries: new Map() };
-    aiLog(this.team, `${this.cname}: Siege plan — ${mode === 'rear' ? 'flank and take the BACK towers' : 'frontal assault'}, ${order.length} tower(s) on the list${fobOnApproach ? ' (their FOB is on the front approach)' : ''}.`);
+    // ANNOUNCE IT ONLY IF WE ARE ACTUALLY DOING IT. _planTarget runs every tick for its side
+    // effects (the spot cache and the front/rear face), so the plan gets built under EVERY
+    // mission — and this line then told the feed "Siege plan — frontal assault" while the panel
+    // header said CAPTURE. Both were true and together they read as a bug. On a non-siege lane
+    // the plan is bookkeeping, so it goes to the archive and stays out of the feed.
+    const _lane = this.strategy && this.strategy.step;
+    const _sieging = _lane === 'siege' || _lane === 'siege-back' || _lane === 'attack';
+    aiLog(this.team, `${this.cname}: Siege plan — ${mode === 'rear' ? 'flank and take the BACK towers' : 'frontal assault'}, ${order.length} tower(s) on the list${fobOnApproach ? ' (their FOB is on the front approach)' : ''}.`, _sieging ? null : { quiet: true, lane: _lane });
     return this._siegePlan;
   }
   // The tower this team is currently sieging, per the plan. Advances past towers we now know are
@@ -9303,7 +9316,14 @@ class AICommander {
     if (lock.spot) {
       const reach = SHOT_REACH[this.unit.type] || 42;
       if ((lock.spot.x - lock.x) ** 2 + (lock.spot.z - lock.z) ** 2 > reach * reach) {
-        aiLog(this.team, `${this.cname}: That firing spot was picked for a longer gun — find one this ${this.unit.type} can shoot from.`);
+        // ONCE PER SPOT, NOT PER TICK. This is a real alarm and it was drowning its own log —
+        // fifty identical lines a second says nothing more than one line does, and it buries
+        // everything else in the feed. Keyed on the spot so a genuinely new bad spot still speaks.
+        const _sk = `${Math.round(lock.spot.x)},${Math.round(lock.spot.z)}`;
+        if (this._badSpotSaid !== _sk) {
+          this._badSpotSaid = _sk;
+          aiLog(this.team, `${this.cname}: That firing spot was picked for a longer gun — find one this ${this.unit.type} can shoot from.`);
+        }
         return false;
       }
     }
@@ -10090,7 +10110,10 @@ class AICommander {
             hqSpot = this._standoffFor(v, { x: hqPt.x, z: hqPt.z, camp: ec, wall: hqKey });
             if (this._siegePlan) { this._siegePlan.spots.set(hqKey, hqSpot); this._siegePlan.spotReach.set(hqKey, hqReach); }   // null cached too — don't re-search a hopeless keep every tick
           }
-          if (hqSpot) { stand2 = hqSpot; stand2Ref = threat; }
+          // Same rule as the breach below: the keep has replaced whatever we were shooting, so a
+          // standoff solved for that old target is not ours to keep. If the keep has no solvable
+          // spot we carry none rather than an inherited wrong one.
+          if (hqSpot) { stand2 = hqSpot; stand2Ref = threat; } else { stand2 = null; stand2Ref = null; }
         }
       }
     }
@@ -10146,6 +10169,15 @@ class AICommander {
       if (bestW && bestD < curD2) {
         threat = { x: bestW.x, y: map.heightAt(bestW.x, bestW.z) + 3, z: bestW.z };
         _tgtWhy = 'breaching the wall in our way'; threatCamp = bestC; _breachDbg.fired++;
+        // A FIRING SPOT BELONGS TO THE TARGET IT WAS SOLVED FOR. This block replaces `threat`
+        // but used to leave `stand2` holding the standoff picked for the tower we just walked
+        // away from — so the lock committed a wall as the target and a firing position 50u from
+        // it, _tgtStillValid measured that pair, rejected it, and re-picked from scratch EVERY
+        // TICK. Measured on seed 53: 55 of 56 bad-spot alarms are this one pairing, one per tick
+        // for three solid seconds, and the commitment the lock exists to hold never held at all.
+        // No new spot is needed: the wall was chosen because it is already inside our own reach,
+        // so the answer is to shoot it from where we stand.
+        stand2 = null; stand2Ref = null;
       }
     }
     // SHOOT BACK: a turret that LANDED A HIT on us in the last 4s IS the threat — not the
@@ -10355,6 +10387,11 @@ class AICommander {
       // 'siege-back', 'capture' covers the four lanes) — see _msnKeyFor for why.
       mission: this.strategy ? this.strategy.step : null,
       threat, threatLOS, flankSide, threatStand, demolishTarget, breakTarget, engageRange: ENGAGE_RANGE[v.type] || 36,
+      // HOW FAST THIS HULL CAN TURN. The anti-wedge reflex needs it: a tank chassis pivots with
+      // ZERO forward throttle, so a slow-turning hull is "not moving" for the whole pivot and the
+      // jolt fires mid-turn. Passed from the vehicle table rather than re-tabulated in AI.js —
+      // one source for the number, which is the whole point.
+      turnRate: (v.def && v.def.turn) || 2.0,
       // ACTIVE tower fire on this hull (last ~2.5s): the siege break-off's trigger. The doctrine
       // is "the maneuver depends on being FIRED ON" — proximity alone interrupted every siege of
       // a defended base into an endless field duel (exact-gate: 8 seeds flipped to stalemate).
@@ -12957,6 +12994,7 @@ window.RR = {
   // argument can set them without a rebuild.
   setOutranged: on => { OUTRANGED_CONTACT = !!on; return OUTRANGED_CONTACT; },   // A/B: offer the fight-or-flight decision when EITHER hull can shoot
   abFlags: () => ({ ...abFlags(), MSN_MOVE: undefined, OFF_PATH_REPLAN, OUTRANGED_CONTACT }),   // READ-ONLY — the setters all write on read
+  setMsnLog: on => setMsnLog(on),   // print every mission score to the AI log
   setDefendW: w => setDefendW(w),   // defend's shape: {on, near, lurcher, firebrat}
   setAmmoCount: on => setAmmoCount(on),   // A/B: 'nothing to shoot with' counts rounds instead of magazine fraction
   setSeesLevel: on => setSeesLevel(on),   // A/B: re-score every second while a rival is SENSED, not just on the edge
@@ -13145,6 +13183,11 @@ window.RR = {
   navAlarms: () => navAlarms,                                  // driver ALARM autopsies this match (flight recordings)
   navAlarmsByTeam: () => ({ ...navAlarmsByTeam }),             // running per-team alarm count (uncapped) — for per-commander analysis
   swapLoopWhy: () => ({ total: swapLoopsTotal, byJob: { ...swapLoopsBy }, pairs: { ...swapLoopsPair } }),
+  // JOLT CENSUS — how often the anti-wedge reflex fires, by chassis. A jolt is a REVERSE: it is
+  // the right answer to a genuine wedge and a self-inflicted stall when it fires on a hull that
+  // was simply pivoting, so the split by hull is the number that matters.
+  joltStats: () => ({ ...joltsBy }),
+  setPivotSlack: n => setPivotSlack(n),   // A/B: 0 restores the flat stillLimit that jolted pivoting Jotuns
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, violationsForced: Driver.violationsForced || 0, violationsForcedBy: { ...(Driver.violationsForcedBy || {}) }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
   decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal,
