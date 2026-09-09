@@ -3397,7 +3397,7 @@ const SHIELD_COMMIT = 60;       // once this close to the wanted gen, COMMIT —
 // instead of instantly un-justifying it. Same shape as SUPPLY_FULL below.
 const SHIELD_WANT = 0.6;        // below this fraction of max shield, go top up
 const SHIELD_FULL = 0.95;       // …and stay until this full (not merely back over the want line)
-const SHIELD_CAMP_R = 40;       // "on the generator" radius — hold here and fight from the shield top-up
+// (SHIELD_CAMP_R deleted 2026-09-08 — an "on the generator" hold radius that nothing read.)
 let SHIELD_SIGHT_MULT = 1.4;    // shield beacon spotted at this × base vision. Tall & glowing so it carries
                                 // past a crate, but NOT half the map — a shield is a reason to SCOUT, not a
                                 // freebie. Runtime-tunable via RR.setShieldSight for A/B.
@@ -4787,8 +4787,8 @@ function constructFort(team, kind, cx, cz, rot = 0) {
 // base (fog-of-war safe — you can't scout with it), a translucent hologram follows the
 // pointer snapped to the build grid, and ✓ BUILD / ✕ CANCEL commit or bail. The garage
 // already freezes the field sim, so placing is calm; the RISK is the construction run
-// that follows on the field. Build radius is capped around the main base.
-const FORT_BUILD_RADIUS = 80;            // u from the main camp centre
+// that follows on the field. (The build-radius cap was removed by request; FORT_BUILD_RADIUS
+// and the sentence claiming a cap outlived it and were deleted 2026-09-08.)
 let fortPlace = null;                    // { kind, rot, cx, cz, ghost, ring, ok, why }
 const FORT_GHOST_ASSET = { wall: 'wall', bastion: 'bastion', armed: 'tower' };
 const _fpRay = new THREE.Raycaster(); const _fpNdc = new THREE.Vector2();
@@ -6094,10 +6094,7 @@ function navWaypoint(nav, v, dest, dt) {
 // deadzone, and chassis capabilities. An omni chassis (the Lurcher's six legs) additionally
 // gets an immediate strafe component: it starts translating toward the point while the
 // nose is still swinging, so there is no turning circle to orbit.
-function steerToward(v, wx, wz) {
-  return locomote({ x: v.holder.position.x, z: v.holder.position.z, heading: v.heading, omni: !!v._move.omni },
-    { goto: { x: wx, z: wz }, arrive: 0.001 });
-}
+// (steerToward deleted 2026-09-08 — an unused wrapper over locomote.)
 
 // Drive the hull with the pedals THE CHASSIS-CORRECT WAY — the one drive boundary every
 // AI motion funnels through. omniTravel: an omni chassis (the Lurcher) folds fwd+strafe
@@ -6332,10 +6329,8 @@ const STAND_RELEASE_S = 12;   // seconds held out of our own reach, not shooting
 const SIEGE_RESOLVE_MAX = 2;
 // A re-solve rate above this in one match is not a hiccup, it is a loop — shout about it.
 const SIEGE_RESOLVE_ALARM = 6;
-// Minimum world separation between two firing spots we spend a reachability search on. With few
-// searches available, diversity matters more than picking the very nearest — 5 probes around the
-// ring beat 5 probes clustered on one side of it.
-const SIEGE_SPOT_SPREAD = 26;
+// (SIEGE_SPOT_SPREAD deleted 2026-09-08. It named a real rule — keep probed firing spots apart
+//  so five searches sample the ring instead of clustering — and nothing ever read it.)
 // Units of ONE type lost on ONE mission with nothing to show before the commander tries a
 // different chassis for it. 2 = "fool me twice". See _vehicleForMission — the mission-level
 // success memory benches the PLAN, this benches the PAIRING, so a good plan attempted with the
@@ -6545,13 +6540,9 @@ const SLOT_FIELDS = Object.keys(freshSlot());
 let aiUnitCap = null;   // debug override (RR.setUnitCap): force the per-team unit cap regardless of elevators
 
 // Forward pass for the trained mission net (1 hidden ReLU layer, tiny — weights are a
-// ── L2 MISSION NET — the doctrine-level head (1v1's learned layer) ────────────────
-// Where the L1 net assigns support-slot ROLES (useless in 1v1 — no support slots), L2
-// picks the MISSION itself in place of the persona playbook's choose(): consulted by
-// Doctrine.tick AFTER the urgent/universal rungs (flag emergencies, preservation, timers
-// all stay hand-authored) and still subject to dwell + the report-card mission bans.
-// Same 26 features, same tiny-MLP shape — only the output head differs (6 missions).
-const L2_MISSIONS = ['attack', 'siege', 'capture', 'defend', 'scout', 'harass'];
+// (The "L2 MISSION NET" was deleted 2026-09-08. Its entire implementation was this comment and a
+//  list of six missions — the learned doctrine-level head it described, "consulted by
+//  Doctrine.tick", was never built. Reading the file made it look like a shipped subsystem.)
 
 // How erratic this commander's dealing is — a PERSONALITY trait (wanderlust: the same
 // appetite that wanders the map wanders the deck; rogues add a twist), overridable for
