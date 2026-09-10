@@ -484,6 +484,17 @@ class Intercept extends Mission {
   // reason ("fight with what we brought"); intercept has the same claim on it and a harder clock.
   wantVehicle(cmd) {
     const v = cmd.unit;
+    // OUR FLAG IS IN THE WATER — the one case where there IS time to change hulls, because a
+    // ground hull is not chasing it slowly, it is chasing it never. A Firebrat hovers and a
+    // Valkyrie flies; a Lurcher and a Jotun sink. Seed 459 is the shape: red's flag went into the
+    // sea with its carrier, and a red Lurcher sat on the shoreline 25u away for the rest of the
+    // match "intercepting" something it could not have reached if it drove all day.
+    // (Jacob: "a new weight for vehicle selecting that gives positive weight to valkyrie and
+    // firebrat if that team's flag is over a water tile".)
+    if (cmd.ourFlagOverWater && cmd.ourFlagOverWater()) {
+      if ((cmd.roster && cmd.roster.valkyrie) > 0) return 'valkyrie';   // fastest, and clears everything
+      if ((cmd.roster && cmd.roster.firebrat) > 0) return 'firebrat';   // hovers, and can carry it home
+    }
     if (v && !v.dead) return v.type;                 // already chasing — no time to change hulls
     return (cmd.roster && cmd.roster.valkyrie) > 0 ? 'valkyrie' : this.doc.role('defend');
   }
@@ -1202,7 +1213,7 @@ export function setHomeScore(on) { HOME_SCORE = !!on; return HOME_SCORE; }
 // in one night (a "both arms identical" that was really "both arms off"). Reading must not write.
 export function abFlags() {
   return { HOME_SCORE, SEES_LEVEL, AMMO_COUNT, FLEE_SCORE, SWAP_SUPPLY,
-           TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, DEFEND_SHAPE };
+           TRIG_FIX, SCORE_CLOCK, SWAP_YIELD, DEFEND_SHAPE, RUNNER_NO_DUEL };
 }
 // Nominal chassis speeds, mirroring the vehicle table in Vehicles.js. Needed here only to price a
 // trip for a hull that does not exist yet — the garage asking "if I build this, can it get back in
@@ -1427,7 +1438,7 @@ const MSN_CANDS = (cmd) => {
 // UNGUARDED and pays the travel bonus to the abandoned plan, measured against that plan's
 // objective. See NOTE_2026-08-09_stale_msnkey.txt.
 // KEEP LOOKING WHILE PREEMPTED (?trigfix). _triggers holds a LEVEL memory per edge, and it is
-// called only inside `if (!next)` — so an _urgent preempt skips it, and the terminal guards for
+// called only inside `if (!next)`, and the terminal guards for
 // flee/swap/fight return before reaching it at all. For the whole duration of a flee, a swap or a
 // duel, every edge memory is frozen at whatever the board looked like when the unit last decided.
 // This refreshes the memories every tick; the DECISION stays exactly where it was.
@@ -1446,6 +1457,11 @@ export function setScoreClock(on) { SCORE_CLOCK = !!on; return SCORE_CLOCK; }
 let SWAP_YIELD = true;
 // A trip in progress is not re-validated against an errand (?noswapcommit reverts). Default ON:
 // it wires up missionGarageOK, which the file already defined for this exact purpose.
+// ?noRunnerDuel disables. A Firebrat on capture is the flag runner, not a duellist — see the
+// trigger that reads this. On by default because the alternative is measured: the runner turns to
+// trade, breaks off, and turns back, which is most of the capture<->fight strobe class.
+let RUNNER_NO_DUEL = true;
+export function setRunnerNoDuel(on) { RUNNER_NO_DUEL = !!on; return RUNNER_NO_DUEL; }
 let SWAP_COMMIT = true;
 export function setSwapCommit(on) { SWAP_COMMIT = !!on; return SWAP_COMMIT; }
 // A flag carrier scores capture with the same +6 flee has always had (?nocapcarry to compare).
@@ -1483,6 +1499,17 @@ export function missionScore(cmd, key, running = null) {
   const spareFB = Math.min(1.5, Math.max(0, (roster.firebrat || 0) - 1) * 0.75);  // per spare runner (re-anchored: 1 spare ≈ the proven binary's +1)
   const lostAge = cmd._lostRecentT != null ? matchT - cmd._lostRecentT : 1e9;
   const justLost = lostAge < 20 ? 2 * (1 - lostAge / 20) : 0;   // sting fades over 20s
+  // IS THERE ANYTHING LEFT TO HUNT. `attack` goes after their ARMY, so its whole case is worth
+  // what that army is worth: full value while they can still field a couple of hulls, nothing at
+  // all once they can field none. Seed 60 is what its absence costs — blue annihilated at 827s,
+  // their keep already rubble, their flag open and grabbable, and red spent the remaining 673
+  // seconds scoring `attack 7.1` against an enemy that no longer existed:
+  //     attack  7.1   base +1, fleet L +2.7, hunter:attack +1, running +2.4
+  //     capture-front  6.3   clock +3, flag OPEN +4, grabbable +2, 1 gun covering the route -2.7
+  // Nothing in attack's case asked whether there was an enemy; `fleet L` is play-to-strength
+  // ("we own Lurchers") and `running` is incumbency, so the mission re-elected itself forever.
+  // The match timed out with a Firebrat sitting in the reserves and the win condition on the table.
+  const hunt = cmd.enemyStrength ? Math.min(1, cmd.enemyStrength() / 2) : 1;
 
   const base = key.split('-')[0];   // 'capture-rear' → 'capture'; 'siege-back' → 'siege'
   // CLOCK PRESSURE (Jacob's rule): the longer the match runs, the hungrier the WIN missions
@@ -1495,10 +1522,11 @@ export function missionScore(cmd, key, running = null) {
     case 'scout':
       add('base', 1); if (earlyB >= 0.1) add('early', earlyB); break;
     case 'attack': {
-      add('base', 1);
-      const fk2 = Math.max(0, 3 - cmd.kills) * 0.7;             // hungriest at zero kills, gone by three
+      if (hunt <= 0) break;                                     // no army left to hunt — this mission has no object
+      add('base', 1 * hunt);
+      const fk2 = Math.max(0, 3 - cmd.kills) * 0.7 * hunt;      // hungriest at zero kills, gone by three
       if (fk2 >= 0.1) add('few kills', fk2);
-      if (justLost >= 0.1) add('just lost a unit', justLost);
+      if (justLost * hunt >= 0.1) add('just lost a unit', justLost * hunt);
       // CLEAR THE INTERCEPTORS: our runners keep dying to enemy DEFENDERS (not towers) — go hunt
       // them down first. Escalates with each lost runner, fades ~30s after the last interception.
       const rInt = (cmd._runnerInterceptT != null && matchT - cmd._runnerInterceptT < 30) ? Math.min(8, 3 * (cmd._runnerLosses || 0)) : 0;
@@ -1880,7 +1908,13 @@ export function missionScore(cmd, key, running = null) {
     // alive, and a roster that never turns over keeps owning only Jotuns.
     // "Play to your strengths" must not outvote the win condition being on the table. Owning the
     // wrong chassis is a reason to CHANGE chassis, not a reason to prefer the mission that suits it.
-    if (fav === key || (fav === base && key !== 'siege-back')) { const b = Math.min(FLEET_FAV_CAP, ((roster[t] || 0) / fleet - thr) * 10); if (b > 0) add('fleet ' + t[0].toUpperCase(), b); }
+    if (fav === key || (fav === base && key !== 'siege-back')) {
+      // …and the same rule the comment above states applies to the mission's OBJECT, not just its
+      // size: owning Lurchers is a reason to prefer `attack` only while there is an army to attack.
+      const h = base === 'attack' ? hunt : 1;
+      const b = Math.min(FLEET_FAV_CAP, ((roster[t] || 0) / fleet - thr) * 10) * h;
+      if (b > 0) add('fleet ' + t[0].toUpperCase(), b);
+    }
   }
   // persona bias: the exact key's nudge plus the base key's (so rogue's capture +1 applies to
   // every direction, and its capture-rear +1 stacks on top of that for the back door)
@@ -2002,6 +2036,37 @@ export function missionPick(cmd, incumbent = null) {
   return best;
 }
 // One-line troubleshooting breakdown of the current decision (top 3 with their term math).
+// THE SAME BOARD, SCORED TWICE AT ONE INSTANT — as the commander actually is, and as if nothing
+// were fielded. Jacob's rule: "I don't think any scores should drastically change depending on if
+// the vehicle is fielded or the decision is in the garage." A term that reads cmd.unit breaks that
+// rule in one of two ways, and both are here to be found: it vanishes when the hull is retired
+// (capture's 'the flag is right there'), or it fires when there is no 'us' to speak of. Either way
+// the board lurches across a deploy boundary, which is the engine of the swap loop — retire the
+// hull, the board says one thing, roll out for it, the board says the other, drive home to swap.
+// Read-only: cmd.unit is restored before returning, and nothing else is touched.
+export function scoreGap(cmd) {
+  const keys = MSN_CANDS(cmd);
+  const asIs = {}, asGarage = {};
+  for (const k of keys) asIs[k] = missionScore(cmd, k, null).total;
+  const saved = cmd.unit;
+  cmd.unit = null;
+  try { for (const k of keys) asGarage[k] = missionScore(cmd, k, null).total; }
+  finally { cmd.unit = saved; }
+  const rows = keys.map(k => ({ key: k, fielded: asIs[k], garage: asGarage[k],
+                                gap: Math.round((asGarage[k] - asIs[k]) * 10) / 10 }))
+                   .sort((x, y) => Math.abs(y.gap) - Math.abs(x.gap));
+  const topF = keys.slice().sort((x, y) => asIs[y] - asIs[x])[0];
+  const topG = keys.slice().sort((x, y) => asGarage[y] - asGarage[x])[0];
+  // The PLAN missions are the ones bound by the rule. A supply mission collapsing to zero with
+  // nothing fielded is correct — a hull that does not exist needs no fuel, and the one that rolls
+  // out arrives full — so it is reported separately rather than counted as a lurch.
+  const PLAN = k => !/^(shield|repair|rearm|refuel|swap|flee)$/.test(k.split('-')[0]);
+  const pk = keys.filter(PLAN);
+  const planFielded = pk.slice().sort((x, y) => asIs[y] - asIs[x])[0];
+  const planGarage = pk.slice().sort((x, y) => asGarage[y] - asGarage[x])[0];
+  return { unit: saved && !saved.dead ? saved.type : null, topFielded: topF, topGarage: topG,
+           planFielded, planGarage, flips: topF !== topG, rows: rows.slice(0, 12) };
+}
 export function missionScoreLog(cmd) {
   const a = cmd._missionScores; if (!a) return '';
   return a.slice(0, 3).map(([k, v, terms]) =>
@@ -2031,7 +2096,7 @@ class Doctrine {
     this.t += dt;
     this.mission.tick(cmd, dt);
     // OBSERVE FIRST, DECIDE SECOND. Everything below can return early — the fight/flee/swap guards
-    // do, and an _urgent preempt skips the block that used to be the ONLY caller of _triggers. So
+    // do, and the block below used to be the ONLY caller of _triggers. So
     // run the observation here, above every early exit, and let the decision consult the answer
     // where it always did. Nothing about the ranking or the re-score gate changes.
     this._trigNow = TRIG_FIX ? this._triggers(cmd, dt) : null;
@@ -2076,7 +2141,7 @@ class Doctrine {
       }
       // A TRIP IS NOT A BLINDFOLD (Jacob, 2026-08-11). Arriving is still terminal — the block above
       // is unchanged — but a swap that is merely IN PROGRESS no longer returns here, so the normal
-      // decision path underneath gets to run: _urgent first (self-preservation, and our flag being
+      // decision path underneath gets to run: the
       // taken), then the trigger-driven re-score. The old early return is why "vehicles just walk
       // on by each other": for the whole duration of a trip the commander was not asked anything,
       // so a Lurcher heading home for a Firebrat could not notice a rival, a stolen flag, or a
@@ -2121,60 +2186,18 @@ class Doctrine {
     }
     // Every forced transition carries a WHY — it's appended to the switch log so a mission
     // change always reads as decision + reason, not just a new battle cry out of nowhere.
-    let next = this._urgent(cmd);
-    // WHICH emergency. _urgent answers with 'flee' OR 'intercept', and this used to read `next`
-    // as a bare truthy and describe it as a flag recovery either way — so a unit breaking off to
-    // save itself was logged, and FILED, as "our flag is lying in the field". Both halves were
-    // wrong: the bark read like nonsense next to the actual situation, and `fk` feeds the ai-lab
-    // decision path, so every self-preservation flee in the game was recorded there as flag_loose.
-    // Nothing downstream was broken by it; the LOGS were, which is worse — they are what we read
-    // to work out why a match went the way it did.
-    let why = null, fk = null;
-    if (next === 'flee') {
-      // shouldFlee has two reasons and they are different decisions, so name the one that fired:
-      // the brain wrote this unit off, or we are carrying and the road home is shut.
-      const hurt = !!(cmd.unit && cmd.unit.ai && cmd.unit.ai._bail);
-      why = hurt ? 'we are done here — break off before we lose the hull'
-                 : 'carrying, and the direct road home is blocked — take the back way';
-      fk = hurt ? 'self_preservation' : 'route_home_blocked';
-    } else if (next) {
-      // Two flavours of the same emergency: a live thief carrying it (chase) vs the thief died
-      // and the flag's lying loose in the field (drive over and touch it home before their next
-      // runner re-grabs it mid-field — far closer than our base).
-      const loose = !cmd.ourFlagStolen();
-      why = loose ? 'our flag is lying in the field — recover it before they re-grab' : 'our flag is on the move — run the thief down';
-      fk = loose ? 'flag_loose' : 'flag_stolen';   // which doctrine rung justified the decision (ai-lab decision-path)
-    }
-    // DELETED 2026-09-08: the home-defence preempt. It set `next = 'defend'` before any scoring,
-    // on a dice roll, and only in tick() — never in garagePick(). Home defence is scored now
-    // (homeDefenceScore), so the fact competes on the board instead of jumping the queue.
-    // FIND PARTS: we can win by capture but have no runner and can't afford to build one →
-    // go collect salvage until we can. Beats the siege press below (cracking the HQ is moot
-    // without a firebrat to actually grab the exposed flag).
-    // DEFENSES BREACHED: the enemy's towers are down but their keep still stands → COMMIT to
-    // siege and finish the HQ (which exposes the flag), instead of orbiting a defenceless base
-    // dueling their leftover units. Without this, Hunter-type doctrines only siege on full
-    // elimination, so a flyer circled a defenceless base for 150s with the HQ at full HP (trace).
-    // STALEMATE GAMBIT: the match dragged on with the enemy base untouched — stop grinding the
-    // mid-field duel and commit to the "Valkyrie around the back" siege (the Siege mission reads
-    // cmd._gambit to force the flyer + rear flank, and rushBase suppresses engaging en route).
-    // A capture runner was gunned down by an enemy VEHICLE → hunt the interceptor down before
-    // feeding another firebrat into it (timed, so it doesn't chase forever).
-    // Tower-soften window (see onRunnerLost): the towers keep shredding runners → hold SIEGE
-    // until they're silenced, instead of rebuilding a firebrat into the same guns each lap.
-    // OPENING SAPPER (persona-rolled): a Firebrat out to a home flank — lay mines on the way back,
-    // drop a pod, scout that side — then fall through to the persona's real playbook.
-    // HUNTER TRAP: once the trap's mined, tend it with a bait Lurcher until it's sprung/spent.
-    // Mid-swap ledger state, hoisted to function scope: the question is whether the trip SURVIVES
-    // this re-score, and that is only knowable after the dwell-gated _switch far below.
-    let msWasSwap = false, msWantedJob = null, msTrig = null;
+    // NO PREEMPTS LEFT. _urgent is gone — self-preservation went to FLEE_SCORE weeks ago, the
+    // home-defence rung went on 2026-09-08, and the flag emergency went today. Every decision this
+    // commander makes now comes off the board, which is the whole point: a weight can be outvoted
+    // by a better one, a preempt cannot be outvoted by anything.
+    let next = null, why = null, fk = null;
+    let msWasSwap = false, msWantedJob = null, msTrig = null;   // mid-swap re-score ledger (read below)
     if (!next) {
       {
         // MISSIONSCORE: the weighted picker owns the whole offensive/economy plan (the
         // fortDown/gambit/soften/clearPath/scavenge/sap/trap rungs above are gated off when
         // weights are on — the success memory + siege/scavenge terms subsume them, and killing
-        // the soften/clearPath loop is the seed-116 fix). Only the flag emergency (_urgent) and
-        // home-defense still hard-preempt.
+        // the soften/clearPath loop is the seed-116 fix), and nothing preempts it any more.
         const runningKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;
         // RE-SCORE ON A TRIGGER, NOT EVERY TICK. This used to run missionPick on every single
         // tick, with a +1.5 bonus for the incumbent as the only thing holding a plan together —
@@ -2240,19 +2263,6 @@ class Doctrine {
   // Emergencies that preempt any persona's plan: our flag's been lifted → run it down;
   // the thief died and dropped it in the field → go RECOVER it (any teammate's touch snaps
   // it home). Both waived when WE'RE carrying the enemy flag home — don't blow a winning run.
-  _urgent(cmd) {
-    // SELF-PRESERVATION OUTRANKS EVERYTHING, and unlike the two below it is NOT waived for a
-    // flag carrier: Flee's destination is our own base, so for a carrier it is the same trip by
-    // a safer road, and arriving still wins the match.
-    // …unless flee is being SCORED, in which case preempting here would short-circuit the very
-    // comparison the change exists to make (the board would never see fight and flee side by side).
-    // (The flee preempt that lived here was deleted 2026-09-08: FLEE_SCORE has shipped on since
-    //  2026-08-18, so `!FLEE_SCORE && ...` had been unreachable for three weeks.)
-    if (cmd.flag() && cmd.flag().carrier === cmd.unit) return null;
-    if (cmd.ourFlagStolen()) return 'intercept';
-    if (cmd.ourFlagLoose && cmd.ourFlagLoose()) return 'intercept';
-    return null;
-  }
   // Directional keys map onto the base missions: 'capture-rear' runs the Capture mission
   // approaching from the rear (cmd._capDir routes the runner); 'siege-back' runs Siege with
   // the rear-tower bias (cmd._siegeBack gates the tower hunt). Records the full scored key on
@@ -2274,7 +2284,7 @@ class Doctrine {
     // "hull low" against 100% hp, and MEASURED OVER 3 SEEDS IT CHANGED NOTHING: 112 vs 114 stale
     // samples out of 4180, byte-identical match outcomes. The early returns are not where the
     // states go stale. The real cause is one level up — `_triggers` is called inside `if (!next)`,
-    // so ANY _urgent preemption skips it, and the terminal guards for flee/swap/fight return
+    // and the terminal guards for flee/swap/fight return
     // before reaching that block at all. For the whole duration of a flee, a swap or a duel, every
     // level memory is frozen at whatever it was when the unit last ran the block.
     // Kept anyway because evaluating all of them is the correct shape and it costs nothing, but
@@ -2352,13 +2362,35 @@ class Doctrine {
     // A run is committed when we are CARRYING, or once inside CAPTURE_COMMIT of the flag, which is
     // the same "grab or die trying" line the desperate-grab term already uses. Outside that, a
     // rival in reach is a question the board should answer like any other.
+    // A RUNNER RUNS OR IT FLEES — IT DOES NOT DUEL. The narrowing above is right for a Lurcher
+    // (Jacob watched one refuse a Valkyrie 17u away and it should have fought) but a Firebrat is
+    // not a fighter: 90hp, the thinnest hull in the game, and a 14-damage gun the code already
+    // refuses to point at a tower for exactly this reason — "excluding it costs nothing and
+    // protects the runner". Measured over 8 seeds, control vs tonight's swap fix: total fight
+    // entries fell 128 -> 101 while `firebrat entered fight from capture` ROSE 15 -> 23, because
+    // deliveries now actually hand out runners and there are more of them in the field to pull.
+    // That is the capture<->fight strobe: fight scores 16.5 on `a rival on us +10, odds +6.5`,
+    // capture-front scores 8.6, the runner turns to trade, disengages, and turns back — 15 times
+    // in 26 seconds on seed 10641.
+    // Self-preservation is untouched: shouldFlee preempts above this, so a cornered runner still
+    // breaks off. It just never chooses to stand and trade instead of running the flag.
+    const _runner = !!(cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat');
     const _fl = cmd.flag && cmd.flag();
     const _carrying = !!(_fl && _fl.carrier === cmd.unit);
     const _uPos = cmd.unit && !cmd.unit.dead ? cmd.unit.holder.position : null;
     const _nearFlag = !!(_fl && _fl.home && _uPos
       && Math.hypot(_fl.home.x - _uPos.x, _fl.home.z - _uPos.z) < CAPTURE_COMMIT);
+    // …AND ONLY A RUNNER CAN BE COMMITTED TO A CAPTURE AT ALL. Stealing is Firebrat-only in the
+    // grab code ("if (v.type !== 'firebrat') continue") — a Lurcher parked on an enemy flag simply
+    // cannot pick it up, ever. So treating one as "committed to the run" exempts it from the
+    // rival-in-reach trigger to protect a run it is incapable of making.
+    // Seed 459 is what that costs: a Lurcher on capture, 24u from the flag (inside CAPTURE_COMMIT,
+    // so committed), with an enemy Lurcher 0.2u away — touching it. It will not fight, because
+    // capture said committed. It will not swap for one of its three Firebrats, because swapWanted
+    // refuses to turn its back on a rival that close. Both units sat there for 600 seconds and the
+    // match timed out with the flag lying in deep water.
     const committedPlan = this.step === 'fight' || this.step === 'flee'
-      || (this.step === 'capture' && (_carrying || _nearFlag));
+      || (this.step === 'capture' && _runner && (_carrying || _nearFlag || RUNNER_NO_DUEL));
     const unanswered = (engaged && !committedPlan)
       ? (underFire ? 'taking fire and we are neither fighting nor fleeing'
                    : 'a rival in reach and we are neither fighting nor fleeing') : null;
@@ -2388,7 +2420,7 @@ class Doctrine {
     // already taken and committed to. Self-preservation still interrupts a runner — shouldFlee
     // preempts above this — so the one thing that should break a run still can.
     const committed = this.step === 'fight' || this.step === 'flee'
-      || (this.step === 'capture' && (_carrying || _nearFlag));
+      || (this.step === 'capture' && _runner && (_carrying || _nearFlag || RUNNER_NO_DUEL));
     const sensed = (SEES_LEVEL && v && v._seesEnemy && !committed)
       ? 'a rival is in sight and we are neither fighting nor fleeing' : null;
     if (sees || fire || flag || unanswered || sensed) return sees || fire || flag || unanswered || sensed;
@@ -2443,7 +2475,7 @@ class Doctrine {
   // so this skips the dwell timer and the incumbent bonus and just asks what the board wants.
   garagePick(cmd) {
     this._rollOpening(cmd);
-    const urg = this._urgent(cmd);
+
     // SCORED COLD, ON PURPOSE — do not pass an incumbent here (tried and measured, 2026-09-02).
     // It looks like a bug: a hull bought FOR capture-front gets no credit for the plan that
     // justified building it, so a near-tied siege can out-score the mission the commander just
@@ -2455,8 +2487,8 @@ class Doctrine {
     // sunk cost to protect and no reason for loyalty. The comment above already said so.
     // The genuine defect behind those seeds was siege out-scoring an exposed flag, and that is
     // fixed where it belongs — in the tower terms, which now stop paying out once the flag is open.
-    this._recordScore(urg ? `garage: ${urg}` : 'chosen in the garage, before roll-out');
-    const next = urg || this._applyKey(cmd, missionPick(cmd, null));
+    this._recordScore('chosen in the garage, before roll-out');
+    const next = this._applyKey(cmd, missionPick(cmd, null));
     if (next !== this.step) this._switch(next, cmd, 'chosen in the garage, before roll-out');
   }
   _switch(key, cmd, why = null) {

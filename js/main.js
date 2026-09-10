@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1814,7 +1814,16 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
   veh.maxShield = st.shield; veh.shield = 0;   // shield pool, picked up at a generator
   veh._shieldFx = null;             // force-field bubble, created on first pickup
   veh._move = VEH_MOVE[veh.type] || VEH_MOVE.lurcher;
-  veh._blocked = blockedFor(veh._move, !isPlayer, veh.team);   // AI paths around water; player may dive in
+  // WATER IS A NAVIGATION PROBLEM, NOT A WALL (Jacob, 2026-09-09: "as long as a vehicle has a
+  // valid path around deep water, I don't think deep water should actually interfere with
+  // navigation… I also think the physical block should be removed").
+  // This made open sea SOLID for AI units and passable for the player — an asymmetry that has been
+  // in the file since the first commit. Its real job was as a safety rail: deep water accrues
+  // _sink and SINK_KILL destroys the hull, so the wall was what stopped the AI drowning itself.
+  // With the depth-scaled A* cost above, routing is what keeps hulls out of the deep, and the rail
+  // is doing nothing except letting a unit grind against an invisible edge. Removing it means A*
+  // has to be right — so `drownings` is counted and reported, and ?aiwaterwall puts it back.
+  veh._blocked = blockedFor(veh._move, !isPlayer && AI_WATER_WALL, veh.team);
   veh._sink = 0;
   veh.hitR = VEH_HIT_R[veh.type] ?? 3.2;   // Firebrat is small + nimble; heavies are big targets
   veh.dead = false;
@@ -2972,7 +2981,7 @@ function applyAltitude(veh, dt) {
     } else if (deepWater) {
       veh._sink += dt * SINK_RATE;
       target = -veh._sink;
-      if (veh._sink >= SINK_KILL) { destroyVehicle(veh, 'sank'); return; }
+      if (veh._sink >= SINK_KILL) { drownings++; destroyVehicle(veh, 'sank'); return; }
     } else {
       // land OR shallow water. On land, sit just above the ground. FORDING, sink below the
       // waterline — DEEPER the bluer (deeper) the water — so it reads as riding the surface and
@@ -3492,7 +3501,7 @@ function buildFlags() {
     g.visible = false;
     scene.add(g);
     flags.push({ team: c.team, group: g, tilt, cloth, hqBody: c.flagHQ || null, revealed: false, dropT: 0,
-      home: { x: gx, y: gy, z: gz }, carried: false, carrier: null, returnT: 0 });
+      home: { x: gx, y: gy, z: gz }, carried: false, carrier: null });
   }
 }
 // Tint a team's capturable flag to a chosen colour (player team-colour lock).
@@ -3642,7 +3651,7 @@ function updateFlags(dt) {
 function onCapture(team, f) {
   flagRunsScored++;
   if (f.carrier) f.carrier._carryRun = null;
-  f.carried = false; f.carrier = null; f.returnT = 0;
+  f.carried = false; f.carrier = null;
   f.group.position.set(f.home.x, f.home.y, f.home.z);
   endMatch(team);
 }
@@ -5435,7 +5444,21 @@ function vehCellCost(v, i, j) {
   const onRoad = roads && (roads.has(key) || gateCells.has(key));
   // SINK vehicles wade shallow water but bog there — make off-road shallows EXPENSIVE so A* keeps
   // them on land/roads and only fords when there's genuinely no dry route (overrides archetype).
-  if (v._move.water === 'sink' && !onRoad && !map.isLand(i * c, j * c)) return 35;
+  // …and it scales with DEPTH rather than stepping at the waterline (Jacob, 2026-09-09: "can we
+  // make it so that water gets more expensive the deeper it gets… so the cost goes from 0 -> 100
+  // in that range to keep the A* away from the deep").
+  //
+  // A flat 35 said a puddle at the tide line and a channel one centimetre off drowning depth were
+  // the same risk, so A* would happily thread the deepest fordable water it could find. Seed 214:
+  // a Lurcher's entire route was terrain-0 cells and it never arrived. The floor runs 0 at the
+  // shore to FORD_DEPTH (-0.8) at the drowning line, so that fraction is the risk, and the cost
+  // now rises with it — cheap enough at the very edge to cut a corner across a spit, ruinous
+  // anywhere a hull would actually bog.
+  if (v._move.water === 'sink' && !onRoad && !map.isLand(i * c, j * c)) {
+    const depth = Math.max(0, -(map.floorAt(i * c, j * c) || 0));
+    const frac = Math.min(1, depth / 0.8);                     // 0 at the tide line → 1 at drowning depth
+    return WATER_COST_MIN + (WATER_COST_MAX - WATER_COST_MIN) * frac;
+  }
   // FIREBRAT (the flag runner) BUMPS trees but SKIMS water: route it AROUND the forest (tree-
   // adjacent land is dear), over open water if that's clearer, instead of threading a tight gap.
   if (v.type === 'firebrat') {
@@ -5728,7 +5751,12 @@ function planPath(v, dest, opts = {}) {
   // time — so a 12000 budget clipped only 0.7% of passes yet cost the standoff solver (which asks
   // for 22500) enough to push unreachable-GOTO violations up 56%. Capping a cost that is already
   // capped buys nothing; making each cell cheaper is what pays. See the static nav bitmap.
-  const path = astarGrid({ start, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
+  // THE GOAL IS A RING, NOT A CELL. opts.goalR is the world-unit radius within which the caller's
+  // requirement is already met — "park within heal range of the flag HQ", not "stand on its
+  // centre". Converted to cells here because A* thinks in cells. Zero keeps the old exact-cell
+  // behaviour for callers that genuinely want one spot (a firing position, a mine).
+  const _goalR = Math.max(0, (opts.goalR || 0) / c);
+  const path = astarGrid({ start, goal, goalR: _goalR, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
   if (path) _astarFrameNodes += path.nodes || 0;
   if (!path || path.length < 2) {
     // BOXED-IN START: parked hard against a wall/shoreline, every neighbouring cell can be
@@ -5737,7 +5765,7 @@ function planPath(v, dest, opts = {}) {
     // one short direct hop to that first waypoint, then follows a real A* route.
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
-      const p2 = astarGrid({ start: s2, goal, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
+      const p2 = astarGrid({ start: s2, goal, goalR: _goalR, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
       if (p2 && p2.length >= 1) { _astarFrameNodes += p2.nodes || 0; const o2 = detourMines(v, _smooth(v, p2.map(n => ({ x: n.i * c, z: n.j * c })))); o2.budgetHit = !!p2.budgetHit; return o2; }
     }
     return null;
@@ -5882,6 +5910,59 @@ setSwapYield(!QS.has('noswapyield'));   // SHIPPED — the param disables
 setSwapSupply(QS.has('swapsupply'));
 setSwapCommit(!QS.has('noswapcommit'));
 setCapCarry(!QS.has('nocapcarry'));   // a carrier scores capture with flee's +6 — see the capture case
+// DEFEND'S CHASSIS PREFERENCE — a Lurcher answering a raid is worth +1.5, only-the-runner-left is
+// worth -2.5, and both only apply once there is a real reason to defend. It had NO boot wiring at
+// all: the sole reference outside its own module was the RR setter, so it could be switched on in a
+// harness and never in a game. That is the HOME_SCORE bug again — a flag that reads as shipped in
+// the source and is unreachable in the product — and it is why "we gated it and it measured flat"
+// has meant nothing three times this month.
+// Jacob's call, on architecture rather than the gate: encouraging a Lurcher and discouraging the
+// flag runner is the right shape for defence regardless of what a global win-rate does with it.
+// Measured on the dimension it actually targets (960 seeds, one family): raiders intercepted
+// 124 -> 168, useful trips per response 6.7% -> 7.4%.
+let drownings = 0;                          // sinkers lost to deep water — the price of removing the wall
+// A* water cost, scaled by depth (see the pathfinding cost function). Settable so the ramp can be
+// swept rather than guessed.
+let WATER_COST_MIN = 20;    // at the tide line, where a hull is barely wet
+let WATER_COST_MAX = 200;   // at drowning depth
+let AI_WATER_WALL = false;  // was true forever: open sea as a solid wall for AI units only
+// TWO KINDS OF RING, AND THEY NEED OPPOSITE TREATMENT. One knob for both was wrong: shrinking
+// them together helps one and breaks the other.
+//
+//   MISSION rings come from arriveDist — a mission's idea of "close enough" (Swap 6, Siege 12).
+//   Those numbers were chosen with no reference to the size of the thing they surround, and the
+//   destination is usually a structure's CENTRE. A base centre has its nearest standable ground
+//   ~8u out, so a 6u ring can never be satisfied at all: the search comes back partial and the
+//   trip never formally finishes. Hence a FLOOR — a ring may not be smaller than the building.
+//
+//   SERVICE rings are physical zones with a hard edge (nearOwnSupply: < 16u main, < 12u FOB).
+//   A* stops at <= goalR, so a ring set exactly AT the requirement lets a path finish at 16.0 and
+//   fail `< 16` — the unit drives all the way home, parks one epsilon outside the pumps, and never
+//   heals. Hence a small INWARD trim.
+//
+// Measured over 40 seeds, shrinking both together (nav alarms): trim0 4 · trim2 8 · trim4 10 ·
+// trim6 15 — monotone, so bigger is better for the mission half, while the service half needs to
+// stay just inside its edge. Both are settable so the pair can be swept rather than guessed.
+// NO FLOOR. This was my idea and the sweep killed it: a blanket minimum ring applies to EVERY
+// advance destination, including the enemy flag, so a capture whose route "completes" ten units
+// out never touches the thing it came for. Measured over 40 seeds, stalemates by floor:
+//     0 -> 0 · 6 -> 0 · 10 -> 6 · 14 -> 28 · 18 -> 40 (nothing resolved at all)
+// Note floor10 also had the FEWEST nav alarms (3 vs 20 at floor0) while stalemating six matches —
+// "route ends 11u short, holding at the closest ground and carrying on" is a LOUD BUT HARMLESS
+// log, and optimising to silence it drives straight off this cliff.
+// The mission already says how close it needs to be. Use exactly that, and nothing else.
+let MISSION_R_FLOOR = 0;
+let SERVICE_R_TRIM = 2;     // …and service rings land this far INSIDE their hard edge
+function setGoalRTrim(mission, service) {
+  if (mission != null) MISSION_R_FLOOR = +mission;
+  if (service != null) SERVICE_R_TRIM = +service;
+  return { floor: MISSION_R_FLOOR, trim: SERVICE_R_TRIM };
+}
+const ringR = (r) => Math.max(0, r - SERVICE_R_TRIM);              // service zones: just inside
+const msnRing = (r) => Math.max(MISSION_R_FLOOR, r || 0);          // mission targets: at least the floor
+function setAiWaterWall(on) { AI_WATER_WALL = !!on; return AI_WATER_WALL; }
+setDefendW({ on: !QS.has('nodefendshape') });
+setAiWaterWall(QS.has('aiwaterwall'));   // the old solid-sea wall for AI units — off by default now
 // SCORED HOME DEFENCE — default OFF, gated deliberately (task #49). Shipping an untested default is
 // exactly what cost 15 resolutions with flat&reqveh this morning; this one earns its default or
 // does not get one.
@@ -5969,7 +6050,7 @@ function pathGap(v, path, idx) {
 const NAV_OFF_PATH = 15;        // u — three cells off our own route means we are not on it
 const NAV_OFF_COOL = 1.0;       // s between displacement replans, so a wedged hull cannot search every frame
 let OFF_PATH_REPLAN = true;     // RR.setOffPathReplan(false) restores the goal-only triggers
-function navWaypoint(nav, v, dest, dt) {
+function navWaypoint(nav, v, dest, dt, goalR = 0) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
   if (nav.retryT > 0) nav.retryT -= dt;
@@ -6040,7 +6121,7 @@ function navWaypoint(nav, v, dest, dt) {
       // the same budget would return the same truncated route. On the LAST try, clear budgetHit so
       // "we don't know" becomes "we could not get there" and the contract is allowed to speak.
       const _mul = !nav.retryN ? 1 : 1 + nav.retryN;
-      nav.path = planPath(v, dest, _mul > 1 ? { nodeMul: _mul } : undefined);
+      nav.path = planPath(v, dest, { goalR, ...(_mul > 1 ? { nodeMul: _mul } : null) });
       // MARKED, not silent. Clearing budgetHit here hands the Driver a budget-truncated route
       // wearing a complete route's badge, and the Driver's whole reachability contract is built on
       // trusting that badge ("a budget-truncated search proves NOTHING about reachability... acting
@@ -6524,6 +6605,7 @@ function freshSlot() {
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
     _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
     _tgtKey: null, _tgtT: 0, _tgtWhy: null,
+    _destRaw: null, _destOut: null, _destSt: null,     // the COMMITTED destination — see the resolve below
     _tgtLock: null,                                    // the target we are COMMITTED to (see _tgtStillValid)                          // the target we are COMMITTED to, and how long we have held it
     _stand2: null,                                     // standoff v2 commitment — PER SLOT (left off the record once: two siege slots shared one commit and ping-ponged goals every tick — the DIRECT(suppress) pin class)
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
@@ -6813,6 +6895,20 @@ class AICommander {
   // as "ahead" and never turtle against a human on this basis.)
   // The enemy fleet is decisively beaten down vs ours — the turtle's licence to leave the
   // wall and press (same read losingBadly makes from the other side).
+  // HOW MUCH ARMY THEY HAVE LEFT — units in the field plus hulls they can still field.
+  // `attack` is the mission that hunts their UNITS, and an army of zero is not something a plan
+  // can accomplish. enemyEliminated() has answered the boolean form of this question for a long
+  // time, and the OLD transition table consulted it ("no one to hunt → press the base"); when
+  // MissionScore became the one place that decides, that knowledge did not come with it. This is
+  // the gradual form the scorer needs: it falls off as their fleet empties rather than stepping
+  // at zero, so a nearly-beaten enemy is worth less to hunt than a fresh one.
+  enemyStrength() {
+    const tt = this.targetTeam();
+    let n = 0;
+    for (const o of combatants) if (!o.dead && o.team === tt) n++;
+    const ec = commanders.find(c => c.team === tt);
+    return n + (ec ? ec.fleetLeft() : 0);
+  }
   enemyWeaker() {
     const ec = commanders.find(c => c.team === this.targetTeam());
     return !ec || ec.fleetLeft() <= this.fleetLeft() - 2;
@@ -7126,6 +7222,20 @@ class AICommander {
     return !!(f && f.revealed && !f.carried
       && Math.hypot(f.group.position.x - f.home.x, f.group.position.z - f.home.z) > 8);
   }
+  // OUR FLAG IS LYING IN WATER. A carrier that dies over the sea drops it there, and it stays
+  // there until somebody drives over and touches it (any teammate recovers its own flag; only a
+  // Firebrat can steal the enemy's). Nothing returns it on a timer, and nothing needs to: you
+  // cannot win without a Firebrat, and a Firebrat hovers — `water: 'cross'` — so no tile on the
+  // map is out of reach of a side that intends to win. A flag in the sea is never unreachable,
+  // only unreachable to the WRONG HULL, which makes it a chassis question.
+  // A Lurcher or Jotun sinks, so for them that flag is not far away, it is unreachable forever.
+  // Asked by Intercept.wantVehicle so the recall picks a hull that can actually get there.
+  ourFlagOverWater() {
+    const f = this.ourFlag();
+    if (!f || f.carried || !this.ourFlagLoose()) return false;
+    const p = f.group.position;
+    return !map.isLand(p.x, p.z);
+  }
   // Our flag base has lost all its turrets → a defender can't lean on tower cover and
   // should switch to a Valkyrie's mobility (ai_behavior Defend).
   ownTowersDown() { return turretCountOf(this.team) === 0; }
@@ -7289,7 +7399,17 @@ class AICommander {
       needBuy = true;   // affordable but not parked — bought below, once the trip is actually ordered
     }
     const up = v.holder.position;
-    for (const o of combatants) {                                  // a rival close enough to shoot us in the back
+    // …UNLESS CARRYING ON IS WORTH NOTHING. The deferral's own justification is that "deferring
+    // costs nothing — we simply carry on with the current mission", and that premise fails when
+    // the hull cannot perform the mission AT ALL. Stealing a flag is Firebrat-only in the grab
+    // code, so a Lurcher on capture is not carrying on with anything: it is standing still, being
+    // shot at for free, waiting for a rival to leave.
+    // Seed 459: a Lurcher on capture, three Firebrats in the rack, an enemy Lurcher 0.2u away —
+    // 0.2, they are touching — so the rival never leaves, the swap is deferred forever, and the
+    // match times out with both units parked side by side for 600 seconds.
+    // Turning your back is a real risk, but it is a risk with a payoff. Standing here has neither.
+    const _useless = key === 'capture' && v.type !== 'firebrat';
+    if (!_useless) for (const o of combatants) {                    // a rival close enough to shoot us in the back
       if (o.dead || o.team === this.team || vehicleHidden(o)) continue;
       if ((o.holder.position.x - up.x) ** 2 + (o.holder.position.z - up.z) ** 2 < SWAP_DEFER_R * SWAP_DEFER_R) return _why('rival within SWAP_DEFER_R');
     }
@@ -7335,6 +7455,7 @@ class AICommander {
       ? `${this.cname}: ${v.type} couldn't get home to swap — ditching it and rolling out a ${want}.`
       : `${this.cname}: ${v.type} is home — swapping it out for a ${want}.`);
     this._swapFrom = v.type; this._swapWant = want;   // SWAP-LOOP alarm reads these at the next deploy
+    this._swapDelivering = true;   // the next deploy is this trip's delivery — see deploy()
     // …and the JOB the trip is for, captured HERE because the strategy clears _swapThen the moment
     // the swap completes, which is before the garage picks and long before the loop is counted.
     if (!this._swapLoopThen) this._swapLoopThen = (this.strategy && this.strategy._swapThen) || '?';   // set by the strategy just before completeSwap; this is the fallback
@@ -8028,10 +8149,11 @@ class AICommander {
     }
     // minR beyond the clear radius so a fresh waypoint is always something to actually TRAVEL to
     // (never one that's cleared next tick → the scout keeps moving instead of freezing).
-    // …and never send a ground unit to a patch of land it can't drive to (see drivableTo): the
+    // …and never send a ground unit to a patch of land it can't drive to (the reachFrom flood
+    // fill, memoised per hull — the same test the standoff solver uses): the
     // recon grid knows what is LAND, which is not the same question. When every unexplored patch
     // left is across water, this returns null and the Scout card falls back to its real goal.
-    if (!this._exploreWp) { const home = this.homePos(), enemy = this.enemyBasePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12, enemy.x, enemy.z, (x, z) => drivableTo(v, x, z)); }
+    if (!this._exploreWp) { const home = this.homePos(), enemy = this.enemyBasePos(); this._exploreWp = this.explore.pickTarget(px, pz, home.x, home.z, this.strategy.arriveDist(this) + 12, enemy.x, enemy.z, (x, z) => { const F = reachFrom(v), k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell)); return k >= 0 && !!F[k]; }); }
     return this._exploreWp;
   }
 
@@ -8094,7 +8216,21 @@ class AICommander {
     // roll-out happened before the doctrine had ticked even once, and each respawn deploys
     // from a dead slot (which returns before its tick). Deciding here is what makes the
     // garage choice and the mission the same decision.
-    if (this.strategy.garagePick) this.strategy.garagePick(this);
+    // A COMPLETED SWAP HAS ALREADY DECIDED THIS. The trip was ordered FOR a job, paid for in
+    // driving, and _switch put that job back on the board before the pad opened — the swap
+    // completion deliberately does not re-pick, for exactly this reason. Re-deciding HERE scores a
+    // board with nothing fielded, and that board is not the same board: every term that reads the
+    // unit is missing for the second between retiring the old hull and rolling out the new one.
+    // Measured with RR.scoreGap over 5 seeds: retiring the hull flips the winning plan mission on
+    // 22% of sampled instants — capture loses 'the flag is right there' (up to +10), siege keeps
+    // its structural terms — so the job that ordered the trip loses to the one that did not.
+    // Seed 60 is what that costs: capture:firebrat->lurcher x7, seven trips home for a runner and
+    // seven Lurchers rolled out, with a Firebrat in the rack and the enemy flag open, undefended
+    // and unreachable-by-Lurcher for the last 673 seconds of a stalemate.
+    // A fresh unit still decides in the garage — that is what garagePick is for — but a delivery
+    // is not a fresh unit.
+    if (this._swapDelivering) this._swapDelivering = false;
+    else if (this.strategy.garagePick) this.strategy.garagePick(this);
     // (The learned mission assigner lived here: a net re-picked a support slot's role card each
     // tour from a 26-feature snapshot of the battlefield. It never beat the deck it was meant to
     // replace and was abandoned; the whole apparatus — two nets, the feature vector, the history
@@ -8487,13 +8623,39 @@ class AICommander {
         aiLog(this.team, `${this.cname}: Been sat outside my own range of that target — picking a new firing position.`);
       }
     } else if (v._oorT) v._oorT = 0;
-    let dest = null, slack = 9;
+    // goalR is the requirement, and it is NOT `slack`. slack says "you are close enough to stop
+    // driving"; goalR says "the path is complete". Wiring the two together cost 17 stalemates in
+    // 240 seeds: `assault` sets slack to engageRange*0.875 (~31u) on purpose — you halt at engage
+    // range and shoot — so A* terminated its search THIRTY-ONE UNITS SHORT of the objective and
+    // the approach was never planned. Siege re-solve thrash 4 -> 41 said so directly.
+    // Default 0 = route to the exact cell, which is right for a firing position and everything
+    // else that names a real spot. Only a STRUCTURE's centre gets a ring, because only a structure
+    // has one.
+    let dest = null, slack = 9, goalR = 0;
     // Use the RESOLVED goal the brain is acting on (view.goal already folds in the shield-grab
     // and intercept detours), not the raw mission objective — else a ground unit's A* steers it
     // to the patrol/objective spot while it claims to be "grabbing a shield" and never gets there.
-    if (st === 'advance') dest = view.goal || this.strategy.objective(this);
-    else if (st === 'resupply') dest = this._supply;       // nearest fuel/ammo (own base or a depot)
-    else if (st === 'assault') { dest = this.strategy.objective(this); slack = (view.engageRange || 36) * 0.7 * 1.25; }
+    // THE MISSION ALREADY STATES ITS REQUIREMENT — arriveDist. Every mission declares how close is
+    // close enough (12 for a base, 8 for a sap, 6 for a trap anchor) and the pathfinder had never
+    // been told. Setting goalR=0 for everything but supply was my over-correction and it cost 10
+    // stalemates: `assault` aims at enemyBasePos(), which is the enemy base CENTRE — inside their
+    // keep, unstandable — so an exact-cell search can never succeed and the approach comes back
+    // partial. That is the same hole Attack already hand-patched around by returning "a REACHABLE
+    // standoff, not the walled fob centre".
+    //
+    // A structure centre is a ring for whoever is heading to it, friend or enemy. Plan to the
+    // ring; the driver still stops earlier at its own tolerance (assault halts at engage range),
+    // because "where the route ends" and "where the wheels stop" are different questions.
+    const _msnR = () => { try { return msnRing(this.strategy.arriveDist(this) || 0); } catch (e) { return MISSION_R_FLOOR; } };
+    if (st === 'advance') {
+      dest = view.goal || this.strategy.objective(this);
+      goalR = _msnR();
+      // A base we are driving to for fuel/ammo/hull has a SERVICE ring, and that is the one that
+      // matters — arriving means being inside nearOwnSupply, not merely near the buildings.
+      if (dest && this._home && dest.x === this._home.x && dest.z === this._home.z) goalR = this._homeR || goalR;
+    }
+    else if (st === 'resupply') { dest = this._supply; goalR = this._supplyR || 0; }   // nearest fuel/ammo (own base or a depot)
+    else if (st === 'assault') { dest = this.strategy.objective(this); slack = (view.engageRange || 36) * 0.7 * 1.25; goalR = _msnR(); }
     // SUPPRESS far-travel: the trek TO a siege standoff can be 100u+ around terrain, and pure
     // direct-steer + dodge feelers left jotuns shuttling between two spots for whole matches
     // (richwatch: stagnant 30s+ at gd 75-185 in suppress). Path-follow with A* until close,
@@ -8577,12 +8739,22 @@ class AICommander {
     // …but NOT for a flyer. Both of these snap a goal onto ground a hull can stand on, which is
     // exactly wrong for a unit that hovers: it would drag a Valkyrie's goal ashore off the water
     // or off the wall it is perfectly entitled to sit above. "Reachable" for a flyer is anywhere.
-    if (!flyer) {
-      dest = nearestDrivable(v, dest.x, dest.z);
-      // …then off any cell this hull could never occupy. Landmass first (which island), structures
-      // second (where on it), so the answer that comes out is standable.
-      dest = standableGoal(v, dest.x, dest.z);
-    }
+    // NO REPAIRS HERE ANY MORE. This used to run nearestDrivable() and standableGoal() on the
+    // destination EVERY TICK — two functions whose only job was to rescue a coordinate that was
+    // never a place a vehicle could be. `_home` and `_supply` are base CENTRES, which sit inside
+    // buildings by construction; the repairs shuffled them to somewhere occupiable, and
+    // nearestDrivable also dragged them across "landmasses" computed by a flood fill that does
+    // not know bridges exist. Both are gone; reachFrom is the only reachability rule now.
+    //
+    // Seed 214: a Lurcher at 18% hp was sent to its own flag base 127u away rather than its FOB at
+    // 130u — three units closer on the ruler — and the base centre is inside the keep, so the
+    // repairs kicked in, resolved differently as the hull moved, and the arrive test flickered
+    // across `slack`, handing the pedals between GOTO and HOLD every 50ms at full throttle.
+    //
+    // The requirement was never "stand on the centre of the base". It was "get within heal range
+    // of it", and that is now what gets asked: the order's arrive radius goes to A*, which stops
+    // as soon as it is satisfied (see planPath's goalR). A goal that cannot be stood on is no
+    // longer a problem to be patched — it is simply the centre of a ring.
     const d2 = (dest.x - v.holder.position.x) ** 2 + (dest.z - v.holder.position.z) ** 2;
     // ARRIVED. Not a fall-through: the unit is where the order sent it, and standing there is
     // the point. An explicit hold says so, and keeps 'no order' meaning 'bug'.
@@ -8636,7 +8808,7 @@ class AICommander {
         && this._matchT - rcap.t < capTTL) { dest = { x: rcap.x, z: rcap.z }; }
     else if (rcap && (rcap.epoch !== _navEpoch || this._matchT - rcap.t >= capTTL)) this._reachCap = null;
     const isStand = this._destIsStand; this._destIsStand = false;
-    const ord = this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, by: st });
+    const ord = this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, goalR, by: st });
     const s = this._driver.tick(dt);
     // HANDLE "NO" — the driver reported this goal unreachable; the ISSUER reacts instead of
     // letting the unit walk a partial route into a soft-lock (the top violation issuers from
@@ -9377,8 +9549,11 @@ class AICommander {
       .map(o => ({ x: o.x, z: o.z, r: towerStats((o.wall.turret && o.wall.turret.upg) || 0).range }));
     const crossfire = (x, z) => others.some(o => (o.x - x) ** 2 + (o.z - z) ** 2 < o.r * o.r);
     // The per-spot tests that the flood fill does NOT answer: can the round get there, and is
-    // some other tower covering the spot. (drivableTo is left in as a cheap early-out, but the
-    // flood below subsumes it — it knows about walls and gates, not merely which island.)
+    // some other tower covering the spot. A landmass-component lookup used to run first as a "cheap
+    // early-out" and this comment already admitted the flood fill below subsumes it. It was also
+    // WRONG: its landmass map was built by a flood fill that skipped every water cell including
+    // road decks, so a bridge-connected island came out as two, and every firing position on the
+    // far side was discarded as `offIsland`. One rulebook, and it is reachFrom.
     // Why a cell FAILS, not merely that it did. With the geometric fallback gone this is the only
     // answer there is, so when it comes back empty the alarm has to be able to say what ruled every
     // candidate out. (Jacob: "I don't want backup algorithms, I just want one that works" — and if
@@ -9386,7 +9561,6 @@ class AICommander {
     const why = { scanned: 0, offIsland: 0, blocked: 0, noLOS: 0, crossfire: 0, unreachable: 0 };
     const spotOK = (x, z, needLOS, takeFire) => {
       if (flyer) return true;
-      if (!drivableTo(v, x, z)) { why.offIsland++; return false; }
       if (v._blocked(x, z)) { why.blocked++; return false; }
       if (needLOS && !hasLOS(x, z, T.x, T.z)) { why.noLOS++; return false; }
       if (!takeFire && crossfire(x, z)) { why.crossfire++; return false; }
@@ -9614,7 +9788,7 @@ class AICommander {
     // The TRIP lives on the unit (three slots can each be running one); the LEDGER on the commander,
     // because the question is about a team's doctrine, not one hull.
     {
-      const L = this._hdLedger || (this._hdLedger = { started: 0, contact: 0, futile: 0, abandoned: 0, fought: 0, gaveUp: 0, repeats: 0, travel: [], to: {}, topScored: {}, tipped: {}, margin: {} });
+      const L = this._hdLedger || (this._hdLedger = { started: 0, contact: 0, futile: 0, abandoned: 0, fought: 0, gaveUp: 0, repeats: 0, travel: [], tContact: [], tFutile: [], to: {}, topScored: {}, tipped: {}, margin: {} });
       const step = this.strategy ? this.strategy.step : null;
       if (step === 'defend' && v._hdStep !== 'defend' && this._homeAttack) {
         // ammo0 IS THE POINT (Jacob, 2026-08-18: "It ran out of ammo? That means it must have been
@@ -9662,7 +9836,15 @@ class AICommander {
         const tx = v._hdTrip.x - px, tz = v._hdTrip.z - pz;
         if (tx * tx + tz * tz < 12 * 12) {        // arrived at the spot the radio call named
           L[(seesEnemy || heard) ? 'contact' : 'futile']++;
-          L.travel.push(Math.round((performance.now() - v._hdTrip.t0) / 1000));
+          // SPLIT THE TRAVEL TIME BY WHETHER THE TRIP WAS WORTH TAKING. The response deadlines
+          // (T_SAVE/T_KILL) are the only thing deciding how far a unit will answer a raid, and
+          // they were never derived from anything — at T_KILL=45s a Lurcher answers from 630u on
+          // a 480u map, so the pull is never zero anywhere. This is the distribution needed to
+          // put those numbers where the evidence is: how long the useful trips took, versus the
+          // ones that arrived to an empty spot.
+          const _tt = Math.round((performance.now() - v._hdTrip.t0) / 1000);
+          L.travel.push(_tt);
+          ((seesEnemy || heard) ? (L.tContact || (L.tContact = [])) : (L.tFutile || (L.tFutile = []))).push(_tt);
           v._hdTrip = null;
         }
       }
@@ -9858,15 +10040,21 @@ class AICommander {
       : ((needAmmo && fuelOk) ? 'ammo' : (needFuel && ammoOk) ? 'fuel' : null);
     if (depotKind) for (const rp of resupplies) if (!rp.dead && rp.kind === depotKind && this.knownSupplies.has(rp)) consider(rp.pos.x, rp.pos.z, false);
     this._supply = supply ? { x: supply.center.x, z: supply.center.z } : null;   // nav target while resupplying
+    this._supplyR = supply ? ringR(supplyHeals ? 16 : 12) : 0;                   // …and the ring that counts as being there
     this._supplyHeals = supplyHeals;   // chosen supply is an own base → hold for a FULL top-off (ammo+fuel+hp)
     // HEAL home: HP only regenerates at an OWN base (a neutral fuel/ammo depot can't
     // patch the hull) — so a hurt unit must fall back HERE, not to the nearest depot,
     // or it camps a fuel tank forever waiting for health that never comes.
-    let healHome = null, healD = Infinity;
-    const considerHome = (x, z) => { const d = (px - x) ** 2 + (pz - z) ** 2; if (d < healD) { healD = d; healHome = { x, z }; } };
-    if (fob) considerHome(fob.center.x, fob.center.z);
-    if (home && flagBaseAlive(this.team)) considerHome(home.center.x, home.center.z);   // can't heal at a destroyed flag base
-    this._home = healHome;
+    // …AND THE RADIUS THAT MEANS "ARRIVED" FOR IT. A base centre is inside the buildings, so it is
+    // not somewhere to stand — it is the middle of a ring, and nearOwnSupply already says how big
+    // that ring is (16u at the main base, 12u at the FOB). Carrying the radius with the point is
+    // what lets the pathfinder stop when the requirement is MET instead of hunting for a cell in
+    // the middle of a keep and being patched afterwards.
+    let healHome = null, healD = Infinity, healR = 0;
+    const considerHome = (x, z, r) => { const d = (px - x) ** 2 + (pz - z) ** 2; if (d < healD) { healD = d; healHome = { x, z }; healR = r; } };
+    if (fob) considerHome(fob.center.x, fob.center.z, ringR(12));
+    if (home && flagBaseAlive(this.team)) considerHome(home.center.x, home.center.z, ringR(16));   // can't heal at a destroyed flag base
+    this._home = healHome; this._homeR = healR;
     // The nearest LIVE enemy wall-turret this unit can actually SHOOT — sensed wide
     // (TURRET_SENSE) so heavies snipe from outside the towers' own range, but ONLY
     // counted if there's a clear line to it. That LOS gate is the key: a unit no
@@ -11388,7 +11576,7 @@ function buildNavStatic() {
     // The sinker footprint, baked in TWO radii because two callers need different ones. HARD (the
     // hull's full clearance, diagonals included) is what blocks a cell for pathing — nine
     // isDeepWater calls per cell, hoisted out of every search onto terrain that never changes.
-    // SOFT (a smaller radius, no diagonals) blocks fewer cells and exists for buildNavComp, which
+    // SOFT (a smaller radius, no diagonals) blocks fewer cells; it fed the landmass map, which
     // wants the most generous possible read of what counts as one landmass.
     if (!map.isLand(x, z)) {
       const deep = map.isDeepWater.bind(map);
@@ -11420,76 +11608,6 @@ function buildNavStatic() {
 // Uses the SOFT sinker footprint on purpose (the smaller radius, no diagonals): it blocks
 // fewer cells, so the components come out as generous as possible and "different landmass"
 // stays a claim worth acting on.
-let navComp = null;
-function buildNavComp() {
-  const N = navStaticN, WET = NAVF.OOB | NAVF.SINKSOFT;
-  navComp = new Int32Array(N * N);   // 0 = water/off-map, ≥1 = landmass id
-  const stack = []; let next = 0;
-  for (let s = 0; s < navComp.length; s++) {
-    if (navComp[s] || (navStatic[s] & WET)) continue;
-    const id = ++next;
-    navComp[s] = id; stack.push(s);
-    while (stack.length) {
-      const k = stack.pop(), a = k % N, b = (k / N) | 0;
-      for (let db = -1; db <= 1; db++) for (let da = -1; da <= 1; da++) {
-        const na = a + da, nb = b + db;
-        if (na < 0 || nb < 0 || na >= N || nb >= N) continue;
-        const nk = nb * N + na;
-        if (navComp[nk] || (navStatic[nk] & WET)) continue;
-        navComp[nk] = id; stack.push(nk);
-      }
-    }
-  }
-}
-// Landmass id at a world point. 0 means water, off the baked grid, or a coastal cell the
-// sinker footprint clips — i.e. "don't know", never "unreachable".
-function landmassAt(x, z) {
-  if (!navStatic) buildNavStatic();
-  if (!navComp) buildNavComp();
-  const k = navIdx(Math.round(x / grid.cell), Math.round(z / grid.cell));
-  return k < 0 ? 0 : navComp[k];
-}
-// Could this vehicle DRIVE from where it stands to (x,z)? Anything that flies or fords always
-// can. A 0 on either end is an unknown, and an unknown answers YES — this test is here to rule
-// destinations out with certainty, never to rule them in.
-// GO AS CLOSE AS THE GROUND ALLOWS. Missions hand out RAW remembered coordinates — a tower's
-// radio call, a sighting, a heard contact — and nothing in that path ever asked whether a ground
-// unit could stand there. The thing that shot our base may have been a Valkyrie over open water;
-// the contact we heard may be across a channel. Defend.objective even carries a comment about
-// it: a unit sent at homeAttack()'s raw position was stranded for 164 seconds.
-// Refusing the order would be wrong (the threat is real and the direction is right), so instead
-// snap the goal to the nearest cell on the unit's OWN landmass. That turns "drive at the sea and
-// grind on the beach" into "get as close to it as you can" — which is what the order meant.
-// No A* involved: it's a ring search over the baked component labels, a few array reads.
-// Returns the point unchanged when it's already drivable, or when nothing better is within maxR.
-function nearestDrivable(v, x, z, maxR = 60) {
-  if (!v || !v._move || v._move.water !== 'sink') return { x, z };
-  const here = landmassAt(v.holder.position.x, v.holder.position.z);
-  if (!here) return { x, z };
-  // A 0 here means water, off-grid, or a coastal cell the sinker footprint clips — "don't know",
-  // NOT "unreachable", same rule as drivableTo. Getting this wrong is expensive: treating 0 as a
-  // mismatch fired the snap on every goal near a shoreline (a normal, fine goal) and dragged it
-  // inland. Worse, the moved goal often sat inside a wall — which the component labels ignore by
-  // design — so the driver ACCEPTED an order it still couldn't fulfil, and the unreachable-GOTO
-  // report that the recovery path keys off never came. Measured: goal snapping on coastal cells
-  // cut contract violations 235 -> 145 while RAISING scuttles 7 -> 10 and nav alarms 14 -> 23.
-  // Suppressing the alarm is not the same as fixing the problem.
-  const there = landmassAt(x, z);
-  if (!there || there === here) return { x, z };
-  const c = grid.cell, i0 = Math.round(x / c), j0 = Math.round(z / c), R = Math.ceil(maxR / c);
-  for (let r = 1; r <= R; r++) {
-    let best = null, bd = Infinity;
-    for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
-      if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;   // walk the ring, not the disc
-      const k = navIdx(i0 + di, j0 + dj);
-      if (k < 0 || navComp[k] !== here) continue;
-      const d = di * di + dj * dj;
-      if (d < bd) { bd = d; best = { x: (i0 + di) * c, z: (j0 + dj) * c }; }
-    }
-    if (best) return best;
-  }
-  return { x, z };
-}
 // A GOAL INSIDE A WALL IS AN ORDER NOBODY CAN OBEY. Several missions hand out raw coordinates
 // that are, by construction, points no hull can ever stand on: `_supply` and `_home` are base
 // CENTRES (measured blocked 25-33% of the time, seed-dependent) and `homeAttack()` is the impact
@@ -11531,40 +11649,6 @@ function noteBailEpisode(why, secs, v, x0, z0) {
                       type: v && v.type, state: v && v._aiState });
   navBailWorst.sort((a, b) => b.secs - a.secs);
   if (navBailWorst.length > 20) navBailWorst.length = 20;
-}
-function standableGoal(v, x, z) {
-  if (!v || !v._blocked) return { x, z };
-  const memo = v.__goalSnap;
-  if (memo && Math.abs(memo.rx - x) < 1 && Math.abs(memo.rz - z) < 1 && performance.now() - memo.t < GOAL_SNAP_TTL) return memo.out;
-  let out = { x, z };
-  if (v._blocked(x, z)) {
-    const c = grid.cell, i0 = Math.round(x / c), j0 = Math.round(z / c), R = Math.ceil(GOAL_SNAP_R / c);
-    const here = navComp ? landmassAt(v.holder.position.x, v.holder.position.z) : 0;
-    ring: for (let r = 1; r <= R; r++) {
-      let best = null, bd = Infinity;
-      for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
-        if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;   // walk the ring, not the disc
-        const gx = (i0 + di) * c, gz = (j0 + dj) * c;
-        if (v._blocked(gx, gz)) continue;
-        // don't rescue the goal onto a DIFFERENT island on the way out (0 = don't know, allowed)
-        if (here) { const k = navIdx(i0 + di, j0 + dj); if (k >= 0 && navComp[k] && navComp[k] !== here) continue; }
-        const d = di * di + dj * dj;
-        if (d < bd) { bd = d; best = { x: gx, z: gz }; }
-      }
-      if (best) { out = best; goalSnaps++; break ring; }
-    }
-    // ringed all the way out and found nothing standable — leave the goal alone and let the
-    // driver's contract report it, rather than inventing a destination.
-  }
-  v.__goalSnap = { rx: x, rz: z, out, t: performance.now() };
-  return out;
-}
-function drivableTo(v, x, z) {
-  if (!v || !v._move || v._move.water !== 'sink') return true;
-  const here = landmassAt(v.holder.position.x, v.holder.position.z);
-  if (!here) return true;
-  const there = landmassAt(x, z);
-  return !there || there === here;
 }
 const obsBuckets = new Map();   // cell key "i,j" → obstacles overlapping that cell
 function buildObsBuckets() {
@@ -12324,7 +12408,7 @@ function returnToGarage() {
   setFieldUI(false);
   garageFadeT = 0;   // fade the garage in from black
   if (captured) {
-    captured.carried = false; captured.carrier = null; captured.returnT = 0;
+    captured.carried = false; captured.carrier = null;
     captured.group.position.set(captured.home.x, captured.home.y, captured.home.z);   // flag back on its post
     flagsCaptured++;   // the VICTORY cinematic already played over the descent (playVictory)
     // The player extraction is the WIN, but it never routes through endMatch (that
@@ -12995,6 +13079,13 @@ window.RR = {
   setOutranged: on => { OUTRANGED_CONTACT = !!on; return OUTRANGED_CONTACT; },   // A/B: offer the fight-or-flight decision when EITHER hull can shoot
   abFlags: () => ({ ...abFlags(), MSN_MOVE: undefined, OFF_PATH_REPLAN, OUTRANGED_CONTACT }),   // READ-ONLY — the setters all write on read
   setMsnLog: on => setMsnLog(on),   // print every mission score to the AI log
+  setGoalRTrim: (mission, service) => setGoalRTrim(mission, service),   // sweep: mission-ring floor, service-ring inward trim
+  setWaterCost: (lo, hi) => { if (lo != null) WATER_COST_MIN = +lo; if (hi != null) WATER_COST_MAX = +hi; return { lo: WATER_COST_MIN, hi: WATER_COST_MAX }; },
+  setAiWaterWall: on => setAiWaterWall(on),   // put the old solid-sea wall back
+  drownings: () => drownings,   // sinkers lost to deep water since the wall came down
+  setRunnerNoDuel: on => setRunnerNoDuel(on),   // A/B: a Firebrat on capture runs or flees, never duels
+  // Does this commander's board lurch when a hull is retired or rolled out? See scoreGap().
+  scoreGap: (i = 0) => { const c = commanders[i]; return c ? scoreGap(c) : null; },
   setDefendW: w => setDefendW(w),   // defend's shape: {on, near, lurcher, firebrat}
   setAmmoCount: on => setAmmoCount(on),   // A/B: 'nothing to shoot with' counts rounds instead of magazine fraction
   setSeesLevel: on => setSeesLevel(on),   // A/B: re-score every second while a rival is SENSED, not just on the edge
@@ -13006,11 +13097,12 @@ window.RR = {
   // Home-defence trip outcomes, summed over both teams' commanders. contact/(contact+futile) is
   // the number the weights are tuned to raise; `futile` alone is task #49's bug counted directly.
   homeDefense: () => {
-    const out = { started: 0, contact: 0, futile: 0, abandoned: 0, fought: 0, gaveUp: 0, repeats: 0, travel: [], to: {}, topScored: {}, tipped: {}, margin: {} };
+    const out = { started: 0, contact: 0, futile: 0, abandoned: 0, fought: 0, gaveUp: 0, repeats: 0, travel: [], tContact: [], tFutile: [], to: {}, topScored: {}, tipped: {}, margin: {} };
     for (const c of commanders) { const L = c._hdLedger; if (!L) continue;
       out.started += L.started; out.contact += L.contact; out.futile += L.futile;
       out.abandoned += L.abandoned; out.fought += L.fought || 0; out.gaveUp += L.gaveUp || 0;
       out.repeats += L.repeats; out.travel.push(...L.travel);
+      out.tContact.push(...(L.tContact || [])); out.tFutile.push(...(L.tFutile || []));
       for (const k of ['to', 'topScored', 'tipped', 'margin']) for (const j in L[k]) out[k][j] = (out[k][j] || 0) + L[k][j]; }
     return out;
   },
@@ -13256,17 +13348,6 @@ window.RR = {
   setScan: on => { aiScan = !!on; return aiScan; },                      // scan-sweep at objective transitions on/off (stealth follow-on)
   getScan: () => aiScan,
   setScanParams: p => { Object.assign(SCAN, p || {}); return { ...SCAN }; }, // { arc, max, rate, cool } — tune the sweep
-  // Landmass census: how many components the map actually has and how big they are. The point
-  // is to know whether the "target across water" idea describes this map at all before trusting
-  // a test built on it — a single-component island means it can never fire.
-  lmDebug: () => {
-    if (!navStatic) buildNavStatic();
-    if (!navComp) buildNavComp();
-    const size = new Map();
-    for (const id of navComp) if (id) size.set(id, (size.get(id) || 0) + 1);
-    const cells = navComp.length, water = cells - [...size.values()].reduce((a, b) => a + b, 0);
-    return { components: size.size, cells, water, biggest: [...size.values()].sort((a, b) => b - a).slice(0, 6) };
-  },
   setDifficulty: (name) => { const d = String(name || '').toLowerCase();
     if (AIM_DIFFICULTY[d]) aimDiff = AIM_DIFFICULTY[d];
     return Object.keys(AIM_DIFFICULTY).find(k => AIM_DIFFICULTY[k] === aimDiff); },
@@ -13436,6 +13517,12 @@ window.RR = {
   get elevators() { return elevators; },
   lookAt: (x, z, dist = 90, pitch = 1.0, yaw = 0) => { orbit.target.set(x, 0, z); orbit.dist = dist; orbit.pitch = pitch; orbit.yaw = yaw; updateCamera(); },   // debug: frame a spot (headless screenshots)
   terrainAt: (x, z) => map.heightAt(x, z),   // debug/tools: world surface height (<=0 = underwater) for shore-stuck analysis
+  // The two water facts the nav actually branches on, exposed for the replay lab's cell probe:
+  // isLand is the drivable test, isDeepWater is the drowning line (below FORD_DEPTH). Between
+  // them is the fordable shallow band whose A* cost now scales with depth.
+  isLand: (x, z) => map.isLand(x, z),
+  isDeepWater: (x, z) => map.isDeepWater(x, z),
+  floorAt: (x, z) => map.floorAt(x, z),
   get commanders() { return commanders; },
   get flags() { return flags; },
   get teamCtrl() { return TEAM_CTRL; },

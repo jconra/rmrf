@@ -181,7 +181,7 @@
     const sd = Number(qs.get('rngseed') || qs.get('dseed') || qs.get('seed'));
     if (Number.isFinite(sd) && window.RR.reseed) window.RR.reseed(sd);
     window.__labClock.rate = 1;                       // …now let time start
-    const { initReplay } = await import('../js/replay.js?v=4');
+    const { initReplay } = await import('../js/replay.js?v=6');
     initReplay(window.RR, qs, document.getElementById('lab-ui'));
   }
 </script>

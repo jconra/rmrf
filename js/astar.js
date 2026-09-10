@@ -19,7 +19,7 @@
 //                 the open set EMPTIED, which is the only honest "unreachable".
 //   exhausted   — true if the open set emptied (genuinely no route), false if the budget stopped it
 //   h0 / bestH  — heuristic at the start vs at the closest node settled: how much ground was gained
-export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false, hScale = 1, stats = null }) {
+export function astarGrid({ start, goal, goalR = 0, cost, inBounds, turnPenalty = 4, allowDiagonal = false, onStep = null, maxNodes = Infinity, partial = false, hScale = 1, stats = null }) {
   // Default is 4-connected (orthogonal) — road LAYOUT needs clean right-angle, connected
   // grids. allowDiagonal adds the 4 diagonals so UNIT NAV can cut straight across open
   // ground instead of staircasing. A diagonal step travels √2 as far, so it costs √2× the
@@ -35,7 +35,23 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
   // Pass hScale = the minimum possible cell cost to restore admissibility (more node
   // expansions, exact results) — worth it for one-shot layout work like roads; unit nav
   // keeps 1 (speed over exactness: its discounts are mild and per-frame budget is tight).
-  const h = (i, j) => Math.hypot(i - goal.i, j - goal.j) * hScale;
+  // A GOAL IS A PLACE TO BE NEAR, NOT A CELL TO STAND ON (goalR, in CELLS).
+  //
+  // Asking for an exact cell is what forced two repair functions to exist upstream: the points
+  // callers actually want — a base, a depot, a keep — are structures, and their coordinates are
+  // centres no vehicle can ever occupy. standableGoal shuffled the goal to a cell that WAS
+  // occupiable and nearestDrivable dragged it across landmasses, both per tick, both guessing.
+  // A radius removes the question: "get within 30u of the flag HQ" is the actual requirement, so
+  // say that, and the search stops the moment it is true.
+  //
+  // The heuristic subtracts the radius to stay ADMISSIBLE — h must never overestimate the cost
+  // still to travel, and once inside the ring that cost is zero. Skip this and A* silently
+  // stops expanding the cheap approach and returns a worse route (the same trap hScale documents).
+  const gr2 = goalR * goalR;
+  const h = (i, j) => Math.max(0, Math.hypot(i - goal.i, j - goal.j) - goalR) * hScale;
+  const atGoal = goalR > 0
+    ? (i, j) => (i - goal.i) * (i - goal.i) + (j - goal.j) * (j - goal.j) <= gr2
+    : (i, j) => i === goal.i && j === goal.j;
 
   // Tiny binary min-heap keyed on f.
   const heap = [];
@@ -91,7 +107,7 @@ export function astarGrid({ start, goal, cost, inBounds, turnPenalty = 4, allowD
       pth.reverse();
       onStep({ cur: { i: cur.i, j: cur.j }, open: heap.map(n => ({ i: n.i, j: n.j })), path: pth });
     }
-    if (cur.i === goal.i && cur.j === goal.j) { const p = buildPath(cur); p.nodes = popped; fillStats(false); return p; }
+    if (atGoal(cur.i, cur.j)) { const p = buildPath(cur); p.nodes = popped; fillStats(false); return p; }
     for (let di = 0; di < DIRS.length; di++) {
       const ddi = DIRS[di][0], ddj = DIRS[di][1];
       const ni = cur.i + ddi, nj = cur.j + ddj;

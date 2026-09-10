@@ -64,6 +64,7 @@ export class Driver {
     this.violations = 0;       // unreachable-GOTO contracts caught (current vehicle)
     this._recT = 0;
     this._winT = 0; this._winX = 0; this._winZ = 0; this._wantT = 0;
+    this._winPath = 0; this._lastPX = null; this._lastPZ = null;   // ground covered this window
     this._cmdT = 0; this._why = 'pin';         // grind bookkeeping + last no-progress reason
     this._noProgWins = 0;      // consecutive windows with no net progress
     this._alarmT = -1;         // >=0: seconds since the alarm fired (grace countdown)
@@ -286,7 +287,11 @@ export class Driver {
     if (o.type === 'HOLD') return null;
     if (o.type !== 'GOTO') return null;
     const dest = { x: o.x, z: o.z };
-    const wp = this.hooks.navWaypoint(this.nav, v, dest, dt);
+    // THE GOAL'S OWN RADIUS — the caller's stated requirement, and deliberately NOT `arrive`.
+    // `arrive` is the stop tolerance (assault sets it to ~31u so a unit halts at engage range and
+    // shoots); using it to end the SEARCH left the last 31u of every assault unplanned. goalR is
+    // zero unless the destination is a structure's centre, which is a ring by nature.
+    const wp = this.hooks.navWaypoint(this.nav, v, dest, dt, o.goalR || 0);
     this._checkReach(dest);
     if (!wp) return null;                        // no route at all — caller's fallback stands
     const last = this.nav.path && this.nav.idx >= this.nav.path.length - 1;
@@ -363,6 +368,11 @@ export class Driver {
     const wants = Math.abs(ped.fwd || 0) > WATCH_WANT || Math.abs(ped.strafe || 0) > WATCH_WANT;
     if (wants) this._wantT += dt;
     this._cmdT += Math.min(1, Math.abs(ped.fwd || 0) + Math.abs(ped.strafe || 0)) * dt;   // window's commanded-throttle integral (grind check)
+    // GROUND ACTUALLY COVERED, tick by tick — not net displacement from where the window opened.
+    // See the window verdict below for why the difference destroys healthy vehicles.
+    { const _p = v.holder.position;
+      if (this._lastPX != null) this._winPath += Math.hypot(_p.x - this._lastPX, _p.z - this._lastPZ);
+      this._lastPX = _p.x; this._lastPZ = _p.z; }
     // GOTO goal-progress stall — the orbit catcher. Any real closing on the goal resets
     // the clock (and stands an armed alarm down); driving hard without ever getting
     // closer runs it up. DIRECT orders skip this (combat holds ground on purpose).
@@ -385,13 +395,31 @@ export class Driver {
     this._winT += dt;
     if (this._winT >= WATCH_WIN) {
       const moved = Math.hypot(v.holder.position.x - this._winX, v.holder.position.z - this._winZ);
-      const pinned = this._wantT > WATCH_WIN * 0.6 && moved < WATCH_MIN_MOVE;
+      // A HULL THAT COVERED REAL GROUND IS NOT PINNED, WHATEVER ITS NET DISPLACEMENT.
+      // `moved` is the straight line from where the window opened to where it closed, so a unit
+      // that drives out and comes back scores zero on it — and this alarm ends in the driver
+      // DESTROYING the vehicle. Seed 564 is the shape: a Lurcher on defend drove 80u south at
+      // full throttle (velocity -4.3,-13.3 held for five seconds), reversed, drove the same 80u
+      // back north, and was scuttled at t54 as "still pinned … hull barely moving". It covered
+      // 160u in ten seconds. Nothing was blocking it; it never stopped once.
+      //
+      // This alarm exists to catch a hull that physically CANNOT move — wedged on a wall, stuck
+      // in geometry, pedals down and going nowhere. Covering 160u of ground is proof it can move,
+      // so it is not this alarm's business. A unit oscillating between two goals is a real bug and
+      // a bad one, but the answer to it is to fix the decision, not to blow up the vehicle — and
+      // the strobe alarm and transit-stuck census both already count it where it belongs.
+      //
+      // Swap.tick() reached this conclusion first and says so in its own words: "STUCK MEANS NOT
+      // MOVING, NOT 'NOT GETTING CLOSER' … a detour is not a failure, so covering real ground
+      // counts as progress too." It accumulates path length; the driver's watchdog never did.
+      const path = this._winPath;
+      const pinned = this._wantT > WATCH_WIN * 0.6 && moved < WATCH_MIN_MOVE && path < WATCH_MIN_MOVE * 3;
       // GRIND: expected ground = avg commanded throttle × the chassis' nominal speed; actual
       // ground under GRIND_FRAC of that means the hull is being held back by something the
       // pedals can't beat — whatever the absolute numbers.
       const avgCmd = this._cmdT / WATCH_WIN; this._cmdT = 0;
       const nom = (v.def && v.def.speed) || 10;
-      const ground = avgCmd > GRIND_CMD_MIN && moved < avgCmd * nom * WATCH_WIN * GRIND_FRAC;
+      const ground = avgCmd > GRIND_CMD_MIN && path < avgCmd * nom * WATCH_WIN * GRIND_FRAC;
       // FIGHTING exemption: a unit planted and trading fire (DIRECT/suppress at a standoff)
       // legitimately shows zero net displacement by design — that's not the same failure as
       // being wedged. Any actual shot fired during this window (ammo genuinely spent, not
@@ -412,7 +440,7 @@ export class Driver {
       }
       this._winD = (o && o.type === 'GOTO')
         ? Math.hypot(o.x - v.holder.position.x, o.z - v.holder.position.z) : null;
-      this._winT = 0; this._wantT = 0;
+      this._winT = 0; this._wantT = 0; this._winPath = 0;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
       if (noProg && this._noProgWins >= ALARM_WINDOWS && this._alarmT < 0) this._fireAlarm(this._why);
     }
@@ -420,9 +448,34 @@ export class Driver {
     if (this._alarmT >= 0) {
       this._alarmT += dt;
       if (this._alarmT > DESTRUCT_GRACE) {
-        this.hooks.log(this.team, `[NAV ALARM] ${this.cname}: ${v.type} still pinned ${Math.round(WATCH_WIN * ALARM_WINDOWS + this._alarmT)}s after the alarm — scuttling it. This is a BUG, see the flight recording.`);
-        this._alarmT = -1;
-        this.hooks.selfDestruct(v, 'nav-alarm');
+        // NEVER SCUTTLE A HULL THAT CAN DEMONSTRABLY MOVE (Jacob, 2026-09-09: "units should be
+        // able to walk around and fight without scuttling"). The scuttle is for a vehicle that is
+        // physically stuck and will never contribute again — geometry has eaten it. It is NOT for
+        // a vehicle whose commander cannot make up its mind.
+        //
+        // Seed 564 is the case that proves the difference. A Lurcher on defend was ordered to
+        // (80,75), reversed at the doorstep, drove 110u south-west, was ordered to (0,25), then
+        // (50,-20), then (45,-35) — every leg at full throttle, velocity holding -9.5/-10.2 for
+        // seconds at a time, nothing blocking it, `_stillT` and `_wedgeT` flat zero throughout.
+        // It never arrived at anything because the goal kept moving, so the GOTO's stall clock ran
+        // out and the driver destroyed a healthy, fully mobile vehicle at t54. The census says
+        // this is not rare: home defence starts 1845 trips, abandons 1098 en route, and 83% of
+        // the arrivals find nothing — a moving goal is the normal case, not the exception.
+        //
+        // So: the ALARM still fires, loudly, with its flight recording — a goal that walks around
+        // the map is a real bug and it should announce itself. The vehicle just stops paying for
+        // it with its life. A hull that covered real ground in the last window can move; the fault
+        // is upstream of the driver and killing the unit neither reports it nor fixes it.
+        const mobile = this._winPath > WATCH_MIN_MOVE;
+        if (mobile) {
+          this.hooks.log(this.team, `[NAV ALARM] ${this.cname}: ${v.type} has been driving hard for ${Math.round(WATCH_WIN * ALARM_WINDOWS + this._alarmT)}s and never arrives — its goal keeps moving. Leaving it alive; this is a decision bug, see the flight recording.`);
+          this._alarmT = -1;
+          if (this.hooks.mobileStall) this.hooks.mobileStall(v);
+        } else {
+          this.hooks.log(this.team, `[NAV ALARM] ${this.cname}: ${v.type} still pinned ${Math.round(WATCH_WIN * ALARM_WINDOWS + this._alarmT)}s after the alarm — scuttling it. This is a BUG, see the flight recording.`);
+          this._alarmT = -1;
+          this.hooks.selfDestruct(v, 'nav-alarm');
+        }
       }
     }
   }
