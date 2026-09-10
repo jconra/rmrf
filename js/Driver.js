@@ -45,7 +45,11 @@ const GRIND_FRAC = 0.15;      // actual ground under this fraction of COMMANDED�
                               // stall clock (it genuinely closed on home, glacially).
 const GRIND_CMD_MIN = 0.5;    // only judge grind when the window's avg pedal is a real demand
 const DESTRUCT_GRACE = 15;    // s pinned AFTER the alarm before the unit scuttles itself
-const UNREACH_SLACK = 9;      // u — route ends farther than this from the goal = partial path
+// u — route ends farther than this from the goal = partial path. EXPORTED because the nav cache
+// has to agree with it: a cached route is kept while the goal drifts, and if it may drift further
+// than this then the contract below ends up judging a route against a goal it was never planned
+// for. See NAV_GOAL_DRIFT in main.js — the two are one rule, not two constants.
+export const UNREACH_SLACK = 9;
 
 export class Driver {
   // hooks = {
@@ -80,6 +84,7 @@ export class Driver {
       this._recT = 0; this._winT = 0; this._wantT = 0; this._noProgWins = 0; this._alarmT = -1;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
       this._winD = null; this._lastGoto = null; this._cmdT = 0; this._why = 'pin'; this._firedInWin = false;
+      this._staleSaid = false;
     }
     this.nav = nav; this.team = team; this.cname = cname;
   }
@@ -315,8 +320,40 @@ export class Driver {
   // The driver names it: route ends far short of the goal → that's the ISSUER's bug
   // (Layer 2 asked for the impossible). Logged once per order, counted always.
   _checkReach(dest) {
-    const o = this.o, path = this.nav && this.nav.path;
+    const o = this.o, nav = this.nav, path = nav && nav.path;
     if (!path || !path.length || o.violated) return;
+    // JUDGE A ROUTE ONLY AGAINST THE GOAL IT WAS PLANNED FOR. The nav cache keeps a route while
+    // the goal drifts a little rather than re-searching every tick, so the destination in hand and
+    // the destination this route was built for are not automatically the same point. Measuring one
+    // against the other convicts a perfectly good route of not reaching somewhere it was never
+    // sent: seed 732, a Valkyrie's goal slid 9.9u in one tick (two scrap piles, nearest-wins,
+    // re-picked per tick), the cache held its route to the first one because the drift was under
+    // its 10u tolerance, and this test compared that route to the second pile and found it 9.9u
+    // short of a 9u limit. One false verdict, and the unit stood still for the remaining 1008
+    // seconds of the match. Across 40 matches that pattern pinned a unit 108 times for 84s a match.
+    //
+    // So the question this asks is about the SEARCH, not about the order's current coordinates:
+    // "A* was asked for a route to P — did it get there?" Measure the shortfall against P, the goal
+    // the route in hand was actually planned for. A destination that has since drifted a couple of
+    // units does not change whether A* could reach what it was asked for, and pretending otherwise
+    // is what produced the false verdict.
+    //
+    // Drift beyond the cache's own tolerance is a different thing: it means the cache should have
+    // replanned and did not. That is an invariant (NAV_GOAL_DRIFT in main.js is pinned to this
+    // file's UNREACH_SLACK precisely so it holds), and a broken invariant is an ALARM — not a case
+    // to handle, and not something to steer around.
+    const planned = nav.dx != null ? { x: nav.dx, z: nav.dz } : dest;
+    const drift = Math.hypot(planned.x - dest.x, planned.z - dest.z);
+    if (drift > UNREACH_SLACK) {
+      Driver.staleRoutes = (Driver.staleRoutes || 0) + 1;
+      if (!this._staleSaid) {
+        this._staleSaid = true;
+        this.hooks.log(this.team, `[NAV STALE-ROUTE ALARM] ${this.cname}: ${this.v.type} holds a route planned to `
+          + `(${Math.round(planned.x)},${Math.round(planned.z)}) while ordered to (${Math.round(dest.x)},${Math.round(dest.z)}) `
+          + `by ${o.by || '?'} — ${Math.round(drift)}u apart, past the ${UNREACH_SLACK}u the cache may drift. It should have replanned.`);
+      }
+      return;
+    }
     // A budget-truncated search proves NOTHING about reachability — the goal may just be far
     // (a long trek on a big map exhausts maxNodes long before it exhausts the island). Only a
     // search that EMPTIED its open set — settled every reachable cell and the goal wasn't
@@ -324,8 +361,25 @@ export class Driver {
     // reachable pursuit contacts written off, good siege stands rotated away, resolution -4.
     if (path.budgetHit) return;
     const end = path[path.length - 1];
-    const short = Math.hypot(end.x - dest.x, end.z - dest.z);
-    if (short > Math.max(UNREACH_SLACK, o.arrive || 0)) {
+    const short = Math.hypot(end.x - planned.x, end.z - planned.z);   // against what A* was ASKED for
+    // …AND goalR IS PART OF THE TOLERANCE, because it is part of the question. `goalR` is the
+    // order's own statement of how close counts as arrived — a base centre sits inside its keep, so
+    // the route is asked for "within 12u of it", and A* stops the moment it satisfies that. A route
+    // that stopped inside goalR did exactly what it was told; convicting it of falling short of the
+    // centre is convicting it of obeying. This was the real cost of the goal-radius work: a base
+    // approach with goalR 12 against a 9u tolerance is an automatic violation every single time,
+    // which is where 1,173 of these came from in 40 matches, and it is what let the recovery cap
+    // walk: the cap moves the goal to the route's end, the next route to THAT point also stops
+    // short of it, and the pair marched a Lurcher's destination across the map 10u at a time.
+    // …PLUS A CELL, because A* settles CELLS, not points. Asked to finish within 14u of a base
+    // centre on a 5u grid, the search stops at the first cell whose centre satisfies that and the
+    // route's last point comes out at 15u — one unit past its own requirement, and convicted for
+    // it. That single unit is the whole of seed 641: the conviction capped the destination at the
+    // route's end, `slack` then declared the unit arrived 9u short of THAT, and a Firebrat sat at
+    // 23u from a base that heals at 16u, on 33% hull, for three minutes. Its own flood fill could
+    // reach within 4u of the door the entire time.
+    const cell = (this.hooks.cell && this.hooks.cell()) || 5;
+    if (short > Math.max(UNREACH_SLACK, o.arrive || 0, (o.goalR || 0) + cell)) {
       o.violated = true; this.violations++; Driver.violationsTotal++;
       Driver.violationsBy[o.by || '?'] = (Driver.violationsBy[o.by || '?'] || 0) + 1;   // WHO orders the impossible (Slice-2 targeting data)
       // WAS THIS CONVICTION EARNED? budgetHit false normally means the search emptied its open

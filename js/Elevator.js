@@ -40,8 +40,24 @@ export class Elevator {
     this.loop = opts.loop ?? false;
     const shaftHalf = this.padHalf + 0.4;     // a little clearance around the pad
 
+    // THE CARVE-VS-LINER RULE. carveShaft edits a heightfield, so the pit's edge is not a cliff:
+    // between the last vertex it lowers and the first it leaves alone there is one tile of ground
+    // that climbs the entire depth of the shaft. That skirt is real geometry, and where the terrain
+    // grid happens to fall relative to the shaft centre decides how far into the mouth it leans —
+    // anywhere from a lip at the floor to a wedge reaching nearly to the surface. On this FOB it
+    // came in at half the pit's height, which is what read as "the dark sides only go halfway down".
+    //
+    // So the liner has to BURY the skirt rather than sit next to it. The skirt is somewhere in
+    // [carve − tile, carve + tile], a two-tile window, and the liner covers [shaftHalf, shaftHalf + t].
+    // Carving exactly one tile outside the liner's inner face puts the window on the liner's
+    // footprint exactly, whatever the grid phase — which is why t is two tiles and not the 0.8 it
+    // was. Only the inner face is ever seen; the rest of the thickness is buried in the island.
+    const tile = (map.params && map.params.tile) || 1;
+    const t = tile * 2;                       // liner thickness — set by the rule above, not by looks
+    const carveHalf = shaftHalf + tile;
+
     // Carve the pit; carveShaft reports the flattened surface + pit-floor heights.
-    const r = map.carveShaft(center.x, center.z, shaftHalf, this.depth);
+    const r = map.carveShaft(center.x, center.z, carveHalf, this.depth);
     this.groundY = r.groundY;
     this.bottomY = r.bottomY;
 
@@ -61,14 +77,14 @@ export class Elevator {
     // flush at groundY because cy is derived from wallH, and a lip above the surface would bury
     // the hazard collar that rings the mouth.
     //   deeper  — the walls run well past the pit floor, so no sightline slips under them
-    //   longer  — each wall overruns the corner by a full thickness, so the four of them overlap
-    //             instead of merely meeting (a meeting joint leaves a diagonal pinhole)
+    //   longer  — each wall spans the full outer width, so the four of them overlap in the corners
     //   floor   — widened to the same footprint so it seals UNDER the walls, not just between them
-    const t = 0.8;
     const wallH = this.depth + 6;              // was depth + 0.4: it ended level with the floor
     const cy = this.groundY - wallH / 2;       // top stays at groundY — extension is all downward
-    const span = shaftHalf * 2;
-    const outer = span + t * 4;                // overrun past each corner
+    // Each wall runs the full outer width, so the four of them OVERLAP in the corner squares
+    // instead of merely meeting (a meeting joint leaves a diagonal pinhole). Exactly the outer
+    // width and no more: any extra is a dark tab sticking out of the ground past the collar.
+    const outer = (shaftHalf + t) * 2;
     for (const [sx, sz] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
       const horiz = sz !== 0;
       const w = horiz ? outer : t;
@@ -77,22 +93,26 @@ export class Elevator {
       wall.position.set(center.x + sx * (shaftHalf + t / 2), cy, center.z + sz * (shaftHalf + t / 2));
       this.group.add(wall);
     }
-    // THE BLUE IS THE PIT FLOOR ITSELF, not a water plane (Jacob: "I still see what looks like
-    // ocean"). There IS no water plane — IslandMap sets this.water = null and paints the sea into
-    // the TERRAIN by depth-splatting, so a shaft carved 18u down is terrain painted deep blue.
-    // _maskWater's stencil therefore never had anything to mask here; it only ever touched the
-    // distant seaFloor plane. What hides the blue is this slab, and it has to sit clearly ON TOP
-    // of the carved floor rather than beneath it — the old placement left its top 0.1u above
-    // bottomY, which is nothing across uneven carved ground.
+    // THE BLUE WAS THE TERRAIN, not a water plane (Jacob: "It looks like it is textured as water").
+    // There IS no water plane — IslandMap sets this.water = null and paints the sea into the TERRAIN,
+    // so anything carved below sea level came out shaded as open ocean, ripples and all. That is
+    // fixed at the source now: carveShaft flags what it digs and the terrain shader shades dug
+    // ground as rock (see aDug in TerrainMaterial.js), so the pit floor is no longer the sea even
+    // where this slab does not reach it. The slab still covers the flat floor, and it has to sit
+    // clearly ON TOP of the carved ground rather than beneath it — an earlier placement left its
+    // top 0.1u above bottomY, which is nothing across uneven carved ground.
     const FLOOR_T = 1.2, FLOOR_LIFT = 0.35;   // top sits this far proud of the carved floor
     const floor = box(outer, FLOOR_T, outer, LINER_MAT);
     floor.position.set(center.x, this.bottomY + FLOOR_LIFT - FLOOR_T / 2, center.z);
     this.group.add(floor);
 
-    // Hazard collar: a striped frame ringing the shaft mouth. Its INNER edge tucks
-    // slightly OVER the deck edge (no gap between pad and border); its OUTER edge
-    // reaches ~7.6 to meet the gate roads.
-    this.group.add(this._collar(this.padHalf - 0.25, 7.6));
+    // Hazard collar: a striped frame ringing the shaft mouth. Its INNER edge tucks slightly OVER
+    // the deck edge (no gap between pad and border); its OUTER edge lands on the liner's outer
+    // face, because that is where the ground starts again. Everything from the deck to there is
+    // liner top — grass would be a dark ring of bare concrete otherwise. It used to stop at 7.6
+    // to meet the gate roads, which is now inside the collar; the roads overlap it and read as
+    // running up to the pad, which is what they were doing before.
+    this.group.add(this._collar(this.padHalf - 0.25, shaftHalf + t));
 
     // Cut the ocean out of the pit: the global sea surface sits at y=0 and the
     // shaft floor is below it, so without this the sea floods the hole. A stencil

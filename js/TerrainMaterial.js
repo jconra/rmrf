@@ -201,18 +201,23 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
     // (so the fragment can tilt the normal along the wave slope without the normal matrix).
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>',
-        '#include <common>\nattribute float aGrass;\nattribute float aShore;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
+        '#include <common>\nattribute float aGrass;\nattribute float aShore;\nattribute float aDug;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying float vDug;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
       .replace('#include <begin_vertex>',
-        '#include <begin_vertex>\nvGrass = aGrass;\nvShore = aShore;\nvHeight = position.y;\nvTerrUV = position.xz;\nvWaveX = normalMatrix * vec3(1.0, 0.0, 0.0);\nvWaveZ = normalMatrix * vec3(0.0, 0.0, 1.0);\nvWaveY = normalMatrix * vec3(0.0, 1.0, 0.0);\nfloat _ny = clamp(normalize(normal).y, 0.001, 1.0);\nvSlope = sqrt(max(0.0, 1.0 - _ny * _ny)) / _ny;');
+        '#include <begin_vertex>\nvGrass = aGrass;\nvShore = aShore;\nvDug = aDug;\nvHeight = position.y;\nvTerrUV = position.xz;\nvWaveX = normalMatrix * vec3(1.0, 0.0, 0.0);\nvWaveZ = normalMatrix * vec3(0.0, 0.0, 1.0);\nvWaveY = normalMatrix * vec3(0.0, 1.0, 0.0);\nfloat _ny = clamp(normalize(normal).y, 0.001, 1.0);\nvSlope = sqrt(max(0.0, 1.0 - _ny * _ny)) / _ny;');
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nuniform float uFoamW;\nuniform float uFoamSlope;\nuniform float uFoamStr;\nuniform float uWaveLen;\nuniform float uWaveSpd;\nuniform float uSpread;\nuniform float uCoast;\nuniform float uFroth;\nuniform float uWAmp;\nuniform float uInland;\nuniform float uInlandR;\nuniform float uFoamUp;\nuniform vec2 uCrest;\nuniform vec2 uBlotch;\nuniform vec3 uOct1;\nuniform vec3 uOct2;\nuniform vec3 uOct3;\nuniform vec4 uLand;\nuniform float uLandMacro;\nuniform float uLandWarp;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
+        '#include <common>\nuniform sampler2D uSand;\nuniform sampler2D uGrass;\nuniform sampler2D uMask;\nuniform float uTexScale;\nuniform float uGrassAmount;\nuniform float uTime;\nuniform vec3 uWetDark;\nuniform vec3 uShallow;\nuniform vec3 uDeep;\nuniform float uFloor;\nuniform float uFoamW;\nuniform float uFoamSlope;\nuniform float uFoamStr;\nuniform float uWaveLen;\nuniform float uWaveSpd;\nuniform float uSpread;\nuniform float uCoast;\nuniform float uFroth;\nuniform float uWAmp;\nuniform float uInland;\nuniform float uInlandR;\nuniform float uFoamUp;\nuniform vec2 uCrest;\nuniform vec2 uBlotch;\nuniform vec3 uOct1;\nuniform vec3 uOct2;\nuniform vec3 uOct3;\nuniform vec4 uLand;\nuniform float uLandMacro;\nuniform float uLandWarp;\nvarying float vGrass;\nvarying float vHeight;\nvarying float vShore;\nvarying float vDug;\nvarying vec2 vTerrUV;\nvarying vec3 vWaveX;\nvarying vec3 vWaveZ;\nvarying vec3 vWaveY;\nvarying float vSlope;')
       // color_fragment runs first: build the whole surface colour per-pixel and stash the
       // depth / water-mask / gloss terms for the roughness + normal stages below.
       .replace('#include <color_fragment>', `#include <color_fragment>
         float vDepth = max(0.0, -vHeight);
-        float vWaterF = 1.0 - smoothstep(-0.06, 0.06, vHeight);    // 1 on water (smooth per-pixel waterline)
+        // Height says where the SEA is, and that holds everywhere the island generator built —
+        // but not in a hole somebody dug. An elevator shaft floor is 18 units down and is rock,
+        // not ocean, so vDug vetoes the water branch outright: no depth gradient, no surf, no
+        // glossy sheet, no animated ripple. Nothing else in this shader keys off water without
+        // going through vWaterF, so one veto here covers all of it.
+        float vWaterF = (1.0 - smoothstep(-0.06, 0.06, vHeight)) * (1.0 - vDug);
         {
           vec2 uv = vTerrUV * uTexScale;
           vec3 sandC  = mix(texture2D(uSand,  uv).rgb, texture2D(uSand,  uv * 0.37 + 11.3).rgb, 0.5);
@@ -269,7 +274,10 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
           // otherwise reveal every underwater hump even though the surface is shaded flat).
           // Near shore keeps the full wet-sand→turquoise→deep gradient.
           waterC = mix(uDeep, waterC, vShore);
-          diffuseColor.rgb = mix(landC, waterC, vWaterF);
+          // Dug ground takes its colour from the VERTEX colour instead of the sand/grass splat —
+          // the one place in this shader where vColor is read. IslandMap paints excavated vertices
+          // the same value as the shaft liner, so the pit reads as one solid box.
+          diffuseColor.rgb = mix(mix(landC, waterC, vWaterF), vColor, vDug);
           // SURF FOAM that washes IN toward the island. The surf LINE (band centre) climbs the
           // beach and recedes, and because its position is keyed off vHeight it follows the
           // shoreline CONTOUR — so the foam advances inward all around the island instead of
@@ -314,7 +322,7 @@ export function makeTerrainMaterial(seed = 1337, grassAmount = 0.5, texWorld = 7
           // map — should barely foam at all. Scale by distance from the map centre: 0 at the
           // middle, full by uInlandR. uInland is how much of that falloff to apply (0 = none).
           float inland = mix(1.0, smoothstep(0.0, max(uInlandR, 1.0), length(vTerrUV)), uInland);
-          float foam = surfZone * vShore * crest * blotch * uFoamStr * inland;
+          float foam = surfZone * vShore * crest * blotch * uFoamStr * inland * (1.0 - vDug);
           diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.96, 0.98, 0.99), foam);
         }`)
       // ALL water is glossy (near-mirror 0.12) so the whole sea reflects the sky env +

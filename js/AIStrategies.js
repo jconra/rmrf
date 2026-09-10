@@ -541,6 +541,63 @@ class Scavenge extends Mission {
   ]); }
 }
 
+// GRAB — pick up salvage that is basically on our way.
+//
+// This used to be two blocks inside main.js's _view that reached in and REWROTE the destination the
+// running mission had chosen (`goal = pile`), with no score, no log and no ending. The mission kept
+// running, believing it was driving somewhere else. Both blocks re-picked the NEAREST pile every
+// tick, so the destination slid as the unit drove — and on seed 732 that slide (9.9u in one tick,
+// two piles, nearest-wins) was what handed the driver a route planned for one point and a goal at
+// another. It stood still for the remaining 1008 seconds of the match.
+//
+// So it is a mission now, and it obeys the same rules as every other one:
+//   scored     — it competes for the unit instead of quietly taking it
+//   committed  — it latches ONE pile at enter() and drives to that pile
+//   ended      — done() when the pile is collected, gone, or the budget runs out
+//   interruptible — a threat, a stolen flag or an empty magazine can outbid it, like anything else
+//
+// SUPPORT, not a plan: it is an errand, so _primaryKey stays on the real job and the unit resumes
+// that job (with the travel it had already banked) the moment the pickup is over.
+const GRAB_BUDGET = 20;   // s — a pickup that has not happened by now is not going to
+// What a FREE pickup is worth (a pile exactly on our line), and how much extra travel makes it
+// worthless. Both are settable so the gate can sweep them (RR.setGrabW). The weight sits
+// deliberately below capture (~10), siege (~9-11) and a dry rearm (~16): free parts are worth
+// bending for, never worth abandoning the match for.
+let GRAB_W = 13;   // provisional: 13 and 17 measured indistinguishable on scrap banked across 3 disjoint 60-seed sets, and 5 was low enough that the mission never fired at all. A finer sweep is in flight.
+let GRAB_DETOUR_S = 2.5;   // seconds of EXTRA travel at which the bend stops being opportunistic
+export function setGrabW(w, sec) {
+  if (w != null) GRAB_W = +w;
+  if (sec != null) GRAB_DETOUR_S = +sec;
+  return { w: GRAB_W, detourS: GRAB_DETOUR_S };
+}
+class Grab extends Mission {
+  get key() { return 'grab'; }
+  get garageOK() { return false; }   // never buy a chassis to pick something up
+  wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }
+  enter(cmd, doc) {
+    super.enter(cmd, doc);
+    // THE COMMITMENT. The scorer already worked out which pile is the cheapest bend and left it
+    // here; taking its answer is what stops this from re-deciding per tick the way the old detour
+    // did. `_switch` runs enter() before it sets this.step, so asking the board again from in here
+    // would ask the wrong question anyway.
+    this.pile = cmd._grabPile || null;
+    cmd._grabPile = null;
+  }
+  objective(cmd) {
+    return (this.pile && !this.pile._gone) ? { x: this.pile.pos.x, z: this.pile.pos.z } : cmd.homePos();
+  }
+  // Well inside SCRAP_PICKUP_R (8) — arriving has to mean the pile is actually collected, not that
+  // we parked next to it. Seed 732's unit froze 9.8u from the pile it had stopped for.
+  arriveDist(cmd) { return 4; }
+  done(cmd) { return !this.pile || this.pile._gone || this.t > GRAB_BUDGET; }
+  label(cmd) { return 'grabbing salvage on our way past'; }
+  cry(cmd) { return pickCry(cmd, [
+    'Salvage on our line — swinging by to scoop it.',
+    'Parts right there on the way. Grabbing them.',
+    'Free scrap ahead — picking it up as we pass.',
+  ]); }
+}
+
 // ---- SUPPLY MISSIONS — the first slice of the flattened decision stack ----------------
 // Topping up used to live one layer down, as rungs on the brain's priority ladder in AI.js,
 // each with its own trip condition rebuilt every tick. That is where the thrash lived: the
@@ -568,7 +625,7 @@ const INCUMBENT_MAX = 3.0;    // …rising to this at the objective
 // Supply missions are exempt from the SCALING (they keep the base): a unit is on refuel BECAUSE
 // it is nearly dry, and rewarding it for having driven a long way to the pump would make the
 // worst case — out of fuel, far from home — the hardest one to interrupt.
-const INCUMBENT_FLAT = { refuel: 1, rearm: 1, repair: 1, shield: 1 };
+const INCUMBENT_FLAT = { refuel: 1, rearm: 1, repair: 1, shield: 1, grab: 1 };
 // HOW FAR OUT THE UNIT IS — 0 at the pad, 1 at the enemy base. Shared by BOTH distance terms so
 // they can never drift onto different scales: the incumbent bonus (what the running plan has
 // already spent getting here) and requiredVehicle's recall cost (what a chassis change would
@@ -1117,7 +1174,7 @@ class ShieldUp extends Supply {
   ]); }
 }
 
-const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass,
+const MISSIONS = { sap: Sap, trap: Trap, scout: Scout, attack: Attack, siege: Siege, capture: Capture, defend: Defend, intercept: Intercept, scavenge: Scavenge, harass: Harass, grab: Grab,
   refuel: Refuel, rearm: Rearm, repair: Repair, shield: ShieldUp, flee: Flee, swap: Swap, fight: Fight };
 function makeMission(key) { return new (MISSIONS[key] || Attack)(); }
 // Is this mission one a commander may buy a chassis for at the lift? (Top-ups are decisions a
@@ -1152,7 +1209,7 @@ const URGENT = new Set(['capture', 'intercept', 'sap', 'flee', 'fight']);   // s
 // It also has a second job here — keeping _primaryKey on the real plan through a duel is what
 // leaves the incumbent bonus with that plan, so winning a fight RESUMES the job instead of
 // handing the board to whatever happened to be second.
-const SUPPORT_MISSIONS = new Set(['flee', 'swap', 'refuel', 'rearm', 'repair', 'shield', 'fight']);
+const SUPPORT_MISSIONS = new Set(['flee', 'swap', 'refuel', 'rearm', 'repair', 'shield', 'fight', 'grab']);
 export const isSupportMission = key => SUPPORT_MISSIONS.has((key || '').split('-')[0]);
 const DWELL = 1.5;   // seconds a mission must run before a non-urgent switch (event re-decides)
 // How long a SCORED mission runs before a non-urgent re-think. Deliberately far calmer than the
@@ -1410,7 +1467,7 @@ const MSN_CANDS_BASE = ['scout', 'attack', 'siege', 'siege-back',
   // back out at 30% hull. `shield` JOINED once its pull stopped being flat: at 3 against attack's
   // 9-15 it could never be picked, and raising it flat would have made a shield worth abandoning a
   // fight for. Distance is what resolves that — see shieldNearness. (Was task #40.)
-  'refuel', 'rearm', 'repair', 'shield', 'fight'];
+  'refuel', 'rearm', 'repair', 'shield', 'fight', 'grab'];
 // Built per call rather than mutated, so the flag genuinely removes `fight` from the board when
 // off — a candidate scored at -50 would still show up in every breakdown and every near-tie log.
 const MSN_CANDS = (cmd) => {
@@ -1777,6 +1834,50 @@ export function missionScore(cmd, key, running = null) {
       add('base', -5);
       if (cmd.ourFlagStolen()) add('flag STOLEN', 12);
       else if (cmd.ourFlagLoose && cmd.ourFlagLoose()) add('flag loose', 10); break;
+    // GRAB — the opportunistic pickup (see the Grab mission). Scavenge is the dedicated hunt for
+    // salvage and stays exactly what it was; this is the different thing: a bend on a trip we are
+    // already making.
+    //
+    // PRICED IN EXTRA TRAVEL, NOT DISTANCE. "Opportunistic" means the pile costs us almost nothing
+    // because we were going past it anyway, and raw distance cannot say that — a pile 20u away is a
+    // trivial bulge on a 100u trip and a serious detour on a 25u one. What it costs is
+    //     (here -> pile -> where we were going) minus (here -> where we were going)
+    // which is zero for a pile on the line and grows as it moves off to the side. And in SECONDS,
+    // not units, because the same distance is a different decision for a 22u/s Valkyrie and an 8u/s
+    // Jotun — the old detour handled that by excluding the Jotun by name, which is the
+    // one-constant-many-scales shape this file keeps finding.
+    case 'grab': {
+      const v = cmd.unit;
+      if (!v || v.dead) break;
+      if (cmd.flag && cmd.flag() && cmd.flag().carrier === v) break;   // a carrier does not shop
+      if (cmd.ourFlagStolen && cmd.ourFlagStolen()) break;             // nor does anyone, mid-theft
+      // A RUNNER DOES NOT SHOP EITHER. Carrying the flag was already excluded; going to GET it was
+      // not, and at a weight high enough to be worth having, a free pickup outbids capture — 30% of
+      // all pickups measured were a Firebrat breaking off a flag run for scrap. Capture is the only
+      // mission that ends the match, so this is the same kind of statement as "a carrier does not
+      // shop": a fact about the job, not a weight to be argued with. _primaryKey rather than `step`
+      // so it still holds while the run is passing through a support errand.
+      if ((cmd._primaryKey || '').split('-')[0] === 'capture'
+          || (cmd.strategy && cmd.strategy.step === 'capture')) break;
+      // THE LATCH, same shape as the supply missions above: while this IS the running mission its
+      // score holds up until the pile is actually collected, so a pickup cannot un-justify itself
+      // by driving closer to the thing it is fetching. A weight, not a lock — a real emergency
+      // still outbids it.
+      if (cmd.strategy && cmd.strategy.step === 'grab') {
+        const p = cmd.strategy.mission && cmd.strategy.mission.pile;
+        if (p && !p._gone) add('finishing the pickup we committed to', GRAB_W);
+        break;
+      }
+      if (!cmd.grabPick) break;
+      // Where we are CURRENTLY headed — the running mission's objective, which is the trip the
+      // pile has to be nearly on. (Never Grab's own: the latch above already returned.)
+      let headed = null; try { headed = cmd.strategy.objective(cmd); } catch (e) { headed = null; }
+      const pick = cmd.grabPick(v, headed);
+      if (!pick) break;
+      cmd._grabPile = pick.pile;   // the commitment Grab.enter() takes
+      add('salvage nearly on our way', GRAB_W * Math.max(0, 1 - pick.sec / GRAB_DETOUR_S));
+      break;
+    }
     case 'scavenge':
       if (cmd.needsPartsRun && cmd.needsPartsRun()) {
         add('need parts', 4);
@@ -2060,7 +2161,7 @@ export function scoreGap(cmd) {
   // The PLAN missions are the ones bound by the rule. A supply mission collapsing to zero with
   // nothing fielded is correct — a hull that does not exist needs no fuel, and the one that rolls
   // out arrives full — so it is reported separately rather than counted as a lurch.
-  const PLAN = k => !/^(shield|repair|rearm|refuel|swap|flee)$/.test(k.split('-')[0]);
+  const PLAN = k => !/^(shield|repair|rearm|refuel|swap|flee|grab)$/.test(k.split('-')[0]);
   const pk = keys.filter(PLAN);
   const planFielded = pk.slice().sort((x, y) => asIs[y] - asIs[x])[0];
   const planGarage = pk.slice().sort((x, y) => asGarage[y] - asGarage[x])[0];

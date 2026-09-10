@@ -38,6 +38,7 @@ const C = {
   grass:   new THREE.Color('#6f8f3a'),
   grassHi: new THREE.Color('#86a64a'),
   rock:    new THREE.Color('#8d8678'),
+  dug:     new THREE.Color('#1d2024'),   // excavated rock — matches the elevator shaft liner
 };
 
 // Tile type codes used by gameplay sampling.
@@ -66,6 +67,11 @@ export class IslandMap {
     this._col = null;       // Float32Array rgb per vertex (water palette + land tint)
     this._grass = null;     // Float32Array macro grassiness 0..1 per vertex
     this._land = null;      // Float32Array 1 = land, 0 = water, per vertex
+    // 1 = ground we EXCAVATED (an elevator shaft), 0 = ground the island generator made.
+    // The terrain shader decides "this is sea" from height alone, which is true everywhere on a
+    // generated island and false in a hole we dug: a shaft floor 18 units down is below sea level
+    // but it is not the sea. This flag is how the shader tells the two apart.
+    this._dug = null;       // Uint8Array per vertex
     this._grassNoise = null;
     this._terrainMat = null;
 
@@ -157,6 +163,7 @@ export class IslandMap {
     this._col = new Float32Array(VX * VZ * 3);
     this._grass = new Float32Array(VX * VZ);
     this._land = new Float32Array(VX * VZ);
+    this._dug = new Uint8Array(VX * VZ);       // set by carveShaft; nothing the generator makes is dug
     this._shore = new Float32Array(VX * VZ);   // wave strength 0..1: 1 at the shore, 0 far out to sea
     this._terrainMat = makeTerrainMaterial(p.seed, p.grassAmount, 7,
       { wetdark: C.wetdark, shallow: C.shallow, deep: C.deep, floor: p.seaLevel * p.heightScale });
@@ -267,7 +274,7 @@ export class IslandMap {
   _makeChunk(cx0, cz0, VX, VZ) {
     const p = this.params;
     const halfW = this.worldW / 2, halfH = this.worldH / 2;
-    const H = this._H, COL = this._col, GRA = this._grass, LND = this._land, SHO = this._shore;
+    const H = this._H, COL = this._col, GRA = this._grass, DUG = this._dug, SHO = this._shore;
     const invTile2 = 1 / (2 * p.tile);
     const cw = Math.min(CHUNK, p.cols - cx0);
     const ch = Math.min(CHUNK, p.rows - cz0);
@@ -276,7 +283,7 @@ export class IslandMap {
     const col = new Float32Array(cvx * cvz * 3);
     const nor = new Float32Array(cvx * cvz * 3);
     const gra = new Float32Array(cvx * cvz);
-    const lnd = new Float32Array(cvx * cvz);
+    const dug = new Float32Array(cvx * cvz);
     const sho = new Float32Array(cvx * cvz);
 
     for (let lz = 0; lz < cvz; lz++) {
@@ -291,7 +298,7 @@ export class IslandMap {
         col[li * 3 + 1] = COL[gi * 3 + 1];
         col[li * 3 + 2] = COL[gi * 3 + 2];
         gra[li] = GRA[gi];
-        lnd[li] = LND[gi];
+        dug[li] = DUG[gi];
         sho[li] = SHO[gi];
         const xl = gx > 0 ? H[gi - 1] : H[gi];
         const xr = gx < VX - 1 ? H[gi + 1] : H[gi];
@@ -316,7 +323,7 @@ export class IslandMap {
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     geo.setAttribute('aGrass', new THREE.BufferAttribute(gra, 1));
-    geo.setAttribute('aLand', new THREE.BufferAttribute(lnd, 1));
+    geo.setAttribute('aDug', new THREE.BufferAttribute(dug, 1));
     geo.setAttribute('aShore', new THREE.BufferAttribute(sho, 1));
     geo.setIndex(idx);
     const mesh = new THREE.Mesh(geo, this._terrainMat);
@@ -411,7 +418,13 @@ export class IslandMap {
   // Carve a square elevator SHAFT: drop the vertices inside a square straight
   // down to `bottomY` so the one-tile-wide boundary quads become near-vertical
   // walls (a clean square pit). Returns {groundY, bottomY} for the elevator rig.
-  // Vertices are tinted dark and flagged non-land; a liner mesh covers them.
+  //
+  // The edge is a RAMP, not a cliff. This is a heightfield, so the last vertex we lower and the
+  // first one we leave alone are a tile apart, and the ground between them is a steep skirt that
+  // climbs the full depth of the pit in that one tile. The skirt is real geometry standing inside
+  // the shaft mouth, and where the grid phase puts it decides how much of the pit it eats — which
+  // is why the liner looked like it stopped halfway down. The caller has to bury it: see the
+  // carve-vs-liner rule in Elevator.js.
   carveShaft(x, z, half, depth) {
     const p = this.params, VX = p.cols + 1, VZ = p.rows + 1;
     const halfW = this.worldW / 2, halfH = this.worldH / 2;
@@ -430,7 +443,13 @@ export class IslandMap {
         const vi = gz * VX + gx;
         this._H[vi] = bottomY;
         this._setAttribs(vi, gx / p.cols, gz / p.rows);
-        this._col[vi * 3] = 0.14; this._col[vi * 3 + 1] = 0.15; this._col[vi * 3 + 2] = 0.17;
+        // Excavated rock, and SAY SO: _setAttribs just painted this vertex from the water palette
+        // because it sits below sea level. The colour alone never reached the screen — the terrain
+        // shader builds its own from height and discards the vertex colour — so the pit came out
+        // shaded as open sea, waves and all. aDug is the flag that switches the shader off the
+        // water branch, and vertex colour is what it uses instead.
+        this._dug[vi] = 1;
+        this._col[vi * 3] = C.dug.r; this._col[vi * 3 + 1] = C.dug.g; this._col[vi * 3 + 2] = C.dug.b;
         this._land[vi] = 0;
       }
     }

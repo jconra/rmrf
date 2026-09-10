@@ -31,7 +31,7 @@ import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
 import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=121';
 import { locomote } from './Locomotion.js?v=1';
-import { Driver } from './Driver.js?v=1';
+import { Driver, UNREACH_SLACK } from './Driver.js?v=1';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
@@ -39,7 +39,7 @@ import { Driver } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -918,7 +918,6 @@ let BUY_FIRST = true;   // buy the hull when the trip is ORDERED (?nobuyfirst re
 const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
 let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
-let aiScrapTightArrive = true;   // salvage-detouring units close to within the pickup radius instead of halting at mission arriveDist (A/B via RR.setScrapTightArrive)
 // SHIPPED 2026-08-10. Grade a unit's death against the PRIMARY mission (the
 // job) instead of strategy.step (the errand it died on). Without it a runner that takes
 // capture-front, gets shot up, correctly breaks off to FLEE and dies on the way out files its loss
@@ -948,9 +947,11 @@ let aiPostKillMoveOn = true;   // on a kill, drop the killer's engage-afterglow 
 const SCRAP_DROP = { jotun: 3, valkyrie: 2, lurcher: 2, firebrat: 1 };   // scrap a destroyed vehicle's wreck is worth
 const SCRAP_GRAB_RANGE = 45;   // max detour a mobile unit takes to grab a spotted pile on its way
 const SCRAP_SIEGE_RANGE = 14;  // a SIEGER only bends for a pile basically on its path (no real detours off the firing line)
-const LOOT_RANGE = 28;         // after a KILL, how far the killer will swing over to grab the wreck it just made
-const LOOT_MS = 6000;          // give up the loot order after this long (don't let it stall the advance)
-let aiKillLoot = true;         // killers collect the wreck of what they just destroyed (A/B knob via RR.setKillLoot)
+// (LOOT_RANGE / LOOT_MS / aiKillLoot deleted with the fresh-kill loot latch. A wreck the unit just
+// made is standing under its own tracks, so the Grab mission prices that bend at ~0 seconds and
+// scores it at full weight without a second system to say so — and the exclusions the latch
+// carried by name (carrying the flag, on a capture run, a flag in play) are decided on the board
+// now: capture outscores a pickup, so it simply wins.)
 const GIB_GRAV = 42;           // gravity on flying debris pieces (world units/s^2)
 const GIB_HOT_MS = 1500;       // debris is airborne/uncollectable this long after death
 const MAX_WRECKS = 10;         // cap persistent wreck piles on the field; oldest fades when exceeded
@@ -2854,14 +2855,6 @@ function destroyVehicle(veh, cause, killer = null) {
     let impact = null;
     if (killer && killer.holder) { impact = veh.holder.position.clone().sub(killer.holder.position); impact.y = 0; }
     const wreck = gibVehicle(veh, impact);   // blow the model apart; the settled debris becomes the scrap pile
-    // FRESH KILL loot: hand the wreck to the KILLER'S commander so it swings over and grabs what
-    // it just dropped — it's close and the fight's (locally) over. Whether it bothers is a mood +
-    // dice roll with mission exceptions (see wantsLoot). Only its OWN commander's current unit.
-    if (wreck && killer && killer.team && killer.team !== veh.team) {
-      const cmd = commanders.find(c => c.team === killer.team && c.ownsUnit(killer));
-      const slot = cmd && cmd._slotFor(killer);   // the loot order goes to the KILLER's slot, not whichever was bound last
-      if (cmd && slot && !wreck.overWater && cmd.wantsLoot(killer)) { slot._lootPile = wreck; slot._lootUntil = performance.now() + LOOT_MS; }
-    }
     // Drop the killer's engage-afterglow ghost: that hysteresis holds a target at its last-seen
     // spot through LOS blinks, but a KILLED enemy shouldn't be "searched for" — it made the killer
     // stand and stare at the corpse (and its fresh wreck) for a beat instead of moving on/looting.
@@ -5855,7 +5848,14 @@ const REACH_TTL = 2;
 // errands and don't bet it on a still-armed fort.
 // Treat the closest reachable point as arrival when the driver proves a goal unreachable, instead
 // of re-issuing the impossible order until the unit is scuttled. A/B via RR.setReachArrive.
-const REACHCAP_TTL = 25;   // s a cap is honoured before the real goal is retried
+// WAS 25s, AND 25 SECONDS IS A LONG TIME TO STAND IN A FIELD (Jacob). The number was chosen to
+// make retrying an impossible goal cheap, and it does — but its real effect is how long a unit
+// waits before finding out the world changed, and it is dead time either way. Measured over 40
+// matches BEFORE the stale-route fix above: 108 pinned episodes, 84 seconds per match standing
+// still, one of them 230s and one (seed 732) for the rest of the match. Most of those convictions
+// were false, so the cap should now be rare — and when it is not, the unit gets back to asking
+// after five seconds rather than four hundred ticks.
+let REACHCAP_TTL = 5;      // s a cap is honoured before the real goal is retried (RR.setReachCapTTL)
 // …and how long a FLAG CARRIER honours one. It is holding the win condition in the enemy's base,
 // so the cost of one more A* is nothing against the cost of standing still.
 const REACHCAP_CARRY_TTL = 1;
@@ -6056,6 +6056,14 @@ function navWaypoint(nav, v, dest, dt, goalR = 0) {
   if (nav.retryT > 0) nav.retryT -= dt;
   const moved2 = nav.dx == null ? Infinity : (dest.x - nav.dx) ** 2 + (dest.z - nav.dz) ** 2;
   const c = grid.cell;
+  // HOW FAR THE GOAL MAY DRIFT BEFORE THE CACHED ROUTE IS NO LONGER THIS TRIP'S ROUTE.
+  // This used to be two cells (10u), picked on its own, while the Driver's reachability contract
+  // convicted any route ending more than UNREACH_SLACK (9u) short of the goal. That one-unit gap
+  // is a hole a goal can sit in: drift 9.9u and the cache keeps a route it will not replan while
+  // the contract judges that route against a destination it was never planned for. It is not a
+  // tuning question — the drift the cache tolerates must never exceed the distance the contract
+  // is willing to convict at, or the two rules contradict each other by construction.
+  const NAV_GOAL_DRIFT = Math.min(c * 2, UNREACH_SLACK);
   // A FAILED plan (no route — unreachable/blocked goal) used to leave nav.path null, so the
   // trigger below re-ran a full-grid A* search EVERY FRAME while a unit was stuck — ~80% of
   // CPU in cellBlocked (the perf sawtooth). failT gates retries after a failure so we search
@@ -6094,7 +6102,7 @@ function navWaypoint(nav, v, dest, dt, goalR = 0) {
   const displaced = offPath > NAV_OFF_PATH && !(nav.offT > 0);
   if (displaced) nav.offT = NAV_OFF_COOL;
   if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || nav.epoch !== _navEpoch
-       || moved2 > (c * 2) ** 2 || displaced) && !(nav.failT > 0)) {
+       || moved2 > NAV_GOAL_DRIFT ** 2 || displaced) && !(nav.failT > 0)) {
     const hasUsablePath = nav.path && nav.idx < nav.path.length;
     if (hasUsablePath && _astarFrameMs >= NAV_FRAME_BUDGET_MS) {
       // Per-frame A* budget spent: keep following the current route and retry the refresh next
@@ -6525,6 +6533,10 @@ function unitDoing(v) {
 const driverHooks = {
   navWaypoint,
   log: aiLog,
+  // The A* grid's resolution. The reachability contract needs it: A* settles CELLS, so a route
+  // asked to finish within goalR of a point can legitimately end up to a cell beyond it, and
+  // convicting that route means convicting it for the grid it was searched on.
+  cell: () => grid.cell,
   alarm: (d, v) => {
     if (d && d.team) navAlarmsByTeam[d.team] = (navAlarmsByTeam[d.team] || 0) + 1;
     if (v) Object.assign(d, unitDoing(v));
@@ -6600,8 +6612,7 @@ function freshSlot() {
     _mrec: null,                                       // mission report card for the unit in the field
     _flankPt: null, _flankDone: false, _flanking: false,   // runner "sneak round the side" approach
     _intercepting: false, _shielding: false, _shieldRun: false, _shieldGen: null, _shieldRunOn: false,
-    _scrapDetour: false, _scrapDetourOn: false, _scrapTargetPile: null,
-    _lootPile: null, _lootUntil: 0,                    // fresh-kill wreck grab
+    _scrapTargetPile: null,   // the pile the running Grab mission committed to (unreachable-bail hook)
     _exploreWp: null,                                  // current recon waypoint (per unit → scouts spread out)
     _driver: null,                                     // this seat's Driver (orders in, pedals out — js/Driver.js)
     _tgtKey: null, _tgtT: 0, _tgtWhy: null,
@@ -8003,26 +8014,35 @@ class AICommander {
     }
     return best;
   }
-  // After a KILL, should the killer grab the wreck? The unit ALREADY pushes to the enemy's
-  // last-known spot (= the kill site) and pauses to investigate, so the wreck is a few units
-  // further on its existing path — grabbing it is basically free, so we just do it. The only
-  // hard skips are decisive flag moments, where nothing should pull focus:
-  //  • carrying the enemy flag, or on a CAPTURE run → stay on the objective
-  //  • ANY flag in play (either side being carried) → don't wander at the deciding moment
-  //  • our flag stolen → go contest it, not loot
-  // (The longer OUT-OF-THE-WAY detours for distant scrap keep their mood/RNG gating; this is
-  // only the free grab at a fresh kill.)
-  wantsLoot(v = this.unit) {   // v: the unit that made the kill (multi-unit: not necessarily the bound slot's)
-    if (!aiKillLoot) return false;
-    if (!v || v.dead) return false;
-    if (this.flag() && this.flag().carrier === v) return false;
-    const sl = this._slotFor(v), strat = (sl && sl.strategy) || this.strategy;   // the KILLER's own card
-    if (strat.step === 'capture' || strat.key === 'capture') return false;
-    if (this.ourFlagStolen()) return false;
-    if (this.ourFlagLoose()) return false;   // the thief we just killed DROPPED it — recover, don't loot
-    for (const f of flags) if (f.carried) return false;
-    return true;
+  // WHICH pile is the cheapest bend from here, and what does that bend COST — in seconds of extra
+  // travel on the trip we are already making. Feeds the Grab mission's score and its commitment.
+  //
+  // The cost is (here -> pile -> goal) minus (here -> goal), so a pile sitting on our line is free
+  // and one off to the side costs the bulge. That is what "opportunistic" means, and it is why
+  // nothing here needs a range constant: a 20u offset is a 7u bulge on a 100u trip and a 25u
+  // detour on a 30u one, and the arithmetic already says so. Divided by the hull's speed because
+  // the same bulge is two seconds to a Valkyrie and six to a Jotun — the old detour expressed that
+  // by excluding the Jotun by name.
+  grabPick(v = this.unit, goal = null) {
+    if (!v || v.dead) return null;
+    const now = performance.now();
+    const px = v.holder.position.x, pz = v.holder.position.z;
+    const spd = (VEHICLE_TYPES[v.type] && VEHICLE_TYPES[v.type].speed) || 12;
+    const dGoal = goal ? Math.hypot(goal.x - px, goal.z - pz) : 0;
+    let best = null, bs = Infinity;
+    for (const p of this.knownScrap) {
+      if (p._gone || p.overWater) continue;                 // in the water: gone in a moment anyway
+      if (p.hotUntil && now < p.hotUntil) continue;         // debris still in the air, uncollectable
+      const noReach = this._scrapNoReach.get(p);
+      if (noReach != null) { if (noReach > now) continue; else this._scrapNoReach.delete(p); }
+      const dP = Math.hypot(p.pos.x - px, p.pos.z - pz);
+      const extra = goal ? dP + Math.hypot(goal.x - p.pos.x, goal.z - p.pos.z) - dGoal : dP;
+      const sec = Math.max(0, extra) / spd;
+      if (sec < bs) { bs = sec; best = p; }
+    }
+    return best ? { pile: best, sec: bs } : null;
   }
+
   // Should the team break off to SCAVENGE for parts? Two cases (both need scrap to actually be
   // findable — a known pile, or unexplored map left to scout):
   //   (A) defenses are cracking but we've no firebrat to run the flag and can't buy one, OR
@@ -9126,11 +9146,13 @@ class AICommander {
     // off on a spit next to the base). Without this the brain just steers straight at it — nosing
     // into the wall forever (the nav line points through the wall). Blocklist the pile for a bit
     // and drop the detour so the unit goes back to its real job instead of grinding on the wall.
-    if (this._scrapDetour && this._scrapTargetPile && !this._nav.path && this._nav.failT > 0
+    if (this._scrapTargetPile && !this._nav.path && this._nav.failT > 0
         && this._nav.dx === this._scrapTargetPile.pos.x && this._nav.dz === this._scrapTargetPile.pos.z) {   // the failed plan was to THIS pile (not a stale failT from another goal)
       this._scrapNoReach.set(this._scrapTargetPile, performance.now() + 8000);
-      if (this._lootPile === this._scrapTargetPile) this._lootPile = null;
-      this._scrapDetour = false; this._scrapTargetPile = null;
+      // END THE MISSION, don't just drop a flag: Grab commits to one pile, so an unroutable pile
+      // means this pickup is over. done() reads mission.pile, so clearing it is the ending.
+      if (this.strategy.step === 'grab' && this.strategy.mission) this.strategy.mission.pile = null;
+      this._scrapTargetPile = null;
     }
     this._logTick(v, view, cmd);
     const out = burnFuel(v, { fwd: cmd.fwd, turn: cmd.turn, strafe: cmd.strafe || 0 }, dt);
@@ -9956,45 +9978,25 @@ class AICommander {
     }
     if (this._shieldRun && !this._shieldRunOn) shieldBark(this, v, 'grab');   // announce the commit once
     this._shieldRunOn = this._shieldRun;
-    // SALVAGE PICKUP — two ways a unit diverts to grab scrap. Shield/intercept always win.
-    this._scrapDetour = false;
-    this._scrapTargetPile = null;   // reset; set below to whichever pile we commit to (drives the unreachable-bail check)
-    // 1) FRESH KILL loot (top scrap priority): grab the wreck we just made. It's right here and
-    //    the local fight's over — but BAIL the moment another live enemy is close (back to the
-    //    fight) or if it somehow drifted out of reach. wantsLoot() already applied the mood/RNG/
-    //    mission gate when the pile was assigned; here we just honour a live loot order.
-    if (this._lootPile && !this._shielding && !this._intercepting
-        && !(this.flag() && this.flag().carrier === v)) {
-      const lp = this._lootPile;
-      const enemyNear = lp._gone ? false : combatants.some(o => !o.dead && o.team !== this.team
-        && !vehicleHidden(o) && (o.holder.position.x - px) ** 2 + (o.holder.position.z - pz) ** 2 < 46 * 46);
-      const d = Math.hypot(lp.pos.x - px, lp.pos.z - pz);
-      if (lp._gone || lp.overWater || enemyNear || d > LOOT_RANGE || performance.now() > this._lootUntil) this._lootPile = null;   // collected / unreachable / re-engaged / too far / timed out → drop it
-      else { goal = { x: lp.pos.x, z: lp.pos.z }; this._scrapDetour = true; this._scrapTargetPile = lp; }
-    }
-    // 2) OPPORTUNISTIC SALVAGE: swing over to a spotted scrap pile that's nearly on our path (free
-    //    parts for the build bank). Short-range so it never drags a unit far off its real objective;
-    //    skipped for the slow Jotun, capturers (a runner never stops), scavengers (their mission IS
-    //    scrap), flag carriers, and while already detouring. A SIEGER used to be fully excluded —
-    //    a Lurcher walked right past its dead teammate's pile mid-siege — but a pile a stone's
-    //    throw from the path is free: it bends (tight SCRAP_SIEGE_RANGE), it doesn't detour.
-    if (!this._scrapDetour && !this._shielding && !this._intercepting && v.type !== 'jotun'
-        && this.strategy.step !== 'capture' && this.strategy.step !== 'scavenge'
-        && !(this.flag() && this.flag().carrier === v)) {
-      const reach = this.strategy.step === 'siege' ? SCRAP_SIEGE_RANGE : SCRAP_GRAB_RANGE;
-      const sp = this.nearestKnownScrap(px, pz);
-      if (sp && Math.hypot(sp.pos.x - px, sp.pos.z - pz) < reach) { goal = { x: sp.pos.x, z: sp.pos.z }; this._scrapDetour = true; this._scrapTargetPile = sp; }
-    }
-    if (this._scrapDetour && !this._scrapDetourOn) {   // announce the commit ONCE (false→true), like the shield grab
-      aiLog(this.team, `${this.cname} ${v.type}: “Salvage on our line — grabbing it.”`);
-    }
-    this._scrapDetourOn = this._scrapDetour;
+    // SALVAGE PICKUP IS A MISSION NOW — see Grab in AIStrategies.js. Two blocks used to sit here,
+    // one for the fresh-kill wreck and one for any pile "nearly on our path", and both of them
+    // reached in and REWROTE `goal` — the destination the running mission had chosen. Nothing
+    // scored it, nothing logged it, and nothing ended it: the mission carried on believing it was
+    // driving somewhere else. Both re-picked the nearest pile EVERY TICK, so the destination slid
+    // as the unit drove, which is what produced seed 732 (goal moved 9.9u in a tick between two
+    // piles; the driver then judged its route to the first against the second, called a reachable
+    // goal impossible, and parked the unit for the remaining 1008 seconds).
+    // The mission scores the bend by what it actually costs, commits to ONE pile, and ends when
+    // that pile is collected — and because it is on the board, anything more urgent can outbid it.
+    // `_scrapTargetPile` survives as the unreachable-bail hook below; the running mission owns it.
+    this._scrapTargetPile = (this.strategy.step === 'grab' && this.strategy.mission)
+      ? (this.strategy.mission.pile || null) : null;
     // SNEAK ROUND THE SIDE (flag runner): a Firebrat headed for the enemy base swings WIDE to the
     // side-beach flank point first, then comes at the flag from the flank/back — instead of driving
     // up the middle road into the FOB's guns. Releases to the real objective once it's rounded the
     // flank (reached the point) or is already close (commit the grab). Never overrides the detours above.
     this._flanking = false;
-    if (v.type === 'firebrat' && !this._intercepting && !this._shielding && !this._scrapDetour
+    if (v.type === 'firebrat' && !this._intercepting && !this._shielding && this.strategy.step !== 'grab'
         && !(this.flag() && this.flag().carrier === v)) {
       const enemyB = this.enemyBasePos();
       const goalToEnemy = Math.hypot(goal.x - enemyB.x, goal.z - enemyB.z);   // is its real goal the enemy base?
@@ -10601,7 +10603,7 @@ class AICommander {
       // thing to shell — so suppress shootGoal or the unit would "assault" (and gun down) the
       // shield generator / intercept spot it's heading for. It still engages real enemies via
       // the combat transitions; this only stops it firing at the detour waypoint.
-      shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting && !this._scrapDetour,
+      shootGoal: this.strategy.shoot(this) && !this._shielding && !this._intercepting,
       // THE MISSION'S OWN MOVEMENT. Read every tick because the mission may change gear (Siege
       // swaps between shelling a gun and shelling the objective); the mission decides that once,
       // in one place, rather than two table rows trading whenever their inputs flicker.
@@ -10615,7 +10617,7 @@ class AICommander {
       // Salvage detour: drive ONTO the pile (within SCRAP_PICKUP_R) instead of stopping at the
       // mission's arriveDist — Scout(12)/Attack(10) exceed the 8u pickup, so the unit used to halt
       // just short and idle for seconds before drifting into range. Tight like the shield/intercept grabs.
-      arriveDist: this._intercepting ? 4 : this._shielding ? 6 : (this._scrapDetour && aiScrapTightArrive) ? 4 : this.strategy.arriveDist(this),
+      arriveDist: this._intercepting ? 4 : this._shielding ? 6 : this.strategy.arriveDist(this),   // Grab states its own 4u — a mission's arrive distance is the mission's to declare
       // Is this unit on a flee-contact RUNNER mission (grab the flag / scout — avoid fights)
       // vs one the commander sent it out to FIGHT on (attack/siege/defend/intercept)? Gates
       // the Firebrat's runnerFlee reflex so an ordered-to-engage Firebrat actually closes +
@@ -13084,6 +13086,8 @@ window.RR = {
   setAiWaterWall: on => setAiWaterWall(on),   // put the old solid-sea wall back
   drownings: () => drownings,   // sinkers lost to deep water since the wall came down
   setRunnerNoDuel: on => setRunnerNoDuel(on),   // A/B: a Firebrat on capture runs or flees, never duels
+  setGrabW: (w, sec) => setGrabW(w, sec),   // A/B: what a free salvage pickup is worth, and the extra travel that kills it
+  setReachCapTTL: (s) => { REACHCAP_TTL = +s; return REACHCAP_TTL; },   // A/B: how long a unit honours 'I can't reach that, stand here'
   // Does this commander's board lurch when a hull is retired or rolled out? See scoreGap().
   scoreGap: (i = 0) => { const c = commanders[i]; return c ? scoreGap(c) : null; },
   setDefendW: w => setDefendW(w),   // defend's shape: {on, near, lurcher, firebrat}
@@ -13280,7 +13284,7 @@ window.RR = {
   // was simply pivoting, so the split by hull is the number that matters.
   joltStats: () => ({ ...joltsBy }),
   setPivotSlack: n => setPivotSlack(n),   // A/B: 0 restores the flat stillLimit that jolted pivoting Jotuns
-  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, violationsBy: { ...Driver.violationsBy }, violationsForced: Driver.violationsForced || 0, violationsForcedBy: { ...(Driver.violationsForcedBy || {}) }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
+  navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, staleRoutes: Driver.staleRoutes || 0, violationsBy: { ...Driver.violationsBy }, violationsForced: Driver.violationsForced || 0, violationsForcedBy: { ...(Driver.violationsForcedBy || {}) }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
   decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal,
     // How every flag run ENDED. scored + runnerDied + heldAtEnd should account for flagCarries;
@@ -13546,9 +13550,7 @@ window.RR = {
   setTeamScrap: (team, n) => { if (team in teamScrap) teamScrap[team] = n | 0; return teamScrap[team]; },
   buildVehicle: (type) => buildVehicle(type),     // spend scrap → replace a lost vehicle (garage)
   setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
-  setScrapTightArrive: (v) => { aiScrapTightArrive = !!v; return aiScrapTightArrive; },   // A/B: salvage detour closes to pickup range vs mission arriveDist
   setPostKillMoveOn: (v) => { aiPostKillMoveOn = !!v; return aiPostKillMoveOn; },   // A/B: drop engage-afterglow ghost on a kill (no post-kill linger)
-  setKillLoot: (v) => { aiKillLoot = !!v; return aiKillLoot; },   // A/B: killers grab the wreck they just made on/off
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
   get hqSwaps() { return _hqSwapCount; },   // debug: how many finisher swaps have fired
