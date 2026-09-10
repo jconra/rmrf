@@ -563,6 +563,32 @@ const GRAB_BUDGET = 20;   // s — a pickup that has not happened by now is not 
 // worthless. Both are settable so the gate can sweep them (RR.setGrabW). The weight sits
 // deliberately below capture (~10), siege (~9-11) and a dry rearm (~16): free parts are worth
 // bending for, never worth abandoning the match for.
+// TOWER-FIRE FLEE. How recently a shell must have landed for this to apply, where the ramp starts
+// (a third of hull), how hard it bites, and its curve. Settable so the gate can sweep them.
+// SWEPT, 12 arms over two disjoint seed sets, judged on the outcome the term exists for — units
+// killed by a fort while doing something else. W=0 (the term off) was worst in BOTH sets, 2.46 and
+// 1.79 per match against ~1.2 for every setting that had it, so the term earns its place outright.
+// Between W 20/30/40 and P 0.5/0.7/1 the differences are noise and the ranking flips between sets;
+// W=30 was best in both, and P is genuinely undetermined — 1 and 0.7 tie on the mean (1.25 / 1.27).
+// Linear it is, because a straight ramp is the one that can be explained: zero above a third of
+// hull, ~8 at a quarter, ~21 at a tenth.
+let TOWER_FLEE_MS = 4000, TOWER_FLEE_FROM = 1 / 3, TOWER_FLEE_W = 30, TOWER_FLEE_P = 1;
+export function setTowerFlee(w, p, from, ms) {
+  if (w != null) TOWER_FLEE_W = +w;
+  if (p != null) TOWER_FLEE_P = +p;
+  if (from != null) TOWER_FLEE_FROM = +from;
+  if (ms != null) TOWER_FLEE_MS = +ms;
+  return { w: TOWER_FLEE_W, p: TOWER_FLEE_P, from: TOWER_FLEE_FROM, ms: TOWER_FLEE_MS };
+}
+// Missions whose whole point is putting rounds into something. A hull with an empty magazine is
+// not weak at these, it is incapable of them.
+const NEEDS_AMMO = new Set(['siege', 'attack', 'defend', 'intercept', 'harass', 'fight']);
+let AMMO_VETO = true, AMMO_VETO_W = 20;
+export function setAmmoVeto(on, w) {
+  if (on != null) AMMO_VETO = !!on;
+  if (w != null) AMMO_VETO_W = +w;
+  return { on: AMMO_VETO, w: AMMO_VETO_W };
+}
 let GRAB_W = 13;   // provisional: 13 and 17 measured indistinguishable on scrap banked across 3 disjoint 60-seed sets, and 5 was low enough that the mission never fired at all. A finer sweep is in flight.
 let GRAB_DETOUR_S = 2.5;   // seconds of EXTRA travel at which the bend stops being opportunistic
 export function setGrabW(w, sec) {
@@ -1777,7 +1803,31 @@ export function missionScore(cmd, key, running = null) {
     // can actually be compared. Mirror-imaged deliberately: fight is 10 + odds, flee is 10 - odds,
     // so they cross where the odds cross and the breakdown reads as one judgement rather than two.
     case 'flee': {
-      if (!cmd.shouldFlee || !cmd.shouldFlee()) break;   // 0 — the brain's bail test says we are staying
+      // A TOWER GRINDING US DOWN IS A REASON TO LEAVE THAT shouldFlee CANNOT SEE, and it has to be
+      // scored ABOVE that gate rather than inside it. shouldFlee reads the brain's bail flag, and
+      // both of that flag's branches are about a rival VEHICLE: one needs `view.underFire`, which
+      // is stamped only by the vehicle damage path, and the other needs `_fof`, which exists only
+      // for a visible rival. A hull being shelled by a fort has neither, so flee scored a flat 0
+      // however close to death it got — measured at 24% hull, 226u from home, under sustained tower
+      // fire: siege-back 11.6, siege 9.6, repair 6.8, flee 0.
+      //
+      // NOT A SECOND LOW-HEALTH TERM (Jacob: "I don't want to double measure low health"). `repair`
+      // already prices a hurt hull wanting a base, and prices it by DISTANCE — right for a scratch,
+      // because healing is cheap at the pad and expensive from the far side of the island. This
+      // says something else: not "I am hurt" but "something I cannot answer is still hitting me and
+      // I am running out of hull to absorb it". Hence the gate on RECENT tower damage — with no
+      // shells landing the term is zero at any health — and the ramp over the last third, quiet at
+      // 33% and dominant near death, so a full-strength unit trading with a fort is untouched.
+      {
+        const fv = cmd.unit;
+        const twrT = fv && !fv.dead && fv._hitByTurret ? fv._hitByTurret.t : 0;
+        if (twrT && performance.now() - twrT < TOWER_FLEE_MS) {
+          const hpF = fv.maxHp ? fv.hp / fv.maxHp : 1;
+          const t = Math.max(0, Math.min(1, (TOWER_FLEE_FROM - hpF) / TOWER_FLEE_FROM));
+          if (t > 0) add('a tower is grinding us down', TOWER_FLEE_W * Math.pow(t, TOWER_FLEE_P));
+        }
+      }
+      if (!cmd.shouldFlee || !cmd.shouldFlee()) break;   // the brain's bail test says we are staying
       add('breaking off', 10);
       const ff = cmd.fightOdds ? cmd.fightOdds() : null;
       if (ff != null) add('odds', -Math.round(ff * 10) / 10);
@@ -2043,6 +2093,27 @@ export function missionScore(cmd, key, running = null) {
   // unit counts too: a Firebrat already on the field can finish the job with an empty roster.
   if (base === 'capture' && (roster.firebrat || 0) === 0 && !cmd.canAfford('firebrat')
       && !(cmd.unit && !cmd.unit.dead && cmd.unit.type === 'firebrat')) add('nothing can carry the flag', -14);
+  // NOTHING TO SHOOT WITH IS A VETO, NOT AN ARGUMENT (Jacob, 2026-09-10: "There should also be a
+  // large negative weight when ammo runs out for missions that require ammo, basically a veto").
+  //
+  // `rearm` already pays +10 for being dry, and that was supposed to be enough. It is not: siege
+  // rises with the very thing that empties the magazine — `a tower has us in range` is a POSITIVE
+  // term — so a Valkyrie down to its last rounds scored siege-back 11.6 against rearm's 14.9 on one
+  // tick and siege 13.6 the next, and the margin is a coin toss. Measured over 12 seeds: 20 cases
+  // of a Valkyrie holding a siege under tower fire it could not answer.
+  //
+  // Paying the dry unit to leave and ALSO pricing the job it cannot do are two different statements
+  // and the board should make both. A hull with no rounds cannot siege, cannot attack, cannot
+  // defend and cannot duel — that is not a weak plan, it is not a plan. Missions that do not need
+  // a gun (capture carries the flag, scout looks, sap lays mines, the supply errands, grab, flee)
+  // are untouched, which is exactly what leaves something for the board to pick instead.
+  //
+  // Placed here, AFTER the switch, deliberately: the fleet-favour, persona and incumbent terms are
+  // all added below, and a veto that can be out-summed by a persona bonus is not a veto.
+  if (AMMO_VETO && NEEDS_AMMO.has(base)) {
+    const av = cmd.unit;
+    if (av && !av.dead && (av.ammo || 0) <= 0) add('nothing to shoot with', -AMMO_VETO_W);
+  }
   // CAN THE FLEET ACTUALLY CREW THIS PLAN — and what would roll out if it did. One value: 0 for
   // the ideal chassis (so a correctly-crewed mission scores exactly what it always did), a small
   // negative for a stand-in plus the trip home, -50 for a job nothing we own or can buy can do.
@@ -2400,10 +2471,21 @@ class Doctrine {
     // never fired once. The damage path has recorded the real thing all along: _hitByVeh{x,z,t}
     // and _hitByTurret, which the sight code at main.js:9199 already reads with a 2.5s window.
     const HIT_MS = 2500;
-    const hitT = Math.max((v && v._hitByVeh && v._hitByVeh.t) || 0,
-                          (v && v._hitByTurret && v._hitByTurret.t) || 0);
-    const underFire = !!(hitT && performance.now() - hitT < HIT_MS);
-    const fire  = edge('fire',  underFire, 'taking fire');
+    const now = performance.now();
+    // TWO SHOOTERS, TWO EDGES (Jacob, 2026-09-10: "I would make it so that there is a trigger for
+    // taking damage from a tower"). These used to be one edge over the max of both timestamps, and
+    // an edge carries a level memory: while a unit was already latched as under VEHICLE fire, a
+    // tower opening up on it produced no rise, so no trigger and no re-score. The two are separate
+    // facts with separate answers — a rival is something to fight or run from, a tower is something
+    // to silence or leave — so they get separate memories and can each wake the board on their own.
+    const underFireVeh = !!(v && v._hitByVeh && now - v._hitByVeh.t < HIT_MS);
+    const underFireTwr = !!(v && v._hitByTurret && now - v._hitByTurret.t < HIT_MS);
+    const underFire = underFireVeh || underFireTwr;
+    // BOTH evaluated, THEN one allowed to win — `||` would short-circuit the second edge() and
+    // freeze its level memory, which is the exact failure this function's header warns about.
+    const fireV = edge('fire',  underFireVeh, 'taking fire');
+    const fireT = edge('fireT', underFireTwr, 'taking tower fire');
+    const fire  = fireV || fireT;
     const flag  = edge('flag',  !!(cmd.ourFlagStolen && cmd.ourFlagStolen()), 'our flag taken');
     // a LEG ended — arrived at the current waypoint, or the driver proved it can't be reached.
     // The unreachable case matters as much as the arrival: without it a unit grinds at an

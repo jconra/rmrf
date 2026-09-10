@@ -32,6 +32,7 @@ import { Projectiles } from './Projectiles.js';
 import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=121';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver, UNREACH_SLACK } from './Driver.js?v=1';
+import { installFlagMenu } from './FlagMenu.js?v=1';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
 // from FOF_DEFAULT; RR.setFof(team, {...}) overrides individual weights live, so red and blue
@@ -39,7 +40,7 @@ import { Driver, UNREACH_SLACK } from './Driver.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setTowerFlee, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -3099,7 +3100,12 @@ const STATUS_COLORS = {
 // The mission steps that mean "I am at/heading to a depot". Kept as a set because the mission
 // layer names four separate errands that all read the same from outside the vehicle.
 const SUPPLY_STEPS = new Set(['refuel', 'rearm', 'repair', 'shield', 'resupply']);
-const aiStatusLights = !QS.has('nolights');
+// THE HULL LAMPS AND THEIR LEGEND, separately switchable and switchable LIVE (RR.setStatusLights /
+// RR.setStatusLegend, and the FLAGS menu drives both). Separate because they answer different
+// questions: the lamps are the field readout, the legend is the thing you need only until you have
+// learned the colours, and it sits over the bottom-left corner of the map while you watch.
+let aiStatusLights = !QS.has('nolights');
+let statusLegend = !QS.has('nolegend');
 let _haloTex = null;
 function haloTexture() {
   if (_haloTex) return _haloTex;
@@ -3188,8 +3194,14 @@ function ensureLightKey() {
   document.body.appendChild(_lightKey);
 }
 function updateStatusLights() {
-  if (!aiStatusLights) return;
-  if (onField && TEAM_CTRL[PLAYER_TEAM] !== 'human') { ensureLightKey(); _lightKey.style.display = ''; }
+  // OFF MEANS GONE, not "stop updating". Returning early left whatever was on screen frozen there,
+  // which is worse than either state — so switching the lamps off hides the ones already built.
+  if (!aiStatusLights) {
+    for (const v of combatants) if (v._statusLight) v._statusLight.grp.visible = false;
+    if (_lightKey) _lightKey.style.display = 'none';
+    return;
+  }
+  if (statusLegend && onField && TEAM_CTRL[PLAYER_TEAM] !== 'human') { ensureLightKey(); _lightKey.style.display = ''; }
   else if (_lightKey) _lightKey.style.display = 'none';
   const now = performance.now();
   for (const v of combatants) {
@@ -5962,6 +5974,8 @@ const ringR = (r) => Math.max(0, r - SERVICE_R_TRIM);              // service zo
 const msnRing = (r) => Math.max(MISSION_R_FLOOR, r || 0);          // mission targets: at least the floor
 function setAiWaterWall(on) { AI_WATER_WALL = !!on; return AI_WATER_WALL; }
 setDefendW({ on: !QS.has('nodefendshape') });
+// The debug flags, as a menu (js/FlagMenu.js). Injects its own button; touches nothing else.
+installFlagMenu();
 setAiWaterWall(QS.has('aiwaterwall'));   // the old solid-sea wall for AI units — off by default now
 // SCORED HOME DEFENCE — default OFF, gated deliberately (task #49). Shipping an untested default is
 // exactly what cost 15 resolutions with flat&reqveh this morning; this one earns its default or
@@ -12822,24 +12836,39 @@ function updateConeViz() {
     }
     ring.geometry.attributes.position.needsUpdate = true;
     ring.geometry.computeBoundingSphere();
-    // FLASH ON A SENSE (Jacob, 2026-09-05: "I keep seeing them walk by each other"). The lobe drew
-    // the SHAPE of what a unit could detect but never said whether it was detecting anything, so
-    // "did it see that?" still had to be inferred from behaviour — which is the exact question
-    // being investigated. Now the ring answers it directly.
-    //   thin + dim  = nothing sensed
-    //   bright pulse = a rival is being sensed RIGHT NOW (the same _seesEnemy test that gates
-    //                  firing, so the ring and the guns cannot disagree)
-    //   white       = sensed AND inside our own weapon reach, i.e. the board is being offered a
-    //                 fight-or-flight decision. If a ring goes white and the mission does not
-    //                 change, that is the bug, visible without a console.
-    const sees = !!v._seesEnemy;
-    let inReach = false;
-    if (sees && v.ai && v.ai._fofD != null) inReach = v.ai._fofD <= (SHOT_REACH[v.type] || 42);
-    const pulse = sees ? 0.55 + 0.45 * Math.sin(performance.now() * 0.012) : 0;
-    ring.material.opacity = sees ? 0.6 + 0.4 * pulse : 0.28;
+    // AN ENEMY IN THE LOBE IS AN ALARM, AND IT SHOULD LOOK LIKE ONE (Jacob, 2026-09-10: "I was
+    // using cones last night and I didn't notice anything ... make it go between black and the
+    // team color and make it flash at 5hz or something obvious").
+    //
+    // The first version of this shaded a slow sine between 0.28 and 1.0 opacity and swapped to
+    // white inside our own weapon reach. Both were too quiet to read on a busy map — a moving
+    // sine spends most of its time in the middle, so a glance usually caught it saying nothing —
+    // and "inside our reach" was the wrong line anyway (see below). What replaces it is a hard
+    // 5Hz square flash between BLACK and alarm PINK: no in-between values, nothing to miss.
+    //
+    // THE LINE IS THE LOBE, NOT THE GUN. "Any time an enemy gets inside the lobe then the light
+    // should turn either red or pink" — because the lobe is exactly where the fight-or-flight
+    // decision becomes available, and the whole point of deciding early is to ambush or to get out
+    // before the range closes. A ring flashing pink while the mission carries on unchanged is the
+    // bug this overlay exists to show, and it now shows it from first sight rather than from first
+    // shot.
+    //
+    // THE ONE EXCEPTION IS A RUNNER WITH THE FLAG. It has already made the decision — run — and
+    // seeing a rival is not supposed to change it, so it keeps its steady team colour and is not
+    // reported as an unanswered contact.
+    const _cf = flags.find(f => f.carrier === v);
+    const sees = !!v._seesEnemy && !_cf;
     const hex = (TEAM_COLORS[v.colorIndex] && TEAM_COLORS[v.colorIndex].hex) || '#8fd0ff';
-    if (inReach) ring.material.color.setHex(0xffffff);
-    else ring.material.color.set(hex);
+    if (sees) {
+      // 5Hz = a 200ms cycle: 100ms black, 100ms pink. Square, not a sine — the eye catches an
+      // on/off far better than a brightness ramp, which is the whole complaint being answered.
+      const on = Math.floor(performance.now() / 100) % 2 === 0;
+      ring.material.color.setHex(on ? 0xff2d6f : 0x000000);
+      ring.material.opacity = 0.95;
+    } else {
+      ring.material.color.set(hex);
+      ring.material.opacity = 0.22;
+    }
   }
   for (const [v, l] of _coneRings) if (!seen.has(v)) { scene.remove(l); l.geometry.dispose(); l.material.dispose(); _coneRings.delete(v); }
 }
@@ -13087,6 +13116,8 @@ window.RR = {
   drownings: () => drownings,   // sinkers lost to deep water since the wall came down
   setRunnerNoDuel: on => setRunnerNoDuel(on),   // A/B: a Firebrat on capture runs or flees, never duels
   setGrabW: (w, sec) => setGrabW(w, sec),   // A/B: what a free salvage pickup is worth, and the extra travel that kills it
+  setAmmoVeto: (on, w) => setAmmoVeto(on, w),   // A/B: the empty-magazine veto on missions that need a gun
+  setTowerFlee: (w, pw, from, ms) => setTowerFlee(w, pw, from, ms),   // A/B: break off when a tower is grinding us down
   setReachCapTTL: (s) => { REACHCAP_TTL = +s; return REACHCAP_TTL; },   // A/B: how long a unit honours 'I can't reach that, stand here'
   // Does this commander's board lurch when a hull is retired or rolled out? See scoreGap().
   scoreGap: (i = 0) => { const c = commanders[i]; return c ? scoreGap(c) : null; },
@@ -13323,6 +13354,8 @@ window.RR = {
   setPerf: (on = true) => { PERF = !!on; return PERF; },   // switch the section timers on at runtime
   setHullEyes: v => { HULL_EYES = Math.max(0, Math.min(1, +v || 0)); return HULL_EYES; },   // A/B: how well the driver sees along the hull heading (0 = turret-only, the old cone)
   setConeViz: on => { coneViz = !!on; return coneViz; },   // debug: draw each unit's real detection lobe on the ground
+  setStatusLights: on => { aiStatusLights = !!on; return aiStatusLights; },   // the mission lamps on each hull
+  setStatusLegend: on => { statusLegend = !!on; return statusLegend; },       // …and the colour key in the corner
   setNoiseViz: on => { noiseViz = !!on; return noiseViz; },   // debug: draw how far each engine carries (outer = heard by a stopped listener, inner = by a moving one)
   noiseStats: () => combatants.filter(v => !v.dead).map(v => ({
     type: v.type, throttle: +(v._throttle || 0).toFixed(2),
