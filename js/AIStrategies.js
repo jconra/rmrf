@@ -991,10 +991,33 @@ class Swap extends Mission {
 // That was the bug in the first version: Siege branched on `cmd.unit.threat`, a VIEW field the
 // Vehicle does not carry, so it read undefined forever and `suppress` went 217 -> 0.
 Mission.prototype.movement = function () { return [{ mode: 'advance', target: 'goal' }]; };
+// A mission may ask to hold fire. Only Fight uses it (the ambush); everything else shoots when the
+// brain says shoot, which is why this defaults to false rather than being a flag every mission has
+// to remember to clear.
+Mission.prototype.holdFire = function () { return false; };
 
 class Fight extends Mission {
   // A duel is combat footwork against the hull the guns are on. Was the `engaging` rung.
-  movement() { return [{ mode: 'engage', target: 'enemyOrLastSeen' }]; }
+  // TWO GEARS, because a duel at 20u and a contact at 66u are not the same job (Jacob: "If it is
+  // out of range then must get in-range"). Duel footwork is the ONLY thing this mission used to
+  // do, and pointed at something 60u away it simply drives at it in a straight line — no route,
+  // no terrain, no approach. That is what made choosing Fight early expensive.
+  //   out of reach  -> `advance` on the objective: a real A* route, which is also what lets the
+  //                    ambush point below actually be driven to
+  //   in reach      -> `engage`: the close-quarters footwork this mission has always run
+  movement(cmd) {
+    return this._closing(cmd)
+      ? [{ mode: 'advance', target: 'goal' }, { mode: 'engage', target: 'enemyOrLastSeen' }]
+      : [{ mode: 'engage', target: 'enemyOrLastSeen' }, { mode: 'advance', target: 'goal' }];
+  }
+  // Are we still closing? Measured from the last SIGHTING, like everything else this mission
+  // steers by — never the live position, which would track a rival through a hill.
+  _closing(cmd) {
+    const v = cmd && cmd.unit; if (!v || v.dead || !this.foe) return false;
+    const p = v.holder.position;
+    const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42);
+    return Math.hypot(this.foe.x - p.x, this.foe.z - p.z) > reach * FIGHT_CLOSE;
+  }
   get key() { return 'fight'; }
   get garageOK() { return false; }            // decided in the field, mid-contact — never buy a hull for it
   wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }   // fight with what we brought
@@ -1012,6 +1035,43 @@ class Fight extends Mission {
     const s = cmd.lastEnemySeen && cmd.lastEnemySeen();
     this.foe = s ? { x: s.x, z: s.z } : null;
   }
+  // AMBUSH — "If the enemy is detected and it is facing away, then try to get closer to it before
+  // opening fire" (Jacob, 2026-09-10). Opening up the moment a rival is sighted spends the one
+  // advantage a sighting gives you: a hull that has not seen you is a hull that is not shooting
+  // back, not manoeuvring, and not calling it in. So while they are looking somewhere else we
+  // close the distance with the guns cold, and start shooting once we are near enough that the
+  // first exchange is ours.
+  //
+  // Evaluated here rather than in objective() because holding fire is a per-tick fact about the
+  // situation, not a destination — objective() already drives at them, and driving at a hull that
+  // is facing away closes on its back by construction.
+  tick(cmd, dt) {
+    super.tick(cmd, dt);
+    this._ambush = false;
+    const v = cmd && cmd.unit;
+    if (!AMBUSH || !v || v.dead || !this.foe || !this.foeV || this.foeV.dead) return;
+    const p = v.holder.position;
+    const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42);
+    const d = Math.hypot(this.foe.x - p.x, this.foe.z - p.z);
+    if (d <= reach * AMBUSH_FIRE) return;            // close enough — this is the moment to open up
+    // Are they facing AWAY from us? Their heading is something we can see; where they are is still
+    // the last sighting, never the live position.
+    const fh = this.foeV.heading || 0;
+    const toUs = Math.atan2(-(p.x - this.foe.x), -(p.z - this.foe.z));
+    let rel = toUs - fh;
+    while (rel > Math.PI) rel -= 2 * Math.PI;
+    while (rel < -Math.PI) rel += 2 * Math.PI;
+    if (Math.abs(rel) < AMBUSH_ARC) return;          // they are looking our way — no ambush to set
+    this._ambush = true;
+    if (!this._ambushSaid && this.doc && this.doc.log) {
+      this._ambushSaid = true;
+      this.doc.log(`${v.type}: their back is to us — closing with guns cold before we open up. `
+        + `[ambush · ${Math.round(d)}u out, firing inside ${Math.round(reach * AMBUSH_FIRE)}u]`);
+    }
+  }
+  // The one thing a mission is allowed to say about the trigger: hold fire. main.js clears cmd.fire
+  // when this is true, which is the whole mechanism — nothing else about aiming or targeting moves.
+  holdFire(cmd) { return !!this._ambush; }
   // THE FOE IS WHOEVER THE GUNS ARE ON (Jacob's ruling). Not a snapshot taken when the duel
   // opened: a second rival that closes to knife range while we chase the one that started it gets
   // to unload on us unopposed, so priority decides the target and the mission follows the target.
@@ -1031,10 +1091,13 @@ class Fight extends Mission {
   }
   objective(cmd) {
     // Where the fight is: refreshed while we have eyes on them so a pursuing unit keeps closing,
-    // frozen at the last known spot once we lose them — which is what makes `done` fire on range
-    // rather than on a flicker.
+    // frozen at the last known spot once we lose them — which is what makes `done` fire on being
+    // lost rather than on a flicker.
     this._acquire(cmd);
-    return this.foe || cmd.enemyBasePos();
+    if (!this.foe) return cmd.enemyBasePos();
+    // While stalking, the objective IS them — driving at a hull that is facing away closes on its
+    // back by construction, which is the approach we want and needs no separate tail point.
+    return this.foe;
   }
   label(cmd) { return 'the rival in front of us'; }
   cry(cmd) { return pickCry(cmd, [
@@ -1069,9 +1132,26 @@ class Fight extends Mission {
     // was v4 — idle-at-goal tripled because the goal WAS the stale point.
     const q = this.foeV.holder && this.foeV.holder.position;
     if (!q) return true;
-    const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42) * FIGHT_BREAK;
+    // OUT OF RANGE **AND NOT CLOSING** (Jacob, 2026-09-10: "done() needs to be a combination of out
+    // of range and the distance is not decreasing. If it is trying to close the gap then the
+    // distance will be decreasing. If the enemy is running and it is equal or faster then the chase
+    // is not worth it.").
+    //
+    // The old test was range alone, and once Fight can be CHOSEN on sight that ends the duel on the
+    // tick it starts — a contact at 66u is by definition outside a Lurcher's 42u gun. Being out of
+    // range is the reason to CLOSE, not the reason to stop. What makes a chase worth abandoning is
+    // that it is not working, and the honest measure of that is the gap itself: a unit that is
+    // gaining is gaining, and one that has not gained in FIGHT_NO_GAIN seconds is chasing something
+    // it cannot catch. That also answers "are they faster than us" without having to ask — if they
+    // are, the gap does not shrink and this fires. Measuring the outcome beats predicting it.
     const p = v.holder.position;
-    if ((q.x - p.x) ** 2 + (q.z - p.z) ** 2 > reach * reach) return true;
+    const d = Math.hypot(q.x - p.x, q.z - p.z);
+    const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42) * FIGHT_BREAK;
+    if (d <= reach) { this._gapD = null; return false; }   // in range: this is a fight, not a chase
+    // Out of range. Track the best gap we have managed and how long since it last improved.
+    // GAP_EPS keeps jitter from counting as progress — both hulls are moving every tick.
+    if (this._gapD == null || d < this._gapD - GAP_EPS) { this._gapD = d; this._gapT = this.t; }
+    if (this.t - (this._gapT || 0) > FIGHT_NO_GAIN) return true;
     // BACKSTOP, for the one case the two rules above leave open: an opponent alive and technically
     // within reach, but sat behind cover where we never see them — the range test says stay, the
     // objective sends us to a stale point, and the unit holds there indefinitely. A tree between
@@ -1081,7 +1161,37 @@ class Fight extends Mission {
     return performance.now() - (this.foeT || 0) > FIGHT_LOST_MS;
   }
 }
-const FIGHT_BREAK = 1.25;   // they are out of the fight at 125% of our reach — see Fight.done
+const FIGHT_BREAK = 1.25;   // (kept: the old reach-based break, still used by nothing else)
+// A CHASE ENDS WHEN IT STOPS WORKING, not at a fixed distance — see Fight.done.
+const FIGHT_NO_GAIN = 6;    // s out of range without the gap shrinking = we cannot catch them
+const GAP_EPS = 1.5;        // u the gap must actually shrink by to count as gaining
+const FIGHT_CLOSE = 0.9;    // inside 90% of our reach we stop closing and start duelling
+// What a rival IN REACH adds on top of the flat contact, and what being SHOT by one adds. Both
+// gradual; both settable so the gate can sweep them (RR.setFightW).
+//
+// SWEPT, eight combinations over two disjoint seed sets, on walk-by cases — a unit with an enemy
+// in its lobe, on a non-combat mission, doing neither:
+//     (0,0) 10.0   (0,6) 10.0   (2,3) 8.5   (4,0) 6.0   (4,6) 6.5   (8,6) 5.0   (6,9) 4.5
+// REACH carries all of it and HIT carries none — (0,6) is indistinguishable from doing nothing.
+// The reason is a detail worth remembering: `hitting us` reads _hitByVeh, which only the VEHICLE
+// damage path writes, and 86% of these cases are units shot by TOWERS or not shot at all yet.
+//
+// It costs, though, and the cost scales with the weight: 240 seeds gave 0 stalemates at (0,0),
+// 2 at (2,3) and 4 at (4,6). Not attrition — deaths per match actually FELL, 13.25 -> 11.83 — and
+// not thrash either; the four were mutual annihilation and an unconvertible survivor. Shipping at
+// the low end because the cost is real and the benefit is still most of the way there.
+let FIGHT_REACH_W = 2, FIGHT_HIT_W = 3;
+const FIGHT_HIT_MS = 2500;   // same window the contact memory and the fire trigger use
+export function setFightW(reachW, hitW) {
+  if (reachW != null) FIGHT_REACH_W = +reachW;
+  if (hitW != null) FIGHT_HIT_W = +hitW;
+  return { reach: FIGHT_REACH_W, hit: FIGHT_HIT_W };
+}
+// AMBUSH — close on a rival that has its back to us before opening fire.
+let AMBUSH = true;   // ?noambush / RR.setAmbush
+const AMBUSH_ARC = Math.PI * 0.55;  // past this far off their nose, we are behind them
+const AMBUSH_FIRE = 0.6;            // hold fire until inside this fraction of our own reach
+export function setAmbush(on) { AMBUSH = !!on; return AMBUSH; }
 const FIGHT_LOST_MS = 8000; // …and they are OUT of it entirely once we have not laid eyes on them
                             // this long. Not "lost sight" (a tree blocks for a second or two) —
                             // this is the difference between an obstruction and an escape, and
@@ -1790,13 +1900,48 @@ export function missionScore(cmd, key, running = null) {
     // the counter-web and whether we could even outrun this rival, and recomputing any of that
     // here would be two rulebooks for one judgement — the defect behind every flap in this layer.
     case 'fight': {
-      const f = cmd.fightOdds ? cmd.fightOdds() : null;
-      if (f == null) break;                    // nothing engaged — scores 0 and cannot be picked
-      // The contact itself is the mandate (a rival inside our reach is not a thing to ignore);
+      // FROM FIRST SIGHT, not from weapon reach (Jacob, 2026-09-10: "My intended design is that it
+      // will decide Fight when it sees the opponent. But then we can dictate exactly what to do
+      // inside the Fight Mission Code"). This was gated on reach because scoring it off a sighting
+      // once measured badly — units broke off real work and closed 24u on contacts they could not
+      // shoot. But that was Fight BEHAVING badly at range, not Fight being CHOSEN at range: the
+      // mission's only movement gear was duel footwork, which just drives at the target, and its
+      // done() ended the moment the foe was past our gun — so picking it at 66u ended it the same
+      // tick. Both are fixed below, which is what makes the early decision safe to take.
+      const f = cmd.fightOdds ? cmd.fightOdds(true) : null;
+      if (f == null) break;                    // nothing sensed — scores 0 and cannot be picked
+      // The contact itself is the mandate (a rival we can see is not a thing to ignore);
       // the odds then decide whether we take it or let the board send us elsewhere. Range is
       // roughly ±5, so a duel lands 5-15: it beats routine work and loses to a real emergency.
       add('a rival on us', 10);
       add('odds', Math.round(f * 10) / 10);
+      // THOSE TWO TERMS CANNOT TELL A SPECK ON THE HORIZON FROM A SHELL THROUGH THE HULL.
+      // `a rival on us` is flat: the same 10 whether the contact is 60u away or touching us. `odds`
+      // says whether we would WIN a fight, never whether we are LOSING one right now. So a unit in
+      // transit weighed a constant 10-ish against a siege carrying seven stacked terms plus the
+      // travel bonus it had banked on the way — and kept driving. Jacob, watching two Jotuns well
+      // inside each other's lobes: "The snow Juton just traveled straight north and died while the
+      // green Juton just fired into it... A vehicle should not just be trying to go on it's merry
+      // way while it's getting shredded by it's opponent."
+      //
+      // Two facts were missing, and both are gradual, which is the point: a rival merely SIGHTED
+      // still scores ~10 and will not drag a unit off a siege it should be finishing — the
+      // regression the old reach gate existed to prevent — while one that is in reach and actually
+      // hitting us climbs past anything the board can stack against it.
+      {
+        const fv = cmd.unit;
+        if (fv && !fv.dead) {
+          // HOW CLOSE: full weight under their nose, nothing at the edge of our reach.
+          const reach = (cmd.shotReach ? cmd.shotReach(fv.type) : 42);
+          const fd = fv.ai ? fv.ai._fofD : null;
+          if (fd != null && reach > 0 && fd <= reach) add('they are in reach', FIGHT_REACH_W * (1 - fd / reach));
+          // ARE WE BEING HIT: decays over the same window the contact memory uses, so it fades as
+          // the shooting stops rather than cliff-edging off.
+          const hb = fv._hitByVeh;
+          const age = hb ? performance.now() - hb.t : 1e9;
+          if (age < FIGHT_HIT_MS) add('they are hitting us', FIGHT_HIT_W * (1 - age / FIGHT_HIT_MS));
+        }
+      }
       break;
     }
     // FLEE — the other half of the same decision as Fight, and now on the same board so the two
@@ -1829,7 +1974,9 @@ export function missionScore(cmd, key, running = null) {
       }
       if (!cmd.shouldFlee || !cmd.shouldFlee()) break;   // the brain's bail test says we are staying
       add('breaking off', 10);
-      const ff = cmd.fightOdds ? cmd.fightOdds() : null;
+      // Priced from FIRST SIGHT: getting away is a thing you can only do while there is still
+      // room to do it, so flee has to be able to score a rival it can see but not yet shoot.
+      const ff = cmd.fightOdds ? cmd.fightOdds(true) : null;
       if (ff != null) add('odds', -Math.round(ff * 10) / 10);
       // A CARRIER'S RUN HOME IS THE WIN CONDITION. The preempt gave this for free and deliberately
       // — flee's destination is our own base, so for a carrier it is the same errand by a safer
@@ -2527,7 +2674,9 @@ class Doctrine {
     // `fightOdds` is null out there so the reach test alone would leave it standing there taking
     // rounds. Watched: a Lurcher shot in the back while topping up at a shield generator, not
     // reacting at all.
-    const engaged = (cmd.fightOdds && cmd.fightOdds() != null) || underFire;
+    // AT SIGHT, not at reach — the whole point is deciding before the range closes. See
+    // fightOdds(atSight) in main.js for why `fight`'s own score does NOT move with it.
+    const engaged = (cmd.fightOdds && cmd.fightOdds(true) != null) || underFire;
     // CAPTURE IS A COMMITMENT TOO (2026-09-07). This excluded fight and flee — the two plans already
     // taken — but not capture, and `outranged` widens `engaged` enough to expose that: fightOdds
     // now answers for a rival that can shoot US, so a flag run gets asked "fight or capture?" every
@@ -2832,6 +2981,7 @@ class Doctrine {
   shoot(cmd) { return this.mission.shoot(cmd); }
   // The running mission's own answer to "how do I move" — see Mission.prototype.movement.
   movement(cmd) { return this.mission.movement ? this.mission.movement(cmd) : { mode: 'advance', target: 'goal' }; }
+  holdFire(cmd) { return this.mission.holdFire ? this.mission.holdFire(cmd) : false; }   // the ambush: guns cold while we close
   arriveDist(cmd) { return this.mission.arriveDist(cmd); }
   lurePoint(cmd) { return this.mission.lurePoint ? this.mission.lurePoint(cmd) : null; }     // trap kite anchor (view.lure)
   signalShot(cmd) { return this.mission.signalShot ? this.mission.signalShot(cmd) : null; }  // trap noise-bait aim point

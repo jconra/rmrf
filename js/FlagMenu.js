@@ -30,16 +30,16 @@ const GROUPS = [
   ['Seeing what the AI sees', [
     ['cones', 'Sight lobes — flash pink when an enemy is inside', { live: 'setConeViz' }],
     ['noise', 'Engine noise rings', { live: 'setNoiseViz' }],
+    ['nav', 'Draw the routes units are driving  (or press G)', { live: 'nav' }],
     ['nolights', 'Mission status lamps on each hull OFF', { live: 'setStatusLights', invert: true }],
     ['nolegend', 'The status-lamp colour key OFF', { live: 'setStatusLegend', invert: true }],
-    ['nav', 'Draw the routes units are driving'],
     ['navlines', 'Route lines only (no waypoint dots)'],
     ['navprobe', 'Pathfinder probe readout'],
   ]],
   ['AI logs', [
-    ['ailog', 'Commander radio chatter'],
-    ['msnlog', 'Every mission score, with the term maths'],
-    ['deeplog', 'Deep decision log (verbose)'],
+    ['ailog', 'Commander radio chatter', { live: (RR, on) => RR.setLogMode(on ? 'brief' : 'hidden') }],
+    ['msnlog', 'Every mission score, with the term maths', { live: 'setMsnLog' }],
+    ['deeplog', 'Deep decision log (verbose)', { live: 'setDeepLog' }],
   ]],
   ['World', [
     ['fol', 'Foliage debug'],
@@ -53,12 +53,12 @@ const GROUPS = [
     ['perf', 'Performance HUD'],
     ['flatterrain', 'Flat terrain (shader-cost test — looks wrong on purpose)'],
     ['noprewarm', 'Skip shader pre-warm'],
-    ['noscan', 'Scan-on-transition OFF'],
+    ['noscan', 'Scan-on-transition OFF', { live: 'setScan', invert: true }],
   ]],
   ['AI experiments (A/B flags)', [
-    ['nodefendshape', 'Home-defence shaping OFF'],
-    ['nofleescore', 'Flee as a scored mission OFF'],
-    ['nohomescore', 'Home-defence scoring OFF'],
+    ['nodefendshape', 'Home-defence shaping OFF', { live: (RR, on) => RR.setDefendW({ on }), invert: true }],
+    ['nofleescore', 'Flee as a scored mission OFF', { live: 'setFleeScore', invert: true }],
+    ['nohomescore', 'Home-defence scoring OFF', { live: 'setHomeScore', invert: true }],
     ['noswapyield', 'Swap yields to a rival OFF'],
     ['noswapcommit', 'Swap commitment OFF'],
     ['nocapcarry', 'Carrier capture bonus OFF'],
@@ -66,7 +66,8 @@ const GROUPS = [
     ['scoreclock', 'Re-score on a clock, not on triggers'],
     ['trigfix', 'Refresh trigger memories every tick'],
     ['swapsupply', 'A running swap suppresses top-ups'],
-    ['aiwaterwall', 'Deep water physically blocks vehicles'],
+    ['aiwaterwall', 'Deep water physically blocks vehicles', { live: 'setAiWaterWall' }],
+    ['noambush', 'Ambush (close with guns cold on a rival facing away) OFF', { live: 'setAmbush', invert: true }],
     ['noai', 'No AI at all'],
   ]],
 ];
@@ -170,9 +171,16 @@ export function installFlagMenu() {
       panel.appendChild(row);
       // A live flag takes effect the moment it is ticked. It still goes into the URL, so the link
       // you copy reproduces what you are looking at.
+      // `live` is either the name of an RR setter that takes a boolean, or a function for the few
+      // that want a shaped argument (a log MODE, an options object). Either way it is handed the
+      // FEATURE's state, so a `no…` flag passes the inverse and the call reads the right way round.
       if (live) cb.addEventListener('change', () => {
-        const RR = window.RR;
-        if (RR && typeof RR[live] === 'function') RR[live](opts.invert ? !cb.checked : cb.checked);
+        const RR = window.RR; if (!RR) return;
+        const on = opts.invert ? !cb.checked : cb.checked;
+        try {
+          if (typeof live === 'function') live(RR, on);
+          else if (typeof RR[live] === 'function') RR[live](on);
+        } catch (e) { /* a setter that is not in this build must not break the menu */ }
       });
       boxes.push({ key, cb });
     }

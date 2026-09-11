@@ -40,13 +40,13 @@ import { installFlagMenu } from './FlagMenu.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setTowerFlee, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setTowerFlee, setAmbush, setFightW, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
 import { makeFuelTank, makeAmmoDepot, makeShieldGenerator, makeShieldBubble, RESUPPLY_TINT } from './Resupply.js';
 import { makeShieldMaterial, pushShieldHit, stepShield } from './ShieldShader.js?v=4';
-import { makePartsPallet, makeWreckage } from './Scrap.js?v=3';
+import { makePartsPallet, makeWreckage, makeSalvageHeap } from './Scrap.js?v=4';
 import { SUPPLY_ASSETS, ASSETS_BY_ID } from './assets.manifest.js?v=8';
 
 // --- Renderer ----------------------------------------------------------
@@ -2737,26 +2737,36 @@ function updateTowerStars(w) {
 }
 
 // Scatter salvage around a destroyed upgraded tower — the "treasure box": the more you invested,
-// the more scrap spills when it falls (roughly half the stars come back as loose piles, worth 1
-// each). Whoever's standing there (usually the attacker) collects it.
+// the more spills when it falls, worth 1 each. Whoever's standing there (usually the attacker)
+// collects it.
+//
+// A RANDOM AMOUNT UP TO ITS LEVEL (Jacob, 2026-09-10). It used to be ceil(upg/2) capped at 6 —
+// a fixed payout you could count on, and only ever half the investment. Rolling 1..upg keeps the
+// same shape (a bigger tower is worth more) while making the spill worth watching: a black-star
+// tower can cough up twelve, or one. The old ceiling of 6 goes with it, because the cap existed
+// when each pile was a 19-mesh pallet.
+//
+// …AND IT DROPS HEAPS, NOT PALLETS (Jacob: "it shouldn't drop pallets"). A strapped crate delivery
+// is the wrong object to fall out of a collapsing gun tower — this is shed wreckage, and the cheap
+// model says so in 1 mesh and 48 triangles instead of 4 and 228.
 function dropTowerScrap(w, upg) {
-  const n = Math.min(6, Math.ceil(upg / 2));
+  const n = Math.max(1, 1 + Math.floor(Math.random() * Math.max(1, upg)));
   const p = w.group.position;
   for (let i = 0; i < n; i++) {
     // A GUN TOWER STANDS ON THE WALL RING. Throwing a pallet blindly around one lands it ON the
     // wall, INSIDE the compound, or in the pinch between the ring and the shoreline: visible,
     // counted as salvage, and impossible for any hull to collect. Every other scrap spawn tests
-    // blockedAt; this path tested only isLand, and it is the one that fires most often — six
-    // pallets per tower death, and a contested base loses every tower it has.
-    // Walk outward for ground a hull could actually stand on, and DROP the pallet rather than
-    // leave a prize nobody can reach. One fewer pallet costs a point of scrap; an unreachable
-    // one costs a unit that drives at it and grinds.
+    // blockedAt; this path tested only isLand, and it is the one that fires most often — up to one
+    // pile per upgrade star, and a contested base loses every tower it has.
+    // Walk outward for ground a hull could actually stand on, and DROP the pile rather than
+    // leave a prize nobody can reach. One fewer costs a point of scrap; an unreachable one costs
+    // a unit that drives at it and grinds.
     for (let t = 0; t < 8; t++) {
       const a = (i / n) * Math.PI * 2 + Math.random() * 0.6 + t * 0.9;
       const r = grid.cell * (0.9 + Math.random() * 0.8) + t * grid.cell * 0.5;
       const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
       if (!map.isLand(x, z) || blockedAt(x, z)) continue;
-      addScrapPile(x, z, 'parts');
+      addScrapPile(x, z, 'heap');
       break;
     }
   }
@@ -4084,9 +4094,10 @@ const SCRAP_PICKUP_R = 8;   // how close a vehicle must get to snag a pile (a li
 const SCRAP_FLOAT_MS = 10000;   // debris in water floats COLLECTABLE this long before it slides under (shallow-water kills stay grabbable)
 
 // kind 'parts' = organized delivery pallet (world scatter); 'wreck' = blown-up vehicle
-// debris (death drop) — its armor plates wear the dead vehicle's team camo.
+// debris (death drop) — its armor plates wear the dead vehicle's team camo; 'heap' = the cheap
+// one, for sources that shed a lot of piles (a tower coming down, and whatever else later).
 function addScrapPile(x, z, kind = 'parts', colorIndex = null) {
-  const g = (kind === 'wreck' ? makeWreckage : makePartsPallet)(grid.cell);
+  const g = (kind === 'wreck' ? makeWreckage : kind === 'heap' ? makeSalvageHeap : makePartsPallet)(grid.cell);
   if (colorIndex != null) {
     if (kind === 'wreck' && g.userData.setCamo) g.userData.setCamo(colorIndex);           // camo the plates
     else if (g.userData.setTeamColor && TEAM_COLORS[colorIndex]) g.userData.setTeamColor(TEAM_COLORS[colorIndex].hex);
@@ -5989,6 +6000,7 @@ const ringR = (r) => Math.max(0, r - SERVICE_R_TRIM);              // service zo
 const msnRing = (r) => Math.max(MISSION_R_FLOOR, r || 0);          // mission targets: at least the floor
 function setAiWaterWall(on) { AI_WATER_WALL = !!on; return AI_WATER_WALL; }
 setDefendW({ on: !QS.has('nodefendshape') });
+setAmbush(!QS.has('noambush'));   // the Fight mission's guns-cold approach
 // The debug flags, as a menu (js/FlagMenu.js). Injects its own button; touches nothing else.
 installFlagMenu();
 setAiWaterWall(QS.has('aiwaterwall'));   // the old solid-sea wall for AI units — off by default now
@@ -6057,6 +6069,10 @@ const NAV_PARTIAL_TRIES = 3;     // …then give up and let the contract alarm
 // shelled, could see the shooter, and the board was offered no decision at all — it could never
 // initiate, only respond after being hit. RR.setOutranged(false) to A/B.
 let OUTRANGED_CONTACT = true;
+// Offer the fight-or-flight decision from FIRST SIGHT rather than from weapon reach — see
+// fightOdds(atSight). Widens only the trigger and the flee price; the Fight mission's own score
+// keeps its reach gate.
+let FOF_SIGHT = true;
 // How far the hull is from the route it is meant to be on. Scans a window around the current
 // waypoint rather than the whole polyline: a route that doubles back passes near itself, and a
 // global nearest-point search would report a small gap for a hull that is nowhere near the leg it
@@ -7967,9 +7983,26 @@ class AICommander {
   // rival in sight (hull, ammo, shields, persona, local numbers, crossfire, the counter-web,
   // whether we could outrun it) and every other consumer reads that same value. The Fight mission
   // scores off this so the mission layer and the reflex layer cannot disagree about a duel.
-  fightOdds() {
+  // atSight: answer as soon as the rival is IN THE LOBE, rather than only once someone is in
+  // weapon reach. Jacob, 2026-09-10: "my design is for the FoF to make the decision ASAP. If it
+  // wants to fight it can try to ambush the opponent and if it wants to flee it might be able to
+  // get away before the opponent even gets in range."
+  //
+  // The two callers want different questions and this is the one method that was answering both.
+  // ASKING is cheap and early: the board should be woken the moment anything is sensed, and `flee`
+  // should be able to price leaving while leaving is still possible. CHARGING is not: scoring the
+  // Fight mission off a bare sighting was measured badly once already (240 seeds: pursue-stuck
+  // 1->11, assault-stuck 26->43, four matches ending with cracked keeps and six runners in reserve
+  // while nobody captured) because `fight` then competed with the whole board from 66u and units
+  // broke off real work to close on contacts they could not shoot.
+  //
+  // So the split is: the trigger and `flee` ask at sight, `fight` still scores at reach. Early
+  // decision, no early charge. `_fof` exists only for a rival we can actually SEE, so "in the lobe"
+  // needs no distance test of its own — it is exactly the condition that `_fof` is non-null.
+  fightOdds(atSight = false) {
     const v = this.unit;
     if (!v || v.dead || !v.ai || v.ai._fof == null) return null;
+    if (atSight && FOF_SIGHT) return v.ai._fof;
     // IN RANGE, NOT MERELY IN SIGHT (Jacob: "now there is an enemy in-range"). Fight is the
     // decision you make when a rival is ON you — its opposite number is Flee, not Siege. Scoring
     // it off a sighting made it compete with the whole board from 66u away, and units broke off
@@ -9139,6 +9172,12 @@ class AICommander {
     // to mines, which is how a bait Lurcher once side-stepped onto its own trap.
     if (this.strategy.lurePoint) { const lp = this.strategy.lurePoint(this); if (lp) view.lure = lp; }
     const cmd = v.ai.think(view);
+    // GUNS COLD WHILE WE STALK. The running mission gets one say over the trigger, and only Fight
+    // uses it: a rival whose back is to us is worth closing on before opening up, because the shot
+    // that gives away the approach buys nothing at long range. Cleared here rather than inside the
+    // brain so the aiming, targeting and cooldown paths are all untouched — the only difference is
+    // that the trigger is not pulled.
+    if (this.strategy.holdFire && this.strategy.holdFire(this)) cmd.fire = false;
     const scanning = this._scanUpdate(v, view, cmd, dt);   // scan-on-transition: hold + sweep the surroundings before advancing
     v._aiState = cmd.state;                 // exposed so a rival's _view can tell this unit is retreating ("finish him")
     v._fleeing = this.strategy.step === 'flee';   // ...and that it has broken off for home (a rival reads this to press)
@@ -13132,6 +13171,7 @@ window.RR = {
   // TONIGHT'S BATCH (2026-09-05). Four knobs, all live on a loaded page so the tournament KNOB
   // argument can set them without a rebuild.
   setOutranged: on => { OUTRANGED_CONTACT = !!on; return OUTRANGED_CONTACT; },   // A/B: offer the fight-or-flight decision when EITHER hull can shoot
+  setFofSight: on => { FOF_SIGHT = !!on; return FOF_SIGHT; },   // A/B: decide fight-or-flight from first sight, not from weapon reach
   abFlags: () => ({ ...abFlags(), MSN_MOVE: undefined, OFF_PATH_REPLAN, OUTRANGED_CONTACT }),   // READ-ONLY — the setters all write on read
   setMsnLog: on => setMsnLog(on),   // print every mission score to the AI log
   setGoalRTrim: (mission, service) => setGoalRTrim(mission, service),   // sweep: mission-ring floor, service-ring inward trim
@@ -13142,6 +13182,8 @@ window.RR = {
   setGrabW: (w, sec) => setGrabW(w, sec),   // A/B: what a free salvage pickup is worth, and the extra travel that kills it
   setAmmoVeto: (on, w) => setAmmoVeto(on, w),   // A/B: the empty-magazine veto on missions that need a gun
   setTowerFlee: (w, pw, from, ms) => setTowerFlee(w, pw, from, ms),   // A/B: break off when a tower is grinding us down
+  setAmbush: on => setAmbush(on),   // A/B: close with guns cold on a rival whose back is turned
+  setFightW: (r, h) => setFightW(r, h),   // A/B: what a rival IN REACH adds, and what being SHOT by one adds
   setReachCapTTL: (s) => { REACHCAP_TTL = +s; return REACHCAP_TTL; },   // A/B: how long a unit honours 'I can't reach that, stand here'
   // Does this commander's board lurch when a hull is retired or rolled out? See scoreGap().
   scoreGap: (i = 0) => { const c = commanders[i]; return c ? scoreGap(c) : null; },
