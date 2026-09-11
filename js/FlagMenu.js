@@ -68,6 +68,7 @@ const GROUPS = [
     ['swapsupply', 'A running swap suppresses top-ups'],
     ['aiwaterwall', 'Deep water physically blocks vehicles', { live: 'setAiWaterWall' }],
     ['noambush', 'Ambush (close with guns cold on a rival facing away) OFF', { live: 'setAmbush', invert: true }],
+    ['nolastgasp', 'Last gasp (both sides wiped → spend the bank on runners) OFF', { live: 'setLastGasp', invert: true }],
     ['noai', 'No AI at all'],
   ]],
 ];

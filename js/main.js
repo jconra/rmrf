@@ -919,6 +919,8 @@ let BUY_FIRST = true;   // buy the hull when the trip is ORDERED (?nobuyfirst re
 const scrapBuilds = { red: 0, blue: 0 };  // count of vehicles built from salvage (debug/telemetry)
 let _hqSwapCount = 0;   // debug/telemetry: HQ-finisher recall-swaps (Jotun→Valkyrie once the fort's down)
 let aiScrapBuild = true;   // AI commanders spend scrap to rebuild + run scavenge missions (A/B knob via RR.setAiScrap)
+let aiLastGasp = !QS.has('nolastgasp');   // both sides wiped → spend the scrap bank on runners instead of freezing (see checkDeadBoard)
+let deadBoardGasps = 0;    // how many times that fired this match (harness metric)
 // SHIPPED 2026-08-10. Grade a unit's death against the PRIMARY mission (the
 // job) instead of strategy.step (the errand it died on). Without it a runner that takes
 // capture-front, gets shot up, correctly breaks off to FLEE and dies on the way out files its loss
@@ -10857,9 +10859,61 @@ function stateDetail(d, st) {
     default:         return '';
   }
 }
+// THE DEAD BOARD — both commanders eliminated, so nothing on the field can ever change again.
+// `_eliminated` is a one-way latch and the respawn gate reads it, so once both sides set it there
+// is no unit, no roster, and no path to the only win condition there is (carry a flag home). The
+// match then runs out the clock on a frozen field. Measured across 480 matches: SEVEN of the eight
+// stalemates were exactly this, sitting dead for a mean of 738 seconds — half a match each.
+//
+// The scrap bank is what makes it absurd. Those seven ended holding 3 to 6 scrap per side against
+// a runner that costs 2. Every one of them could afford the very hull that wins the game, and the
+// latch is the only thing standing between them and a real ending.
+//
+// So when the board goes dead, both sides get one last gasp: spend the bank, field a runner, play
+// it out. This deliberately does NOT resurrect a team whose enemy is still alive — that was tried
+// and measured at -3/16 resolved, and the reasoning behind it holds, because a team that cannot be
+// wiped out cannot be pressured. Here there is nobody left to pressure. Both are stamped in the
+// same pass so the outcome does not depend on whose slot happens to tick first, and the condition
+// clears itself the moment either one fields something, so it cannot spin.
+function checkDeadBoard() {
+  if (!aiLastGasp || !aiScrapBuild || commanders.length < 2) return;
+  if (!commanders.every(c => c._eliminated)) return;
+  for (const v of combatants) if (!v.dead) return;   // a unit still on the field: not dead yet
+  // BUILD FIRST, then un-latch — in that order, and only if the build actually went through.
+  // Clearing the flag and letting deploy() sort it out does not work: deploy re-derives the hull
+  // from the roster, finds it still empty, and re-latches on the same tick, so the pair would
+  // flip forever. Going through buildUnit also makes this self-terminating for free, because a
+  // runner costs 2 scrap out of a finite bank — a team that keeps dying eventually cannot pay,
+  // and the board settles genuinely dead instead of spinning.
+  //
+  // WHICH HULL depends on whether the flag is already out from behind the guns. A runner is the
+  // only thing that can win, but it can only win a flag it can reach: while the keep still stands
+  // its 14-damage pop-guns cannot open one, and fielding it anyway just puts a unit on the map to
+  // wander. Measured on the seven dead boards — six revived runners never converted, one of them
+  // circling on `defend` for 500 seconds with nothing left alive to defend against. So field what
+  // the board needs: the heaviest sieger the bank covers while the flag is sealed, a runner once
+  // it is open (or when a runner is all we can afford). Everything after that is the brain it
+  // already has — a fielded sieger can crack the keep, and scavenge turns the piles still lying
+  // around into the scrap for a runner.
+  for (const c of commanders) {
+    const open = c.flagGrabbable && c.flagGrabbable();
+    const order = open ? ['firebrat', 'lurcher', 'valkyrie', 'jotun']
+      : ['jotun', 'valkyrie', 'lurcher', 'firebrat'];
+    let built = null;
+    for (const t of order) if (c.buildUnit(t)) { built = t; break; }
+    if (!built) continue;                     // broke, or the garage is capped — this one stays out
+    c._eliminated = false;   // team-level, so clearing it here reaches every slot (freshSlot owns
+                             // the per-unit fields; respawnT is one of them and has been counting
+                             // down all through the freeze, so the lift is already clear to go)
+    deadBoardGasps++;
+    aiLog(c.team, `${c.cname}: Everyone's wiped — scrape the bank together, get a ${built} back out there!`);
+  }
+}
+
 function updateCommanders(dt) {
   _astarFrameMs = 0; _astarFrameNodes = 0; _planFrame = 0;
   updateReservations();
+  checkDeadBoard();
   for (const cmd of commanders) cmd.update(dt);
   // Run the no-move watch ONCE per unit per tick, here rather than at the drive boundary, so it
   // catches units whose brain wants to move but which never reach a drive call at all.
@@ -13699,6 +13753,8 @@ window.RR = {
   setTeamScrap: (team, n) => { if (team in teamScrap) teamScrap[team] = n | 0; return teamScrap[team]; },
   buildVehicle: (type) => buildVehicle(type),     // spend scrap → replace a lost vehicle (garage)
   setAiScrap: (v) => { aiScrapBuild = !!v; return aiScrapBuild; },   // A/B: AI rebuild-from-scrap on/off
+  setLastGasp: (v) => { aiLastGasp = !!v; return aiLastGasp; },      // A/B: dead-board last gasp on/off
+  deadBoard: () => ({ on: aiLastGasp, gasps: deadBoardGasps, eliminated: commanders.map(c => !!c._eliminated) }),
   setPostKillMoveOn: (v) => { aiPostKillMoveOn = !!v; return aiPostKillMoveOn; },   // A/B: drop engage-afterglow ghost on a kill (no post-kill linger)
   setKeepBreach: (v) => { aiKeepBreach = !!v; return aiKeepBreach; },   // A/B: flatten-HQ-early + grab-with-back-towers on/off
   setGambitAfter: (v) => { GAMBIT_AFTER = +v; return GAMBIT_AFTER; },   // A/B: seconds of stalemate before the "Valkyrie around the back" gambit (Infinity = off)
