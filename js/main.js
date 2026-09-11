@@ -4090,6 +4090,12 @@ function updateCrushables() {
 // One pile = 1 scrap. Piles drop where vehicles die and are scattered in remote
 // corners at map build; a vehicle driving over one collects it for its team. Spend
 // scrap in the garage to build more vehicles (BUILD_COST). Neutral: either team grabs.
+const GRAB_BUDGET_S = 20;   // must match GRAB_BUDGET in AIStrategies.js (the Grab mission's own clock)
+const GRAB_REACH_F = 0.25;  // …and how much of it may be spent merely ARRIVING. 0.6 was far too
+// loose: it let a Lurcher commit to a pile 168u away, which is a journey, not a detour — and
+// `advance on grab` scuttles kept showing up in the breakdowns. A quarter of the budget leaves the
+// rest for actually getting there through whatever is in the way. By hull that is roughly
+// Jotun 40u, Lurcher 70u, Firebrat 100u, Valkyrie 110u — which is what "on our way past" means.
 const SCRAP_PICKUP_R = 8;   // how close a vehicle must get to snag a pile (a little margin so a unit halting at the kill site still collects)
 const SCRAP_FLOAT_MS = 10000;   // debris in water floats COLLECTABLE this long before it slides under (shallow-water kills stay grabbable)
 
@@ -6618,6 +6624,9 @@ const driverHooks = {
   // asked to finish within goalR of a point can legitimately end up to a cell beyond it, and
   // convicting that route means convicting it for the grid it was searched on.
   cell: () => grid.cell,
+  // Would THIS hull sink here? Flyers and hovercraft cross water; a sinker does not. The combat
+  // maneuvers need this because they steer by geometry and know nothing about the shoreline.
+  sinksAt: (v, x, z) => !!(v && v._move && v._move.water === 'sink' && map.isDeepWater(x, z)),
   alarm: (d, v) => {
     if (d && d.team) navAlarmsByTeam[d.team] = (navAlarmsByTeam[d.team] || 0) + 1;
     if (v) Object.assign(d, unitDoing(v));
@@ -8122,6 +8131,9 @@ class AICommander {
   // detour on a 30u one, and the arithmetic already says so. Divided by the hull's speed because
   // the same bulge is two seconds to a Valkyrie and six to a Jotun — the old detour expressed that
   // by excluding the Jotun by name.
+  // Fraction of the Grab mission's own budget we are willing to spend just GETTING there.
+  // (GRAB_BUDGET_S mirrors GRAB_BUDGET in AIStrategies — the mission owns the ending, this only
+  // refuses to start one it cannot finish.)
   grabPick(v = this.unit, goal = null) {
     if (!v || v.dead) return null;
     const now = performance.now();
@@ -8135,6 +8147,13 @@ class AICommander {
       const noReach = this._scrapNoReach.get(p);
       if (noReach != null) { if (noReach > now) continue; else this._scrapNoReach.delete(p); }
       const dP = Math.hypot(p.pos.x - px, p.pos.z - pz);
+      // ON THE WAY IS NOT THE SAME AS WITHIN REACH. The cost below prices the EXTRA travel, so a
+      // pile sitting directly on a long route comes out free however far off it is — and a Jotun at
+      // 8u/s once committed to one 113u away, spent the whole mission budget driving at it, wedged,
+      // and was scuttled (seed 1271). A pickup you cannot arrive at before the mission's own budget
+      // expires was never a detour; it is a journey the board will have re-decided twice over.
+      // Expressed against GRAB_BUDGET rather than a new distance constant, so the two cannot drift.
+      if (dP / spd > GRAB_REACH_F * GRAB_BUDGET_S) continue;
       const extra = goal ? dP + Math.hypot(goal.x - p.pos.x, goal.z - p.pos.z) - dGoal : dP;
       const sec = Math.max(0, extra) / spd;
       if (sec < bs) { bs = sec; best = p; }

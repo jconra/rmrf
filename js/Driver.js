@@ -147,6 +147,25 @@ export class Driver {
     return o;
   }
 
+  // A NET UNDER EVERY MANEUVER. The orbit gets a purposeful answer above — circle the other way —
+  // because it has a direction to reverse. Kite, align and joust do not; they are steering at or
+  // away from a point, and the sea is simply in the way. For a hull that sinks, refuse the part of
+  // the motion that would put it there and keep the turn, so it still faces the fight while the
+  // footwork stops walking it into the water. Flyers and hovercraft are untouched.
+  _noWet(v, ped) {
+    if (!ped || !this.hooks.sinksAt || !v || !v._move || v._move.water !== 'sink') return ped;
+    const f = ped.fwd || 0, st = ped.strafe || 0;
+    if (!f && !st) return ped;
+    const h = v.heading, p = v.holder.position, LOOK = 7;
+    // hull frame → world: nose is -Z at heading 0, strafe is local +X
+    const wx = -Math.sin(h) * f + Math.cos(h) * st;
+    const wz = -Math.cos(h) * f - Math.sin(h) * st;
+    const m = Math.hypot(wx, wz) || 1;
+    if (!this.hooks.sinksAt(v, p.x + (wx / m) * LOOK, p.z + (wz / m) * LOOK)) return ped;
+    this.wetStops = (this.wetStops || 0) + 1; Driver.wetStops = (Driver.wetStops || 0) + 1;
+    return { ...ped, fwd: 0, strafe: 0 };
+  }
+
   // Execute the active order → pedals {fwd, turn, strafe}, or null when the order is
   // DIRECT (the behavior's own motor output stands). GOTO: follow the A* route through
   // the shared nav cache; the last leg uses the order's arrive radius so the unit
@@ -177,11 +196,36 @@ export class Driver {
       const dx = p.x - o.cx, dz = p.z - o.cz;
       const d = Math.hypot(dx, dz) || 1;
       const rx = dx / d, rz = dz / d;                       // radial out (center → us)
-      const tx = -rz * o._dirAdj, tz = rx * o._dirAdj;      // tangent, dir=+1 ccw viewed from +y
       const rerr = d - o.radius;                            // + = too far out
       const inpull = Math.max(-1, Math.min(1, -rerr / 8));  // radial correction gain
-      let mx = tx + rx * inpull, mz = tz + rz * inpull;     // desired world motion
-      const mm = Math.hypot(mx, mz) || 1; mx /= mm; mz /= mm;
+      // WATER IS A WALL THE ORBIT CANNOT SEE. This steers by pure geometry — a tangent around a
+      // point — and nothing in it knows where the shoreline is. Measured over 40 seeds: every unit
+      // that started sinking was 10-46u OFF its route with a route that never touched deep water,
+      // and 9 of 11 were circling under an ORBIT. A* is not driving them in; the footwork is.
+      //
+      // The response already exists one line up: when something blocks the lane, the orbit reverses
+      // and goes round the other way. The sea is the same kind of obstruction, so it gets the same
+      // answer — probe a short step ahead, and if this hull would sink there, circle the other way.
+      // Only sinkers care; a Valkyrie or a Firebrat crosses water and keeps its direction.
+      const spin = (dir) => {
+        const tx0 = -rz * dir, tz0 = rx * dir;
+        let x = tx0 + rx * inpull, z = tz0 + rz * inpull;
+        const m = Math.hypot(x, z) || 1;
+        return { x: x / m, z: z / m };
+      };
+      let mv = spin(o._dirAdj);
+      if (this.hooks.sinksAt) {
+        const LOOK = 7;                                    // ~half a second of travel for a Lurcher
+        if (this.hooks.sinksAt(v, p.x + mv.x * LOOK, p.z + mv.z * LOOK)) {
+          const other = spin(-o._dirAdj);
+          if (!this.hooks.sinksAt(v, p.x + other.x * LOOK, p.z + other.z * LOOK)) {
+            o._dirAdj = -o._dirAdj; mv = other;            // dry water on the other side — go that way
+          } else {
+            mv = { x: rx, z: rz };                         // both ways wet: back straight out, inland
+          }
+        }
+      }
+      let mx = mv.x, mz = mv.z;
       const f = o.face || { x: o.cx, z: o.cz };
       const faceErr = wrapPi(Math.atan2(-(f.x - p.x), -(f.z - p.z)) - v.heading);
       const turn = Math.abs(faceErr) < 0.06 ? 0 : Math.max(-1, Math.min(1, faceErr * 2.2));
@@ -189,7 +233,7 @@ export class Driver {
       const h = v.heading;
       const fwd = Math.max(-1, Math.min(1, (mx * -Math.sin(h) + mz * -Math.cos(h)) * 1.2));
       const strafe = Math.max(-1, Math.min(1, (mx * Math.cos(h) + mz * -Math.sin(h)) * 1.2));
-      return { fwd, turn, strafe, arrived: false };
+      return this._noWet(v, { fwd, turn, strafe, arrived: false });
     }
     if (o.type === 'KITE') {
       // ROUTED retreat: follows the same A* cache as GOTO — only the FACING differs,
@@ -226,7 +270,7 @@ export class Driver {
       const h = v.heading;
       const fwd = Math.max(-1, Math.min(1, (mx * -Math.sin(h) + mz * -Math.cos(h)) * 1.2));
       const strafe = Math.max(-1, Math.min(1, (mx * Math.cos(h) + mz * -Math.sin(h)) * 1.2));
-      return { fwd, turn, strafe, arrived: false };
+      return this._noWet(v, { fwd, turn, strafe, arrived: false });
     }
     if (o.type === 'JOUST') {
       // The Valkyrie's signature: a full-speed strafing run — target held ABEAM (the
@@ -289,7 +333,7 @@ export class Driver {
         if (o._side == null) o._side = 1; else if (o._blkT > 2.6) { o._side = -o._side; o._blkT = 1.3; }
         turn = Math.max(-1, Math.min(1, turn + o._side * 0.7));
       }
-      return { fwd, turn, strafe: 0, arrived: false };
+      return this._noWet(v, { fwd, turn, strafe: 0, arrived: false });
     }
     // HOLD — "stand here on purpose". The behaviour keeps the pedals (it is aiming, settling into
     // a firing position, scanning, or squaring up to shoot a blocker), exactly as under DIRECT.
