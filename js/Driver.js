@@ -352,6 +352,17 @@ export class Driver {
     const planned = nav.dx != null ? { x: nav.dx, z: nav.dz } : dest;
     const drift = Math.hypot(planned.x - dest.x, planned.z - dest.z);
     if (drift > UNREACH_SLACK) {
+      // …UNLESS THE CACHE WAS TOLD TO WAIT. It defers a replan when its last search found no route,
+      // or when the frame's A* budget is already spent — and during that moment it legitimately
+      // holds a route to the old goal. That is a deferral, not a disagreement, and it clears itself
+      // in under a second. Watched live on seed 25 at 2305s: a Firebrat's goal jumped 88u and the
+      // alarm called it a defect. Judging is still declined either way; only the shouting stops.
+      //
+      // Worth knowing WHY no headless run ever caught this: the frame budget accrues as
+      // `performance.now() - start`, and every rig freezes performance.now for determinism, so the
+      // budget never trips in a test. The counter I quoted as "zero in 1,200 matches" could not
+      // have moved. See reference_harness_blind_spots.
+      if (nav.deferT > 0) return;
       Driver.staleRoutes = (Driver.staleRoutes || 0) + 1;
       if (!this._staleSaid) {
         this._staleSaid = true;

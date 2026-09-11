@@ -40,7 +40,7 @@ import { installFlagMenu } from './FlagMenu.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setTowerFlee, setAmbush, setFightW, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -4096,6 +4096,24 @@ const SCRAP_FLOAT_MS = 10000;   // debris in water floats COLLECTABLE this long 
 // kind 'parts' = organized delivery pallet (world scatter); 'wreck' = blown-up vehicle
 // debris (death drop) — its armor plates wear the dead vehicle's team camo; 'heap' = the cheap
 // one, for sources that shed a lot of piles (a tower coming down, and whatever else later).
+// FREE A PILE PROPERLY. Removing the group from the scene drops the reference the renderer walks,
+// but the GPU buffers behind it live until something disposes them — so every pickup leaked a
+// geometry, and a busy match collects dozens. Merging shrank each pile ~5x; it did not stop the
+// leak.
+//
+// Materials need the opposite care: they are SHARED singletons now (Scrap.js marks them), so
+// disposing one would blank every other pile of that kind on the map. Only the per-pile tinted
+// ones — the pallet's team case, a wreck's camo plates — are ours to free.
+function freeScrapPile(p) {
+  if (!p || !p.group) return;
+  scene.remove(p.group);
+  p.group.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.geometry) o.geometry.dispose();
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) if (m && !(m.userData && m.userData.shared)) m.dispose();
+  });
+}
 function addScrapPile(x, z, kind = 'parts', colorIndex = null) {
   const g = (kind === 'wreck' ? makeWreckage : kind === 'heap' ? makeSalvageHeap : makePartsPallet)(grid.cell);
   if (colorIndex != null) {
@@ -4192,7 +4210,7 @@ function gibVehicle(veh, impact) {
   let wrecks = scrapPiles.filter(p => p.kind === 'wreck');
   while (wrecks.length > MAX_WRECKS) {
     const old = wrecks.shift();
-    scene.remove(old.group);
+    freeScrapPile(old);
     const i = scrapPiles.indexOf(old); if (i >= 0) scrapPiles.splice(i, 1);
     old._gone = true;   // let commanders prune it from known-scrap intel
   }
@@ -4221,7 +4239,7 @@ function updateGibs(dt) {
 
 // Scatter neutral salvage in remote/shore corners so scouting the map's edges pays off.
 function scatterScrap() {
-  for (const p of scrapPiles) scene.remove(p.group);
+  for (const p of scrapPiles) freeScrapPile(p);
   scrapPiles = [];
   gibChunks = [];   // drop any debris still mid-flight from the previous map
   if (QS.has('noscrap') || configBases) return;   // custom maps place their own (slice 2)
@@ -5344,7 +5362,7 @@ function updateScrap(dt) {
         if (p.sinkBase == null) p.sinkBase = p.group.position.y;
         p.sink = (p.sink || 0) + dt;
         p.group.position.y = p.sinkBase - p.sink * 3;   // ~3 u/s under
-        if (p.sink > 1.6) { scene.remove(p.group); p._gone = true; scrapPiles.splice(i, 1); }
+        if (p.sink > 1.6) { freeScrapPile(p); p._gone = true; scrapPiles.splice(i, 1); }
         continue;   // not collectable while sinking
       }
     }
@@ -5358,7 +5376,7 @@ function updateScrap(dt) {
       if (Math.hypot(v.holder.position.x - p.pos.x, v.holder.position.z - p.pos.z) <= SCRAP_PICKUP_R) {
         spawnScrapPop(p.pos);
         p._gone = true;                 // let commanders prune it from their known-scrap intel
-        scene.remove(p.group);
+        freeScrapPile(p);
         scrapPiles.splice(i, 1);
         collectScrap(v.team, p.value || 1);
         break;
@@ -6098,6 +6116,8 @@ let OFF_PATH_REPLAN = true;     // RR.setOffPathReplan(false) restores the goal-
 function navWaypoint(nav, v, dest, dt, goalR = 0) {
   nav.t -= dt;
   if (nav.failT > 0) nav.failT -= dt;
+  if (nav.deferT > 0) nav.deferT -= dt;
+  if (nav.failT > 0) nav.deferT = 0.25;   // a recent no-route also suppresses replans — same deferral, different cause
   if (nav.retryT > 0) nav.retryT -= dt;
   const moved2 = nav.dx == null ? Infinity : (dest.x - nav.dx) ** 2 + (dest.z - nav.dz) ** 2;
   const c = grid.cell;
@@ -6149,6 +6169,13 @@ function navWaypoint(nav, v, dest, dt, goalR = 0) {
   if ((!nav.path || nav.idx >= nav.path.length || nav.t <= 0 || nav.epoch !== _navEpoch
        || moved2 > NAV_GOAL_DRIFT ** 2 || displaced) && !(nav.failT > 0)) {
     const hasUsablePath = nav.path && nav.idx < nav.path.length;
+    // DEFERRING IS NOT DISAGREEING. The Driver's stale-route alarm exists to catch the cache and
+    // the reachability contract disagreeing about which trip is running — but the cache is ALSO
+    // allowed to put a replan off for a moment, and while it does it genuinely holds a route to the
+    // old goal. Two paths do that: a search that just failed (failT), and the per-frame A* budget
+    // below. Stamp the deferral so the alarm can tell "should have replanned" from "was told to
+    // wait"; the contract still declines to convict either way.
+    nav.deferT = 0.25;
     if (hasUsablePath && _astarFrameMs >= NAV_FRAME_BUDGET_MS) {
       // Per-frame A* budget spent: keep following the current route and retry the refresh next
       // frame, so a crowd of simultaneous replans spreads across frames instead of spiking.
@@ -8053,6 +8080,7 @@ class AICommander {
     return null;
   }
   shotReach(type) { return SHOT_REACH[type] || 42; }   // how far this chassis can actually shoot (Fight.done)
+  hullSpeed(type) { return (VEHICLE_TYPES[type] && VEHICLE_TYPES[type].speed) || 12; }   // world u/s — what a trip COSTS depends on the hull taking it
   scrap() { return teamScrap[this.team] || 0; }
   canAfford(type) { return this.scrap() >= (BUILD_COST[type] || 99); }
   // Build one of `type` from salvage — capped at the base garage count (same finite fleet
@@ -13184,6 +13212,8 @@ window.RR = {
   setTowerFlee: (w, pw, from, ms) => setTowerFlee(w, pw, from, ms),   // A/B: break off when a tower is grinding us down
   setAmbush: on => setAmbush(on),   // A/B: close with guns cold on a rival whose back is turned
   setFightW: (r, h) => setFightW(r, h),   // A/B: what a rival IN REACH adds, and what being SHOT by one adds
+  setSwapCost: (w, sec) => setSwapCost(w, sec),   // A/B: what a trip home to change hull costs the board
+  setSwapMargin: (m) => setSwapMargin(m),   // A/B: how far ahead a job must be to be worth changing hull for
   setReachCapTTL: (s) => { REACHCAP_TTL = +s; return REACHCAP_TTL; },   // A/B: how long a unit honours 'I can't reach that, stand here'
   // Does this commander's board lurch when a hull is retired or rolled out? See scoreGap().
   scoreGap: (i = 0) => { const c = commanders[i]; return c ? scoreGap(c) : null; },
@@ -13642,6 +13672,7 @@ window.RR = {
   startCommanders: (reserved) => startCommanders(reserved),
   get lock() { return lock; },
   get resupplies() { return resupplies; },
+  addScrapPile: (x, z, kind) => addScrapPile(x, z, kind || 'heap'),   // debug/leak probes: drop a pile on demand
   get scrapPiles() { return scrapPiles; },   // live salvage on the ground — probes ask if a hull can actually reach each one, and the stalemate autopsy asks whether a dying unit had scrap it could have taken instead
   get gibCount() { return gibChunks.length; },   // debug: debris pieces currently mid-flight
   get teamScrap() { return { ...teamScrap }; },   // scrap banked per team

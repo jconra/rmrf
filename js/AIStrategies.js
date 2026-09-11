@@ -582,6 +582,18 @@ export function setTowerFlee(w, p, from, ms) {
 }
 // Missions whose whole point is putting rounds into something. A hull with an empty magazine is
 // not weak at these, it is incapable of them.
+// What a full-length trip home to change hull costs a mission's score, and the round-trip time at
+// which it is charged in full. Settable so the gate can sweep them (RR.setSwapCost).
+let SWAP_COST_W = 6, SWAP_COST_SEC = 30;
+// How far ahead a job must be before it is worth driving home to change hull. 0 = off (the old
+// behaviour: any preference at all buys the trip). Settable so the gate can sweep it.
+let SWAP_MARGIN = 0;
+export function setSwapMargin(m) { SWAP_MARGIN = +m; return SWAP_MARGIN; }
+export function setSwapCost(w, sec) {
+  if (w != null) SWAP_COST_W = +w;
+  if (sec != null) SWAP_COST_SEC = +sec;
+  return { w: SWAP_COST_W, sec: SWAP_COST_SEC };
+}
 const NEEDS_AMMO = new Set(['siege', 'attack', 'defend', 'intercept', 'harass', 'fight']);
 let AMMO_VETO = true, AMMO_VETO_W = 20;
 export function setAmmoVeto(on, w) {
@@ -2257,6 +2269,60 @@ export function missionScore(cmd, key, running = null) {
   //
   // Placed here, AFTER the switch, deliberately: the fleet-favour, persona and incumbent terms are
   // all added below, and a veto that can be out-summed by a persona bonus is not a veto.
+  // A SWAP IS A ROUND TRIP, AND THE BOARD HAS NEVER PAID FOR IT (Jacob, 2026-09-10, watching a
+  // warrior open on `attack` in a Lurcher, fetch a shield, then immediately drive home and trade the
+  // Lurcher for a Jotun because `siege` had crept ahead by 0.4 — the shield went into the garage
+  // with the hull). `swapWanted` is purely categorical: it asks whether the job wants a different
+  // chassis and never what fetching one costs. So four tenths of a point buys the same journey as
+  // six points would.
+  //
+  // PRICED IN SECONDS, the same currency the Grab mission uses for its detours: out to the pad in
+  // the hull we are driving, back out in the hull we are fetching. That scales by chassis for free —
+  // a Jotun at 8u/s pays nearly three times what a Valkyrie at 22 pays for the same ground — which
+  // is true, and which no flat incumbency bonus can express.
+  //
+  // NOT `requiredVehicle` AGAIN. That term (REQ_VEHICLE, tried as default 2026-08-17, net -19 over
+  // 720 seeds, deleted in be5e073) priced the CREW categorically — same-role, cross-role, impossible.
+  // This prices the TRIP, which is the part that actually costs the match. Infeasible pairs stay
+  // where they already are: `nothing can carry the flag` above, and the Firebrat-only grab rule.
+  //
+  // Skipped for `swap` itself (it IS the trip) and for `flee` (leaving is not a chassis choice).
+  if (SWAP_COST_W > 0 && base !== 'swap' && base !== 'flee') {
+    const sv = cmd.unit;
+    if (sv && !sv.dead && cmd.homePos && cmd.hullSpeed) {
+      let want = null;
+      try { want = missionWants(key, cmd); } catch (e) { want = null; }
+      if (want && want !== sv.type) {
+        const home = cmd.homePos();
+        if (home) {
+          const pp = sv.holder.position;
+          const d = Math.hypot(home.x - pp.x, home.z - pp.z);
+          const secs = d / cmd.hullSpeed(sv.type) + d / cmd.hullSpeed(want);
+          add('the trip to change hull', -SWAP_COST_W * Math.min(1, secs / SWAP_COST_SEC));
+        }
+      }
+    }
+  }
+  // A FIREBRAT CANNOT HURT A TOWER, AND SOMETIMES IT CANNOT GO AND FETCH SOMETHING THAT CAN.
+  // Watched on seed 634: blue annihilated, its flag sitting unguarded, and red's last unit — a
+  // Firebrat, roster {firebrat:2, everything else 0}, 3 scrap — ran `siege` for the final 700
+  // seconds, shuttling siege -> refuel -> siege against four towers with a 14-damage gun. The
+  // `a tower has us in range` term already excludes Firebrats by name ("a Firebrat's 14-damage gun
+  // cannot hurt a tower... excluding it costs nothing and protects the runner"); the base
+  // `towers standing` and `flag sealed` terms never got the same treatment.
+  //
+  // Normally this needs no term at all — siege wins, swapWanted says "fetch a Jotun", and the trip
+  // sorts it out. It only bites when there is nothing to fetch: no heavy in the roster and no scrap
+  // to build one. Then siege is not a plan, it is a way to spend the clock — and pricing it out
+  // lets `scavenge` win instead, which is the move that actually ends that match.
+  // Same shape and the same -14 as `nothing can carry the flag` above.
+  if (base === 'siege') {
+    const fb = cmd.unit;
+    if (fb && !fb.dead && fb.type === 'firebrat') {
+      const canGetOne = ['lurcher', 'jotun', 'valkyrie'].some(t => (roster[t] || 0) > 0 || cmd.canAfford(t));
+      if (!canGetOne) add('nothing here can hurt a tower', -14);
+    }
+  }
   if (AMMO_VETO && NEEDS_AMMO.has(base)) {
     const av = cmd.unit;
     if (av && !av.dead && (av.ammo || 0) <= 0) add('nothing to shoot with', -AMMO_VETO_W);
@@ -2871,6 +2937,37 @@ class Doctrine {
     }
     if (key !== 'swap' && cmd.unit && !cmd.unit.dead) {
       const want = cmd.swapWanted(key);
+      // A TRIP HOME HAS TO BE EARNED (Jacob, 2026-09-10: a warrior traded a freshly-shielded Lurcher
+      // for a Jotun because siege had crept 0.4 points ahead of attack).
+      //
+      // The first attempt at this priced the trip as a NEGATIVE TERM on the mission's score, and it
+      // did nothing — swaps 4.8 -> 4.8 per match across two seed sets, with matches running longer.
+      // A score penalty only helps if it flips which mission WINS, and most swaps do not come from
+      // near-ties; they come from a decisive change that happens to want a different hull. Docking
+      // points is the wrong instrument for a decision that has already been made.
+      //
+      // So ask the question where it is actually asked: at the moment the trip is ordered, is the
+      // chosen job enough BETTER than the best job we could do in the hull we are already sitting
+      // in? A margin, not a tax. Below it, take the no-swap job and stay out — which is precisely
+      // the case that was watched, where attack was 0.4 behind and needed no trip at all.
+      if (want && SWAP_MARGIN > 0 && !this._noSwapRetry) {
+        const S = cmd._missionScores || [];
+        const mineRow = S.find(r => String(r[0]).split('-')[0] === String(key).split('-')[0]);
+        let best = null;
+        for (const r of S) {                       // sorted best-first, so the first hit is the best
+          if (String(r[0]).split('-')[0] === String(key).split('-')[0]) continue;
+          let w2 = null; try { w2 = missionWants(String(r[0]).split('-')[0], cmd); } catch (e) { w2 = null; }
+          if (!w2 || w2 === cmd.unit.type) { best = r; break; }   // doable in the hull we have
+        }
+        if (mineRow && best && (mineRow[1] - best[1]) < SWAP_MARGIN) {
+          this._noSwapRetry = true;               // one level only — the replacement needs no trip
+          try {
+            this._switch(this._applyKey(cmd, best[0]) || best[0], cmd,
+              `not worth a trip home (${key} only ${(mineRow[1] - best[1]).toFixed(1)} ahead)`);
+          } finally { this._noSwapRetry = false; }
+          return;
+        }
+      }
       if (want) {
         this._swapThen = key;
         this.mission = makeMission('swap');

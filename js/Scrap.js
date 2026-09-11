@@ -162,6 +162,9 @@ export function makeWreckage(s = 5) {
 // scattering reading as copies, and staying identical is what would let a high-volume emitter draw
 // all of them as a single InstancedMesh later without changing the look.
 const SALVAGE = new THREE.MeshStandardMaterial({ color: 0x4a4238, roughness: 0.92, metalness: 0.35, flatShading: true });
+// SHARED — one instance behind every pile of that kind. Marked so freeing a collected pile disposes
+// its geometry without destroying a material the rest of the map is still drawing with.
+for (const m of [WOOD, CRATE, STRAP, CHAR, DARKM, SCARM, EMBER, SALVAGE]) m.userData.shared = true;
 export function makeSalvageHeap(s = 5) {
   const g = new THREE.Group();
   const b = bucket();
