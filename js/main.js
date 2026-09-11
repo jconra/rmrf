@@ -1251,7 +1251,21 @@ function placeCampsFromConfig(assets) {
 
   for (const [dt, gt] of TEAMS) {
     const teamHQs = hqs.filter(h => (h.team || 'neutral') === dt);
-    const realHQ = teamHQs.find(h => h.real) || teamHQs[0];
+    // WHICH KEEP HOLDS THE FLAG IS A ROLL, NOT A FIXTURE (Jacob, for Hollow Keep: "the flag
+    // location will be randomly picked to be in one of the available flag buildings"). Give a team
+    // two flag halls and the attacker has to find out which one matters — breaking into the wrong
+    // one costs a sortie and announces the approach. With one hall this is a no-op, which is why
+    // every earlier map is untouched.
+    //
+    // Rolled on doctrineRng, the SETUP stream: live play gets a genuinely different answer each
+    // match, while ?dseed pins it so a rig, a replay or an A/B still reproduces exactly. In-match
+    // randomness is deliberately left alone — same split the doctrine draw already uses.
+    //
+    // `real` in the map JSON is now a designer's note rather than a decision. It stays honoured
+    // when a team has only one hall (there is nothing to roll), so nothing about the format breaks.
+    const realHQ = teamHQs.length > 1
+      ? teamHQs[Math.min(teamHQs.length - 1, Math.floor(doctrineRng() * teamHQs.length))]
+      : (teamHQs.find(h => h.real) || teamHQs[0]);
     const site = siteOfCell(realHQ.cx, realHQ.cz);
     items.push({ cell: { cx: realHQ.cx, cz: realHQ.cz }, site, size: CAMP_SIZE, role: 'main', team: gt });
     pads.push(padFor(site, CAMP_SIZE));
@@ -5771,7 +5785,7 @@ function planPath(v, dest, opts = {}) {
     const s2 = nearestOpenCell(v, start.i, start.j, 4, 1);
     if (s2) {
       const p2 = astarGrid({ start: s2, goal, goalR: _goalR, cost, inBounds, turnPenalty: 3, allowDiagonal: true, maxNodes, partial: true, hScale: NAV_HSCALE });
-      if (p2 && p2.length >= 1) { _astarFrameNodes += p2.nodes || 0; const o2 = detourMines(v, _smooth(v, p2.map(n => ({ x: n.i * c, z: n.j * c })))); o2.budgetHit = !!p2.budgetHit; return o2; }
+      if (p2 && p2.length >= 1) { _astarFrameNodes += p2.nodes || 0; const o2 = detourMines(v, _smooth(v, p2.map(n => ({ x: n.i * c, z: n.j * c })))); o2.budgetHit = !!p2.budgetHit; o2.reached = !!p2.reached; return o2; }
     }
     return null;
   }
@@ -5779,6 +5793,7 @@ function planPath(v, dest, opts = {}) {
   // avoidance must survive into the final shape rather than be straightened back out of it.
   const out = detourMines(v, _smooth(v, path.map(n => ({ x: n.i * c, z: n.j * c }))));
   out.budgetHit = !!path.budgetHit;   // carried through the transforms: "partial because FAR" ≠ "partial because UNREACHABLE"
+  out.reached = !!path.reached;       // …and whether the search actually got there, which is not a thing to measure afterwards
   return out;
 }
 
@@ -6182,7 +6197,16 @@ function navWaypoint(nav, v, dest, dt, goalR = 0) {
   // thousands of seconds with its order still reading GOTO 20u away, and not one alarm anywhere.
   // Silent, so it contributes NOTHING to any tournament number — which is why the harness could
   // never find it.
-  if (nav.path.budgetHit && nav.idx >= nav.path.length - 1) {
+  // …AND NOT ONLY A TRUNCATED ONE. The guard used to require budgetHit, i.e. "the search ran out of
+  // nodes". But a COMPLETE search ends inside goalR of the target, and goalR is measured on a 5u
+  // grid — so a route that legitimately satisfied "within 11u of the generator" can still leave the
+  // hull sitting further out than the driver's own arrive tolerance. It is then on its last
+  // waypoint with nothing left to chase, the consumption loop stops at length-1 so `idx` never
+  // reaches `length`, and the 'consumed' replan never fires. Same deadlock, reached by a healthy
+  // route instead of a broken one — and it is what parked a Lurcher 12u from a shield it wanted.
+  // Running out of ROUTE while still short of the REQUIREMENT is the condition; why the route ended
+  // is not this check's business.
+  if (nav.idx >= nav.path.length - 1) {
     const slack = Math.max(grid.cell * 1.2, 9);
     if ((dest.x - px) ** 2 + (dest.z - pz) ** 2 > slack * slack && !(nav.retryT > 0)) {
       nav.retryN = (nav.retryN || 0) + 1;

@@ -11,6 +11,8 @@ export const CAMPAIGN = [
     blurb: 'Crack a lightly-held base and run the flag home. Learn the ropes.' },
   { id: 'crossroads',   name: 'Crossroads',   file: 'campaign/crossroads.json',
     blurb: 'Twin bases across a crossroads. A random opponent, still finding their feet.' },
+  { id: 'hollow-keep',  name: 'Hollow Keep',  file: 'campaign/hollow-keep.json',
+    blurb: 'One of these two keeps is empty. You will not know which until you are inside it.' },
   // ── Upcoming (no map yet → shown locked) ────────────────────────────────────
   { id: 'the-gauntlet', name: 'The Gauntlet', blurb: 'Coming soon.' },
 ];

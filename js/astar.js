@@ -107,7 +107,12 @@ export function astarGrid({ start, goal, goalR = 0, cost, inBounds, turnPenalty 
       pth.reverse();
       onStep({ cur: { i: cur.i, j: cur.j }, open: heap.map(n => ({ i: n.i, j: n.j })), path: pth });
     }
-    if (atGoal(cur.i, cur.j)) { const p = buildPath(cur); p.nodes = popped; fillStats(false); return p; }
+    // REACHED, and say so. Callers were left to infer success by measuring how far the last
+    // waypoint sits from the goal, which cannot be done reliably: the route legitimately stops
+    // anywhere inside goalR, the grid quantises that to whole cells, and the smoother then moves
+    // the final point again. Every margin picked for that test has been wrong by a unit or two —
+    // it is the search that knows whether it arrived, so the search reports it.
+    if (atGoal(cur.i, cur.j)) { const p = buildPath(cur); p.nodes = popped; p.reached = true; fillStats(false); return p; }
     for (let di = 0; di < DIRS.length; di++) {
       const ddi = DIRS[di][0], ddj = DIRS[di][1];
       const ni = cur.i + ddi, nj = cur.j + ddj;
@@ -140,6 +145,6 @@ export function astarGrid({ start, goal, goalR = 0, cost, inBounds, turnPenalty 
   // open set EMPTIED — every reachable cell was settled and the goal wasn't among them: genuinely
   // unreachable. Callers judging a "contract violation" must only trust the second kind.
   fillStats(!budgetHit);
-  if (partial && best && bestH < h(start.i, start.j) - 0.5) { const p = buildPath(best); p.budgetHit = budgetHit; p.nodes = popped; return p; }
+  if (partial && best && bestH < h(start.i, start.j) - 0.5) { const p = buildPath(best); p.budgetHit = budgetHit; p.nodes = popped; p.reached = false; return p; }
   return null;
 }

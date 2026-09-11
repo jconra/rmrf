@@ -114,7 +114,14 @@ export class Driver {
       same = false;
     }
     if (same) {
-      if (o.type === 'GOTO') { cur.x = o.x; cur.z = o.z; cur.arrive = o.arrive; }   // goal drift
+      // goal drift — and goalR MOVES WITH IT. The radius belongs to the DESTINATION (a base serves
+      // at 16u, a FOB at 12, a depot or shield generator at 11, a firing position is an exact
+      // point), so an order whose goal has drifted onto a different kind of target is carrying the
+      // wrong requirement until it is refreshed. Watched live: a Lurcher on a shield run held
+      // goalR 12 — the generic mission default, inherited from the job it had been doing before —
+      // while the generator it was driving to only charges within 11. The route was allowed to
+      // finish outside the thing it came for, and it parked 12u out with the throttle at zero.
+      if (o.type === 'GOTO') { cur.x = o.x; cur.z = o.z; cur.arrive = o.arrive; cur.goalR = o.goalR; }
       else if (o.type === 'ORBIT') { cur.cx = o.cx; cur.cz = o.cz; cur.radius = o.radius; cur.face = o.face; }
       else if (o.type === 'KITE') { cur.tx = o.tx; cur.tz = o.tz; cur.toward = o.toward; }
       else if (o.type === 'HOLD') cur.why = o.why;   // same hold, refreshed reason
@@ -360,39 +367,34 @@ export class Driver {
     // there — convicts the order. Acting on budget partials was the false-conviction bug:
     // reachable pursuit contacts written off, good siege stands rotated away, resolution -4.
     if (path.budgetHit) return;
+    // ASK THE SEARCH, DO NOT MEASURE THE ROUTE. This used to convict on how far the last waypoint
+    // sat from the goal, against a tolerance assembled out of UNREACH_SLACK, the order's arrive
+    // radius, its goalR and a grid cell — and every version of that sum has been wrong by a unit or
+    // two, because a route may stop anywhere inside goalR, the grid quantises that to whole cells,
+    // and the smoother moves the final point again afterwards. A Firebrat sat 23u from a base that
+    // heals at 16 over one such unit; a Lurcher parked 12u from a shield generator that charges at
+    // 11 over another. astarGrid now reports `reached` — it is the only thing that actually knows —
+    // so the contract asks instead of estimating.
+    // The search satisfied what it was asked for — nothing to convict, whatever the arithmetic says.
+    if (path.reached) return;
+    // NOT REACHED IS NOT THE SAME AS NOT CLOSE ENOUGH. `reached` answers the question exactly as
+    // asked, and for a RING target (a base, a depot, a generator) that is the whole story. But most
+    // destinations are asked for with goalR 0 — a firing position, a waypoint, a pile — where the
+    // question is "land on this exact cell", and a route that stops one cell short of it has still
+    // done everything the order needs. Convicting those took violations from 111 to 1752 over 120
+    // seeds when `reached` alone replaced the old test. So both: the search's own verdict accepts,
+    // and the distance tolerance still forgives the exact-cell near miss it was always there for.
     const end = path[path.length - 1];
-    const short = Math.hypot(end.x - planned.x, end.z - planned.z);   // against what A* was ASKED for
-    // …AND goalR IS PART OF THE TOLERANCE, because it is part of the question. `goalR` is the
-    // order's own statement of how close counts as arrived — a base centre sits inside its keep, so
-    // the route is asked for "within 12u of it", and A* stops the moment it satisfies that. A route
-    // that stopped inside goalR did exactly what it was told; convicting it of falling short of the
-    // centre is convicting it of obeying. This was the real cost of the goal-radius work: a base
-    // approach with goalR 12 against a 9u tolerance is an automatic violation every single time,
-    // which is where 1,173 of these came from in 40 matches, and it is what let the recovery cap
-    // walk: the cap moves the goal to the route's end, the next route to THAT point also stops
-    // short of it, and the pair marched a Lurcher's destination across the map 10u at a time.
-    // …PLUS A CELL, because A* settles CELLS, not points. Asked to finish within 14u of a base
-    // centre on a 5u grid, the search stops at the first cell whose centre satisfies that and the
-    // route's last point comes out at 15u — one unit past its own requirement, and convicted for
-    // it. That single unit is the whole of seed 641: the conviction capped the destination at the
-    // route's end, `slack` then declared the unit arrived 9u short of THAT, and a Firebrat sat at
-    // 23u from a base that heals at 16u, on 33% hull, for three minutes. Its own flood fill could
-    // reach within 4u of the door the entire time.
-    const cell = (this.hooks.cell && this.hooks.cell()) || 5;
-    if (short > Math.max(UNREACH_SLACK, o.arrive || 0, (o.goalR || 0) + cell)) {
-      o.violated = true; this.violations++; Driver.violationsTotal++;
-      Driver.violationsBy[o.by || '?'] = (Driver.violationsBy[o.by || '?'] || 0) + 1;   // WHO orders the impossible (Slice-2 targeting data)
-      // WAS THIS CONVICTION EARNED? budgetHit false normally means the search emptied its open
-      // set — real proof. But main.js force-clears the flag after NAV_PARTIAL_TRIES to force a
-      // verdict, and a route wearing that badge proves nothing at all. Counted separately so the
-      // difference is a number instead of an argument.
-      if (path.budgetForced) { Driver.violationsForced = (Driver.violationsForced || 0) + 1;
-        Driver.violationsForcedBy = Driver.violationsForcedBy || {};
-        Driver.violationsForcedBy[o.by || '?'] = (Driver.violationsForcedBy[o.by || '?'] || 0) + 1; }
-      this.hooks.log(this.team, `[NAV CONTRACT] ${this.cname}: ${this.v.type} ordered to unreachable `
-        + `(${Math.round(dest.x)},${Math.round(dest.z)}) by ${o.by || '?'} — route ends ${Math.round(short)}u short. `
-        + `Walking the partial route; the ORDER is the bug.`);
-    }
+    const short = Math.hypot(end.x - planned.x, end.z - planned.z);
+    if (short <= Math.max(UNREACH_SLACK, o.arrive || 0)) return;
+    o.violated = true; this.violations++; Driver.violationsTotal++;
+    Driver.violationsBy[o.by || '?'] = (Driver.violationsBy[o.by || '?'] || 0) + 1;   // WHO orders the impossible (Slice-2 targeting data)
+    if (path.budgetForced) { Driver.violationsForced = (Driver.violationsForced || 0) + 1;
+      Driver.violationsForcedBy = Driver.violationsForcedBy || {};
+      Driver.violationsForcedBy[o.by || '?'] = (Driver.violationsForcedBy[o.by || '?'] || 0) + 1; }
+    this.hooks.log(this.team, `[NAV CONTRACT] ${this.cname}: ${this.v.type} ordered to unreachable `
+      + `(${Math.round(dest.x)},${Math.round(dest.z)}) by ${o.by || '?'} — route ends ${Math.round(short)}u short. `
+      + `Walking the partial route; the ORDER is the bug.`);
   }
 
   // Observe the tick that actually drove the vehicle — whatever produced the pedals
