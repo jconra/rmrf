@@ -349,6 +349,40 @@ function resolveTarget(key, view, mem) {
   }
 }
 
+// THE BLOCKED-LINE RESPONSE — one mechanism for the duel and the siege, because it is one
+// question: the round we are about to fire will not arrive, so what now?
+//
+// There were two answers in here and they disagreed. The duel sidestepped on a coin flip and kept
+// firing, because feedback from live rounds was the only way it could discover whether the guess
+// was right. The siege crept straight at the target with its gun cold, which only ever works when
+// the bank can be crested. Neither could tell a hill from a fence.
+//
+// With the terrain test the spot can just be solved for (Jacob, 2026-09-12: "I like the idea of
+// finding a good position rather then creeping forward or choosing a random position"), and the
+// blocker can be identified rather than guessed at:
+//
+//   solid / tree — a wall, a depot, a trunk. All destructible, all with hp, all of them killed by
+//                  the very round we were about to hold back. Shoot it; that is how a hole is made.
+//   ground       — the only blocker that gives nothing back. Hold fire and go somewhere else.
+//
+// The move commits for a beat rather than re-solving every tick: the duel version learned that the
+// hard way (two jotuns random-walked the same crest for 300 seconds) and answered it with a held
+// hop escalating to a committed leg. A solved destination needs the same patience for the same
+// reason — a spot abandoned mid-approach is a spot never reached.
+const UNBLOCK_HOLD = 2.5;   // s to commit to a chosen spot before solving again
+function blockedLine(ctx, aimPt) {
+  const { view, mem, self } = ctx;
+  if (!aimPt || !view.shotHits) return null;
+  if (view.shotHits(aimPt.x, aimPt.z, aimPt.y) !== 'ground') { mem._unblockTo = null; return null; }
+  let to = mem._unblockTo;
+  const reached = to && Math.hypot(to.x - self.x, to.z - self.z) < 3;
+  if (!to || reached || (mem.t - (mem._unblockToT ?? -99)) > UNBLOCK_HOLD) {
+    to = view.unblockSpot ? view.unblockSpot(aimPt.x, aimPt.z, aimPt.y) : null;
+    mem._unblockTo = to; mem._unblockToT = mem.t;
+  }
+  return to ? { to } : null;
+}
+
 // Per-duel FOOTWORK, the ai_behavior matchup table distilled into three intents:
 //   strafe — lateral orbit intensity 0..1 to stay out of the enemy's kill arc (facing the
 //            enemy + strafing = orbiting toward its flank/rear).
@@ -456,6 +490,35 @@ const BEHAVIORS = {
       // is shootable yet, so most approaches never actually reach the tight hold at all.
       if (atStand || barred || demolish || canBear) {
         const turn = clamp((demolish ? demoErr : err) * 2.2, -1, 1);   // square onto the wall (demolish) or tower
+        // SHOOTING INTO THE HILL — creep up the bank instead of planting, and hold fire until the
+        // round can actually get there (Jacob, 2026-09-12: "the lurcher was on the shore and if it
+        // moved forward just a tiny bit it would have gone up enough for the shots to hit").
+        //
+        // canBear is true here on `threatLOS`, and LOS is a wall test — `obstacles` holds wall
+        // pieces and HQ centres and NO terrain, so it reports a clean lane straight through a
+        // hillside. That is how seed 1607 plants a Lurcher 39.8u from a 13.3hp keep, inside its
+        // reach and correctly aimed, and feeds it magazine after magazine into an embankment for
+        // NINE HUNDRED SECONDS. Every round logged from that spot died `grnd:true`, ~10u out.
+        //
+        // shotClears fills the gap LOS leaves: the rounds fly dead straight (constant velocity, no
+        // gravity) and pitch is taken as-is rather than clamped, so the shot IS the segment from
+        // muzzle to aim point and walking the ground beneath it answers exactly. Verified against
+        // that spot — blocked where it stood, clear 10u further in, which is the "tiny bit".
+        //
+        // Closing, not sidestepping: a bank runs on, so stepping aside re-blocks a few metres
+        // along, while every metre forward flattens the angle over the lip. Same 0.4 ease this
+        // block already uses to close range, so it is a walk rather than a charge, and floored so
+        // a unit never creeps its nose into the thing it is shelling.
+        const aimPt = demolish ? view.demolishTarget : view.threat;
+        const blk = SIEGE_CREEP_ON ? blockedLine(ctx, aimPt) : null;
+        if (blk) {
+          // The ground is eating the rounds. Go to the solved spot with the gun cold rather than
+          // feed a magazine into a bank and then spend a whole trip rearming for the privilege.
+          const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+            { goto: blk.to, face: aimPt, arrive: 2 });
+          mem._wantMove = true;
+          return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode };
+        }
         const fwd = dist > want ? 0.4 : 0;                 // ease into range, then plant
         mem._wantMove = fwd > 0.3;
         return { fwd, turn, fire, state: mode };
@@ -577,6 +640,19 @@ const BEHAVIORS = {
       // jotuns random-walked the same crest for 300s, burning full magazines with zero damage
       // (richwatch seed 25). After a few failed hops, COMMIT: hold one direction for a long
       // leg (~5s) so the firing line genuinely moves off the blocking feature.
+      // SOLVED FIRST. When the terrain test can name the blocker and a spot that fixes it, take
+      // that — it knows a fence from a hill, so it never pulls a unit off a shot that would have
+      // smashed through a wall, and it never spends a magazine proving the coin flip wrong. The
+      // hop below stays as the backstop for what the predictor cannot see (a rival hull parked in
+      // the lane, cover that moved), which is exactly the case live feedback is still the only
+      // witness to.
+      const blkDuel = SIEGE_CREEP_ON ? blockedLine(ctx, view.enemy) : null;
+      if (blkDuel) {
+        const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+          { goto: blkDuel.to, face: view.enemy, arrive: 2 });
+        mem._wantMove = true;
+        return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode };
+      }
       if (view.shotBlocked) {
         mem._blockSeenT = mem.t;
         if (mem._unblockT == null || (mem.t - mem._unblockT) > (mem._unblockLong ? 5 : 1.5)) {
@@ -719,6 +795,16 @@ const BEHAVIORS = {
     const { view, mem, p, err, dist, mode, self, target } = ctx;
     const aimGate = 0.18 + p.aggression * 0.12;
     const want = view.engageRange || 36;
+    // Shelling the objective runs the same blocked-line rule as the duel and the suppress plant —
+    // see blockedLine. Three copies of "my shot is buried, now what" is how they drifted apart in
+    // the first place.
+    const blkA = SIEGE_CREEP_ON ? blockedLine(ctx, target) : null;
+    if (blkA) {
+      const loU = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+        { goto: blkA.to, face: target, arrive: 2 });
+      mem._wantMove = true;
+      return { fwd: loU.fwd, turn: loU.turn, strafe: loU.strafe || 0, fire: false, state: mode };
+    }
     const standoff = want * 0.7;
     const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
       { goto: target ? { x: target.x, z: target.z } : null, face: target, arrive: standoff });
@@ -972,6 +1058,19 @@ export function recActive() { return REC_ON; }
 // the default brain reads the new value next tick. getBrainConfig() with no key returns
 // a copy of the whole config so the harness can snapshot/restore it.
 export function setBrainConfig(k, v) { if (k in DEFAULT_BRAIN.config) DEFAULT_BRAIN.config[k] = v; return DEFAULT_BRAIN.config[k]; }
+// CREEPING ONTO A FIRING LINE (see assault). In map units, not a fraction of the standoff: the
+// thing being cleared is a bank of a certain height, and that is a distance — the same lip costs a
+// Jotun and a Lurcher the same metres even though their standoffs differ.
+//
+// CREEP is how much nearer than "here" the unit asks to be on a blocked tick. Small on purpose —
+// Jacob watched the case and the Lurcher needed "just a tiny bit" — and because the test re-runs
+// every tick, a small number is a smooth walk up the bank that halts on the exact metre the ground
+// drops away, where a big one overshoots past cover it did not need to give up. FLOOR is the line
+// it will not cross whatever the terrain says, so a siege cannot end up under its own target.
+// A/B: off → every blocked-line response falls back to what shipped (the duel's coin-flip hop;
+// siege plants and fires into whatever is in front of it).
+let SIEGE_CREEP_ON = true;
+export function setSiegeCreep(on) { SIEGE_CREEP_ON = !!on; return SIEGE_CREEP_ON; }
 let AI_JOUST = true;   // the Valkyrie's jousting attack runs (off → legacy hover-strafe duel; A/B knob)
 let AI_ALIGN = true;   // plain duel footwork issued as an ALIGN order instead of steering itself (A/B knob)
 export function setAlign(on) { AI_ALIGN = !!on; return AI_ALIGN; }

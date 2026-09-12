@@ -2316,6 +2316,16 @@ export function missionScore(cmd, key, running = null) {
   // to build one. Then siege is not a plan, it is a way to spend the clock — and pricing it out
   // lets `scavenge` win instead, which is the move that actually ends that match.
   // Same shape and the same -14 as `nothing can carry the flag` above.
+  //
+  // 2026-09-12: THE STATED REASON HERE IS WRONG and the term still measured better than removing
+  // it. Destructible.damage() subtracts flat — no armour, no threshold — and a Firebrat's 127
+  // damage/second is the HIGHEST of the four hulls, so "cannot hurt a tower" is false; it is slow,
+  // not futile. But inverting the test (penalise only while a heavy is gettable, per Jacob's
+  // reading) came back -4/-1/-2 resolved across three disjoint 240-seed sets and produced FOUR
+  // `no-runner deadlock` matches against zero. The protection this accidentally provides is real
+  // even though its justification is not: capture is the only win condition, so a runner absorbed
+  // into demolition work is a team with no way to finish. Rework pending as SCARCITY rather than
+  // capability — free to siege while spare runners exist, priced out only as the last one.
   if (base === 'siege') {
     const fb = cmd.unit;
     if (fb && !fb.dead && fb.type === 'firebrat') {

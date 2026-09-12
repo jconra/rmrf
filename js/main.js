@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove } from './AI.js?v=121';
+import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=121';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver, UNREACH_SLACK } from './Driver.js?v=1';
 import { installFlagMenu } from './FlagMenu.js?v=1';
@@ -1940,6 +1940,12 @@ function fireVehicle(veh, playSound, targetPoint = null, targetVeh = null, aimed
     if (!muzzle) return;
     veh.group.updateMatrixWorld(true);
     const mpos = muzzle.getWorldPosition(_muzzleWorld);
+    // HOW HIGH THIS GUN SITS above the ground it is standing on. Recorded here because this is the
+    // one place the real muzzle position is already solved — walking the model tree for a node
+    // called "muzzle" guesses, and firing just to find out is absurd. Feeds shotWouldClear(), which
+    // needs a muzzle height BEFORE the trigger. Refreshed every round, so it tracks a turret that
+    // has pitched or a hull sitting on a slope.
+    veh._muzzleH = mpos.y - map.heightAt(mpos.x, mpos.z);
     // Remote/AI shot → a positioned report so you HEAR enemies fire (player matches +
     // AI-vs-AI observation). The player's own gun already sounded via fireGun() above.
     if (!playSound && sound && sound.spatialReady) {
@@ -2514,13 +2520,26 @@ function updateProjectileHits() {
         }
       }
       const tagged = explodeAt(pos, p.blast, p.dmg, p.team, p.shooter);
-      // SHOT FEEDBACK: for a round AIMED at an enemy vehicle, tell a clean hit (it tagged
-      // someone, direct or splash) from one that detonated on terrain/cover short of the
-      // target. A run of blocked shots flags the shooter so its combat brain can sidestep
-      // to open a clear lane (the "two units shoot the hill between them forever" stalemate).
+      // SHOT FEEDBACK: tell a round that did its job from one that detonated on the terrain
+      // short of the target. A run of the latter flags the shooter, and the brain acts on it.
+      //
+      // THIS USED TO WATCH ONLY ROUNDS AIMED AT VEHICLES, which left the detector blind to the
+      // case it matters most for. Seed 1607: a Lurcher parked 39.8u from a 13.3hp HQ — inside
+      // its 42u reach, correctly targeted — emptied magazine after magazine for NINE HUNDRED
+      // SECONDS while standing in a hollow, every round burying itself in the embankment 28u
+      // short. The one mechanism that would have moved it was switched off for the entire class
+      // of target it was firing at.
+      //
+      // `tagged` alone cannot be the success test once structures count: it only reports hitting
+      // an enemy VEHICLE, so a perfect strike on the keep would read as a miss and a sieging unit
+      // would flag itself blocked while demolishing the thing it came for. So the question is
+      // "did this round do what it was aimed at" — a shot at a vehicle still has to TAG one; a
+      // shot at a structure has to actually STRIKE one. A wall we did not aim at still counts:
+      // that is progress, and breaching owns it. Only terrain and trees mean a blocked lane.
       const sh = p.shooter;
-      if (p.atVehicle && sh && !sh.dead) {
-        if (tagged) { sh._blockedShots = 0; }
+      if (sh && !sh.dead) {
+        const landed = p.atVehicle ? tagged : (!!hitSolid || tagged);
+        if (landed) { sh._blockedShots = 0; }
         else { sh._blockedShots = (sh._blockedShots || 0) + 1; sh._lastBlockT = performance.now(); }
       }
       projectiles.scene.remove(p.obj); p.dispose(); projectiles.items.splice(i, 1);
@@ -10692,6 +10711,16 @@ class AICommander {
       // `shotBlocked` recovery only fires AFTER rounds have already been wasted on terrain.
       // Cheap: losBlocker walks the segment in 4u steps against wall pieces only.
       losFrom: (fx, fz, tx, tz) => hasLOS(fx, fz, tx, tz),
+      // Would a round fired at (tx,tz) clear the ground, from where we are standing right now?
+      // Lets the brain ASK before pulling the trigger instead of learning from wasted magazines.
+      shotClears: (tx, tz, ty) => shotWouldClear(v, tx, tz, ty),
+      // WHAT the round would hit first — 'clear' | 'solid' | 'tree' | 'ground'. Everything but
+      // 'ground' is destructible and worth shooting; 'ground' is the only one that gives nothing.
+      shotHits: (tx, tz, ty) => shotHitsFirst(v.holder.position.x, v.holder.position.z,
+        muzzleHeightOf(v), tx, tz, ty),
+      // Where to stand instead, when the ground is in the way: nearest spot with a clear line,
+      // else the highest ground nearby. Null when we are already fine.
+      unblockSpot: (tx, tz, ty) => bestUnblockSpot(v, tx, tz, ty),
 
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
       // the enemy → the firing lane is blocked; the combat brain sidesteps to clear it.
@@ -11513,6 +11542,116 @@ function losBlocker(ax, az, bx, bz, skipTeam) {
 // Line of sight: blocked if any wall obstacle straddles the segment a→b. Own walls block the
 // eye exactly as they always did — only the demolish pick skips them.
 function hasLOS(ax, az, bx, bz) { return !losBlocker(ax, az, bx, bz); }
+
+// WILL THIS ROUND CLEAR THE GROUND? losBlocker answers the same question about walls and knows
+// nothing about terrain — `obstacles` is built from wall pieces and HQ centres, so hasLOS reports
+// a clear lane straight through a hillside. That blind spot cost seed 1607 nine hundred seconds:
+// a Lurcher in a hollow, correctly aimed at a 13.3hp keep inside its reach, burying every round in
+// the embankment 28u short and never learning.
+//
+// This is EXACT rather than an estimate, because the rounds that matter fly dead straight —
+// Projectiles.js advances them at constant velocity with no gravity — and the gun pitches onto the
+// target (aimFireDir). So the shot IS the segment muzzle→aim point, and the only question is
+// whether the ground rises through it. Tested against the same `+0.2` band updateProjectileHits
+// uses for hitGround, so a pass here means the round genuinely survives the trip.
+//
+// Sampled every ~3u: finer than the 4u losBlocker walk, because a lip only has to poke through for
+// one step to eat the shot. Cost is a handful of heightAt calls on a unit that is about to fire.
+// WHAT WOULD THIS ROUND HIT FIRST — 'clear', 'ground', 'solid' or 'tree'.
+//
+// "Blocked" is not one fact, and treating it as one is what made the first version of this a
+// regression (Jacob, 2026-09-12: "does that get blocked by other objects (tree, wall, other
+// assets)? If it gets blocked by something that is destructible then go ahead and start shooting.
+// If it gets blocked by terrain, then... get out of the hole"). A wall, a tree, a depot — every
+// one of those is destructible, has hp, and dies to exactly the round we were about to hold back.
+// Firing at them is not waste, it is how a hole gets made. Only the ground gives nothing back.
+//
+// Mirrors updateProjectileHits' own tests — the same destructibles.queryHit, the same
+// foliage.treeAt, the same `heightAt + 0.2` ground band — walked along the ray in order, so the
+// prediction cannot disagree with what actually becomes of the round. Both are 2D in the same
+// way, too: queryHit ignores height, so a wall stops a round at any altitude here exactly as it
+// does in flight.
+function shotHitsFirst(px, pz, muzzleH, tx, tz, ty) {
+  const len = Math.hypot(tx - px, tz - pz);
+  if (len < 2) return 'clear';
+  const my = map.heightAt(px, pz) + muzzleH;
+  const aimY = ty != null ? ty : map.heightAt(tx, tz) + 3;
+  const steps = Math.ceil(len / 2);
+  for (let s = 1; s < steps; s++) {
+    const t = s / steps;
+    const x = px + (tx - px) * t, z = pz + (tz - pz) * t, y = my + (aimY - my) * t;
+    if (destructibles.queryHit({ x, y, z }, 0.3)) return 'solid';
+    if (foliage && foliage.treeAt(x, z, 0.3)) return 'tree';
+    if (y <= map.heightAt(x, z) + 0.2) return 'ground';
+  }
+  return 'clear';
+}
+// GET OUT OF THE HOLE — the nearest spot around us the shot clears from, else the highest ground
+// on offer. Jacob's rule, and it beats both of the things it replaces: creeping straight at the
+// target only works when the bank can be crested, and the duel's coin-flip sidestep has to burn
+// live rounds to discover whether it guessed right. Here the terrain is static and the test is
+// exact, so the spot can simply be solved for.
+//
+// Elevation is the fallback rather than the goal: a spot that clears is what we actually want, and
+// when nothing within reach clears, higher ground is the move that most reliably turns a blocked
+// line into an open one next tick. Ring of 8 headings x 3 radii = 24 heightAt-cheap probes, run
+// only for a unit that has just been told its shot is buried.
+const UNBLOCK_RADII = [6, 12, 20];
+function bestUnblockSpot(v, tx, tz, ty) {
+  if (!v || !v.holder) return null;
+  const px = v.holder.position.x, pz = v.holder.position.z;
+  const mh = muzzleHeightOf(v);
+  let best = null, bestD = Infinity, high = null, highY = map.heightAt(px, pz);
+  for (const r of UNBLOCK_RADII) {
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const x = px + Math.cos(a) * r, z = pz + Math.sin(a) * r;
+      if (!map.isLand(x, z)) continue;                       // never solve a firing line into the sea
+      const h = map.heightAt(x, z);
+      if (h > highY) { highY = h; high = { x, z }; }
+      if (shotHitsFirst(x, z, mh, tx, tz, ty) !== 'ground' && r < bestD) { bestD = r; best = { x, z }; }
+    }
+    if (best) break;                                          // nearest ring that works wins
+  }
+  return best || high;
+}
+// Coordinate form, so the rule can be checked against a known-failing spot without needing a
+// vehicle parked on it — terrain is static, so any tick can answer for any position.
+function shotClearsAt(px, pz, muzzleH, tx, tz, ty) {
+  const len = Math.hypot(tx - px, tz - pz);
+  if (len < 2) return true;
+  const my = map.heightAt(px, pz) + muzzleH;
+  const aimY = ty != null ? ty : map.heightAt(tx, tz) + 3;
+  const steps = Math.ceil(len / 3);
+  for (let s = 1; s < steps; s++) {
+    const t = s / steps;
+    const x = px + (tx - px) * t, z = pz + (tz - pz) * t;
+    if (my + (aimY - my) * t <= map.heightAt(x, z) + 0.2) return false;
+  }
+  return true;
+}
+// How high this hull's gun sits above the ground under it, WITHOUT firing to find out.
+//
+// The obvious source is the height recorded on the last shot, and it is a trap: this test decides
+// whether to fire, so a unit that has not fired yet has no measurement, and if the fallback guess
+// is too low it holds fire, never fires, and never measures. That deadlock is not hypothetical —
+// it is what a first pass here did, and both keeps in seed 1607 survived a whole match untouched.
+// So read the muzzle node straight off the model, which every hull keeps in `_muzzles` and which
+// is true before the first round. The recorded value is only a fallback for a model without one.
+const _muzzleProbe = new THREE.Vector3();
+function muzzleHeightOf(v) {
+  const m = v.model && v.model._muzzles && v.model._muzzles[0];
+  if (m) {
+    v.group.updateMatrixWorld(true);
+    const w = m.getWorldPosition(_muzzleProbe);
+    return w.y - map.heightAt(w.x, w.z);
+  }
+  return v._muzzleH != null ? v._muzzleH : 2;
+}
+function shotWouldClear(v, tx, tz, ty) {
+  if (!v || !v.holder) return true;
+  return shotClearsAt(v.holder.position.x, v.holder.position.z, muzzleHeightOf(v), tx, tz, ty);
+}
 
 // --- Collision ---------------------------------------------------------
 // Solid wall pieces the player can't drive through (gates excluded — drive-through).
@@ -13547,6 +13686,7 @@ window.RR = {
   missionScores: () => commanders.map(c => ({ team: c.team, arch: c.archetype, step: c.strategy && c.strategy.step, scores: c._missionScores || [] })),   // live weight breakdown per team
   setJoust: on => setJoust(on),                                         // Valkyrie jousting runs vs legacy hover-duel (A/B knob)
   setAlign: on => setAlign(on),                                         // duel footwork as an ALIGN order vs steering itself (A/B knob)
+  setSiegeCreep: on => setSiegeCreep(on),                               // siege creeps up a bank instead of shelling it (A/B knob)
   reseed: n => { if (_rngReseed) { _rngReseed(n); return true; } return false; },   // re-pin the ?rngseed stream at drive-start (kills load-order ghosts)
   setSightCone: on => { sightCone = !!on; return sightCone; },          // forward vision cone on/off (stealth A/B tournament)
   getSightCone: () => sightCone,
@@ -13643,6 +13783,8 @@ window.RR = {
   // watcher can ask the game which one refused rather than inferring it (seed 6493539 t=117s: two
   // Jotuns 37u apart, both aimed within 12deg, effective range 71u, and neither could see).
   losBlocked: (ax, az, bx, bz) => { const o = losBlocker(ax, az, bx, bz); return o ? { x: o.x, z: o.z, r: o.r, team: o.team } : null; },
+  shotClearsAt: (px, pz, mh, tx, tz, ty) => shotClearsAt(px, pz, mh, tx, tz, ty),   // debug: would a round from here clear the ground?
+  shotHitsAt: (px, pz, mh, tx, tz, ty) => shotHitsFirst(px, pz, mh, tx, tz, ty),     // debug: what would it hit first — clear/solid/tree/ground
   vehHidden: (v) => !!vehicleHidden(v),
   obstacleCount: () => obstacles.length,
   aiEvents: () => aiArchive,                                   // full structured decision-event archive (headless analysis)
