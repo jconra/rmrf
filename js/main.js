@@ -40,7 +40,7 @@ import { installFlagMenu } from './FlagMenu.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -8434,6 +8434,30 @@ class AICommander {
         && !(this.roster.jotun || 0) && !(this.roster.valkyrie || 0) && !(this.roster.lurcher || 0)) {
       for (const heavy of ['jotun', 'valkyrie', 'lurcher']) { if (this.buildUnit(heavy)) { type = heavy; break; } }
     }
+    // NO RUNNER LEFT, AND THE BANK COVERS ONE (Jacob, 2026-09-12: "if a FB dies, and there are no
+    // more, can we buy one, and if so then buy it"). Carrying a flag home is the only way to win and
+    // the Firebrat is the only hull that can carry, so a team holding 2 scrap is one purchase away
+    // from still being in the match.
+    //
+    // The clause above already asks this, but only `while the team is otherwise still alive`
+    // (type !== null) — which excludes the case where it decides the match. That exclusion froze
+    // seven of the eight stalemates across 480 matches: both sides latched out holding 3 to 6 scrap
+    // against a 2-scrap runner, with a one-way flag between them and a finish.
+    //
+    // The old objection, that a team which keeps resurrecting can never be beaten, does not hold:
+    // wiping the enemy fleet has never won a match here, only carrying a flag does. And it is
+    // self-limiting — each rebuild spends real scrap from a finite bank, and a team with nothing
+    // fielded cannot collect more.
+    //
+    // FIRST ATTEMPT AT THIS COST MATCHES, and not for the reason it looks like. Paired with an
+    // inverted Firebrat-siege veto it produced four `no-runner deadlock` matches against zero: the
+    // bank became runners, the runners were sent to grind the keep, and the team reached an open
+    // base with nothing able to carry. The buy is sound; sending what it buys to do demolition was
+    // not. The siege term now fades with runner SCARCITY, which is what makes this safe.
+    if (!type && aiScrapBuild && (this.roster.firebrat || 0) === 0 && this.buildUnit('firebrat')) {
+      type = 'firebrat';
+      aiLog(this.team, `${this.cname}: Down to the last of the scrap — get a runner built, we're still in this!`);
+    }
     if (!type) {                               // roster empty AND can't afford a rebuild — out of the fight
       this.unit = null;
       if (!this._eliminated) { this._eliminated = true; aiLog(this.team, `${this.cname}: We're combat ineffective — no vehicles left! We're out!`); }
@@ -13421,6 +13445,7 @@ window.RR = {
   setRunnerNoDuel: on => setRunnerNoDuel(on),   // A/B: a Firebrat on capture runs or flees, never duels
   setGrabW: (w, sec) => setGrabW(w, sec),   // A/B: what a free salvage pickup is worth, and the extra travel that kills it
   setAmmoVeto: (on, w) => setAmmoVeto(on, w),   // A/B: the empty-magazine veto on missions that need a gun
+  setFbSiege: (w) => setFbSiege(w),             // A/B: how hard a SCARCE runner is steered off siege (0 = never)
   setTowerFlee: (w, pw, from, ms) => setTowerFlee(w, pw, from, ms),   // A/B: break off when a tower is grinding us down
   setAmbush: on => setAmbush(on),   // A/B: close with guns cold on a rival whose back is turned
   setFightW: (r, h) => setFightW(r, h),   // A/B: what a rival IN REACH adds, and what being SHOT by one adds

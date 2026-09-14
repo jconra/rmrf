@@ -601,6 +601,11 @@ export function setAmmoVeto(on, w) {
   if (w != null) AMMO_VETO_W = +w;
   return { on: AMMO_VETO, w: AMMO_VETO_W };
 }
+// How hard a scarce runner is steered off siege. Held at the 14 the old veto used so the cases it
+// was tuned against behave the same at full scarcity; what changed is that it now FADES as spare
+// runners appear. 0 lets a Firebrat siege freely however few are left.
+let FB_SIEGE_W = 14;
+export function setFbSiege(w) { if (w != null) FB_SIEGE_W = +w; return FB_SIEGE_W; }
 let GRAB_W = 13;   // provisional: 13 and 17 measured indistinguishable on scrap banked across 3 disjoint 60-seed sets, and 5 was low enough that the mission never fired at all. A finer sweep is in flight.
 let GRAB_DETOUR_S = 2.5;   // seconds of EXTRA travel at which the bend stops being opportunistic
 export function setGrabW(w, sec) {
@@ -2317,20 +2322,47 @@ export function missionScore(cmd, key, running = null) {
   // lets `scavenge` win instead, which is the move that actually ends that match.
   // Same shape and the same -14 as `nothing can carry the flag` above.
   //
-  // 2026-09-12: THE STATED REASON HERE IS WRONG and the term still measured better than removing
-  // it. Destructible.damage() subtracts flat — no armour, no threshold — and a Firebrat's 127
-  // damage/second is the HIGHEST of the four hulls, so "cannot hurt a tower" is false; it is slow,
-  // not futile. But inverting the test (penalise only while a heavy is gettable, per Jacob's
-  // reading) came back -4/-1/-2 resolved across three disjoint 240-seed sets and produced FOUR
-  // `no-runner deadlock` matches against zero. The protection this accidentally provides is real
-  // even though its justification is not: capture is the only win condition, so a runner absorbed
-  // into demolition work is a team with no way to finish. Rework pending as SCARCITY rather than
-  // capability — free to siege while spare runners exist, priced out only as the last one.
+  // REWRITTEN 2026-09-12 — THE AXIS IS SCARCITY, NOT CAPABILITY.
+  //
+  // The old reason above is false. Destructible.damage() subtracts flat, with no armour and no
+  // threshold anywhere, and a Firebrat's 127 damage per second is the HIGHEST of the four hulls
+  // (Jotun 106, Lurcher 109, Valkyrie 86). One magazine carries 1,260 damage — a 600hp keep in
+  // under five seconds of fire. It is slow to bring, not unable: reach 40 against a turret's ~54 on
+  // a 90hp hull means it is outranged walking down a GUN, while a keep does not shoot back at all.
+  // Jacob: "It is possible to destroy things with FB.. it just takes longer", and "the Firebrat can
+  // flee and heal and come back to finish the job", which is the hull's own rhythm.
+  //
+  // So capability is the wrong test — and removing the term on that basis was measured and cost
+  // real matches: -4/-1/-2 resolved across three disjoint 240-seed sets, with FOUR `no-runner
+  // deadlock` matches against zero. That alarm says exactly what went wrong: their base OPEN, our
+  // runners at zero, nothing affordable, no scrap left. The runners were spent breaking the door
+  // they were the only thing able to walk through.
+  //
+  // What the term was accidentally protecting is the WIN CONDITION. Capture is the only way to end
+  // a match and the Firebrat is the only hull that can carry, so the question is not "can this hull
+  // break things" but "can we afford to lose it doing so". That scales with how many we have, which
+  // makes it gradual per the house rule instead of a flat veto:
+  //
+  //   3+ runners   free to siege — it is a fine sieger and there are spares
+  //   2 runners    half weight
+  //   the last one  full weight: it is the match, not a demolition tool
+  //
+  // Even then it only bites when there is somewhere better for the job to go — a heavy in the rack
+  // or affordable, or scrap on the ground to buy one with. With no heavy, no scrap and the last
+  // runner, grinding it down IS the plan, and the no-runner alarm's own definition of hopeless
+  // agrees with that reading.
   if (base === 'siege') {
     const fb = cmd.unit;
     if (fb && !fb.dead && fb.type === 'firebrat') {
-      const canGetOne = ['lurcher', 'jotun', 'valkyrie'].some(t => (roster[t] || 0) > 0 || cmd.canAfford(t));
-      if (!canGetOne) add('nothing here can hurt a tower', -14);
+      const runners = (roster.firebrat || 0) + 1;            // the rack, plus the one we are driving
+      const scarce = Math.max(0, (3 - runners) / 2);          // 1 on the last, 0 once there are spares
+      if (scarce > 0) {
+        const haveHeavy = ['lurcher', 'jotun', 'valkyrie'].some(t => (roster[t] || 0) > 0 || cmd.canAfford(t));
+        const fp = fb.holder ? fb.holder.position : null;
+        const scrapOut = !!(fp && cmd.nearestKnownScrap && cmd.nearestKnownScrap(fp.x, fp.z));
+        if (haveHeavy) add('a heavy should break this, not our last runner', -FB_SIEGE_W * scarce);
+        else if (scrapOut) add('salvage first, then bring a heavy', -FB_SIEGE_W * scarce);
+      }
     }
   }
   if (AMMO_VETO && NEEDS_AMMO.has(base)) {
