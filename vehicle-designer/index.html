@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VEHICLE DESIGNER</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0a1520;
+      font-family: 'Courier New', Courier, monospace;
+      color: #aaccdd;
+    }
+
+    #top-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      background: rgba(5, 12, 20, 0.92);
+      border-bottom: 1px solid #0e2030;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      z-index: 100;
+    }
+
+    #title {
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 0.25em;
+      color: #00eeff;
+      text-shadow: 0 0 8px rgba(0, 238, 255, 0.5);
+    }
+
+    #tabs {
+      display: flex;
+      gap: 6px;
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: 1px solid #1a3040;
+      color: #4a6a7a;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      padding: 6px 12px;
+      cursor: pointer;
+      transition: none;
+      outline: none;
+    }
+
+    .tab-btn.active {
+      border-color: #00eeff;
+      color: #00eeff;
+      text-shadow: 0 0 6px rgba(0, 238, 255, 0.6);
+      background: rgba(0, 238, 255, 0.05);
+    }
+
+    #sound-toggle {
+      position: fixed;
+      top: 60px;
+      left: 20px;
+      background: rgba(5, 12, 20, 0.88);
+      border: 1px solid #1a3040;
+      color: #4a6a7a;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      padding: 6px 12px;
+      cursor: pointer;
+      outline: none;
+      z-index: 100;
+    }
+
+    #sound-toggle.active {
+      border-color: #00eeff;
+      color: #00eeff;
+      text-shadow: 0 0 6px rgba(0, 238, 255, 0.6);
+      background: rgba(0, 238, 255, 0.05);
+    }
+
+    #canvas-container {
+      position: fixed;
+      top: 48px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+    }
+
+    #canvas-container canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    #hud {
+      position: fixed;
+      bottom: 24px;
+      left: 20px;
+      background: rgba(5, 12, 20, 0.82);
+      border: 1px solid #0e2030;
+      padding: 14px 18px;
+      min-width: 240px;
+      z-index: 100;
+    }
+
+    #hud-name {
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 0.2em;
+      color: #00eeff;
+      margin-bottom: 12px;
+      text-shadow: 0 0 6px rgba(0, 238, 255, 0.4);
+    }
+
+    .stat-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 7px;
+      gap: 10px;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      color: #5a7a8a;
+      width: 72px;
+      flex-shrink: 0;
+    }
+
+    .stat-bar {
+      font-size: 13px;
+      letter-spacing: 0.05em;
+      color: #00eeff;
+    }
+
+    #hud-role {
+      font-size: 10px;
+      color: #4a7a8a;
+      letter-spacing: 0.08em;
+      margin-top: 10px;
+      line-height: 1.5;
+      border-top: 1px solid #0e2030;
+      padding-top: 8px;
+    }
+
+    #perf {
+      position: fixed;
+      top: 60px;
+      right: 20px;
+      color: rgba(0, 238, 255, 0.45);
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11px;
+      text-align: right;
+      pointer-events: none;
+      line-height: 1.8;
+      letter-spacing: 1px;
+      z-index: 100;
+    }
+
+    #hint {
+      position: fixed;
+      bottom: 10px;
+      right: 20px;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: #2a4a5a;
+      z-index: 100;
+    }
+
+    #brightness-wrap {
+      position: fixed;
+      bottom: 44px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: #2a5060;
+      z-index: 100;
+    }
+
+    #brightness-slider {
+      width: 90px;
+      accent-color: #00eeff;
+      cursor: pointer;
+    }
+
+    #camo-panel {
+      position: fixed;
+      top: 96px;
+      left: 20px;
+      width: 192px;
+      z-index: 120;
+    }
+
+    #camo-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      background: rgba(5, 12, 20, 0.88);
+      border: 1px solid #1a3040;
+      color: #4a6a7a;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      padding: 6px 12px;
+      cursor: pointer;
+      outline: none;
+    }
+
+    #camo-toggle:hover { border-color: #00eeff; color: #00eeff; }
+
+    #camo-current {
+      width: 12px;
+      height: 12px;
+      border: 1px solid #2a4a5a;
+      flex-shrink: 0;
+    }
+
+    #camo-toggle .caret { margin-left: auto; }
+
+    #camo-body {
+      margin-top: 4px;
+      background: rgba(5, 12, 20, 0.92);
+      border: 1px solid #0e2030;
+      padding: 10px 14px;
+    }
+
+    #camo-panel.collapsed #camo-body { display: none; }
+
+    #team-color-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    .team-color {
+      height: 26px;
+      background: transparent;
+      border: 2px solid transparent;
+      cursor: pointer;
+      outline: none;
+      padding: 0;
+    }
+
+    .team-color.active {
+      border-color: #00eeff;
+      box-shadow: 0 0 6px rgba(0, 238, 255, 0.55);
+    }
+
+    #camo-randomize {
+      display: block;
+      width: 100%;
+      background: transparent;
+      border: 1px solid #1a3040;
+      color: #4a6a7a;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 9px;
+      letter-spacing: 0.15em;
+      padding: 5px;
+      cursor: pointer;
+      outline: none;
+      margin-top: 3px;
+      margin-bottom: 8px;
+    }
+
+    #camo-randomize:hover {
+      border-color: #00eeff;
+      color: #00eeff;
+    }
+
+    #camo-swatches {
+      display: flex;
+      gap: 3px;
+    }
+
+    .camo-swatch {
+      flex: 1;
+      height: 14px;
+      border: 1px solid #0e2030;
+    }
+
+    /* On-screen drive stick — revealed on touch devices (see main.js) */
+    #touch-joystick {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 132px;
+      height: 132px;
+      border-radius: 50%;
+      background: rgba(5, 12, 20, 0.55);
+      border: 1px solid rgba(0, 238, 255, 0.35);
+      box-shadow: 0 0 12px rgba(0, 238, 255, 0.15), inset 0 0 18px rgba(0, 238, 255, 0.08);
+      z-index: 120;
+      display: none;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #touch-joystick.visible { display: block; }
+
+    .tj-label {
+      position: absolute;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 0.1em;
+      color: rgba(0, 238, 255, 0.5);
+      pointer-events: none;
+    }
+    .tj-w { top: 6px;  left: 50%; transform: translateX(-50%); }
+    .tj-s { bottom: 6px; left: 50%; transform: translateX(-50%); }
+    .tj-a { left: 8px;  top: 50%; transform: translateY(-50%); }
+    .tj-d { right: 8px; top: 50%; transform: translateY(-50%); }
+
+    #touch-knob {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 56px;
+      height: 56px;
+      margin: -28px 0 0 -28px;
+      border-radius: 50%;
+      background: rgba(0, 238, 255, 0.18);
+      border: 1px solid rgba(0, 238, 255, 0.7);
+      box-shadow: 0 0 10px rgba(0, 238, 255, 0.5);
+      transition: transform 0.05s linear;
+    }
+  </style>
+</head>
+<body>
+  <div id="top-bar">
+    <div id="title">VEHICLE DESIGNER</div>
+    <div id="tabs">
+      <button class="tab-btn active" data-index="0">LURCHER</button>
+      <button class="tab-btn" data-index="1">FIREBRAT</button>
+      <button class="tab-btn" data-index="2">VALKYRIE</button>
+      <button class="tab-btn" data-index="3">JOTUN</button>
+    </div>
+  </div>
+
+  <div id="canvas-container"></div>
+
+  <div id="hud">
+    <div id="hud-name">LURCHER</div>
+    <div class="stat-row">
+      <span class="stat-label">SPEED</span>
+      <span class="stat-bar" id="stat-speed">▪▪▪▫▫</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">ARMOR</span>
+      <span class="stat-bar" id="stat-armor">▪▪▪▫▫</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">FIREPOWER</span>
+      <span class="stat-bar" id="stat-firepower">▪▪▪▫▫</span>
+    </div>
+    <div id="hud-role">Balanced all-rounder. Effective at any range.</div>
+  </div>
+
+  <div id="perf"></div>
+
+  <button id="sound-toggle">♪ ENGINE: OFF</button>
+
+  <div id="brightness-wrap">
+    <span>BRIGHTNESS</span>
+    <input type="range" id="brightness-slider" min="30" max="220" value="100" />
+  </div>
+
+  <div id="hint">W/A/S/D DRIVE&nbsp;&nbsp;•&nbsp;&nbsp;CLICK/TAP FIRE&nbsp;&nbsp;•&nbsp;&nbsp;DRAG TO ORBIT&nbsp;&nbsp;•&nbsp;&nbsp;SCROLL TO ZOOM</div>
+
+  <div id="touch-joystick" aria-hidden="true">
+    <span class="tj-label tj-w">W</span>
+    <span class="tj-label tj-a">A</span>
+    <span class="tj-label tj-s">S</span>
+    <span class="tj-label tj-d">D</span>
+    <div id="touch-knob"></div>
+  </div>
+
+  <div id="camo-panel" class="collapsed">
+    <button id="camo-toggle">
+      <span id="camo-current"></span>TEAM COLOR<span class="caret">▸</span>
+    </button>
+    <div id="camo-body">
+      <div id="team-color-grid"></div>
+      <button id="camo-randomize">RANDOMIZE PATTERN</button>
+      <div id="camo-swatches"></div>
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+  <script type="module" src="js/main.js?v=18"></script>
+</body>
+</html>

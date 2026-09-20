@@ -1,5 +1,5 @@
 // Vehicles.js — brings the four designer vehicles into the game. The classes
-// were authored in the vehicle-designer app and are vendored here (copied into
+// were authored in the vehicle designer (vehicle-designer/ in this repo) and are vendored here (copied into
 // this js/ folder) so the game is a self-contained, deployable repo. When a
 // model changes in the designer, re-copy it here. They only depend on `three`
 // (resolved via this page's importmap) + CamoTexture.js + GunFX.js, which sit beside them.

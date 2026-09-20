@@ -12584,7 +12584,7 @@ function ensureGameMenu() {
       '<div class="gm-toollbl">EDITORS &amp; LABS</div>' +
       '<a class="gm-tool" href="https://asset-designer.rmrfbase.com" target="_blank" rel="noopener">ASSET DESIGNER &#8599;</a>' +
       '<a class="gm-tool" href="https://map-designer.rmrfbase.com" target="_blank" rel="noopener">MAP DESIGNER &#8599;</a>' +
-      '<a class="gm-tool" href="https://vehicle-designer.rmrfbase.com" target="_blank" rel="noopener">VEHICLE DESIGNER &#8599;</a>' +
+      '<a class="gm-tool" href="vehicle-designer/" target="_blank" rel="noopener">VEHICLE DESIGNER &#8599;</a>' +
       '<a class="gm-tool" href="https://sound-lab.rmrfbase.com" target="_blank" rel="noopener">SOUND LAB &#8599;</a>' +
       '<button data-act="back">&#9666; BACK</button>' +
     '</div>' +
