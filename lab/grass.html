@@ -59,6 +59,7 @@
     <div class="row"><label>Blades / tuft <b id="v_blades"></b></label><input type="range" id="blades" min="2" max="18" step="1"></div>
     <div class="row"><label>Curve segments <b id="v_segs"></b></label><input type="range" id="segs" min="2" max="10" step="1"></div>
     <div class="row"><label>Curve bend <b id="v_bend"></b></label><input type="range" id="bend" min="0" max="0.8" step="0.02"></div>
+    <div class="row"><label>Colour variety <b id="v_vary"></b></label><input type="range" id="vary" min="0" max="1" step="0.02"></div>
     <div class="row"><label>Tuft spread <b id="v_spread"></b></label><input type="range" id="spread" min="0.03" max="0.6" step="0.01"></div>
     <div class="row"><label>Patch size <b id="v_area"></b></label><input type="range" id="area" min="8" max="60" step="1"></div>
     <div class="row"><label>Sink into ground <b id="v_sink"></b></label><input type="range" id="sink" min="0" max="0.3" step="0.01"></div>
@@ -164,10 +165,11 @@ const grassMat = new THREE.ShaderMaterial({
   vertexShader: `
     attribute float aH;
     attribute vec3 aBase;
+    attribute vec2 aVary;
     uniform float uTime, uWindAmp, uWindFreq, uWindSpeed, uBillboard;
-    varying float vH; varying vec3 vN;
+    varying float vH; varying vec3 vN; varying vec2 vVary;
     void main() {
-      vH = aH;
+      vH = aH; vVary = aVary;
       vec3 world;
       if (uBillboard > 0.5) {
         vec3 rel = position - aBase;                       // canonical: x = width, y = height
@@ -189,10 +191,17 @@ const grassMat = new THREE.ShaderMaterial({
   fragmentShader: `
     uniform vec3 uRoot, uTip, uSun;
     uniform float uRootBand, uUnlit;
-    varying float vH; varying vec3 vN;
+    varying float vH; varying vec3 vN; varying vec2 vVary;
+    // a small turn of the hue (about the grey axis) and a shift of the lightness
+    vec3 vary(vec3 c) {
+      float a = vVary.x * 6.2831853; float cs = cos(a), sn = sin(a);
+      vec3 k = vec3(0.57735);
+      c = c * cs + cross(k, c) * sn + k * dot(k, c) * (1.0 - cs);
+      return clamp(c * (1.0 + vVary.y), 0.0, 1.0);
+    }
     void main() {
       float g = clamp((vH - uRootBand) / max(0.001, 1.0 - uRootBand), 0.0, 1.0);   // hold the bottom band at root, then gradient
-      vec3 col = mix(uRoot, uTip, g);
+      vec3 col = vary(mix(uRoot, uTip, g));
       float d = abs(dot(normalize(vN), normalize(uSun)));
       float lit = mix(0.62 + 0.42 * d, 1.0, uUnlit);   // unlit → base = root colour EXACTLY (matches the unlit ground)
       gl_FragColor = vec4(col * lit, 1.0);
@@ -259,8 +268,11 @@ function buildField(P) {
   const _m = new THREE.Matrix4();
   for (let t = 0; t < P.count; t++) {
     const tx = (Math.random() - 0.5) * P.area, tz = (Math.random() - 0.5) * P.area;
+    // colour varies tuft to tuft (hue a little, lightness more), and a touch blade to blade
+    const tHue = (Math.random() - 0.5) * P.vary * 0.12, tLight = (Math.random() - 0.5) * P.vary * 0.5;
     for (let bld = 0; bld < P.blades; bld++) {
       const bl = P.hmin + Math.random() * (hmax - P.hmin);
+      const vHue = tHue + (Math.random() - 0.5) * P.vary * 0.04, vLight = tLight + (Math.random() - 0.5) * P.vary * 0.2;
       const g = makeBlade(P.style, bl, P.width);
       const bx = tx + (Math.random() - 0.5) * P.spread, bz = tz + (Math.random() - 0.5) * P.spread;
       if (P.style === 'billboard') {
@@ -271,9 +283,10 @@ function buildField(P) {
           .multiply(new THREE.Matrix4().makeRotationZ((Math.random() - 0.5) * P.lean));
         g.applyMatrix4(_m);
       }
-      const n = g.attributes.position.count, ab = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) { ab[i * 3] = bx; ab[i * 3 + 2] = bz; }
+      const n = g.attributes.position.count, ab = new Float32Array(n * 3), av = new Float32Array(n * 2);
+      for (let i = 0; i < n; i++) { ab[i * 3] = bx; ab[i * 3 + 2] = bz; av[i * 2] = vHue; av[i * 2 + 1] = vLight; }
       g.setAttribute('aBase', new THREE.BufferAttribute(ab, 3));
+      g.setAttribute('aVary', new THREE.BufferAttribute(av, 2));
       geos.push(g);
     }
   }
@@ -291,7 +304,7 @@ function buildField(P) {
 
 // minimal concat merge — all blade geos share [position, normal, aH, aBase].
 function mergeGeometries(list) {
-  const attrs = ['position', 'normal', 'aH', 'aBase'], sizes = { position: 3, normal: 3, aH: 1, aBase: 3 };
+  const attrs = ['position', 'normal', 'aH', 'aBase', 'aVary'], sizes = { position: 3, normal: 3, aH: 1, aBase: 3, aVary: 2 };
   let vTotal = 0, iTotal = 0;
   for (const g of list) { vTotal += g.attributes.position.count; iTotal += g.index ? g.index.count : g.attributes.position.count; }
   const out = new THREE.BufferGeometry();
@@ -310,7 +323,7 @@ function mergeGeometries(list) {
 }
 
 // ── controls ────────────────────────────────────────────────────────────────
-const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8, sink: 0.06, segs: 6, bend: 0.35 };
+const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8, sink: 0.06, segs: 6, bend: 0.35, vary: 0.5 };
 const STYLE_HINT = {
   cone: 'the current game blade — a 3D 4-sided cone. Heaviest.',
   spike: 'one flat triangle tapering to a point. Leanest; vanishes edge-on unless dense.',
@@ -318,7 +331,7 @@ const STYLE_HINT = {
   curve: 'a strip of segments along a bezier, rounded edges, bending over at the tip — the stylised big-blade look. Segments × 2 tri/blade.',
   billboard: 'flat quad that turns to face you (stays upright) — never edge-on, only 2 tris.',
 };
-const ids = ['count', 'blades', 'spread', 'area', 'sink', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq', 'segs', 'bend'];
+const ids = ['count', 'blades', 'spread', 'area', 'sink', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq', 'segs', 'bend', 'vary'];
 const el = {}; ids.forEach(id => el[id] = document.getElementById(id));
 const rootEl = document.getElementById('root'), tipEl = document.getElementById('tip');
 const hex = c => '#' + c.getHexString();
@@ -327,6 +340,7 @@ function syncLabels() {
   el.count.value = P.count; document.getElementById('v_count').textContent = P.count;
   el.blades.value = P.blades; document.getElementById('v_blades').textContent = P.blades;
   el.segs.value = P.segs; document.getElementById('v_segs').textContent = P.segs; el.bend.value = P.bend; document.getElementById('v_bend').textContent = P.bend.toFixed(2);
+  el.vary.value = P.vary; document.getElementById('v_vary').textContent = P.vary.toFixed(2);
   el.spread.value = P.spread; document.getElementById('v_spread').textContent = P.spread.toFixed(2);
   el.area.value = P.area; document.getElementById('v_area').textContent = P.area;
   el.sink.value = P.sink; document.getElementById('v_sink').textContent = P.sink.toFixed(2);
@@ -355,7 +369,7 @@ ${bladeCount.toLocaleString()} blades over ${P.area}×${P.area}  (≈ ${(bladeCo
 let regenT = null;
 const regen = () => { clearTimeout(regenT); regenT = setTimeout(() => buildField(P), 40); };
 const bindRange = (id, key, dp) => el[id].oninput = e => { P[key] = +e.target.value; document.getElementById('v_' + id).textContent = dp != null ? (+e.target.value).toFixed(dp) : e.target.value; regen(); };
-bindRange('count', 'count'); bindRange('blades', 'blades'); bindRange('segs', 'segs'); bindRange('bend', 'bend', 2); bindRange('spread', 'spread', 2); bindRange('area', 'area');
+bindRange('count', 'count'); bindRange('blades', 'blades'); bindRange('segs', 'segs'); bindRange('bend', 'bend', 2); bindRange('vary', 'vary', 2); bindRange('spread', 'spread', 2); bindRange('area', 'area');
 bindRange('hmin', 'hmin', 2); bindRange('hmax', 'hmax', 2); bindRange('width', 'width', 3); bindRange('lean', 'lean', 2);
 el.wamp.oninput = e => { uni.uWindAmp.value = +e.target.value; document.getElementById('v_wamp').textContent = (+e.target.value).toFixed(3); updateStats(); };
 el.wspeed.oninput = e => { uni.uWindSpeed.value = +e.target.value; document.getElementById('v_wspeed').textContent = (+e.target.value).toFixed(2); updateStats(); };
