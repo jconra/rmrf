@@ -48,6 +48,7 @@
       <button data-s="cone" class="on">Cone · 12</button>
       <button data-s="spike">Spike · 1</button>
       <button data-s="blade">Blade · 2</button>
+      <button data-s="curve">Curve · 2×segs</button>
       <button data-s="billboard">Billboard · 2</button>
     </div>
     <div class="hint" id="styleHint"></div>
@@ -56,6 +57,8 @@
   <div class="grp"><div class="lbl">Field</div>
     <div class="row"><label>Tufts <b id="v_count"></b></label><input type="range" id="count" min="200" max="12000" step="100"></div>
     <div class="row"><label>Blades / tuft <b id="v_blades"></b></label><input type="range" id="blades" min="2" max="18" step="1"></div>
+    <div class="row"><label>Curve segments <b id="v_segs"></b></label><input type="range" id="segs" min="2" max="10" step="1"></div>
+    <div class="row"><label>Curve bend <b id="v_bend"></b></label><input type="range" id="bend" min="0" max="0.8" step="0.02"></div>
     <div class="row"><label>Tuft spread <b id="v_spread"></b></label><input type="range" id="spread" min="0.03" max="0.6" step="0.01"></div>
     <div class="row"><label>Patch size <b id="v_area"></b></label><input type="range" id="area" min="8" max="60" step="1"></div>
     <div class="row"><label>Sink into ground <b id="v_sink"></b></label><input type="range" id="sink" min="0" max="0.3" step="0.01"></div>
@@ -213,6 +216,25 @@ function makeBlade(style, bl, width) {
     g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute([-width, 0, 0, width, 0, 0, 0, bl, 0], 3));
     g.computeVertexNormals();
+  } else if (style === 'curve') {                    // a strip of segments along a bezier, bending over toward the tip
+    const seg = P.segs, tw = width * 0.18, bend = P.bend * bl, pts = [];
+    // quadratic bezier from the root, up, then over: the tip leans `bend` sideways (+x, before the tuft's turn)
+    const P0 = [0, 0], P1 = [0, bl * 0.62], P2 = [bend, bl];
+    for (let i = 0; i <= seg; i++) {
+      const t = i / seg, u = 1 - t;
+      const x = u * u * P0[0] + 2 * u * t * P1[0] + t * t * P2[0], y = u * u * P0[1] + 2 * u * t * P1[1] + t * t * P2[1];
+      // the blade's width tapers, and its edge is ROUNDED not straight (a sine hump), which is what reads as a curvy blade
+      const w = (width - (width - tw) * t) * (0.55 + 0.45 * Math.sin(Math.PI * Math.min(1, t * 1.15)));
+      pts.push([x - w, y], [x + w, y]);
+    }
+    const arr = [];
+    for (let i = 0; i < seg; i++) {
+      const a = pts[i * 2], b = pts[i * 2 + 1], c = pts[i * 2 + 2], d = pts[i * 2 + 3];
+      arr.push(a[0], a[1], 0, b[0], b[1], 0, d[0], d[1], 0,  a[0], a[1], 0, d[0], d[1], 0, c[0], c[1], 0);
+    }
+    g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+    g.computeVertexNormals();
   } else {                                           // 'blade' / 'billboard': tapered quad, 2 triangles
     const tw = width * 0.28;                          // tip narrower than base → tapered
     g = new THREE.BufferGeometry();
@@ -288,14 +310,15 @@ function mergeGeometries(list) {
 }
 
 // ── controls ────────────────────────────────────────────────────────────────
-const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8, sink: 0.06 };
+const P = { style: 'cone', count: 4000, blades: 9, spread: 0.16, area: 26, hmin: 0.35, hmax: 0.6, width: 0.05, lean: 0.8, sink: 0.06, segs: 6, bend: 0.35 };
 const STYLE_HINT = {
   cone: 'the current game blade — a 3D 4-sided cone. Heaviest.',
   spike: 'one flat triangle tapering to a point. Leanest; vanishes edge-on unless dense.',
   blade: 'a flat tapered quad — reads most blade-like. Vanishes edge-on unless dense.',
+  curve: 'a strip of segments along a bezier, rounded edges, bending over at the tip — the stylised big-blade look. Segments × 2 tri/blade.',
   billboard: 'flat quad that turns to face you (stays upright) — never edge-on, only 2 tris.',
 };
-const ids = ['count', 'blades', 'spread', 'area', 'sink', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq'];
+const ids = ['count', 'blades', 'spread', 'area', 'sink', 'hmin', 'hmax', 'width', 'lean', 'wamp', 'wspeed', 'wfreq', 'segs', 'bend'];
 const el = {}; ids.forEach(id => el[id] = document.getElementById(id));
 const rootEl = document.getElementById('root'), tipEl = document.getElementById('tip');
 const hex = c => '#' + c.getHexString();
@@ -303,6 +326,7 @@ const hex = c => '#' + c.getHexString();
 function syncLabels() {
   el.count.value = P.count; document.getElementById('v_count').textContent = P.count;
   el.blades.value = P.blades; document.getElementById('v_blades').textContent = P.blades;
+  el.segs.value = P.segs; document.getElementById('v_segs').textContent = P.segs; el.bend.value = P.bend; document.getElementById('v_bend').textContent = P.bend.toFixed(2);
   el.spread.value = P.spread; document.getElementById('v_spread').textContent = P.spread.toFixed(2);
   el.area.value = P.area; document.getElementById('v_area').textContent = P.area;
   el.sink.value = P.sink; document.getElementById('v_sink').textContent = P.sink.toFixed(2);
@@ -331,7 +355,7 @@ ${bladeCount.toLocaleString()} blades over ${P.area}×${P.area}  (≈ ${(bladeCo
 let regenT = null;
 const regen = () => { clearTimeout(regenT); regenT = setTimeout(() => buildField(P), 40); };
 const bindRange = (id, key, dp) => el[id].oninput = e => { P[key] = +e.target.value; document.getElementById('v_' + id).textContent = dp != null ? (+e.target.value).toFixed(dp) : e.target.value; regen(); };
-bindRange('count', 'count'); bindRange('blades', 'blades'); bindRange('spread', 'spread', 2); bindRange('area', 'area');
+bindRange('count', 'count'); bindRange('blades', 'blades'); bindRange('segs', 'segs'); bindRange('bend', 'bend', 2); bindRange('spread', 'spread', 2); bindRange('area', 'area');
 bindRange('hmin', 'hmin', 2); bindRange('hmax', 'hmax', 2); bindRange('width', 'width', 3); bindRange('lean', 'lean', 2);
 el.wamp.oninput = e => { uni.uWindAmp.value = +e.target.value; document.getElementById('v_wamp').textContent = (+e.target.value).toFixed(3); updateStats(); };
 el.wspeed.oninput = e => { uni.uWindSpeed.value = +e.target.value; document.getElementById('v_wspeed').textContent = (+e.target.value).toFixed(2); updateStats(); };
