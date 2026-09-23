@@ -6,7 +6,7 @@
 //
 // The effect is yomotsu's volumetric fire (see VolumetricFire.js), which is a draw call and a
 // buffer upload PER FIRE PER FRAME and cannot be instanced. That is affordable here only because
-// the fires are brief, so the count at any moment is small. Measured in lab/fire.html on an
+// the fires are brief, so the count at any moment is small. Measured in labs/fire.html on an
 // S24 Ultra — the weakest device in play — at under 0.03ms a fire, so a pool of 12 costs about
 // 0.35ms of a 16.7ms frame.
 //
@@ -93,7 +93,7 @@ const frnd = () => ((_fseed = (_fseed * 1664525 + 1013904223) >>> 0) / 429496729
 
 // ── textures, generated rather than shipped ──────────────────────────────────
 // RMRF has no image files anywhere and it would be a poor trade to start for a gradient and some
-// noise. Both are derived from what the shader actually asks for — see lab/fire.html, where the
+// noise. Both are derived from what the shader actually asks for — see labs/fire.html, where the
 // two can be compared against the originals side by side.
 
 // A hash table, not a picture: the shader reads .xy as a value and a slope and interpolates
@@ -696,7 +696,7 @@ const _fax = new THREE.Vector3();
 const LEAN = (() => { const q = new URLSearchParams(location.search).get('firelean');
   return q == null ? -0.76 : Math.max(-1.2, Math.min(1.2, +q || 0)); })();
 
-// SPOT-FIRE SHAPE. Query-string overridable like LEAN, though the sliders in lab/fire.html are the
+// SPOT-FIRE SHAPE. Query-string overridable like LEAN, though the sliders in labs/fire.html are the
 // real way in now — these values came from there.
 //   ?firesat=    spot fire size against the main flame
 //   ?firespread= how far out to place it, against its own radius

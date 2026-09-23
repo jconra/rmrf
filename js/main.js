@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { IslandMap, DEFAULTS } from './IslandMap.js?v=75';
 // Same specifier IslandMap uses — a different one would load a second copy of the module and
 // RR.setSurf would then be tuning a material nobody is rendering.
-import { SURF, setSurf } from './TerrainMaterial.js?v=22';   // shoreline surf tunables (lab/surf.html)
+import { SURF, setSurf } from './TerrainMaterial.js?v=22';   // shoreline surf tunables (labs/surf.html)
 import { Controls } from './Controls.js';
 import { DestructibleManager, Destructible } from './Destructible.js?v=7';
 import { applyStaging } from './AssetStaging.js?v=1';
@@ -9767,7 +9767,7 @@ class AICommander {
     if (dHere >= minR && dHere <= Math.min(reach * 0.95, unitR * 1.25) && spotOK(px, pz)) return { x: px, z: pz };
     // SCAN THE WHOLE REACHABLE REGION, don't sample a ring. One flood fill (reachFrom) answers
     // "can this hull get there" for every cell at once, so the search can afford to look at all of
-    // them and take the nearest good one — which is exactly what lab/standoff-lab.html does, and
+    // them and take the nearest good one — which is exactly what labs/standoff-lab.html does, and
     // why the lab reliably finds a spot where this used to abandon the tower. What it replaces:
     // 24 points on each of three or four fixed radii, of which only ~5 could be checked for
     // reachability at all (a full A* each, spread-filtered so they didn't all probe one arc), and
@@ -10622,7 +10622,7 @@ class AICommander {
       // the geometric fallbacks. Those fallbacks are gone, and the distance question belongs to
       // _standoffFor now: its band is sized from SHOT_REACH and TURRET_HOLD and every tier is
       // capped at reach*0.99, so a spot it returns is one the gun can actually shoot from.)
-      // ONE ALGORITHM. _standoffFor picks the firing position the way lab/standoff-lab.html does —
+      // ONE ALGORITHM. _standoffFor picks the firing position the way labs/standoff-lab.html does —
       // flood the reachable ground, keep the cells in range with a line to the target and clear of
       // other guns, take the nearest. If it finds nothing there is NO SECOND METHOD: it raises a
       // STANDOFF ALARM naming the test that rejected every candidate, and the unit gets no stand.
@@ -11785,7 +11785,7 @@ const navIdx = (i, j) => {
 // unit's own cell over the same blocked test A* uses, 8-connected, ~96x96 cells. Every cell it
 // reaches is somewhere this hull can actually drive to; every cell it doesn't, isn't.
 //
-// This is how the standoff playground (lab/standoff-lab.html) has always worked, and why it finds
+// This is how the standoff playground (labs/standoff-lab.html) has always worked, and why it finds
 // good firing positions when the game struggles to: the lab floods once and then judges EVERY
 // reachable cell, while _standoffFor used to sample 24 points on three or four fixed radii and
 // could afford about five real A* searches before giving up and abandoning the tower. The flood is
@@ -13501,7 +13501,7 @@ window.RR = {
   // Match clock in seconds — what a replay link's `at=` is measured in. Taken from a commander's
   // own match timer rather than wall clock, so it means the same thing headless and on screen.
   matchTime: () => (commanders[0] && commanders[0]._matchT) || 0,
-  // Hooks the replay lab drives the game through (lab/replay.html). Deliberately tiny and
+  // Hooks the replay lab drives the game through (labs/replay.html). Deliberately tiny and
   // general — a time scale and "point the camera at this unit" are things a game may as well
   // have; none of the lab's own logic lives in here.
   setTimeScale: (x) => { timeScale = Math.max(0, Math.min(8, x)); return timeScale; },
@@ -13509,7 +13509,7 @@ window.RR = {
   watched: () => spectateTarget,
   scatterFoliage: () => scatterFoliage(),    // debug/shot: re-scatter foliage on demand
   setGrassDensity: (m) => { grassDensityMul = Math.max(0, +m); scatterFoliage(); return grassDensityMul; },   // re-scatters
-  setSurf: (patch) => setSurf(patch),   // shoreline surf/wave tuning, live — the knobs lab/surf.html drives
+  setSurf: (patch) => setSurf(patch),   // shoreline surf/wave tuning, live — the knobs labs/surf.html drives
   get surf() { return SURF; },
   get foliage() { return foliage; },
   get camera() { return camera; },   // debug: headless shot rigs position the camera for close-ups
@@ -14508,7 +14508,7 @@ function drawSensorContacts(g, W, H) {
   }
 }
 
-// WORLD CLOCK SCALE. 1 in a normal game. The replay lab (lab/replay.html + js/replay.js) turns it
+// WORLD CLOCK SCALE. 1 in a normal game. The replay lab (labs/replay.html + js/replay.js) turns it
 // down for slow motion and to 0 to freeze, then steps the sim itself. Everything downstream takes
 // dt, so scaling here slows the whole world together — fire, water and treads, not just the hulls.
 // This is the ONLY thing the replay lab needs from the game; all of its logic lives in its own files.

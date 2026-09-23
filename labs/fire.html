@@ -1050,7 +1050,7 @@ const lightWreck = () => { clearFires(); fireWreck(0, 0.2, 0, wreckScale, () => 
     // values twice — once the whole spawn/debris block, then every smoke parameter — because a new
     // tunable has to be remembered in two files and eventually is not. Now anything the module
     // exports is exported here.
-    const lines = ['// fire look, chosen in lab/fire.html'];
+    const lines = ['// fire look, chosen in labs/fire.html'];
     let cur = [];
     const flush = () => { if (cur.length) { lines.push('let ' + cur.join(', ') + ';'); cur = []; } };
     let lastPrefix = null;

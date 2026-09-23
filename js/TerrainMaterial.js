@@ -25,9 +25,9 @@ function canvasTex(size, paint, srgb = true) {
 // ── SURF / WAVE TUNABLES ─────────────────────────────────────────────────────────────────────
 // Every number the shoreline look is made of, in one place, live-settable. These are the values
 // that used to be hardcoded in the shader below, so nothing changes until something moves them.
-// lab/surf.html drives these against the REAL island, which is the point: whatever is dialled in
+// labs/surf.html drives these against the REAL island, which is the point: whatever is dialled in
 // there is what the game does — no porting by hand, no lab-vs-game drift.
-// Dialled in in lab/surf.html against the real island, 2026-07-27. The shape of the look: a wide
+// Dialled in in labs/surf.html against the real island, 2026-07-27. The shape of the look: a wide
 // band held hard against the waterline (a big foamWidth, but slope-normalised and then clamped low
 // by foamMaxUp, so it hugs the shore instead of climbing the beach), no surf at all in the
 // sheltered middle of the map, long lazy crests that break out of step bay to bay, and most of the
@@ -62,7 +62,7 @@ export const SURF = {
   // is the scale the eye reads as surface texture at normal camera height. One extra mask tap
   // fills it, weighted separately for sand and grass so the same sample gives footprint-ish
   // pocking on sand and broader patchiness on grass.
-  // Values below are Jacob's, dialled in on a real screen in lab/surf.html. The look he landed on
+  // Values below are Jacob's, dialled in on a real screen in labs/surf.html. The look he landed on
   // is BROAD and SOFT rather than fine and crisp: strong detail (0.37) at a large feature size,
   // no hard edges, and a heavy macro field carrying most of the variation.
   landSand: 0.37,     // detail strength on sand

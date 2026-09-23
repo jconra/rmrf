@@ -1,4 +1,4 @@
-// replay.js — WATCH THE FAILURE.  (paired with lab/replay.html)
+// replay.js — WATCH THE FAILURE.  (paired with labs/replay.html)
 //
 // Reading "69% of stuck ticks have zero commanded throttle" tells you what happened. It does not
 // let you SEE a Jotun roll to a stop in an open field and sit there. This drives the REAL game —
@@ -18,7 +18,7 @@ const LEAD_IN = 8;          // s of run-up to show before the moment a unit stop
 
 export function initReplay(RR, QS, host) {
   const ui = host || document.body;
-  // The lab page installed a controlled clock before the game loaded (see lab/replay.html).
+  // The lab page installed a controlled clock before the game loaded (see labs/replay.html).
   // Seeking drives it by hand at the harness's 50ms/tick; playing hands it back to real time,
   // scaled, so the game's wall-clock timers stay in step with simulated time at any speed.
   const clk = window.__labClock || { t: 0, rate: 1 };
