@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, setBurstFix, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=121';
+import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=122';
 import { locomote } from './Locomotion.js?v=1';
 import { Driver, UNREACH_SLACK } from './Driver.js?v=1';
 import { installFlagMenu } from './FlagMenu.js?v=1';
@@ -40,7 +40,7 @@ import { installFlagMenu } from './FlagMenu.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=126';
+import { setPadScore, setPadW, padScoreOn, setInterceptFp, interceptFpOn, setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=127';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -2365,6 +2365,7 @@ function damageVehicle(veh, amount, cause = 'other', shooter = null, srcPos = nu
     if (dealt > 0) logCombat(shooter.team,
       `${teamLabel(shooter.colorIndex)} ${shooter.type} hits ${teamLabel(veh.colorIndex)} ${veh.type} ${dealt} dmg (${Math.round(_hp0)}→${Math.max(0, Math.round(veh.hp))})`);
   }
+  veh._lastDmg = { cause, by: shooter && shooter.type ? shooter.type : null };   // what hurt it last (the pad ledger names a death by it)
   if (veh.hp <= 0) destroyVehicle(veh, 'killed', shooter);
 }
 
@@ -2871,6 +2872,7 @@ function promoteUnit(killer) {
 function destroyVehicle(veh, cause, killer = null) {
   if (veh.dead) return;
   veh.dead = true;
+  padDied(veh);
   // ITS LIGHTS GO OUT. A wreck keeps its group in the scene while it burns, and with the glow
   // lights still on, every wreck on the field kept counting against the point-light budget —
   // enough dead hulls in a 3v3 and the budget overflows, which recompiles every lit shader. A dead
@@ -3661,11 +3663,13 @@ function updateFlags(dt) {
         f.group.position.set(c.x + Math.sin(hd) * 2.0, c.y + 1.5, c.z + Math.cos(hd) * 2.0);
         f.group.rotation.y = hd - Math.PI / 2;   // fabric spun 180° about the pole: fly points AFT
         f.tilt.rotation.z = -0.9;                // pole still leans BACKWARD (lean flips with the yaw flip)
-        // AI carriers score by reaching their own base. The PLAYER must EXTRACT it —
+        // AI carriers score by reaching their own ELEVATOR (the FOB). The PLAYER must EXTRACT it —
         // ride the flag down the FOB lift into the secure garage (see returnToGarage).
+        // ONLY THE ELEVATOR (Jacob, 2026-10-08: "Only at the elevator"): the main base used to count for an AI carrier
+        // too, a finish line the player never had. It still counts on a map with no FOB, so a carrier always has one.
         if (f.carrier !== player) {
           const main = teamCamp(f.carrier.team, 'main'), fob = teamCamp(f.carrier.team, 'fob');
-          const atMain = main && Math.hypot(c.x - main.center.x, c.z - main.center.z) < CAP;
+          const atMain = !fob && main && Math.hypot(c.x - main.center.x, c.z - main.center.z) < CAP;
           const atFob = fob && Math.hypot(c.x - fob.center.x, c.z - fob.center.z) < CAP_FOB;
           if (atMain || atFob) onCapture(f.carrier.team, f);
         }
@@ -3878,6 +3882,50 @@ function rearm(v, dt) {
 }
 // A hunter tending a live mine trap doesn't top all the way up — it holds a killable mid-health so
 // it keeps luring pursuers onto the mines (the provoke phase does the actual wounding via tower fire).
+// THE PAD LEDGER (RR.padStats): how top-ups go under the pad score. Arrivals and seconds spent by chassis,
+// rounds fired from the pad and on the drive in, how each stay ended (full; the board picked something
+// else, and what; pushed out of the zone; died there), and rearms started while still holding one round.
+const PAD_STATS = { arrivals: {}, sec: {}, maxSec: {}, shots: 0, runShots: 0, ends: {}, deaths: 0, rearmStarts: 0, rearmAt1: 0, deathList: [], zoneDeaths: 0, zoneByType: {}, allDeaths: 0 };
+// a stay that ends in death, closed where every death passes (destroyVehicle): shots, rails, towers and mines all
+// land outside the victim's own tick, so a check in its tick only ever saw drowning
+// EVERY death inside a supply its own team uses (its base, its FOB, or a depot) — counted for any build, the old
+// resupply included, so the two can be compared on the same footing; plus all deaths, for the rate
+function zoneDied(v) {
+  if (!v || !v.holder) return;
+  PAD_STATS.allDeaths++;
+  const x = v.holder.position.x, z = v.holder.position.z;
+  const inDepot = resupplies.some((rp) => !rp.dead && (rp.kind === 'fuel' || rp.kind === 'ammo') && Math.hypot(x - rp.pos.x, z - rp.pos.z) < rp.radius);
+  if (nearOwnSupply(v, x, z) || inDepot) { PAD_STATS.zoneDeaths++; PAD_STATS.zoneByType[v.type] = (PAD_STATS.zoneByType[v.type] || 0) + 1; }
+}
+function padDied(v) {
+  zoneDied(v);
+  if (!v || !v._topping) return;
+  const now = performance.now(), sec = (now - (v._padT0 || now)) / 1000;
+  PAD_STATS.deaths++; PAD_STATS.ends.died = (PAD_STATS.ends.died || 0) + 1;
+  // each death in detail: what killed it, how hurt it came in, whether it arrived under fire, how long it stayed,
+  // whether it shot back, and at what kind of supply
+  if (PAD_STATS.deathList.length < 300) PAD_STATS.deathList.push({ type: v.type, cause: v._lastDmg ? v._lastDmg.cause : '?', by: v._lastDmg ? v._lastDmg.by : null,
+    hp0: +(v._padHp0 ?? 1).toFixed(2), underFire0: !!v._padFire0, sec: +sec.toFixed(1), shots: v._padShots || 0, base: !!v._padBase, at: Math.round(now / 1000) });
+  PAD_STATS.sec[v.type] = (PAD_STATS.sec[v.type] || 0) + sec; PAD_STATS.maxSec[v.type] = Math.max(PAD_STATS.maxSec[v.type] || 0, +sec.toFixed(1));
+  v._topping = false;
+}
+function padTally(cmd, v, topping) {
+  const now = performance.now(), step = cmd.strategy ? cmd.strategy.step : '?';
+  if (step === 'rearm' && v._padStep !== 'rearm') { PAD_STATS.rearmStarts++; if (v.ammo === 1) PAD_STATS.rearmAt1++; }
+  v._padStep = step;
+  if (topping && !v._topping) { PAD_STATS.arrivals[v.type] = (PAD_STATS.arrivals[v.type] || 0) + 1; v._padT0 = now;
+    v._padHp0 = v.maxHp ? v.hp / v.maxHp : 1; v._padShots = 0; v._padFire0 = (now - (v._hitByVehT || -1e9)) < 2500 || !!(v._hitByTurret && now - v._hitByTurret.t < 2500); }
+  else if (!topping && v._topping) {
+    const sec = (now - (v._padT0 || now)) / 1000;
+    PAD_STATS.sec[v.type] = (PAD_STATS.sec[v.type] || 0) + sec; PAD_STATS.maxSec[v.type] = Math.max(PAD_STATS.maxSec[v.type] || 0, +sec.toFixed(1));
+    // full by the levels themselves (the board may already have moved on in the same tick it filled up)
+    const sup = step === 'refuel' || step === 'rearm' || step === 'repair', cap = repairCap(v);
+    const lvl = { fuel: v.fuel / v.maxFuel, ammo: v.ammo / v.maxAmmo, hp: cap > 0 ? Math.min(1, v.hp / cap) : 1 };
+    const low = Math.min(...(v._padServes || ['fuel', 'ammo', 'hp']).map((r) => lvl[r] ?? 1));
+    const why = low >= 0.99 ? 'full' : (sup ? (cmd._intercepting ? 'left to chase our flag' : 'pushed out') : 'left for ' + step) + (low < 0.5 ? ' (under half)' : low < 0.9 ? ' (half to 90%)' : ' (90%+)');
+    PAD_STATS.ends[why] = (PAD_STATS.ends[why] || 0) + 1;
+  }
+}
 function repairCap(v) {
   const cmd = commanders.find(c => c.ownsUnit(v));
   const sl = cmd && cmd._slotFor(v);
@@ -6068,9 +6116,17 @@ setHomeScore(!QS.has('nohomescore'));
 setStatueFix(!QS.has('nostatuefix'));
 // DIFFICULTY — ?difficulty=easy|medium|hard (task #46). Also RR.setDifficulty() for the lab, and it
 // is read live so a running match can be re-tuned without a reload.
-{ const d = (QS.get('difficulty') || '').toLowerCase(); if (AIM_DIFFICULTY[d]) aimDiff = AIM_DIFFICULTY[d]; }
+// The start menu's DIFFICULTY row remembers the choice (localStorage 'rmrf-difficulty'); the address still wins over it.
+{ let saved = ''; try { saved = localStorage.getItem('rmrf-difficulty') || ''; } catch (e) {}
+  const d = (QS.get('difficulty') || saved || '').toLowerCase(); if (AIM_DIFFICULTY[d]) aimDiff = AIM_DIFFICULTY[d]; }
+function setDifficultyFromMenu(name) {
+  if (!AIM_DIFFICULTY[name]) return;
+  aimDiff = AIM_DIFFICULTY[name];
+  try { localStorage.setItem('rmrf-difficulty', name); } catch (e) {}
+  const m = document.getElementById('gamemenu'); if (m) m.querySelectorAll('.gm-diff button').forEach(b => b.classList.toggle('on', b.dataset.diff === name));
+}
 LEAD_FIX = !QS.has('oldlead');
-setBurstFix(!QS.has('oldburst'));
+setPadScore(!QS.has('oldpad')); if (QS.has('interceptfp')) setInterceptFp(true);   // the pad score (?oldpad: the 0.95 finish and low lines), the flag chase by firepower
 KILLER_FIX = !QS.has('oldkiller');   // blame a dead runner on what actually shot it (task #44)
 BUY_FIRST = !QS.has('nobuyfirst');   // a running trip is not re-validated against an errand  // a running swap suppresses the top-ups it is about to satisfy
 // PURSUE CAME OFF THE LADDER 2026-08-11 and the rung was DELETED 2026-09-01. The chase lives in
@@ -8155,6 +8211,33 @@ class AICommander {
   // Fraction of the Grab mission's own budget we are willing to spend just GETTING there.
   // (GRAB_BUDGET_S mirrors GRAB_BUDGET in AIStrategies — the mission owns the ending, this only
   // refuses to start one it cannot finish.)
+  // WHERE A TOP-UP OF `what` WOULD GO, chosen the way the route chooses it (the nearest own FOB, the main
+  // base while its HQ stands, and for fuel or ammo a known live depot of that kind), with the seconds of
+  // driving to its edge and everything it gives: for the pad score (AIStrategies.js)
+  supplySource(what) {
+    const v = this.unit; if (!v || v.dead || !v.holder) return null;
+    const px = v.holder.position.x, pz = v.holder.position.z;
+    let best = null, bestD = Infinity;
+    const consider = (x, z, r, base, kind) => { const d = Math.hypot(px - x, pz - z); if (d < bestD) { bestD = d; best = { x, z, r, base, d, serves: base ? ['fuel', 'ammo', 'hp'] : [kind] }; } };
+    const fob = teamCamp(this.team, 'fob'), home = teamCamp(this.team, 'main');
+    if (fob) consider(fob.center.x, fob.center.z, 12, true);
+    if (home && flagBaseAlive(this.team)) consider(home.center.x, home.center.z, 16, true);
+    if (what === 'fuel' || what === 'ammo') for (const rp of resupplies) if (!rp.dead && rp.kind === what && this.knownSupplies.has(rp)) consider(rp.pos.x, rp.pos.z, rp.radius, false, what);
+    if (!best) return null;
+    best.sec = Math.max(0, best.d - best.r) / this.hullSpeed(v.type);
+    return best;
+  }
+  // the most hull base repair will give this unit (a trap's bait holds 55% on purpose)
+  healCap() { return this.unit && !this.unit.dead ? repairCap(this.unit) : 0; }
+  // HOW MUCH OF A KILL ON OUR FLAG'S CARRIER IS IN THE GUN: 0 empty, 1 with rounds enough for its hull and
+  // shield, the square root so part of a magazine still counts for a good share (the flag chase's weight)
+  firepowerOnCarrier() {
+    const v = this.unit; if (!v || v.dead) return 0;
+    const of = this.ourFlag && this.ourFlag(), c = of && of.carrier;
+    const ehp = c && !c.dead ? (c.hp || 0) + (c.shield || 0) : 135;
+    const dmg = (v.ammo || 0) * (SHOT_DMG[v.def.soundIndex] || 20);
+    return Math.sqrt(Math.min(1, dmg / Math.max(1, ehp)));
+  }
   grabPick(v = this.unit, goal = null) {
     if (!v || v.dead) return null;
     const now = performance.now();
@@ -8775,6 +8858,7 @@ class AICommander {
     // searching; the point of coming through here is that the result is a real GOTO somebody owns.
     const flyer = v._move.ignoreWalls;
     if (cmd.breakAim) return this._hold(cmd, 'lining up a shot on a blocker');
+    if (view.topping && this._hold(cmd, 'topping up, watching the field')) return true;
     const st = cmd.state;
     // RELEASE VALVE: a sieger holding a target it is sitting OUTSIDE its own weapon range of
     // is doing nothing but waiting to be shot — it cannot fire from here, so no amount of
@@ -9395,8 +9479,9 @@ class AICommander {
       }
       else if (view.enemy) { tp = leadAim(v.holder.position, view.enemy, v.def.soundIndex, v.ai.p.jitter).clone(); atEnemy = true; }   // lead a moving target (Lurcher/Valkyrie/Jotun; charge-compensated for the railgun)
       else if (cmd.breakAim) tp = _aimDir.set(cmd.breakAim.x, cmd.breakAim.y, cmd.breakAim.z).clone();   // blasting a blocker out of the way
+      if (view.topping) { PAD_STATS.shots++; v._padShots = (v._padShots || 0) + 1; } else if (view.padRun && atEnemy) PAD_STATS.runShots++;
       fireVehicle(v, false, tp, null, atEnemy);
-    } else if (v.cooldown <= 0 && !view.enemy && v.ammo > 1) {
+    } else if (v.cooldown <= 0 && !view.enemy && v.ammo > (padScoreOn(this.team) ? 0 : 1)) {
       // No fight on and the gun's idle: pot-shot any enemy REPAIR JEEP that happens to be in
       // range/arc/line — a target of opportunity, never a mission (the unit doesn't steer at
       // it, so it can't be lured off its actual job). Keeps the last round for real trouble.
@@ -10098,7 +10183,7 @@ class AICommander {
     // plan and chase the carrier toward its delivery point — so a stolen flag is always
     // contested. Skip it if WE'RE carrying the enemy flag (don't blow a winning run).
     this._intercepting = false;
-    if (this.ourFlagStolen() && !(this.flag() && this.flag().carrier === v)) {
+    if (this.ourFlagStolen() && !(this.flag() && this.flag().carrier === v) && (!interceptFpOn(this.team) || this.strategy.step === 'intercept')) {
       const ip = this.interceptSpot();
       if (ip) { goal = ip; this._intercepting = true; }
     }
@@ -10122,7 +10207,8 @@ class AICommander {
     // scuttled having got neither the shield nor the fuel. Trip on LOW, clear on FULL — the same
     // shape as the resupply latch next door, which never had this problem because it clears on
     // `resupDone`. See devblog/2026-08-05-one-mission-layer.md.
-    const shieldable = !this._intercepting && (v.type === 'lurcher' || v.type === 'valkyrie')
+    const topUp = padScoreOn(this.team) && this.strategy && (this.strategy.step === 'refuel' || this.strategy.step === 'rearm' || this.strategy.step === 'repair');
+    const shieldable = !this._intercepting && !topUp && (v.type === 'lurcher' || v.type === 'valkyrie')
       && v.maxShield > 0 && !(this.flag() && this.flag().carrier === v);
     const shFrac = v.maxShield > 0 ? v.shield / v.maxShield : 1;
     const gen = shieldable ? this.nearestKnownShield(px, pz) : null;
@@ -10708,6 +10794,32 @@ class AICommander {
       }
       if (best) breakTarget = { x: best.x, y: map.heightAt(best.x, best.z) + ty, z: best.z, tree: ty === 3.0 };   // tree vs wall — a Firebrat may blast a tree but never a structure
     }
+    // TOPPING UP (the pad score, rule 3): a fuel/ammo/hull top-up is running and the unit is inside the place
+    // giving it. It holds there, faces the field and fires from where it stands; the score, not a rule, says
+    // when to leave. Facing: a rival in sight, else whoever last shot us, else the last contact (12s), else
+    // straight out from the supply, the way it came in. Entered 1.5u inside the edge and left only past it,
+    // so an ally's bump on the line doesn't flip it.
+    let topping = false, padWatch = null, padRun = false;
+    if (padScoreOn(this.team) && this.strategy && (this.strategy.step === 'refuel' || this.strategy.step === 'rearm' || this.strategy.step === 'repair')) {
+      padRun = true;
+      const msn = this.strategy.mission, src = msn && msn.what ? this.supplySource(msn.what) : null;
+      if (src) {
+        const d = Math.hypot(px - src.x, pz - src.z);
+        // not a carrier (it drives on to its scoring ring), and not an armed unit the stolen-flag override is sending after
+        // the carrier (the old game's chase; a dry gun stays and rearms: "if the vehicle has no ammo, intercept is worthless")
+        const carrier = !!(this.flag() && this.flag().carrier === v);
+        topping = (v._topping ? d < src.r : d < src.r - 1.5) && !(msn.done && msn.done(this)) && !carrier && !(this._intercepting && v.ammo > 0);
+        if (topping) {
+          v._padServes = src.serves; v._padBase = src.base;
+          const inc = v._hitByVeh && performance.now() - v._hitByVeh.t < 2500 ? { x: v._hitByVeh.x, z: v._hitByVeh.z } : null;
+          const last = this.lastEnemyPos();
+          const out = d > 1 ? { x: px + (px - src.x) / d * 40, z: pz + (pz - src.z) / d * 40 } : this.enemyBasePos();
+          padWatch = enemy ? { x: enemy.x, z: enemy.z } : inc || last || out;
+        }
+      }
+    }
+    padTally(this, v, topping);
+    v._topping = topping;
     // Standing in the door on an intercept, and the lane to watch from it (see the view fields).
     let atCamp = false, watch = null;
     if (this.strategy.step === 'intercept') {
@@ -10774,6 +10886,7 @@ class AICommander {
       supplyHeals,   // the chosen resupply point is an own base → hold until ammo+fuel+hp are all maxed
       home: healHome || goal,
       atHome: nearOwnSupply(v, px, pz),   // already in the base's heal/rearm zone → stop and top up (don't orbit the exact centre)
+      topping, padWatch, padRun,   // the pad score's top-up: hold, face the field, fire from here (see above); padRun: a top-up is running (not `supplyRun`, the old table's field below)
       // The most hp base repair will actually give THIS unit (fraction). A trap-tending bait
       // deliberately holds 55% (repairCap) — without this the hurt/resup latches demand 80/99%
       // hp that can never come, parking the unit at its FOB "topping up" forever (deadlock).
@@ -12505,6 +12618,12 @@ function ensureMenuStyle() {
     #gamemenu button:hover { background:rgba(40,58,80,0.96); }
     #gamemenu button:active { transform:scale(0.97); }
     #gamemenu .gm-group { display:flex; flex-direction:column; align-items:center; gap:12px; }
+    /* the difficulty row: three small toggles under PLAYER VS AI, the chosen one lit */
+    #gamemenu .gm-diffrow { width:262px; display:flex; flex-direction:column; gap:6px; }
+    #gamemenu .gm-diffrow .gm-toollbl { text-align:center; }
+    #gamemenu .gm-diff { display:flex; gap:6px; }
+    #gamemenu .gm-diff button { width:auto; flex:1; padding:9px 0; font-size:12px; letter-spacing:2px; }
+    #gamemenu .gm-diff button.on { background:rgba(40,90,60,0.95); border-color:rgba(120,255,170,0.7); color:#e9fff1; }
     /* Locked / upcoming buttons (campaign levels not yet unlocked, or with no map) */
     #gamemenu .gm-soon { position:relative; opacity:0.5; cursor:default; }
     #gamemenu .gm-soon:hover { background:rgba(20,30,42,0.88); }
@@ -12568,6 +12687,10 @@ function ensureGameMenu() {
     '<div class="gm-sub" id="gm-sub">ISLAND CTF</div>' +
     '<div class="gm-group" id="gm-main">' +
       '<button data-act="pva">PLAYER VS AI</button>' +
+      '<div class="gm-diffrow" title="How well the AI aims"><div class="gm-toollbl">DIFFICULTY</div>' +
+        '<div class="gm-diff" role="group" aria-label="Difficulty">' +
+          ['easy', 'medium', 'hard'].map(d => `<button data-diff="${d}" class="${AIM_DIFFICULTY[d] === aimDiff ? 'on' : ''}" aria-pressed="${AIM_DIFFICULTY[d] === aimDiff}">${d.toUpperCase()}</button>`).join('') +
+        '</div></div>' +
       '<button data-act="campaign">CAMPAIGN &#9656;</button>' +
       '<button data-act="dev">DEV TOOLS &#9656;</button>' +
     '</div>' +
@@ -12630,6 +12753,7 @@ function ensureGameMenu() {
   m._setDevView = (on) => showView(on ? 'dev' : 'main');   // back-compat with showGameMenu
   m.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b || b.disabled) return;   // locked levels are disabled
+    if (b.dataset.diff) { setDifficultyFromMenu(b.dataset.diff); m.querySelectorAll('.gm-diff button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.diff === b.dataset.diff))); return; }
     if (b.dataset.lvl != null) { startCampaignLevel(+b.dataset.lvl); return; }
     const act = b.dataset.act;
     if (act === 'campaign') { showView('campaign'); return; }
@@ -13455,6 +13579,10 @@ window.RR = {
   // Does this commander's board lurch when a hull is retired or rolled out? See scoreGap().
   scoreGap: (i = 0) => { const c = commanders[i]; return c ? scoreGap(c) : null; },
   setDefendW: w => setDefendW(w),   // defend's shape: {on, near, lurcher, firebrat}
+  setPadScore: (on, team) => setPadScore(on, team),   // the pad score (Jacob 2026-10-08): stay while anything's missing at the supply, need rising sharply near empty
+  setPadW: (w, team) => setPadW(w, team),   // its weights; with a team, that team's own set (to DUEL two sets in one match)
+  setInterceptFp: (on, w, team) => setInterceptFp(on, w, team),   // the flag chase weighed by firepower on the carrier
+  padStats: () => JSON.parse(JSON.stringify(PAD_STATS)),   // the pad ledger (see padTally)
   setAmmoCount: on => setAmmoCount(on),   // A/B: 'nothing to shoot with' counts rounds instead of magazine fraction
   setSeesLevel: on => setSeesLevel(on),   // A/B: re-score every second while a rival is SENSED, not just on the edge
   setSupplyWAll: w => setSupplyWAll(w),   // A/B: the SAME repair weights on both sides (hpUrge, nearMax, nearFar)

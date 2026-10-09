@@ -755,6 +755,79 @@ let SWAP_SUPPLY = false;  // a running swap suppresses refuel/rearm/repair/shiel
 export function setSwapSupply(on) { SWAP_SUPPLY = !!on; return SWAP_SUPPLY; }
 export const SUPPLY_LOW = { fuel: 0.18, ammo: 0.25, hp: 0.45, shield: 0.6 };   // start wanting it…
 export const SUPPLY_FULL_F = 0.95;                                             // …and stay until this full
+// THE PAD SCORE (Jacob, 2026-10-08). Every choice is a score competing with the others, never a rule
+// like "stay until 100%": a stolen flag or a rival in reach must still be able to win. For each thing a
+// top-up gives (a base gives fuel, ammo and hull; a depot its one kind), two parts:
+//   stay = S x e^(-T / Ts) x missing/(missing + K)
+//                                    strong while standing AT the supply with a real amount missing,
+//                                    gone within a moment's drive of it (Ts 0.4s: at 3s it reached a
+//                                    unit merely passing a base with a third of its tank used, and
+//                                    refuel trips went 8 -> 206 in 16 matches), and small for a sliver
+//                                    missing: a hovering Firebrat burns a
+//                                    little fuel as it waits and is never exactly full, and with a
+//                                    power curve (missing^0.2) that sliver was still worth 5, which
+//                                    parked it on the pad until something beat 5
+//   need = (A x sqrt(missing) + X x empty) x (1 + (C - 1) x near)
+//                                    grows as the tank or magazine runs down, and sharply near empty
+//                                    (`empty`: an exponential in how full it is, 0 full, 1 empty), so a
+//                                    dry gun goes home from anywhere while a half-full one far off
+//                                    keeps its siege
+//   near = e^(-T / T0), T = seconds of driving to the supply's edge (0 inside it)
+// Full means a score of 0: the top-up ends because nothing is left to want, not because a line was
+// crossed. Replaces, when on: the low lines' pull, 'finish the job' +8, the 0.95 finish and the +10
+// 'nothing to shoot with' at one round (a unit fires every round it has: rule 1 of the three, see
+// feedback_rmrf_resupply_rules). ?oldpad restores all of those.
+let PAD_SCORE = true;
+// PER TEAM TOO, to DUEL the new brain against the old one in the same match (sides flipped): setPadScore(on)
+// sets both sides, setPadScore(on, team) that side alone
+const teamPadOn = {};
+export function setPadScore(on, team = null) { if (team == null) PAD_SCORE = !!on; else teamPadOn[team] = !!on; return team == null ? PAD_SCORE : teamPadOn[team]; }
+export const padScoreOn = (team) => (team != null && team in teamPadOn) ? teamPadOn[team] : PAD_SCORE;
+// Fuel and hull pull gently until they are really low. A DRY TANK ONLY LIMPS (Jacob, 2026-08-18: an empty
+// tank drives at 35%, it never strands a unit), so fuel's pull is mostly its sharp end: with A 3 a third of
+// a tank already pulled units home, refuel trips 33 -> 461 over 80 matches. The hull keeps a little more.
+// THE MID-LEVEL PULL (A) STAYS. Halving it won the weight sweep's star (each change against these weights,
+// 54% over six seed sets), but against the OLD resupply it lost 139-100 on fresh seeds while these weights tie the
+// old one: wins don't chain, and the change that matters is the one played against the real alternative.
+// stayAlways: the stay part for any candidate, not just the running top-up (the first version; a duel knob).
+export const PAD_W = { S: 20, K: 0.03, Ts: 0.4, T0: 3, C: 4, stayAlways: false,
+  ammo: { A: 3, X: 36, tau: 0.12 }, fuel: { A: 1, X: 24, tau: 0.08 }, hp: { A: 2, X: 26, tau: 0.15 } };
+// PER-TEAM, to DUEL two weight sets in one match (and flip sides) - the same shape as setSupplyW.
+// setPadW(w) changes both sides; setPadW(w, team) gives that team its own copy.
+const teamPadW = {};
+const mergePadW = (base, w) => { const o = { ...base }; for (const k in w) o[k] = (w[k] && typeof w[k] === 'object') ? { ...(base[k] || {}), ...w[k] } : w[k]; return o; };
+export function setPadW(w, team = null) {
+  if (team == null) { const m = mergePadW(PAD_W, w || {}); for (const k in m) PAD_W[k] = m[k]; return PAD_W; }
+  teamPadW[team] = mergePadW(teamPadW[team] || PAD_W, w || {}); return teamPadW[team];
+}
+const padWOf = (team) => teamPadW[team] || PAD_W;
+// how full a supply is for the pad score; the hull against what base repair will give THIS unit (a
+// trap's bait holds 55% on purpose, and a top-up must not wait for hull that never comes)
+function padFrac(cmd, what) {
+  const v = cmd.unit; if (!v || v.dead) return 1;
+  if (what === 'hp') { const cap = cmd.healCap ? cmd.healCap() : v.maxHp; return cap > 0 ? Math.min(1, v.hp / cap) : 1; }
+  return fracOf(cmd, what);
+}
+const padEmpty = (f, tau) => { const e1 = Math.exp(-1 / tau); return Math.max(0, (Math.exp(-f / tau) - e1) / (1 - e1)); };
+// one supply's two parts, from how full it is (0..1) and the seconds of driving to where it's given
+export function padTerms(f, T, w, wr) {
+  const miss = Math.max(0, 1 - f); if (miss <= 1e-9) return { stay: 0, need: 0 };
+  const near = Math.exp(-Math.max(0, T) / w.T0), at = Math.exp(-Math.max(0, T) / (w.Ts || 0.4));
+  return { stay: w.S * at * miss / (miss + w.K), need: (wr.A * Math.sqrt(miss) + wr.X * padEmpty(f, wr.tau)) * (1 + (w.C - 1) * near) };
+}
+// THE FLAG CHASE WEIGHED BY WHAT WE CAN SHOOT (Jacob, 2026-10-08: "if the vehicle has no ammo then
+// intercept is worthless"). When on, 'flag STOLEN' is INTERCEPT_W x firepower (0 with an empty gun, 1
+// with enough rounds to kill the carrier: see firepowerOnCarrier in main.js), and the old override that
+// sent EVERY unit after a stolen flag whatever it was doing only steers a unit whose board picked the
+// chase. Off by default until it has been gated on its own (?interceptfp).
+let INTERCEPT_FP = false, INTERCEPT_W = 18;
+const teamIntFp = {};   // per team too, to duel it: setInterceptFp(on, w, team)
+export function setInterceptFp(on, w, team = null) {
+  if (w != null) INTERCEPT_W = +w;
+  if (on != null) { if (team == null) INTERCEPT_FP = !!on; else teamIntFp[team] = !!on; }
+  return { on: team == null ? INTERCEPT_FP : interceptFpOn(team), w: INTERCEPT_W };
+}
+export const interceptFpOn = (team) => (team != null && team in teamIntFp) ? teamIntFp[team] : INTERCEPT_FP;
 // How hard each shortage pulls at its worst (empty). Fuel leads: a dry tank is a dead unit, not
 // merely a weak one. The shield is the softest — worth a detour, never worth a crisis.
 // hp: 10 is a behaviour choice, not a tuned optimum — see NEAR_MAX below for why win rate cannot
@@ -1277,7 +1350,13 @@ class Supply extends Mission {
   // do, and deploy() picks its vehicle from the running mission. Keep whatever we are driving.
   get garageOK() { return false; }
   wantVehicle(cmd) { return cmd.unit ? cmd.unit.type : this.doc.role('attack'); }
-  done(cmd) { return fracOf(cmd, this.what) >= SUPPLY_FULL_F; }
+  done(cmd) {
+    if (!padScoreOn(cmd.team) || this.what === 'shield') return fracOf(cmd, this.what) >= SUPPLY_FULL_F;
+    // at the supply: everything it gives is full; on the way: what we came for is (the score is 0 then)
+    const src = cmd.supplySource ? cmd.supplySource(this.what) : null;
+    const list = src && src.sec <= 0 ? src.serves : [this.what];
+    return list.every((r) => padFrac(cmd, r) >= 1);
+  }
   objective(cmd) { return cmd._supply || cmd._home || cmd.homePos(); }
   shoot(cmd) { return false; }
   arriveDist(cmd) { return 6; }
@@ -2046,7 +2125,8 @@ export function missionScore(cmd, key, running = null) {
     }
     case 'intercept':
       add('base', -5);
-      if (cmd.ourFlagStolen()) add('flag STOLEN', 12);
+      if (cmd.ourFlagStolen() && interceptFpOn(cmd.team)) { const fp = cmd.firepowerOnCarrier ? cmd.firepowerOnCarrier() : 1; add('flag STOLEN', INTERCEPT_W * fp); }
+      else if (cmd.ourFlagStolen()) add('flag STOLEN', 12);
       else if (cmd.ourFlagLoose && cmd.ourFlagLoose()) add('flag loose', 10); break;
     // GRAB — the opportunistic pickup (see the Grab mission). Scavenge is the dedicated hunt for
     // salvage and stays exactly what it was; this is the different thing: a bend on a trip we are
@@ -2160,6 +2240,32 @@ export function missionScore(cmd, key, running = null) {
       if (key === 'shield' && !(v.maxShield > 0 && cmd.nearestKnownShield
           && cmd.nearestKnownShield(v.holder.position.x, v.holder.position.z))) break;   // no shield to fetch
       if (key === 'repair' && !cmd._home) break;                      // only an own base patches a hull
+      // A CARRIER DOES NOT SHOP under the pad score either. Getting the flag home ends the match, and the pad score's
+      // scale (stay up to 20 per supply, need up to 4x near one) is far past the +6 carry bonus that keeps capture
+      // ahead of the old supply urges: a carrier at 5% hull parked 1.5u outside its scoring ring for 6s (seed 109).
+      if (padScoreOn(cmd.team) && cmd.flag && cmd.flag() && cmd.flag().carrier === v) break;
+      if (padScoreOn(cmd.team) && key !== 'shield') {
+        // the supply this trip would use (the one the route picks), how far, and everything it gives
+        const src = cmd.supplySource ? cmd.supplySource(what) : null;
+        if (!src) break;                                              // nowhere known to get it
+        const w = padWOf(cmd.team);
+        const terms = src.serves.map((r) => [r, padTerms(padFrac(cmd, r), src.sec, w, w[r] || w.fuel)]);
+        // ONE TRIP, ONE NAME. A base fills fuel, ammo and hull at once, so refuel, rearm and repair to it are the
+        // same trip with the same total; the trip goes by the supply it is most for, and the other two keep only
+        // their own part (otherwise refuel won every tie and named every base trip, whatever it was for)
+        const top = terms.reduce((a, b) => (b[1].stay + b[1].need > a[1].stay + a[1].need ? b : a))[0];
+        // THE STAY IS A TOP-UP'S OWN: "don't leave half-full", for the one running. A unit standing in a supply on another
+        // job is refilled anyway (refilling goes by where you are, not what you're doing), so it gains nothing by
+        // switching; with the stay offered to it, a Valkyrie besieging from inside a depot flipped to rearm every time it
+        // fired a rocket and back once the depot replaced it, six times in ten seconds (seeds 354, 2116)
+        const mine = running === key || w.stayAlways;
+        for (const [r, t] of terms) {
+          if (src.base && r !== what && what !== top) continue;
+          if (mine && t.stay > 0.05) add(`at the ${src.base ? 'base' : 'depot'}, ${r} not full`, t.stay);
+          if (t.need > 0.05) add(`${r} running down`, t.need);
+        }
+        break;
+      }
       const frac = fracOf(cmd, what), low = SUPPLY_LOW[what];
       // HOW MUCH IT PULLS DEPENDS ON HOW FAR THE CURE IS (Jacob). A flat number has to be two
       // contradictory things at once — worth crossing the map for, and not worth abandoning a
@@ -2759,6 +2865,9 @@ class Doctrine {
       const t = edge('low' + what, fracOf(cmd, what) < SUPPLY_LOW[what], `${what} is low`);
       if (t && !lowLabel) lowLabel = t;
     }
+    // THE LAST ROUND FIRED. Under the pad score one round is a round, not an empty gun, so the board
+    // has to hear the moment it is actually gone: before this the next look could be 15s away.
+    if (padScoreOn(cmd.team)) { const t = edge('empty', !!(v && !v.dead && (v.ammo || 0) <= 0), 'magazine empty'); if (t && !lowLabel) lowLabel = t; }
     // AN ENGAGEMENT MUST BE ANSWERED (Jacob's rule: contact resolves to fight or flee, nothing else).
     // `sees` above is an EDGE on "any contact within 12s", so it fires once and then stays latched
     // for as long as contacts keep refreshing — which means a NEW rival closing on a unit that saw

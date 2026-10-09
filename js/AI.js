@@ -19,7 +19,7 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=126';   // rock-paper-scissors web for fight-or-flight matchups
+import { COUNTER } from './AIStrategies.js?v=127';   // rock-paper-scissors web for fight-or-flight matchups
 import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
@@ -62,34 +62,13 @@ function wrapPi(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) 
 
 // Fraction of ammo remaining (treat "unknown" as full, matching the old behaviour).
 function ammoFrac(view) { return view.self.ammoFrac != null ? view.self.ammoFrac : 1; }
-// Ammo hysteresis for the fight conditions: STAYING in a fight only needs a round in the gun,
-// but ENTERING one needs a usable burst (~12% of the magazine). Without the asymmetry a unit
-// topping up at base flipped resupply↔engage on every refill tick — off to fight with one
-// round, fire it, dry, back to resupply, repeat (the deterministic ×38 strobe, seed 11 t=201).
-// A USABLE BURST IS A NUMBER OF ROUNDS, NOT A FRACTION (task #47 — "It's dumb if you can't fire your
-// last rocket"). The flat 0.12 was tuned on the Firebrat and is absurd at the extremes, because the
-// magazines and the damage per round are nothing like each other:
-//     chassis    dmg/shot   mag   12% is   damage withheld
-//     lurcher       35       68     8.2       286
-//     firebrat      14       90    10.8       151   <- where 0.12 was tuned
-//     valkyrie      90       12      1.4       130
-//     jotun        180       16      1.9       346   <- two shells, and ONE kills a Firebrat outright
-// So a Jotun sitting on its last rocket would not enter a fight it could win with that rocket.
-// Restated as the thing the rule is actually about: enough rounds to be worth starting a fight,
-// ~150 damage (roughly one kill), floored at one round so a loaded gun is never unusable.
-//   rounds = max(1, ceil(150 / dmgPerShot))  ->  lurcher 5/68, firebrat 11/90, valkyrie 2/12, jotun 1/16
-// The Firebrat's value is unchanged at 0.122, so the strobe fix that produced 0.12 keeps its tuning.
-const BURST_FRAC = { lurcher: 5 / 68, firebrat: 11 / 90, valkyrie: 2 / 12, jotun: 1 / 16 };
-// ?oldburst restores the flat 0.12 so the gate has a control arm inside this same build.
-let BURST_FIX = true;
-export function setBurstFix(on) { BURST_FIX = !!on; return BURST_FIX; }
-// The asymmetry stays: STAYING in a fight needs only a round in the gun, ENTERING one needs the
-// burst. Without it a unit topping up at base flipped resupply<->engage on every refill tick (the
-// deterministic x38 strobe, seed 11 t=201).
-function ammoBurst(view, mem) {
-  if (mem && mem.state === 'engage') return ammoFrac(view) > 0;
-  return ammoFrac(view) > (BURST_FIX ? (BURST_FRAC[view.self && view.self.type] ?? 0.12) : 0.12);
-}
+// EVERY ROUND IS USABLE (Jacob, 2026-10-08: "a vehicle should be able to shoot every round that it has").
+// The entry gate this used to hold (a burst of rounds to START a fight, one to stay) existed for the
+// refill strobe: at the pad each refill tick handed over one round, the fight rung above resupply took
+// it, fired it, ran dry and fell back, x38 on seed 11 t=201. Its last form (BURST_FRAC, rounds per
+// chassis) asked for one round more than it meant. This table only runs with missions' movement off
+// (RR.setMsnMove(false)); in play the pad score decides, and a unit topping up fights FROM the pad.
+function ammoBurst(view, mem) { return ammoFrac(view) > 0; }
 // Pull-out HP threshold: brave brains hold longer (0.27–0.45 across aggression). The
 // Jotun is the exception — it's far too slow to flee (a crawling retreat just gets it
 // shot in the back), so it holds and keeps firing down to nearly dead.
@@ -847,10 +826,13 @@ const BEHAVIORS = {
     // Both stay parked: leaving the spot to duel loses the heal, or opens the door. Gated on
     // ARRIVED (not fwd===0) so a unit merely pivoting en route doesn't stop.
     const camped = view.atCamp && mode === 'advance';   // holding the door, not off pursuing from it
-    if (arrived && (homeward || camped)) {
+    // TOPPING UP under the pad score (Jacob's rule 3): inside the supply with a top-up running, hold and
+    // face the field (padWatch: a rival in sight, whoever last shot us, the last contact, or straight out)
+    // and fire from here. The route-follower holds the wheels (main.js _navOverride); this sets the turn.
+    if (view.topping || (arrived && (homeward || camped))) {
       const foe = view.enemy;                      // visible + LOS → can actually shoot it
       // A rival in sight wins; otherwise face the lane we are here to watch.
-      const face = foe || (camped ? view.watch : null);
+      const face = foe || (camped ? view.watch : view.topping ? (view.incomingFire || view.padWatch) : null);
       if (face) {
         const derr = wrapPi(Math.atan2(-(face.x - self.x), -(face.z - self.z)) - self.heading);
         let fire = false;
@@ -864,7 +846,15 @@ const BEHAVIORS = {
       }
     }
     mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
-    return { fwd, turn, strafe, fire: false, state: ctx.mode };
+    // ON THE WAY IN, the rounds still in the gun are still rounds (rule 1): a rival inside the gun's own arc
+    // and reach is shot at without leaving the route. A turret reaches round; a fixed gun only ahead.
+    let fire = false;
+    if (view.padRun && view.enemy) {
+      const foe = view.enemy, ferr = wrapPi(Math.atan2(-(foe.x - self.x), -(foe.z - self.z)) - self.heading);
+      const fd = Math.hypot(foe.x - self.x, foe.z - self.z), range = view.engageRange || 36, fireCap = view.shotReach || 999;
+      if (Math.abs(ferr) < Math.min(view.shotArc || 0.3, Math.PI) && fd < Math.min(range * 1.3, fireCap)) fire = mem.rng() < 0.7 * AI_HANDICAP.fireProb;
+    }
+    return { fwd, turn, strafe, fire, state: ctx.mode };
   },
 
   // Obstacle avoidance OVERLAY (not a standalone state): takes the behavior's intended
@@ -883,6 +873,7 @@ const BEHAVIORS = {
   // True wedges (driving but not moving) are still caught by the unstick reflex.
   avoid(ctx, cmd) {
     const { view, mem, cfg, p } = ctx;
+    if (view.topping) { mem._dodgeTurn = 0; mem._breakT = 0; return cmd; }   // parked on purpose: a wall ahead is not a thing to drive round
     // SHOOT-THROUGH: a destructible (wall or tree) is dead ahead on the way to the goal.
     // Rather than always circling it, a brain can square the nose onto it and blast a
     // path clear — a Firebrat that can't crush a palm just shoots it down; a heavy
