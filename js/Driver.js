@@ -22,7 +22,7 @@
 //            SELF-DESTRUCTS (loudly). No mud in this game: a stuck vehicle is a bug,
 //            and a bug should cost the team, not pirouette for minutes.
 
-import { locomote, wrapPi } from './Locomotion.js?v=1';
+import { locomote, wrapPi } from './Locomotion.js?v=2';
 
 const REC_MAX = 120;          // flight-recorder ring: ~12s at the 0.1s sample floor
 const REC_DT = 0.1;           // min seconds between recorder samples
@@ -34,6 +34,9 @@ const WATCH_MIN_MOVE = 6;     // u — under this much net ground in a window = 
 const WATCH_WANT = 0.3;       // |pedal| above this counts as "trying to move"
 const ALARM_WINDOWS = 2;      // consecutive no-progress windows before the alarm fires
 const GOTO_STALL = 16;        // s — a GOTO making NO headway toward its goal this long = alarm.
+// a re-issued GOTO to the same point inherits the last attempt's stall record only after a gap this short (a brain-state
+// flicker) or with the hull still within this of where that attempt ended (a wedged unit that flickered in place)
+const LAUNDER_MS = 3000, LAUNDER_MOVE = 8;
                               // This is the ORBIT catcher: a circling unit covers plenty of
                               // ground (the pin detector never trips) while its distance-to-goal
                               // goes nowhere. Progress = getting CLOSER, not just moving.
@@ -69,6 +72,7 @@ export class Driver {
     this._recT = 0;
     this._winT = 0; this._winX = 0; this._winZ = 0; this._wantT = 0;
     this._winPath = 0; this._lastPX = null; this._lastPZ = null;   // ground covered this window
+    this._prevWinPath = 0;     // ground covered in the last WHOLE window (the scuttle's mobility test)
     this._cmdT = 0; this._why = 'pin';         // grind bookkeeping + last no-progress reason
     this._noProgWins = 0;      // consecutive windows with no net progress
     this._alarmT = -1;         // >=0: seconds since the alarm fired (grace countdown)
@@ -84,7 +88,7 @@ export class Driver {
       this._recT = 0; this._winT = 0; this._wantT = 0; this._noProgWins = 0; this._alarmT = -1;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
       this._winD = null; this._lastGoto = null; this._cmdT = 0; this._why = 'pin'; this._firedInWin = false;
-      this._staleSaid = false;
+      this._staleSaid = false; this._prevWinPath = 0;
     }
     this.nav = nav; this.team = team; this.cname = cname;
   }
@@ -137,12 +141,17 @@ export class Driver {
       // re-issues "the same trip" as a fresh order every flip, and a wall-grinding unit's
       // stall clock reset to zero each time (autopsy: full pedals, stationary, stallT 0.1).
       // Same destination = same trip: inherit the previous attempt's progress bookkeeping.
-      const lg = this._lastGoto;
-      if (lg && Math.abs(lg.x - o.x) < 3 && Math.abs(lg.z - o.z) < 3) {
-        o.bestD = lg.bestD; o.stallT = lg.stallT; o.violated = lg.violated; o.d0 = lg.d0;
+      // …WHEN IT IS THE SAME TRIP: the gap was a flicker, or the hull is still where it was. A real trip somewhere else in
+      // between makes it a new one. Seed 242: a Lurcher fleeing north for four seconds, sent back south to a point it had
+      // once come within 11u of, inherited that 11 and alarmed for 'no progress' at 54u while driving straight at it.
+      const lg = this._lastGoto, gapMs = lg ? performance.now() - lg.endT : Infinity;
+      const sameTrip = lg && (gapMs < LAUNDER_MS || Math.hypot(this.v.holder.position.x - lg.px, this.v.holder.position.z - lg.pz) < LAUNDER_MOVE);
+      if (lg && sameTrip && Math.abs(lg.x - o.x) < 3 && Math.abs(lg.z - o.z) < 3) {
+        o.bestD = lg.bestD; o.bestOn = lg.bestOn && { ...lg.bestOn }; o.stallT = lg.stallT; o.violated = lg.violated; o.d0 = lg.d0;
       }
     }
-    if (cur && cur.type === 'GOTO') this._lastGoto = { x: cur.x, z: cur.z, bestD: cur.bestD, stallT: cur.stallT || 0, violated: cur.violated, d0: cur.d0 };
+    if (cur && cur.type === 'GOTO') this._lastGoto = { x: cur.x, z: cur.z, bestD: cur.bestD, bestOn: cur.bestOn && { ...cur.bestOn }, stallT: cur.stallT || 0, violated: cur.violated, d0: cur.d0,
+      endT: performance.now(), px: this.v.holder.position.x, pz: this.v.holder.position.z };
     this.o = o;
     return o;
   }
@@ -492,10 +501,19 @@ export class Driver {
     // short of an unreachable goal — the silent soft-lock the autopsy caught. Standing
     // at the end of a route that never reached the order IS the failure, motion or not.
     if (o && o.type === 'GOTO' && (wants || o.violated)) {
-      const d = Math.hypot(o.x - v.holder.position.x, o.z - v.holder.position.z);
+      const d = this._leftD(o, v);
+      // ONE RULER PER COMPARISON. _leftD measures along the route when it holds one planned for this goal and along the
+      // straight line when it does not, and the route is never the shorter of the two. A reading on one judged against a
+      // best taken on the other measures nothing. Seed 12123 at 399s: the issuer drops the route on the tick the driver
+      // calls a firing spot unreachable, so a Jotun's first reading was the 64u straight line; the next tick it had a 181u
+      // route, drove 112u of it at full throttle, and was alarmed at 415s for sixteen seconds of 'no progress' because
+      // the route left had not yet dipped under that first 64. Run the other way, every jolt that drops the route read
+      // as closing and reset the clock. So each ruler keeps its own best, and switching rulers is neither progress nor stall.
+      const on = this._onRoute(o) ? 'route' : 'line', best = o.bestOn || (o.bestOn = {});
       if (!wants && d <= (o.arrive || 2) + 2) { /* genuinely arrived — nothing to stall */ } else
-      if (o.bestD == null || d < o.bestD - GOTO_STALL_MIN) {
-        o.bestD = d; o.stallT = 0;   // stall clock resets on any closing — but an ARMED alarm
+      if (best[on] == null) { best[on] = o.bestD = d; if (o.stallT == null) o.stallT = 0; }   // first reading on this ruler
+      else if (d < best[on] - GOTO_STALL_MIN) {
+        best[on] = o.bestD = d; o.stallT = 0;   // stall clock resets on any closing — but an ARMED alarm
         // does NOT stand down here: a creeper closes 1u every few seconds forever. Recovery
         // is judged once per window below, at a rate no wall-grind can fake.
       } else {
@@ -545,12 +563,11 @@ export class Driver {
       // still on a GOTO — real closing on the goal (≥4u/window ≈ 0.5u/s). An orbit moves
       // without closing; a creeper closes without moving fast; neither counts as recovered.
       if (this._alarmT >= 0 && !noProg) {
-        const closed = (o && o.type === 'GOTO' && this._winD != null)
-          ? this._winD - Math.hypot(o.x - v.holder.position.x, o.z - v.holder.position.z) : null;
+        const closed = (o && o.type === 'GOTO' && this._winD != null) ? this._winD - this._leftD(o, v) : null;
         if (closed == null || closed >= 4) { this._alarmT = -1; if (o) o.stallT = 0; }
       }
-      this._winD = (o && o.type === 'GOTO')
-        ? Math.hypot(o.x - v.holder.position.x, o.z - v.holder.position.z) : null;
+      this._winD = (o && o.type === 'GOTO') ? this._leftD(o, v) : null;
+      this._prevWinPath = path;
       this._winT = 0; this._wantT = 0; this._winPath = 0;
       this._winX = v.holder.position.x; this._winZ = v.holder.position.z;
       if (noProg && this._noProgWins >= ALARM_WINDOWS && this._alarmT < 0) this._fireAlarm(this._why);
@@ -577,7 +594,13 @@ export class Driver {
         // the map is a real bug and it should announce itself. The vehicle just stops paying for
         // it with its life. A hull that covered real ground in the last window can move; the fault
         // is upstream of the driver and killing the unit neither reports it nor fixes it.
-        const mobile = this._winPath > WATCH_MIN_MOVE;
+        // THE LAST WINDOW MEANS THE LAST WHOLE ONE, not just the one in progress. The grace runs on its own clock, so it can
+        // run out a moment after a window has closed, and the ground covered so far then says nothing. Seed 20186: a Lurcher
+        // on an empty tank backed 5u out and drove 5u back in the two seconds before its window closed (37.9u on that window),
+        // was judged on the 0.05s that followed (0.25u) and scuttled at t410. Seed 34354: a Jotun covered 14.8u in its last
+        // whole window, spent 3s turning on the spot toward a new goal (1.3u) and was scuttled at t360. A hull that is
+        // really stuck covers nothing in either.
+        const mobile = Math.max(this._winPath, this._prevWinPath) > WATCH_MIN_MOVE;
         if (mobile) {
           this.hooks.log(this.team, `[NAV ALARM] ${this.cname}: ${v.type} has been driving hard for ${Math.round(WATCH_WIN * ALARM_WINDOWS + this._alarmT)}s and never arrives — its goal keeps moving. Leaving it alive; this is a decision bug, see the flight recording.`);
           this._alarmT = -1;
@@ -591,6 +614,23 @@ export class Driver {
     }
   }
 
+  // HOW FAR IS LEFT, measured along the route when one planned for this order is in hand. A route that swings round
+  // a lake or a base gets further from the goal in a straight line for a while, and the straight line called that
+  // "no progress": seed 305, a Jotun at full throttle on its 13-point route, alarmed twice as stalled. Circling a
+  // point still shows, since the route left doesn't shrink either. Without a route for this goal, the straight line.
+  _onRoute(o) {
+    const nav = this.nav, path = nav && nav.path;
+    return !!(path && path.length && nav.dx != null && Math.hypot(nav.dx - o.x, nav.dz - o.z) <= UNREACH_SLACK);
+  }
+  _leftD(o, v) {
+    const p = v.holder.position, nav = this.nav, path = nav && nav.path;
+    const straight = Math.hypot(o.x - p.x, o.z - p.z);
+    if (!this._onRoute(o)) return straight;
+    let i = Math.max(0, Math.min(nav.idx || 0, path.length - 1)), d = Math.hypot(path[i].x - p.x, path[i].z - p.z);
+    for (; i < path.length - 1; i++) d += Math.hypot(path[i + 1].x - path[i].x, path[i + 1].z - path[i].z);
+    const end = path[path.length - 1];
+    return d + Math.hypot(o.x - end.x, o.z - end.z);
+  }
   _fireAlarm(why = 'pin') {
     const v = this.v, o = this.o;
     this.alarms++; Driver.alarmsTotal++;

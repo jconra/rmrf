@@ -19,8 +19,8 @@
 // `Brain.think()` is now a thin wrapper around runBrain(DEFAULT_BRAIN, …); assign a
 // different graph to a brain's `.graph` to change its behavior.
 
-import { COUNTER } from './AIStrategies.js?v=127';   // rock-paper-scissors web for fight-or-flight matchups
-import { locomote } from './Locomotion.js?v=1';     // the ONE steering primitive (behaviors emit orders, not motor math)
+import { COUNTER } from './AIStrategies.js?v=129';   // rock-paper-scissors web for fight-or-flight matchups
+import { locomote } from './Locomotion.js?v=2';     // the ONE steering primitive (behaviors emit orders, not motor math)
 
 const TYPES = ['lurcher', 'firebrat', 'valkyrie', 'jotun'];
 
@@ -348,16 +348,37 @@ function resolveTarget(key, view, mem) {
 // hard way (two jotuns random-walked the same crest for 300 seconds) and answered it with a held
 // hop escalating to a committed leg. A solved destination needs the same patience for the same
 // reason — a spot abandoned mid-approach is a spot never reached.
-const UNBLOCK_HOLD = 2.5;   // s to commit to a chosen spot before solving again
-function blockedLine(ctx, aimPt) {
-  const { view, mem, self } = ctx;
+//
+// PATIENCE IS MEASURED IN HEADWAY, NOT SECONDS. The beat used to be a flat 2.5s from the moment the
+// spot was solved. A tank creeping backwards to a spot behind it and off to one side does not get
+// there in 2.5s, so the spot was solved again from wherever it had got to — and a spot solved from a
+// new position is a new spot. Seed 14284: a Jotun's spot walked (119,36) -> (125,34) -> (134,39),
+// each one solved partway to the last, until it had backed out of sight of the rival it was trying to
+// shoot. Held while it keeps getting closer; let go once it is reached or has stopped getting closer
+// for UNBLOCK_HOLD — which is what "the spot is not working" actually means.
+//
+// `seenAs` (the duel only): the rival's chassis, so the solver keeps the spot inside the range at
+// which we can SEE that rival. A firing spot we cannot see the target from is not a firing spot.
+const UNBLOCK_HOLD = 2.5;   // s without getting closer to a chosen spot before solving again
+function heldSpot(mem, self, mode) {
+  const to = mem._unblockTo;
+  if (!to || mem._unblockMode !== mode) return null;           // a spot belongs to the job it was solved for
+  const d = Math.hypot(to.x - self.x, to.z - self.z);
+  // reached or given up on: let it go, or a later tick that happens to edge closer revives a spot already abandoned
+  if (d < 3) { mem._unblockTo = null; return null; }
+  if (d < (mem._unblockBest ?? Infinity) - 0.5) { mem._unblockBest = d; mem._unblockToT = mem.t; }
+  if (mem.t - (mem._unblockToT ?? -99) > UNBLOCK_HOLD) { mem._unblockTo = null; return null; }
+  return to;
+}
+function blockedLine(ctx, aimPt, seenAs, cap) {
+  const { view, mem, self, mode } = ctx;
   if (!aimPt || !view.shotHits) return null;
   if (view.shotHits(aimPt.x, aimPt.z, aimPt.y) !== 'ground') { mem._unblockTo = null; return null; }
-  let to = mem._unblockTo;
-  const reached = to && Math.hypot(to.x - self.x, to.z - self.z) < 3;
-  if (!to || reached || (mem.t - (mem._unblockToT ?? -99)) > UNBLOCK_HOLD) {
-    to = view.unblockSpot ? view.unblockSpot(aimPt.x, aimPt.z, aimPt.y) : null;
-    mem._unblockTo = to; mem._unblockToT = mem.t;
+  let to = heldSpot(mem, self, mode);
+  if (!to) {
+    to = view.unblockSpot ? view.unblockSpot(aimPt.x, aimPt.z, aimPt.y, seenAs, cap) : null;
+    mem._unblockTo = to; mem._unblockToT = mem.t; mem._unblockMode = mode;
+    mem._unblockBest = to ? Math.hypot(to.x - self.x, to.z - self.z) : null;
   }
   return to ? { to } : null;
 }
@@ -397,6 +418,7 @@ const BEHAVIORS = {
   // wall-turret at arm's length and arc around its flank to find a clean line).
   combat(ctx) {
     const { view, mem, p, err, dist, mode, self, cfg } = ctx;
+    mem._closeOn = null;   // set below only while closing on a rival we cannot see (the nav layer routes it)
     const aimGate = 0.18 + p.aggression * 0.12;
     const want = view.engageRange || 36;
     const range = mode === 'suppress' ? want : want * (1 - p.aggression * 0.45);
@@ -467,7 +489,9 @@ const BEHAVIORS = {
       // already live — the instant ANYTHING (tower or demolish wall) is in range with a
       // clear line, plant right here and pour fire. Only keeps closing when truly nothing
       // is shootable yet, so most approaches never actually reach the tight hold at all.
-      if (atStand || barred || demolish || canBear) {
+      // …and while walking to a spot this branch solved: the swing onto the spot's line takes the nose off the tower, so
+      // canBear drops part-way, the skirt below routes it back to the stand, and the next plant hands it the same spot.
+      if (atStand || barred || demolish || canBear || (mode === 'suppress' && mem._unblockTo && mem._unblockMode === mode)) {
         const turn = clamp((demolish ? demoErr : err) * 2.2, -1, 1);   // square onto the wall (demolish) or tower
         // SHOOTING INTO THE HILL — creep up the bank instead of planting, and hold fire until the
         // round can actually get there (Jacob, 2026-09-12: "the lurcher was on the shore and if it
@@ -496,11 +520,25 @@ const BEHAVIORS = {
           const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
             { goto: blk.to, face: aimPt, arrive: 2 });
           mem._wantMove = true;
-          return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode };
+          return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode, working: true, solvedRun: true };
         }
-        const fwd = dist > want ? 0.4 : 0;                 // ease into range, then plant
+        // EASE IN ONLY WHILE THE TARGET IS PAST THE GUN'S REACH — the limit the trigger above uses and
+        // the one the standoff solver places to (every tier capped at reach*0.99). This eased in to
+        // `want`, duelling range, which is the same disagreement the fire cap had: a Jotun's stand can
+        // be solved out to 79u while its duelling range is 70, so a Jotun arriving on a 76u stand drove
+        // off it toward the tower. The stand is 5u wide, so the route took the wheel back, the plant
+        // drove off again, and the hull lapped the spot, firing only when a lap swung its nose across
+        // the target. Seed 14067 at 225-262s: six shots in 37 seconds at the keep and a stall alarm;
+        // planted, the same hull squared up in a second and put four rounds into it in the next five.
+        // Seeds 24060 and 24242 are the same lap. And scaled by how squarely the nose points: throttle
+        // at full lock is a circle for a tank, which is what every one of those laps was.
+        const fwd = dist > fireCap ? 0.4 * Math.max(0, Math.cos(demolish ? demoErr : err)) : 0;
         mem._wantMove = fwd > 0.3;
-        return { fwd, turn, fire, state: mode };
+        // WORKING (read by the route, see ONCE THERE in main.js): something here this gun can shoot —
+        // the target in reach with a clean line, or the wall in the way. Not `canBear`: that also asks
+        // whether the nose is on it this tick, through a jittered aim error, and a unit still swinging
+        // onto its target would hand the wheel back and forth with the route at every flicker.
+        return { fwd, turn, fire, state: mode, working: (view.threatLOS && dist < fireCap) || demolish };
       }
       // Skirt: drive the hull toward the standoff (arcing around the base) while the
       // turret keeps firing on the tower whenever it bears. The point is to REACH the
@@ -625,12 +663,22 @@ const BEHAVIORS = {
       // hop below stays as the backstop for what the predictor cannot see (a rival hull parked in
       // the lane, cover that moved), which is exactly the case live feedback is still the only
       // witness to.
-      const blkDuel = SIEGE_CREEP_ON ? blockedLine(ctx, view.enemy) : null;
+      // ONLY FOR A ROUND WE ARE ABOUT TO FIRE: inside the same reach the trigger uses. Out of it the
+      // shot is moot and the footwork below is already closing — and the two pulled opposite ways.
+      // Seed 32291: a Jotun 67u from its rival, firing only inside 58, had a line that read wall one
+      // tick and bank the next; every 'bank' tick sent it 6u back toward a spot, every 'wall' tick
+      // closed it again, and it sat on one spot with the pedals flipping until the watchdog alarmed.
+      // The spot must sit inside the same line this test runs under (and the trigger fires under), with a little room for a
+      // rival that drifts: solved past it, the walk out crossed the line, the closing footwork took over and walked the hull
+      // back in, and the held spot sent it out again (review of the merged fixes, seed 14284's Lurcher at the gate).
+      const duelGate = Math.min(range * 1.3, fireCap);
+      const blkDuel = SIEGE_CREEP_ON && dist < duelGate
+        ? blockedLine(ctx, view.enemy, view.enemy.type, duelGate - 2) : null;
       if (blkDuel) {
         const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
           { goto: blkDuel.to, face: view.enemy, arrive: 2 });
         mem._wantMove = true;
-        return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode };
+        return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode, solvedRun: true };
       }
       if (view.shotBlocked) {
         mem._blockSeenT = mem.t;
@@ -746,6 +794,30 @@ const BEHAVIORS = {
         return { fwd, turn, fire, strafe, state: mode, mnv };
       }
     }
+    // THE RIVAL IS OUT OF SIGHT (past the afterglow), so there is no duel to footwork. Two things are
+    // still worth doing, and the old fallback — steer straight at the last sighting — did neither.
+    if (mode === 'engage' && !view.enemy) {
+      // FINISH THE MOVE WE STARTED. A firing spot solved while we could see them is a decision, and a
+      // decision does not evaporate because the target blinked out — least of all when the move
+      // itself is what hid it: backing off, or swinging a tank's nose round to reach a spot off to its
+      // side. Seed 12242: a Jotun 61u from a Lurcher it sees at 61, its shot buried in a bank, backed a
+      // metre toward its spot, lost sight, drove back to the last sighting, saw it again, and backed
+      // off again — every 2.5s for over a hundred seconds, without firing a round.
+      const held = heldSpot(mem, self, mode);
+      if (held) {
+        const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
+          { goto: held, face: ctx.target, arrive: 2 });
+        mem._wantMove = true;
+        return { fwd: lo.fwd, turn: lo.turn, strafe: lo.strafe || 0, fire: false, state: mode, solvedRun: true };
+      }
+      // CLOSING ON THE LAST SIGHTING IS A TRIP, and trips get routes. Steered in a straight line it
+      // went straight at whatever stood in between. Seed 12088: a Jotun in the lane of its own FOB, 53u
+      // from where it last saw its rival, steered at the sighting through the FOB's own buildings and
+      // rocked in the lane for 16s between the dodge feelers and the anti-wedge jolt (seed 14284 did
+      // the same in its FOB). Same stopping distance as the footwork above; the nav layer supplies the
+      // route (out through the gate) and holds the unit once it is that close.
+      mem._closeOn = { x: ctx.target.x, z: ctx.target.z, r: range * 0.95 };
+    }
     mem._wantMove = Math.abs(fwd) > 0.3 || Math.abs(strafe) > 0.3;
     // ALIGN — the plain nose-on-the-target footwork, as an ORDER. This is what every fight falls
     // back on when there is no orbit / kite / joust to run: a chassis that cannot strafe, or
@@ -782,7 +854,7 @@ const BEHAVIORS = {
       const loU = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
         { goto: blkA.to, face: target, arrive: 2 });
       mem._wantMove = true;
-      return { fwd: loU.fwd, turn: loU.turn, strafe: loU.strafe || 0, fire: false, state: mode };
+      return { fwd: loU.fwd, turn: loU.turn, strafe: loU.strafe || 0, fire: false, state: mode, solvedRun: true };
     }
     const standoff = want * 0.7;
     const lo = locomote({ x: self.x, z: self.z, heading: self.heading, omni: view.omni },
@@ -874,6 +946,12 @@ const BEHAVIORS = {
   avoid(ctx, cmd) {
     const { view, mem, cfg, p } = ctx;
     if (view.topping) { mem._dodgeTurn = 0; mem._breakT = 0; return cmd; }   // parked on purpose: a wall ahead is not a thing to drive round
+    // DRIVING A SOLVED RUN — a firing spot whose straight line was already checked clear for this hull
+    // (bestUnblockSpot). The feelers reach 9u down the nose and 34 degrees either side, past a spot 6u
+    // off and across the corners the run was checked to miss, so they called it blocked and the dodge
+    // threw the hull off a line it could drive. Seed 32291: a Jotun swinging onto a spot 6u away read
+    // 'blocked' on both feelers, was boxed into the back-out, and turned more than a full circle in 8s.
+    if (cmd.solvedRun) { mem._dodgeTurn = 0; mem._breakT = 0; return cmd; }
     // SHOOT-THROUGH: a destructible (wall or tree) is dead ahead on the way to the goal.
     // Rather than always circling it, a brain can square the nose onto it and blast a
     // path clear — a Firebrat that can't crush a palm just shoots it down; a heavy
@@ -907,6 +985,13 @@ const BEHAVIORS = {
     } else {
       mem._breakT = 0;
     }
+    // NOTHING TO DRIVE ROUND WHEN THE BEHAVIOUR IS NOT DRIVING FORWARD. The feelers look ahead; a unit
+    // standing still on purpose (holding its band and shooting, a siege plant) or backing off has no
+    // path ahead to clear, but the dodge took the wheel anyway and drove it forward, turning hard, into
+    // the very thing it was facing. Seed 12242: a Jotun holding its distance from where it last saw its
+    // rival, nose to a building, rocked 0.35 forward and 0.5 back against the wall until the anti-wedge
+    // jolt fired. The same reasoning as `topping` above, for every behaviour that is standing on purpose.
+    if (!(cmd.fwd > 0.05) && !(Math.abs(cmd.strafe || 0) > 0.05)) { mem._dodgeTurn = 0; mem._dodgeEpisodeT = 0; return cmd; }
     if (view.blockedAhead) {
       mem._dodgeClearT = 0;
       if (!mem._dodgeTurn) {                       // choose a way around ONCE, then commit
@@ -924,7 +1009,9 @@ const BEHAVIORS = {
     if (!mem._dodgeTurn) return cmd;               // no obstacle to round → behavior steers itself
     const boxed = view.blockedLeft && view.blockedRight;   // walled on both feelers → back out, still turning
     mem._wantMove = true;
-    return { fwd: boxed ? -0.6 : 0.35, turn: mem._dodgeTurn, fire: cmd.fire, state: cmd.state };
+    // `working` rides through: rounding a stump on the way to a clear firing line is still working the firing
+    // position, and dropping it handed a creeping Lurcher back to the route, which drove it onto the buried line again.
+    return { fwd: boxed ? -0.6 : 0.35, turn: mem._dodgeTurn, fire: cmd.fire, state: cmd.state, working: cmd.working };
   },
 };
 

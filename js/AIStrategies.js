@@ -1096,17 +1096,25 @@ class Fight extends Mission {
   //                    ambush point below actually be driven to
   //   in reach      -> `engage`: the close-quarters footwork this mission has always run
   movement(cmd) {
-    return this._closing(cmd)
-      ? [{ mode: 'advance', target: 'goal' }, { mode: 'engage', target: 'enemyOrLastSeen' }]
-      : [{ mode: 'engage', target: 'enemyOrLastSeen' }, { mode: 'advance', target: 'goal' }];
+    this._duel = !this._closing(cmd);
+    return this._duel
+      ? [{ mode: 'engage', target: 'enemyOrLastSeen' }, { mode: 'advance', target: 'goal' }]
+      : [{ mode: 'advance', target: 'goal' }, { mode: 'engage', target: 'enemyOrLastSeen' }];
   }
   // Are we still closing? Measured from the last SIGHTING, like everything else this mission
   // steers by — never the live position, which would track a rival through a hill.
+  // THE DUEL, ONCE JOINED, HOLDS until they have opened the range for real. One line for both ways
+  // put the boundary inside the ground the duel footwork works over: it backs off to a firing spot,
+  // kites, orbits wide, and every metre out across the line handed the wheels back to `advance`,
+  // which drove straight back in. Seed 24249, a Lurcher 37.5-38.0u from its rival against a 37.8u
+  // line, its shot buried in a bank: advance pushed it 0.7u in, the duel backed it 0.7u out toward a
+  // spot that cleared, every tick for a minute — three stall alarms on one GOTO, net ground under 1u.
+  // In at FIGHT_CLOSE, out at FIGHT_BREAK: the same distance done() calls "a fight, not a chase".
   _closing(cmd) {
     const v = cmd && cmd.unit; if (!v || v.dead || !this.foe) return false;
     const p = v.holder.position;
     const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42);
-    return Math.hypot(this.foe.x - p.x, this.foe.z - p.z) > reach * FIGHT_CLOSE;
+    return Math.hypot(this.foe.x - p.x, this.foe.z - p.z) > reach * (this._duel ? FIGHT_BREAK : FIGHT_CLOSE);
   }
   get key() { return 'fight'; }
   get garageOK() { return false; }            // decided in the field, mid-contact — never buy a hull for it
@@ -1124,6 +1132,7 @@ class Fight extends Mission {
     this.foeV = cmd.lastEnemyVeh ? cmd.lastEnemyVeh() : null;
     const s = cmd.lastEnemySeen && cmd.lastEnemySeen();
     this.foe = s ? { x: s.x, z: s.z } : null;
+    this._duel = false;                       // a new fight starts by closing; see _closing
   }
   // AMBUSH — "If the enemy is detected and it is facing away, then try to get closer to it before
   // opening fire" (Jacob, 2026-09-10). Opening up the moment a rival is sighted spends the one
@@ -1251,7 +1260,7 @@ class Fight extends Mission {
     return performance.now() - (this.foeT || 0) > FIGHT_LOST_MS;
   }
 }
-const FIGHT_BREAK = 1.25;   // (kept: the old reach-based break, still used by nothing else)
+const FIGHT_BREAK = 1.25;   // out to this x reach it is still a fight: done() and the duel gear's exit (_closing)
 // A CHASE ENDS WHEN IT STOPS WORKING, not at a fixed distance — see Fight.done.
 const FIGHT_NO_GAIN = 6;    // s out of range without the gap shrinking = we cannot catch them
 const GAP_EPS = 1.5;        // u the gap must actually shrink by to count as gaining
@@ -2466,8 +2475,17 @@ export function missionScore(cmd, key, running = null) {
         const haveHeavy = ['lurcher', 'jotun', 'valkyrie'].some(t => (roster[t] || 0) > 0 || cmd.canAfford(t));
         const fp = fb.holder ? fb.holder.position : null;
         const scrapOut = !!(fp && cmd.nearestKnownScrap && cmd.nearestKnownScrap(fp.x, fp.z));
-        if (haveHeavy) add('a heavy should break this, not our last runner', -FB_SIEGE_W * scarce);
-        else if (scrapOut) add('salvage first, then bring a heavy', -FB_SIEGE_W * scarce);
+        // ONLY WHEN THE RUNNER WOULD DO IT. When the siege already plans the trip to a heavy we hold or can afford, that
+        // trip is priced below ('the trip to change hull') and the job is the heavy's; charging the runner as well priced
+        // the whole siege out. Seeds 8424 and 10018: a Firebrat-only side with scrap for a Jotun, the enemy fleet gone and
+        // its keep standing, scored siege -1.9 against defend 2 and guarded an empty base for twenty minutes.
+        // Judged on the base mission, so siege-back is asked the same question as siege.
+        let sw = null; try { sw = missionWants(base, cmd); } catch (e) { sw = null; }
+        const heavyDoesIt = !!sw && sw !== 'firebrat' && ((roster[sw] || 0) > 0 || cmd.canAfford(sw));
+        if (!heavyDoesIt) {
+          if (haveHeavy) add('a heavy should break this, not our last runner', -FB_SIEGE_W * scarce);
+          else if (scrapOut) add('salvage first, then bring a heavy', -FB_SIEGE_W * scarce);
+        }
       }
     }
   }

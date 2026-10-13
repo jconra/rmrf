@@ -22,16 +22,16 @@ import { RoadNetwork } from './Roads.js?v=85';
 import { Foliage } from './Foliage.js?v=5';
 import { setWindTime } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
-import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=69';
+import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=70';
 import { Elevator } from './Elevator.js?v=5';
 import { Sub } from './Submarine.js?v=5';
 import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=122';
-import { locomote } from './Locomotion.js?v=1';
-import { Driver, UNREACH_SLACK } from './Driver.js?v=1';
+import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=124';
+import { locomote } from './Locomotion.js?v=2';
+import { Driver, UNREACH_SLACK } from './Driver.js?v=4';
 import { installFlagMenu } from './FlagMenu.js?v=1';
 
 // Per-team fight-or-flight weight sets (Phase 2 auto-tuning / A/B self-play). Lazily cloned
@@ -40,7 +40,7 @@ import { installFlagMenu } from './FlagMenu.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setPadScore, setPadW, padScoreOn, setInterceptFp, interceptFpOn, setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=127';
+import { setPadScore, setPadW, padScoreOn, setInterceptFp, interceptFpOn, setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=129';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1564,6 +1564,21 @@ const VEH_HIT_R = { lurcher: 3.2, firebrat: 2.0, valkyrie: 3.0, jotun: 3.6 };
 // combat). Firebrat = 40u hitscan laser; Jotun slug 115·0.7 ≈ 80; the Valkyrie's homing missile
 // curves in so distance isn't its limiter (kept generous).
 const SHOT_REACH = { lurcher: 42, firebrat: 40, valkyrie: 80, jotun: 80 };
+// A FIRING SPOT BELONGS TO A HULL, NOT ONLY TO A GUN. _standoffFor searches the ground the hull asking can stand on and
+// drive to — a Firebrat hovers over the sea, a Valkyrie hangs over walls — so a spot drawn for one of those can be open
+// water or the inside of a compound to a Jotun. The siege cache already re-solves a spot drawn for a longer gun; nothing
+// asked about the ground. Seed 12123: a Firebrat solved the tower at (115,85) from (95,100), out in deep water; sixty
+// seconds later the Jotun that replaced it inherited the spot (drawn for a 40u gun, so the 80u reach stamp passed), was
+// ordered into the sea, refused as unreachable, and drove 150u round a lake toward it while it already stood 71u from
+// that tower, inside its own reach. Re-solve when the spot was drawn for a hull that goes where this one cannot; the
+// other direction costs nothing, same as the reach rule.
+function spotFitsHull(spot, v) {
+  const drawn = spot && spot.mv, mine = v && v._move;
+  if (!drawn || !mine) return true;
+  if (drawn.ignoreWalls && !mine.ignoreWalls) return false;
+  if (drawn.water !== 'sink' && mine.water === 'sink') return false;
+  return true;
+}
 // SIEGE TARGET PRIORITY (Jacob's design). Every enemy structure is a valid target and carries a
 // score; the keep is the win condition so it sits highest by DEFAULT, and a tower that is
 // actually shooting at us outranks it for as long as that is true. The old rule was a queue with
@@ -6503,19 +6518,8 @@ function _noMoveWatch(v, dt) {
   v._nmX = p.x; v._nmZ = p.z; v._nmT = 0;   // re-anchor so a persistent wedge can report again
 }
 function driveChassis(v, out, dt, omniTravel) {
-  // HOLD THE PAD WHILE THE SHIELD IS UP. The elevator shield blocks damage completely, but only
-  // while the unit stands on the pad — so a unit that has chosen to fight from cover must not
-  // then drive out of it. The combat behaviours press, orbit and strafe toward their target; here
-  // we keep the turn (aim) and drop the translation, so it fights from the doorway for the few
-  // seconds the shield lasts and leaves under its own power afterwards.
-  // ...BUT ONLY IF THERE IS SOMETHING TO FIGHT. The rule above says a unit that has "chosen to
-  // fight from cover" must not drive out of it — except nothing ever checked that it chose to
-  // fight. Every vehicle rolled off the lift and stood still for the whole shield timer, and
-  // because the hold zeroes the throttle it cannot drive off the pad to end it early: it waited
-  // out all five seconds even on an empty map. MEASURED: 5.77s of sitting after the lift tops, on
-  // 65 of 82 deploys with no enemy within 80u. Cover is worth standing in when a rival can shoot
-  // you and worth nothing when one cannot, so ask.
-  if (aiPadFight && v.ammo > 0 && elevShieldOn(v) && padThreatNear(v)) { out.fwd = 0; out.strafe = 0; }
+  // (The pad hold — stand in the elevator shield while a rival can shoot us — used to live here. It
+  // runs before the driver's note() now, beside the friendly yield; see "HOLD THE PAD" there.)
   // REVERSE CAP (doctrine): every chassis backs up at HALF throttle — reverse is a
   // maneuver tool (kite, reverse-arc, backing out of a notch), never a fast way to
   // travel; a unit that wants to go the other way turns around. The omni Lurcher is
@@ -6786,6 +6790,7 @@ function freshSlot() {
     _destRaw: null, _destOut: null, _destSt: null,     // the COMMITTED destination — see the resolve below
     _tgtLock: null,                                    // the target we are COMMITTED to (see _tgtStillValid)                          // the target we are COMMITTED to, and how long we have held it
     _stand2: null,                                     // standoff v2 commitment — PER SLOT (left off the record once: two siege slots shared one commit and ping-ponged goals every tick — the DIRECT(suppress) pin class)
+    _standAt: null,                                    // { v, sk }: this unit has arrived at firing position sk this stay (the footwork owns the spot)
     _dbg: null, _lpx: null, _lpz: null, _stuckT: 0,    // log snapshot + movement-health tracking
     _netT: 0, _netX: null, _netZ: null, _netStuck: false, _wantT: 0,   // net-progress wedge watchdog
     _joltT: 0, _joltSide: 1, _joltN: 0,                // reverse-pivot unwedge
@@ -8860,6 +8865,9 @@ class AICommander {
     if (cmd.breakAim) return this._hold(cmd, 'lining up a shot on a blocker');
     if (view.topping && this._hold(cmd, 'topping up, watching the field')) return true;
     const st = cmd.state;
+    // One stay at a firing position (see ONCE THERE, THE FOOTWORK OWNS THE SPOT below): it ends when the unit leaves
+    // suppress or the hull is a new one, so a unit coming back from a rearm drives all the way in again.
+    if (this._standAt && (st !== 'suppress' || this._standAt.v !== v)) this._standAt = null;
     // RELEASE VALVE: a sieger holding a target it is sitting OUTSIDE its own weapon range of
     // is doing nothing but waiting to be shot — it cannot fire from here, so no amount of
     // patience helps. Nothing else in the loop ever revisits that stand, so a unit could hold
@@ -8962,10 +8970,41 @@ class AICommander {
       // the driver already clamps its final leg to 2u regardless of what the order asks for, so
       // the hull eases in the same way it always did. All this number decides is how close the
       // unit gets before navigation hands the pedals back to the firing footwork.
+      //
+      // ONCE THERE, THE FOOTWORK OWNS THE SPOT. Arriving hands the pedals over, and they must not be
+      // taken back the moment the footwork moves the hull for a reason of its own. The shooter walks
+      // off a stand whose round is buried in a bank to the nearest spot it clears from
+      // (bestUnblockSpot, 6-20u out); with only the 5u test above behind it, the route dragged it
+      // back onto the buried line, it walked off again, and round it went. Seed 12368 at 300-341s: a
+      // Lurcher shuttling across that 5u line, 36 order changes in 41 seconds, 11 rounds from a gun
+      // that reloads in a third of a second, stall alarms at 334 and 340. Left where the footwork
+      // took it, it walked 12u up the bank, opened fire within half a second and the tower fell four
+      // seconds later. So after arriving, while the footwork is WORKING the position — walking to a
+      // clear line, or planted with something it can shoot — the unit stays where the footwork puts
+      // it. With nothing to shoot from where it stands, the route takes over again.
+      const sk = `${Math.round(view.threatStand.x)},${Math.round(view.threatStand.z)}`;
+      if (d2s < STAND_ARRIVE * STAND_ARRIVE) this._standAt = { v, sk };
+      else if (cmd.working && this._standAt && this._standAt.sk === sk) return this._hold(cmd, 'working its firing position');
       dest = view.threatStand; slack = STAND_ARRIVE;
       this._destIsStand = true;
       dlog(`suppressStand:${this.team}`, { unit: v.type, distU: +Math.sqrt(d2s).toFixed(0) },
         `${this.cname} ${v.type}: routing to its firing position, ${Math.round(Math.sqrt(d2s))}u out.`);
+    }
+    // ENGAGE WITH THE RIVAL OUT OF SIGHT: the brain is closing on where it last saw them (see
+    // combat's _closeOn), which is a trip like any other — route it, and hold where the footwork
+    // would have stopped anyway. Duel footwork against a rival in sight still steers itself.
+    else if (st === 'engage' && v.ai && v.ai._closeOn) {
+      dest = v.ai._closeOn; slack = v.ai._closeOn.r;
+      // THE TRIP STARTS WITH A CLEAN STUCK RECORD. The movement-health timers count every engage
+      // tick as wanting to move, so a hull planted in its duel band on purpose arrives here already
+      // marked as wedged, and the escalation below answered the first routed tick with a 1.4s
+      // reverse-pivot and a blacklisted cell under its nose — seed 14284, twice in ten seconds, on a
+      // hull that was turning onto its route, not stuck.
+      const prev = this._driver && this._driver.o;
+      if (!(prev && prev.type === 'GOTO' && prev.by === 'engage')) {
+        this._stuckT = 0; this._netStuck = false; this._netT = 0; this._wantT = 0;
+        this._netX = v.holder.position.x; this._netZ = v.holder.position.z;
+      }
     }
     else {
       if (st !== 'unstick') v._joltSeen = 0;
@@ -9077,6 +9116,11 @@ class AICommander {
     const isStand = this._destIsStand; this._destIsStand = false;
     const ord = this._driver.order({ type: 'GOTO', x: dest.x, z: dest.z, arrive: slack, goalR, by: st });
     const s = this._driver.tick(dt);
+    // A firing position is also ARRIVED AT when the route has brought the unit as close as the route goes. A route may end
+    // a few units short of the spot (the contract forgives up to UNREACH_SLACK), and then the driver parks at its end with
+    // the pedals at zero while the 5u test above never comes true: seed 12368 at 294-300s, a Lurcher sat 5.5u from its
+    // stand for six seconds, gun cold, the footwork asking to move and the driver holding it still.
+    if (isStand && s && s.arrived) this._standAt = { v, sk: `${Math.round(dest.x)},${Math.round(dest.z)}` };
     // HANDLE "NO" — the driver reported this goal unreachable; the ISSUER reacts instead of
     // letting the unit walk a partial route into a soft-lock (the top violation issuers from
     // the tournament breakdown, handled at their source):
@@ -9429,6 +9473,25 @@ class AICommander {
     // yield never trips a pin/grind alarm.
     if (reservationYield(v) === 0) { out.fwd = 0; out.strafe = 0; v.ai._wantMove = false; v._yielding = true; Driver.yieldSamples++; }
     else v._yielding = false;
+    // HOLD THE PAD WHILE THE SHIELD IS UP. The elevator shield blocks damage completely, but only
+    // while the unit stands on the pad — so a unit that has chosen to fight from cover must not
+    // then drive out of it. The combat behaviours press, orbit and strafe toward their target; here
+    // we keep the turn (aim) and drop the translation, so it fights from the doorway for the few
+    // seconds the shield lasts and leaves under its own power afterwards.
+    // ...BUT ONLY IF THERE IS SOMETHING TO FIGHT. The rule above says a unit that has "chosen to
+    // fight from cover" must not drive out of it — except nothing ever checked that it chose to
+    // fight. Every vehicle rolled off the lift and stood still for the whole shield timer, and
+    // because the hold zeroes the throttle it cannot drive off the pad to end it early: it waited
+    // out all five seconds even on an empty map. MEASURED: 5.77s of sitting after the lift tops, on
+    // 65 of 82 deploys with no enemy within 80u. Cover is worth standing in when a rival can shoot
+    // you and worth nothing when one cannot, so ask.
+    // …AND IT IS A HOLD, SO IT HAPPENS WHERE THE YIELD DOES: before the driver reads the pedals, with
+    // the brain told it is not trying to move. It used to run inside driveChassis, after note(), so
+    // the watchdog logged full throttle on a hull the chassis was deliberately holding still, and the
+    // brain's anti-wedge clock counted the hold as a wedge. Seed 26242 at 60s: a fresh Jotun on its
+    // pad edge, rival in reach, recorded at fwd 1 for three seconds while it drove at 0, and
+    // reverse-pivoted at 62s to escape a wedge that was the shield rule doing its job.
+    if (aiPadFight && v.ammo > 0 && elevShieldOn(v) && padThreatNear(v)) { out.fwd = 0; out.strafe = 0; v.ai._wantMove = false; }
     // Flight recorder + net-progress watchdog: the driver observes the pedals that are
     // ACTUALLY about to drive the hull (post fuel-burn, post chassis gate, post yield),
     // whoever produced them. This is the alarm's data feed — one call per tick, at drive time.
@@ -9774,6 +9837,8 @@ class AICommander {
         }
         return false;
       }
+      // …and to a HULL — the same hat again, on the ground the spot stands on (see spotFitsHull).
+      if (!spotFitsHull(lock.spot, this.unit)) return false;
     }
     // …with one exception, and it is the siege rule PRIO already encodes: "the keep is the top
     // priority, but a tower that is actually shooting at us outranks it" (tower 6 + shooting 10 >
@@ -9849,7 +9914,7 @@ class AICommander {
     // better spot you have to travel to, and emphatically so under fire. It also needs no A*
     // probe: we are demonstrably able to be here, because we are here.
     const dHere = Math.hypot(px - T.x, pz - T.z);
-    if (dHere >= minR && dHere <= Math.min(reach * 0.95, unitR * 1.25) && spotOK(px, pz)) return { x: px, z: pz };
+    if (dHere >= minR && dHere <= Math.min(reach * 0.95, unitR * 1.25) && spotOK(px, pz)) return { x: px, z: pz, mv: v._move };
     // SCAN THE WHOLE REACHABLE REGION, don't sample a ring. One flood fill (reachFrom) answers
     // "can this hull get there" for every cell at once, so the search can afford to look at all of
     // them and take the nearest good one — which is exactly what labs/standoff-lab.html does, and
@@ -9913,7 +9978,7 @@ class AICommander {
         if (R) { const k = navIdx(i, j); if (k < 0 || !R[k]) { why.unreachable++; continue; } }   // proven undrivable-to
         if (!spotOK(x, z, needLOS, takeFire)) continue;
         const dU = (x - px) ** 2 + (z - pz) ** 2;                          // nearest = least travel
-        if (dU < bestD) { bestD = dU; best = { x, z }; }
+        if (dU < bestD) { bestD = dU; best = { x, z, mv: v._move }; }   // mv: the hull it was drawn for — see spotFitsHull
       }
       if (best) {
         if (tier === 'relaxed') aiLog(this.team, `${this.cname}: No clean firing spot on the tower at (${Math.round(T.x)}, ${Math.round(T.z)}) — taking a less comfortable one.`);
@@ -10431,6 +10496,7 @@ class AICommander {
         const myReach = SHOT_REACH[v.type] || 42;
         const forReach = this._siegePlan.spotReach.get(k.wall);
         if (spot !== undefined && forReach != null && forReach > myReach) spot = undefined;
+        if (spot && !spotFitsHull(spot, v)) spot = undefined;          // …and to a hull: see spotFitsHull
         if (spot === undefined) {
           spot = this._standoffFor(v, k);
           this._siegePlan.spots.set(k.wall, spot);   // null is cached too: don't re-search a hopeless tower every tick
@@ -10551,6 +10617,7 @@ class AICommander {
           const hqReach = SHOT_REACH[v.type] || 42;                       // same gun-length rule as a tower's spot
           const hqFor = this._siegePlan ? this._siegePlan.spotReach.get(hqKey) : undefined;
           if (hqSpot !== undefined && hqFor != null && hqFor > hqReach) hqSpot = undefined;
+          if (hqSpot && !spotFitsHull(hqSpot, v)) hqSpot = undefined;
           if (hqSpot === undefined) {
             hqSpot = this._standoffFor(v, { x: hqPt.x, z: hqPt.z, camp: ec, wall: hqKey });
             if (this._siegePlan) { this._siegePlan.spots.set(hqKey, hqSpot); this._siegePlan.spotReach.set(hqKey, hqReach); }   // null cached too — don't re-search a hopeless keep every tick
@@ -10855,8 +10922,11 @@ class AICommander {
       shotHits: (tx, tz, ty) => shotHitsFirst(v.holder.position.x, v.holder.position.z,
         muzzleHeightOf(v), tx, tz, ty),
       // Where to stand instead, when the ground is in the way: nearest spot with a clear line,
-      // else the highest ground nearby. Null when we are already fine.
-      unblockSpot: (tx, tz, ty) => bestUnblockSpot(v, tx, tz, ty),
+      // else the highest ground nearby. Null when we are already fine. `seenAs` = the rival's
+      // chassis in a duel: the spot must stay inside the range we can see that chassis at (the
+      // same SIGHT/VIS rule the detector uses, nose on it), or it is no firing spot.
+      unblockSpot: (tx, tz, ty, seenAs, cap) => bestUnblockSpot(v, tx, tz, ty,
+        Math.min(cap ?? Infinity, seenAs ? AI_VISION * ((SIGHT[v.type] ?? 1) + (VIS[seenAs] ?? 1)) * 0.5 : Infinity)),
 
       // shot-feedback: ≥2 of our recent rounds (last ~2s) detonated on terrain/cover, not on
       // the enemy → the firing lane is blocked; the combat brain sidesteps to clear it.
@@ -11719,7 +11789,13 @@ function shotHitsFirst(px, pz, muzzleH, tx, tz, ty) {
     const x = px + (tx - px) * t, z = pz + (tz - pz) * t, y = my + (aimY - my) * t;
     if (destructibles.queryHit({ x, y, z }, 0.3)) return 'solid';
     if (foliage && foliage.treeAt(x, z, 0.3)) return 'tree';
-    if (y <= map.heightAt(x, z) + 0.2) return 'ground';
+    // …AND ONLY ON LAND, the half of hitGround this used to leave out: a round over water does not
+    // stop at the sea floor, it flies on to whatever it was aimed at. Seed 24018: a Valkyrie 62u from a
+    // Jotun wading in the shallows read its line as 'ground' 6-8u short of the target, over open
+    // water, on every tick its nose sat a few hundredths of a radian one way, and as 'solid' (a
+    // wall it grazed, so shoot) on the ticks it sat the other. It reversed toward a better spot
+    // one tick and jousted forward the next, 35 throttle flips in a window, and never moved.
+    if (y <= map.heightAt(x, z) + 0.2 && map.isLand(x, z)) return 'ground';
   }
   return 'clear';
 }
@@ -11733,17 +11809,40 @@ function shotHitsFirst(px, pz, muzzleH, tx, tz, ty) {
 // when nothing within reach clears, higher ground is the move that most reliably turns a blocked
 // line into an open one next tick. Ring of 8 headings x 3 radii = 24 heightAt-cheap probes, run
 // only for a unit that has just been told its shot is buried.
+//
+// maxD: no spot further than this from the target. A duel passes the range it can SEE that rival
+// at — a spot it could not see the rival from is no firing spot at all, and choosing one is how a
+// duel at the edge of sight turned into a shuttle: seed 14354, a Jotun seeing its rival at 70u
+// (it sees a Jotun at 71) was sent to spots behind it, lost sight on the way, drove back to the
+// last sighting, saw it again and was sent back — every 2.5s, without firing a round.
+//
+// And it has to be somewhere the hull can stand and drive STRAIGHT to: the brain steers at the spot
+// directly, with no route. Only `isLand` was asked, so a spot could sit inside a building — seed
+// 12242, a Jotun beside one was sent to a point 6u into it and rocked against its wall between the
+// dodge feelers and the anti-wedge jolt. The unit's own cell is skipped, since a hull pressed
+// against a wall already reads its own cell as blocked.
 const UNBLOCK_RADII = [6, 12, 20];
-function bestUnblockSpot(v, tx, tz, ty) {
+function hullCanRun(v, ax, az, bx, bz) {
+  const c = grid.cell, i0 = Math.floor(ax / c + 0.5), j0 = Math.floor(az / c + 0.5);
+  return walkCells(ax, az, bx, bz, (i, j) => (i === i0 && j === j0) || !cellBlocked(v, i, j));
+}
+function bestUnblockSpot(v, tx, tz, ty, maxD = Infinity) {
   if (!v || !v.holder) return null;
   const px = v.holder.position.x, pz = v.holder.position.z;
-  const mh = muzzleHeightOf(v);
+  const mh = muzzleHeightOf(v), reach = SHOT_REACH[v.type] || 42;
   let best = null, bestD = Infinity, high = null, highY = map.heightAt(px, pz);
   for (const r of UNBLOCK_RADII) {
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2;
       const x = px + Math.cos(a) * r, z = pz + Math.sin(a) * r;
       if (!map.isLand(x, z)) continue;                       // never solve a firing line into the sea
+      // NOR FROM WHERE THE ROUND DIES SHORT. shotHitsFirst walks the line all the way to the target and knows nothing of
+      // reach, so a spot directly behind us "cleared". Seed 24487 at 181s: a Jotun duelling at 69u was sent to a spot 88u
+      // off its rival with an 80u gun, backed out across the Fight mission's 72u duel line, was switched to closing, drove
+      // back in, was sent back out — rocking two metres either way for seventeen seconds.
+      if (Math.hypot(tx - x, tz - z) > reach) continue;
+      if (Math.hypot(x - tx, z - tz) > maxD) continue;       // out of sight of the target from there
+      if (!hullCanRun(v, px, pz, x, z)) continue;            // inside a building, or one in the way
       const h = map.heightAt(x, z);
       if (h > highY) { highY = h; high = { x, z }; }
       if (shotHitsFirst(x, z, mh, tx, tz, ty) !== 'ground' && r < bestD) { bestD = r; best = { x, z }; }
@@ -11763,7 +11862,7 @@ function shotClearsAt(px, pz, muzzleH, tx, tz, ty) {
   for (let s = 1; s < steps; s++) {
     const t = s / steps;
     const x = px + (tx - px) * t, z = pz + (tz - pz) * t;
-    if (my + (aimY - my) * t <= map.heightAt(x, z) + 0.2) return false;
+    if (my + (aimY - my) * t <= map.heightAt(x, z) + 0.2 && map.isLand(x, z)) return false;   // land only, as shotHitsFirst
   }
   return true;
 }

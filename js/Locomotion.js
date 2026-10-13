@@ -18,6 +18,7 @@
 
 const PIVOT = 0.6;     // |err| above this (≈34°): pivot in place, no forward (tank chassis)
 const EASE = 0.25;     // |err| above this (≈14°): half throttle while lining up
+const LATERAL_SPAN = 2;   // u of sideways offset over which a face-locked tank hands its nose to the travel
 const DEAD = 0.06;     // |err| below this: drive dead straight (anti-wobble)
 
 export function wrapPi(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
@@ -56,5 +57,24 @@ export function locomote(kin, order) {
   const a = Math.abs(travelErr);
   const fwd = f ? clamp(Math.cos(travelErr) * 1.3, -1, 1)
     : (a > PIVOT ? 0 : a > EASE ? 0.5 : 1);
+  if (f) {
+    // A TANK HELD ON A FACE TARGET MOVES ONLY ALONG ITS OWN AXIS, so a goal off to the side is out of reach: it slides to the
+    // point abeam of the goal and parks there with the throttle at zero. Seed 12242: a Jotun whose shot was buried in a bank,
+    // sent to a firing spot 6u to its side with its nose held on the rival, rocked a metre back and forth for over a hundred
+    // seconds. The further the goal sits off the face line, the more the hull swings onto the goal's line, so it drives in and
+    // squares back up on the face as the offset closes.
+    // Offset measured off the FACE line, not the hull's: measured off the hull it shrinks as the hull turns to meet it and
+    // the swing stalls halfway (simulated: a 20u sidestep took 19s); off the face line it shrinks only as the ground closes.
+    const faceH = kin.heading + faceErr, goalH = kin.heading + travelErr;
+    const lateral = dist * Math.abs(Math.sin(goalH - faceH));
+    const w = clamp((lateral - arrive * 0.5) / LATERAL_SPAN, 0, 1);   // under half of `arrive` abeam, the axis alone lands it
+    if (w > 0) {
+      // nose or tail onto the goal's line: whichever is nearer the HULL. Picking by the face flipped end to end with a goal
+      // dead abeam (any drift crosses the tie) and the hull swung back and forth between the two.
+      const axisH = Math.abs(travelErr) <= Math.PI / 2 ? goalH : goalH + Math.PI;
+      const err2 = wrapPi(faceH + w * wrapPi(axisH - faceH) - kin.heading);
+      return { fwd, turn: Math.abs(err2) < DEAD ? 0 : clamp(err2 * 2.2, -1, 1), strafe: 0, arrived: false };
+    }
+  }
   return { fwd, turn, strafe: 0, arrived: false };
 }

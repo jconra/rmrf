@@ -138,8 +138,18 @@ export class Vehicle {
     const px = this.holder.position.x, pz = this.holder.position.z;
     let nx = px + dx, nz = pz + dz;
     if (blockedFn && blockedFn(nx, nz)) {
-      nx = blockedFn(px + dx, pz) ? px : px + dx;   // slide on whichever axis is clear
-      nz = blockedFn(px, pz + dz) ? pz : pz + dz;
+      // Slide on whichever axis is clear — but NEVER BOTH, because both together is the very step that was just
+      // refused. Each axis alone can be clear while the sum is not: the step cuts across the rounded edge of a tower's
+      // or a tree's collision circle. Taking both put the hull a hair INSIDE the circle, and from inside one every
+      // step tests blocked (whole and per axis), so the hull never moved again — pedals down, heading still turning,
+      // x/z frozen — and the spool-up reset below made every retry a from-rest crawl (a Jotun's first tick covers
+      // 0.008u) that could not cross even that hair. Seed 16277: a Jotun leaving its lift grazed a corner tower,
+      // landed 0.04u inside it and sat at full throttle until the tower was shot down 23s later; seed 34270's Jotun
+      // sat 0.01u inside one until the driver scuttled it; seed 20382's Firebrat landed 0.24u inside a tree. When
+      // both axes are open, keep the bigger one — it holds the most of the step.
+      const xOk = !blockedFn(px + dx, pz), zOk = !blockedFn(px, pz + dz);
+      if (xOk && zOk) { if (Math.abs(dx) >= Math.abs(dz)) nz = pz; else nx = px; }
+      else { nx = xOk ? px + dx : px; nz = zOk ? pz + dz : pz; }
       if (nx === px && nz === pz) this.vel = 0;     // ran into something solid: it stopped, so it has to spool up again
     }
     this.holder.position.x = nx;
@@ -191,8 +201,10 @@ export class Vehicle {
     const px = this.holder.position.x, pz = this.holder.position.z;
     let nx = px + dx, nz = pz + dz;
     if (blockedFn && blockedFn(nx, nz)) {
-      nx = blockedFn(px + dx, pz) ? px : px + dx;        // slide on whichever axis is clear
-      nz = blockedFn(px, pz + dz) ? pz : pz + dz;
+      // slide on whichever axis is clear, never both: both is the refused step itself (see drive())
+      const xOk = !blockedFn(px + dx, pz), zOk = !blockedFn(px, pz + dz);
+      if (xOk && zOk) { if (Math.abs(dx) >= Math.abs(dz)) nz = pz; else nx = px; }
+      else { nx = xOk ? px + dx : px; nz = zOk ? pz + dz : pz; }
     }
     this.holder.position.x = nx;
     this.holder.position.z = nz;
