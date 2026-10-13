@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the pad score</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:24px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  a { color:var(--blue); }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  pre { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0;
+        overflow-x:auto; font-size:12px; line-height:1.5; }
+  pre .c { color:var(--dim); } pre .del { color:var(--bad); } pre .add { color:var(--good); }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); } td b.warn { color:var(--warn); }
+  .matrix td, .matrix th { text-align:center; }
+  .matrix td:first-child, .matrix th:first-child { text-align:left; color:var(--dim); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+
+  /* ── interactive furniture ─────────────────────────────────────── */
+  .demo { background:#0a0f16; border:1px solid #223041; border-radius:8px; margin:14px 0; padding:12px; }
+  .demo .hd { color:var(--accent); font-size:11px; letter-spacing:1px; margin-bottom:2px; }
+  .demo .hint { color:var(--dim); font-size:11px; margin-bottom:8px; }
+  .demo svg { width:100%; height:auto; display:block; touch-action:none; user-select:none; }
+  .btnrow { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 4px; }
+  .btnrow button { background:var(--card2); border:1px solid #2a3a4d; color:var(--ink);
+                   font-family:inherit; font-size:11px; padding:6px 9px; border-radius:6px; cursor:pointer;
+                   transition:background .15s, border-color .15s, color .15s; }
+  .btnrow button:hover { border-color:#3d5570; }
+  .btnrow button[aria-pressed="true"] { background:#1d2c3d; border-color:var(--accent); color:var(--accent); }
+  .readout { font-size:11.5px; line-height:1.7; margin-top:8px; }
+  .readout .row { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+                  border-bottom:1px solid #16202b; padding:3px 0; }
+  .readout .row span:last-child { text-align:right; }
+  .stat { min-width:0; }
+  /* On a phone the label and its figures will not sit side by side without pushing the page
+     wider than the screen — stack them instead. (Jacob reads these on his phone.) */
+  @media (max-width:560px) {
+    .readout .row { flex-direction:column; gap:1px; }
+    .readout .row span:last-child { text-align:left; }
+  }
+  .tag { display:inline-block; padding:1px 6px; border-radius:4px; font-size:10.5px; }
+  .tag.ok { background:#16351f; color:var(--good); } .tag.no { background:#3a1a17; color:var(--bad); }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle;
+            margin-right:4px; border:1px solid #33414f; }
+  .legend { font-size:10.5px; color:var(--dim); margin-top:8px; line-height:1.9; }
+
+  /* animated counters + bars */
+  .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+  .stat { flex:1 1 150px; background:#0a0f16; border:1px solid #223041; border-radius:8px; padding:10px 12px; }
+  .stat .n { font-size:23px; color:var(--accent); letter-spacing:1px; }
+  .stat .n.bad { color:var(--bad); } .stat .n.good { color:var(--good); }
+  .stat .l { font-size:10.5px; color:var(--dim); line-height:1.45; margin-top:2px; }
+  .barrow { margin:7px 0; font-size:11.5px; }
+  .barrow .lab { color:var(--dim); display:flex; justify-content:space-between; }
+  .bartrack { background:#0a0f16; border:1px solid #223041; border-radius:3px; height:11px; margin-top:3px; overflow:hidden; }
+  .barfill { height:100%; width:0; border-radius:2px; transition:width 1.1s cubic-bezier(.2,.8,.25,1); }
+  @media (prefers-reduced-motion: reduce) { .barfill { transition:none; } }
+</style>
+
+<style>
+  h4 { color:var(--ink); font-size:13px; margin:18px 0 4px; }
+  blockquote { border-left:3px solid #2a3a4d; padding:2px 0 2px 12px; margin:10px 0; color:var(--dim); }
+  hr { border:none; border-top:1px solid #223041; margin:20px 0; }
+  .tw { overflow-x:auto; }
+  ol { padding-left:22px; }
+</style>
+</head><body>
+<a class="navbtn" style="left:10px" href="post33.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post35.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 34 · the pad score</div>
+</header>
+<main>
+
+<article>
+  <h2>&#8470;34 — THE PAD SCORE</h2>
+  <div class="date">2026-10-08 · the last rocket, and a rule that hadn't run in a month</div>
+
+  <p class="fine">2026-10-08. One design conversation, about 5,000 headless matches, and three fixes that each looked like a tuning problem until they didn&#39;t. The question was a small one: why can&#39;t a Valkyrie fire its last rocket? The answer was that the rule everyone was talking about hadn&#39;t run in a month.</p>
+<h3>The rule that wasn&#39;t there</h3>
+<p>Back in August the game had an ammo gate: a unit needed a &quot;usable burst&quot; before it would start a
+fight, so a Valkyrie with one rocket left would not answer a rival. Jacob&#39;s verdict at the time:</p>
+<blockquote>
+<p>&quot;That&#39;s not a good solution. It&#39;s dumb if you can&#39;t fire your last rocket.&quot;</p>
+</blockquote>
+<p>It had been restated as a number of rounds per chassis, and reading it again it had an off-by-one —
+<code>ammo / magazine &gt; rounds / magazine</code> on whole rounds asks for one round <em>more</em> than it means. A Jotun
+still couldn&#39;t start a fight on its last shell, the exact case the restatement was written for.</p>
+<p>But the gate lived in the old priority table, and that table hasn&#39;t run in normal play since
+September, when missions took over their own movement. The off-by-one changed nothing. The real
+reasons a unit didn&#39;t fire its last round were somewhere else entirely:</p>
+<ul>
+<li>the mission board counted <strong>one round as an empty gun</strong> (+10 toward rearming at <code>ammo &lt;= 1</code>),
+because nothing re-thought the board when the magazine actually ran dry — the next look could be
+fifteen seconds away;</li>
+<li>a unit driving home to rearm <strong>never fired</strong> on the way, even with sixteen rounds in the gun;</li>
+<li>&quot;full&quot; meant <strong>95% of the one thing it came for</strong> — a Lurcher left the pad with 65 of 68 rounds,
+and a rearm trip ignored the fuel and hull the same base was filling;</li>
+<li>anything that outscored the top-up pulled it off the pad, and the fight it left for <strong>never came
+back to finish the job</strong>;</li>
+<li>and the &quot;fight from the pad&quot; code — face the chaser, shoot back while the base heals you — was
+still in the file, unreachable since September. A unit topping up parked nose-in, its eyes on its
+own buildings and its back to the field.</li>
+</ul>
+<h3>Three rules, then no rules</h3>
+<p>Jacob&#39;s first answer was three rules: fire every round you have; resupply until full; turn around
+and fight from the pad while you&#39;re being resupplied. His second answer took the rules back out:</p>
+<blockquote>
+<p>&quot;I want to try to avoid explicit rules like you must stay at the resupply until 100% because there
+may be reasons why it is important to leave early such as the flag is stolen... I am hoping that
+everything in the game will be based off of competing scores while also trying to avoid the
+missions flapping back and forth.&quot;</p>
+</blockquote>
+<p>And then he described the score. Close to the supply with a lot missing: a big number. A hundred units
+away and just starting to need ammo: not enough to peel off a siege. As the magazine approaches zero:
+exponential, so it goes home from anywhere. Standing on the pad: the distance is nothing, so the
+score holds it there until it&#39;s full, when the score drops to zero. And a really big score — a fight,
+the flag — still wins.</p>
+<h3>The formula</h3>
+<p>For each thing a top-up gives (a base gives fuel, ammo and hull at once; a depot gives its one kind),
+two parts, summed:</p>
+<pre><code>stay = S · e^(−T/Ts) · missing/(missing + K)
+need = (A · √missing + X · empty(f)) · (1 + (C − 1) · e^(−T/T0))
+</code></pre>
+<p><code>T</code> is seconds of driving to the edge of the supply (zero standing inside it), <code>missing</code> is how much
+of the tank, magazine or hull is gone, and <code>empty(f)</code> is an exponential in how full it is — zero when
+full, one when empty, and steep at the bottom. <code>stay</code> is the &quot;you&#39;re here, don&#39;t leave half-full&quot;
+part; <code>need</code> is the &quot;you&#39;re running out&quot; part, made stronger the closer the supply is.</p>
+<p>When everything the supply gives is full, both parts are zero. The top-up ends because there&#39;s
+nothing left to want, not because a line was crossed.</p>
+<p>Alongside it: an &quot;empty magazine&quot; trigger so the board hears the last round go; supply trips fire at
+a rival inside the gun&#39;s own arc without leaving the route; a unit topping up holds still, faces the
+field — the rival it can see, else whoever last shot it, else the last contact, else straight out the
+way it came — and fires from where it stands.</p>
+<h3>Three things that looked like tuning</h3>
+<p><strong>A Firebrat that never filled up.</strong> The first <code>stay</code> used <code>missing^0.2</code> so it stayed high until
+nearly full. A hovering Firebrat burns a little fuel while it waits, so it is never <em>exactly</em> full —
+and 0.1% missing to the power 0.2 is still worth five points, more than the jobs it should have been
+doing. It parked. The fix is the knee: <code>missing/(missing + K)</code> is high for a real shortfall and close
+to zero for a sliver.</p>
+<p><strong>Units refuelling on the way past.</strong> <code>stay</code> first faded over three seconds of driving, so it reached
+any unit passing near a base. Refuel trips went from 8 to 206 in sixteen matches. Jacob had said
+<em>very close</em>; three seconds isn&#39;t. It now fades in under half a second — it&#39;s for the unit that is
+standing there.</p>
+<p><strong>Fuel pulling at a third of a tank.</strong> Refuel trips went from 33 to 461 over 80 matches. The design
+note from August said it already: an empty tank drives at 35% speed, it never strands a unit. Fuel&#39;s
+mid-tank pull came down to a third of ammo&#39;s; its pull now lives almost all at the empty end.</p>
+<h3>What the review found</h3>
+<p>A three-lens code review, each finding checked by a second agent trying to refute it, turned up three
+real defects:</p>
+<ul>
+<li><strong>A flag carrier went shopping.</strong> The pad score&#39;s scale (stay up to 20 per supply, need up to four
+times stronger near one) is far past the +6 &quot;carrying the flag home&quot; bonus. On seed 109 a carrier at
+5% hull switched to repair and parked 1.5 units outside its own scoring ring for six seconds. A
+carrier now does not shop, and never tops up.</li>
+<li><strong>A stolen flag couldn&#39;t pull a unit off the pad</strong>, even with a full magazine — the hold ran before
+the old &quot;chase the carrier&quot; override could steer. Now an armed unit goes; a dry one stays and
+rearms. (&quot;If the vehicle has no ammo then intercept is worthless.&quot;)</li>
+<li><strong>The ledger couldn&#39;t see a death.</strong> &quot;Died while topping up&quot; was counted inside the victim&#39;s own
+tick — and shots, rails, towers and mines all land outside it. It read zero for a whole day and I
+reported it as a result. It&#39;s counted in <code>destroyVehicle</code> now, and proven by killing a unit
+mid-top-up and watching the count move.</li>
+</ul>
+<h3>The numbers</h3>
+<p>Old game (<code>?oldpad</code>, verified seed-for-seed against the previous build) against the pad score, three
+seed sets of 80, 30,000 ticks:</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th></th>
+<th>old</th>
+<th>pad score</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>matches won</td>
+<td>237/240</td>
+<td>240/240</td>
+</tr>
+<tr>
+<td>average match</td>
+<td>381 s</td>
+<td>411 s</td>
+</tr>
+<tr>
+<td>top-ups ending full</td>
+<td>—</td>
+<td>89%</td>
+</tr>
+<tr>
+<td>died while topping up</td>
+<td>—</td>
+<td>3.5% of stays (56 in 240 matches)</td>
+</tr>
+<tr>
+<td>left nearly full to answer a fight</td>
+<td>—</td>
+<td>3.3%</td>
+</tr>
+<tr>
+<td>rounds fired from the pad / on the drive in</td>
+<td>~0</td>
+<td>673 / 1,450</td>
+</tr>
+</tbody></table></div>
+<p>Matches run about 30 seconds longer. That&#39;s the time units now spend filling up — repair time
+doubled, rearm rose a quarter — not anything going wrong.</p>
+<p><strong>Head to head</strong>, the new brain on one team and the old one on the other in the same match, every
+seed played twice with the sides swapped: 121–117 over 240 matches. A tie. Resupply style, like the
+repair weights in August, doesn&#39;t decide who wins; it decides how the game reads.</p>
+<p><strong>The sweep.</strong> Fourteen variations of the weights, each against the shipped set, 180 matches apiece:
+every one landed between 47% and 54% — inside the noise. One pattern held in all three seed sets: a
+weaker mid-level pull (A halved) won 55/55/53%, and a stronger one lost 49/50/42%.</p>
+<p>Then the confirmation, on three fresh seed sets (6011/8011/10011), 240 matches per row:</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th></th>
+<th>share</th>
+<th>per set</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>new brain vs old (old&#39;s share)</td>
+<td>49.4%</td>
+<td>49 / 51 / 48</td>
+</tr>
+<tr>
+<td>mid-level pull halved</td>
+<td>51.7%</td>
+<td>54 / 49 / 52</td>
+</tr>
+<tr>
+<td>no mid-level pull at all</td>
+<td>52.9%</td>
+<td>56 / 50 / 53</td>
+</tr>
+</tbody></table></div>
+<p>The head-to-head is a tie twice over: 241–234 across both runs. Halving the mid-level pull held its lean
+on fresh seeds, smaller — 221–197 over six sets, five of them above 50%.</p>
+<p>So it went in, and was played against the <em>old</em> resupply on three more fresh sets. It lost 139–100. That
+looked like a verdict until the unchanged pad score was played on the same seeds: it lost too, 123–113.
+Those seeds just like the old resupply; the extra four or five points that halving cost are inside what
+one set swings. Two lessons, both already in the house rules and both needed again: a win against the
+shipped weights doesn&#39;t chain into a win against the alternative, and a result on one seed group means
+nothing until the control has played the same seeds. <code>A</code> stays where it was.</p>
+<h3>The flip-flop</h3>
+<p>The tournament&#39;s strobe alarm caught two episodes over 240 matches: a unit switching between rearm and
+siege six times in ten seconds. Slowed down, it was a Valkyrie shelling a tower from a spot inside an ammo
+depot. Every rocket it fired left it one short, with the depot right there, so <code>stay</code> jumped past the
+siege; it switched to rearm, the depot handed the rocket back in a sixth of a second, and it went back to
+the siege to fire it again.</p>
+<p>Refilling goes by where a unit is, not what it&#39;s doing — that Valkyrie was being topped up all along. The
+stay is &quot;don&#39;t leave a top-up half-done&quot;, so it now belongs to the running top-up alone. Strobes over the
+next 480 matches: zero. Played head to head against the version without the fix: 84–81.</p>
+<h3>Also in this batch</h3>
+<ul>
+<li><strong>Only the elevator wins.</strong> An AI carrier used to score inside 12 units of its main base as well as at
+its FOB, a finish line the player never had. Jacob: &quot;Only at the elevator.&quot; The main base still counts on
+a map with no FOB. Same seeds, before and after: 160/160 resolved both ways, the same match lengths.</li>
+<li><strong>Difficulty on the start menu</strong>: Easy / Medium / Hard under PLAYER VS AI, remembered between visits
+(the address&#39;s <code>?difficulty=</code> still wins).</li>
+</ul>
+<h3>Ships as</h3>
+<p>The pad score is on by default. <code>?oldpad</code> restores the old resupply exactly. The flag chase weighed
+by firepower (<code>?interceptfp</code>) is built and off, waiting for its own head-to-head. The weights are in
+<code>PAD_W</code> (AIStrategies.js), per team for duels via <code>RR.setPadW(w, team)</code>; <code>RR.padStats()</code> is the ledger,
+and the tournament prints it as PAD LEDGER, with every death while topping up named by what killed it.</p>
+
+</article>
+
+</main>
+</body></html>

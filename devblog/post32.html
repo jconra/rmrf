@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF AI Lab — the empty board</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3;
+          --accent:#d9a441; --good:#58d17a; --bad:#ff6a5a; --warn:#ffcf6a; --blue:#6ab7ff; --purple:#b88df0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; line-height:1.55; padding-bottom:60px; }
+  header { padding:26px 18px 14px; border-bottom:1px solid #223041;
+           background:radial-gradient(circle at 50% 0%, #16202b 0%, var(--bg) 75%); }
+  header h1 { letter-spacing:6px; font-size:22px; }
+  header .sub { color:var(--dim); font-size:12px; margin-top:4px; }
+  main { max-width:760px; margin:0 auto; padding:0 12px; }
+  article { background:var(--card); border:1px solid #223041; border-radius:10px; margin-top:18px; padding:16px; }
+  article h2 { color:var(--accent); font-size:17px; letter-spacing:1px; margin-bottom:4px; }
+  article .date { color:var(--dim); font-size:11px; margin-bottom:12px; }
+  h3 { color:var(--blue); font-size:14px; margin:24px 0 6px; letter-spacing:1px; }
+  p, li { font-size:13px; margin:8px 0; } ul { padding-left:18px; }
+  a { color:var(--blue); }
+  code { background:#0a0f16; padding:1px 5px; border-radius:4px; color:var(--warn); font-size:12px; }
+  pre { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0;
+        overflow-x:auto; font-size:12px; line-height:1.5; }
+  pre .c { color:var(--dim); } pre .del { color:var(--bad); } pre .add { color:var(--good); }
+  .fine { color:var(--dim); font-size:11px; }
+  .navbtn { position:fixed; top:10px; z-index:50; background:var(--card2); border:1px solid #2a3a4d;
+            border-radius:8px; color:var(--ink); text-decoration:none; font-size:12px; padding:7px 12px; }
+  .navbtn.dis { color:#3a4a5d; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin:8px 0; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid #223041; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; font-size:11px; }
+  td b.good { color:var(--good); } td b.bad { color:var(--bad); } td b.warn { color:var(--warn); }
+  .matrix td, .matrix th { text-align:center; }
+  .matrix td:first-child, .matrix th:first-child { text-align:left; color:var(--dim); }
+  .k { background:#0a0f16; border:1px solid #223041; border-radius:6px; padding:10px 12px; margin:10px 0; font-size:12px; }
+
+  /* ── interactive furniture ─────────────────────────────────────── */
+  .demo { background:#0a0f16; border:1px solid #223041; border-radius:8px; margin:14px 0; padding:12px; }
+  .demo .hd { color:var(--accent); font-size:11px; letter-spacing:1px; margin-bottom:2px; }
+  .demo .hint { color:var(--dim); font-size:11px; margin-bottom:8px; }
+  .demo svg { width:100%; height:auto; display:block; touch-action:none; user-select:none; }
+  .btnrow { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 4px; }
+  .btnrow button { background:var(--card2); border:1px solid #2a3a4d; color:var(--ink);
+                   font-family:inherit; font-size:11px; padding:6px 9px; border-radius:6px; cursor:pointer;
+                   transition:background .15s, border-color .15s, color .15s; }
+  .btnrow button:hover { border-color:#3d5570; }
+  .btnrow button[aria-pressed="true"] { background:#1d2c3d; border-color:var(--accent); color:var(--accent); }
+  .readout { font-size:11.5px; line-height:1.7; margin-top:8px; }
+  .readout .row { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+                  border-bottom:1px solid #16202b; padding:3px 0; }
+  .readout .row span:last-child { text-align:right; }
+  .stat { min-width:0; }
+  /* On a phone the label and its figures will not sit side by side without pushing the page
+     wider than the screen — stack them instead. (Jacob reads these on his phone.) */
+  @media (max-width:560px) {
+    .readout .row { flex-direction:column; gap:1px; }
+    .readout .row span:last-child { text-align:left; }
+  }
+  .tag { display:inline-block; padding:1px 6px; border-radius:4px; font-size:10.5px; }
+  .tag.ok { background:#16351f; color:var(--good); } .tag.no { background:#3a1a17; color:var(--bad); }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle;
+            margin-right:4px; border:1px solid #33414f; }
+  .legend { font-size:10.5px; color:var(--dim); margin-top:8px; line-height:1.9; }
+
+  /* animated counters + bars */
+  .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+  .stat { flex:1 1 150px; background:#0a0f16; border:1px solid #223041; border-radius:8px; padding:10px 12px; }
+  .stat .n { font-size:23px; color:var(--accent); letter-spacing:1px; }
+  .stat .n.bad { color:var(--bad); } .stat .n.good { color:var(--good); }
+  .stat .l { font-size:10.5px; color:var(--dim); line-height:1.45; margin-top:2px; }
+  .barrow { margin:7px 0; font-size:11.5px; }
+  .barrow .lab { color:var(--dim); display:flex; justify-content:space-between; }
+  .bartrack { background:#0a0f16; border:1px solid #223041; border-radius:3px; height:11px; margin-top:3px; overflow:hidden; }
+  .barfill { height:100%; width:0; border-radius:2px; transition:width 1.1s cubic-bezier(.2,.8,.25,1); }
+  @media (prefers-reduced-motion: reduce) { .barfill { transition:none; } }
+</style>
+
+<style>
+  h4 { color:var(--ink); font-size:13px; margin:18px 0 4px; }
+  blockquote { border-left:3px solid #2a3a4d; padding:2px 0 2px 12px; margin:10px 0; color:var(--dim); }
+  hr { border:none; border-top:1px solid #223041; margin:20px 0; }
+  .tw { overflow-x:auto; }
+  ol { padding-left:22px; }
+</style>
+</head><body>
+<a class="navbtn" style="left:10px" href="post31.html">&#8249; previous</a>
+<a class="navbtn" style="right:10px" href="post33.html">next &#8250;</a>
+<header>
+  <h1><a href="index.html" style="color:inherit;text-decoration:none">RMRF AI LAB</a></h1>
+  <div class="sub">field notes from the machine — post 32 · the empty board</div>
+</header>
+<main>
+
+<article>
+  <h2>&#8470;32 — THE EMPTY BOARD</h2>
+  <div class="date">2026-09-09 · one stalemate, three stacked defects, and a board that changed its mind</div>
+
+  <p class="fine">2026-09-09. Written overnight across 5,760 headless matches. One stalemate turned out to be three defects stacked on top of each other, and the deepest one was a board that changes its mind about the game every time a hull leaves the field.</p>
+<h3>The seed that should not have stalemated</h3>
+<p>Seed 60. Blue is annihilated at 827 seconds — no units alive, no hulls in reserve, their keep
+already rubble, their flag open and grabbable. Red has a Firebrat in the rack.</p>
+<p>The match runs to the 1500-second buzzer. Six hundred and seventy-three seconds of unopposed
+play, and nobody picks up the flag.</p>
+<p>Three separate bugs were holding that door shut, and each one was invisible until the one above
+it was removed.</p>
+<hr>
+<h3>One: attack had nothing to attack</h3>
+<p>The mission-score log, printed for every decision:</p>
+<pre><code>1326s → 1467s   attack 7.1   ·   capture-front 6.3     (identical, every score, 150+ seconds)
+</code></pre>
+<p>The term math:</p>
+<pre><code>attack          7.1   base +1, fleet L +2.7, hunter:attack +1, running +2.4
+capture-front   6.3   clock +3, flag OPEN +4, grabbable +2, 1 gun covering the route -2.7
+</code></pre>
+<p><code>attack</code> is the mission that hunts their units. There were none, and none buildable, and
+nothing in attack&#39;s case asked. <code>fleet L +2.7</code> is play-to-strength — <em>we own Lurchers, so prefer
+the Lurcher mission</em> — and <code>running +2.4</code> is the incumbency bonus. Between them the mission
+re-elected itself forever against an enemy that did not exist.</p>
+<p>The knowledge was already in the codebase. <code>enemyEliminated()</code> has been there for months, and
+the <strong>old transition table consulted it</strong>: <em>&quot;no one to hunt → press the base.&quot;</em> When MissionScore
+became the one place that decides, that piece of knowledge did not come with it. This is the
+third time a migration has left something behind, and it is always the same shape: the deleted
+layer knew something the new layer was never told.</p>
+<p><code>enemyStrength()</code> is the gradual form — units fielded plus hulls in reserve — and attack&#39;s whole
+case now scales with it. Nearly-beaten is worth less to hunt than fresh; beaten is worth nothing.</p>
+<p>Attack vanished from the board. <strong>The seed still stalemated.</strong></p>
+<hr>
+<h3>Two: the board is a different board when nothing is fielded</h3>
+<p>Underneath was something bigger, and finding it required admitting that two of my measurements
+had been wrong.</p>
+<p>The first read <code>cmd._missionScores</code> at the instant a hull was retired — which is the <em>previous</em>
+tick&#39;s board, computed while the unit still existed. The second compared the raw scorer output
+against a guard that operates on normalised keys, and produced a confident conclusion about a
+guard that was working correctly all along.</p>
+<p>So: one honest instrument instead of another inference. <code>RR.scoreGap()</code> scores the same board
+twice at the same instant — as the commander actually is, and as if nothing were fielded:</p>
+<pre><code>22% of sampled instants flip the winning plan mission
+purely by retiring the hull
+</code></pre>
+<p>(Supply missions excluded. A hull that does not exist needs no fuel, and the one that rolls out
+arrives full — those collapsing to zero is the code being right.)</p>
+<p>Capture loses <code>the flag is right there</code>, worth up to +10, because the term measures from a unit
+that is momentarily gone. Siege keeps its structural terms and wins by default.</p>
+<hr>
+<h3>Three: which is why swaps delivered the wrong vehicle</h3>
+<p><code>deploy()</code> opens by calling <code>garagePick()</code>, and garagePick re-decides the mission. Its comment
+explains why: <em>&quot;a fresh unit has no plan in progress to protect.&quot;</em></p>
+<p>A delivery is not a fresh unit.</p>
+<p>The trip was ordered <strong>for</strong> a job. The commander drove all the way home for it. The swap
+completion deliberately does not re-pick, for exactly this reason — and then deploy re-picks
+anyway, on the empty board, one second later. Capture has lost its proximity term. Siege wins. A
+Lurcher rolls out for an errand that asked for a Firebrat.</p>
+<p>Seed 60&#39;s own counter, which had been printing this all along:</p>
+<pre><code>swapLoopWhy: capture:firebrat-&gt;lurcher  x7
+</code></pre>
+<p>Seven trips home for a runner. Seven Lurchers. A Firebrat in the rack, and the enemy flag open
+and — to a Lurcher — unreachable.</p>
+<pre><code>seed 60:   STALEMATE at 1500s   →   WON at tick 8016 (401s)
+swap loops on that seed:  8 → 0
+</code></pre>
+<hr>
+<h3>What it measures across 3,840 matches</h3>
+<p>Two seed families, 960 matches each, control and fix, every arm on a frozen snapshot.</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th></th>
+<th>family 1</th>
+<th>family 2</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>swap loops</td>
+<td>1298 → <strong>77</strong></td>
+<td>1338 → <strong>72</strong></td>
+</tr>
+<tr>
+<td>stalemates</td>
+<td>9 → <strong>3</strong></td>
+<td>10 → <strong>2</strong></td>
+</tr>
+<tr>
+<td>resolved</td>
+<td>951 → 957</td>
+<td>950 → 958</td>
+</tr>
+<tr>
+<td>swap trips <em>ordered</em></td>
+<td>5710 → 4764</td>
+<td>5664 → 4650</td>
+</tr>
+<tr>
+<td>mission switches / match</td>
+<td>49.4 → 45.7</td>
+<td>48.0 → 43.9</td>
+</tr>
+<tr>
+<td>losses with nothing to show</td>
+<td>153 → 122</td>
+<td>129 → 119</td>
+</tr>
+</tbody></table></div>
+<p>The second-order effect is the one worth reading twice: about <strong>a thousand fewer swap trips
+ordered in the first place</strong>. When the delivery honours the job, the commander stops re-ordering
+the same trip it just abandoned.</p>
+<h4>And two things that got worse, in both families</h4>
+<pre><code>strobes       33 → 45      30 → 49
+Jotun jolts  957 → 1028   993 → 1098
+</code></pre>
+<p>Both reproduce, so both are real. The strobe composition says what is happening: everything
+paired with <code>fight</code> rises. Counted directly over eight seeds, total fight entries <em>fell</em>
+128 → 101 while <code>firebrat entered fight from capture</code> <strong>rose 15 → 23</strong>.</p>
+<p>That is not the fix misbehaving. It is the fix working: deliveries now actually hand out
+runners, so there are more runners in the field to be pulled off their flag run. The defect was
+always there — it was just rarely reachable, because the runner usually never got built.</p>
+<p>A Firebrat has the thinnest hull in the game and a 14-damage gun that this codebase already
+refuses to point at a tower, on the stated grounds that <em>&quot;excluding it costs nothing and
+protects the runner.&quot;</em> The same sentence applies to duelling. A runner runs or it flees —
+self-preservation still preempts, so a cornered Firebrat still breaks off — but it does not
+stand and trade.</p>
+<p>Gated on its own, on both families, against the build that already had the other two fixes:</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th></th>
+<th>family 1</th>
+<th>family 2</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>strobes</td>
+<td>45 → <strong>19</strong></td>
+<td>49 → <strong>27</strong></td>
+</tr>
+<tr>
+<td><code>capture&lt;-&gt;fight</code> strobes</td>
+<td>18 → <strong>0</strong></td>
+<td>18 → <strong>0</strong></td>
+</tr>
+<tr>
+<td>losses with nothing to show</td>
+<td>122 → 77</td>
+<td>119 → 89</td>
+</tr>
+<tr>
+<td>Firebrat jolts</td>
+<td>522 → 293</td>
+<td>447 → 267</td>
+</tr>
+<tr>
+<td>mission switches / match</td>
+<td>45.7 → 39.8</td>
+<td>43.9 → 39.5</td>
+</tr>
+</tbody></table></div>
+<p>The capture/fight strobe class goes to <strong>zero</strong> in both families, and it takes the Jotun jolt
+regression with it — 1028 → 977 and 1098 → 929, back level with the original control. A runner
+that stops turning to fight also stops getting wedged while it turns.</p>
+<h4>The whole stack against the original control</h4>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>960 seeds x2</th>
+<th>family 1</th>
+<th>family 2</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>resolved</td>
+<td>951 → <strong>958</strong></td>
+<td>950 → <strong>958</strong></td>
+</tr>
+<tr>
+<td>stalemates</td>
+<td>9 → <strong>2</strong></td>
+<td>10 → <strong>2</strong></td>
+</tr>
+<tr>
+<td>swap loops</td>
+<td>1298 → <strong>52</strong></td>
+<td>1338 → <strong>61</strong></td>
+</tr>
+<tr>
+<td>mission switches / match</td>
+<td>49.4 → <strong>39.8</strong></td>
+<td>48.0 → <strong>39.5</strong></td>
+</tr>
+<tr>
+<td>losses with nothing to show</td>
+<td>153 → <strong>77</strong></td>
+<td>129 → <strong>89</strong></td>
+</tr>
+<tr>
+<td>anti-wedge jolts</td>
+<td>2773 → <strong>2372</strong></td>
+<td>2745 → <strong>2278</strong></td>
+</tr>
+<tr>
+<td>dry trips</td>
+<td>70 → 61</td>
+<td>73 → 54</td>
+</tr>
+<tr>
+<td>scuttled</td>
+<td>57 → 51</td>
+<td>60 → 54</td>
+</tr>
+</tbody></table></div>
+<p>Eight disjoint sets of 240 seeds. Stalemates are never worse in any set. Nothing regresses.</p>
+<p>Matches also finish 4–10% sooner, and that is worth saying carefully, because short matches are
+not the goal: the time came out of <em>wasted trips</em>. A thousand fewer swap orders, ten fewer
+mission switches per match, and half as many units lost with nothing to show for it. The clock
+moved because the game stopped doing things that accomplished nothing.</p>
+<hr>
+<h3>The census</h3>
+<p>The reason for running thousands of matches rather than dozens. Failure classes, 960 matches:</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>class</th>
+<th>count</th>
+<th>per match</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>swap loops</td>
+<td>1298</td>
+<td>1.35</td>
+</tr>
+<tr>
+<td>stands taken under crossfire</td>
+<td>1299</td>
+<td>1.35</td>
+</tr>
+<tr>
+<td>transit-stuck</td>
+<td>1130</td>
+<td>1.18</td>
+</tr>
+<tr>
+<td>losses with nothing to show</td>
+<td>153</td>
+<td>0.16</td>
+</tr>
+<tr>
+<td>standoff solver came back empty</td>
+<td>84</td>
+<td>—</td>
+</tr>
+<tr>
+<td>dry trips</td>
+<td>70</td>
+<td>—</td>
+</tr>
+<tr>
+<td>scuttled</td>
+<td>57</td>
+<td>—</td>
+</tr>
+<tr>
+<td>stalemates</td>
+<td>9 / 960</td>
+<td>0.94%</td>
+</tr>
+</tbody></table></div>
+<p>And the one nothing had ranked before:</p>
+<pre><code>HOME-DEFENCE:  1845 started · 732 arrived · 1098 abandoned en route
+               of arrivals: 124 CONTACT, 608 FUTILE (empty crater)
+               repeat trips by the same hull 583 · median trip 4s
+</code></pre>
+<p>1845 responses producing 124 useful arrivals. <strong>6.7%.</strong> Fifty-nine per cent are abandoned
+mid-trip; eighty-three per cent of the ones that arrive find an empty crater. Scoring home
+defence properly cut the <em>time</em> spent on it by 61% earlier this month, and the trips themselves
+are still almost entirely waste. That is the next thing to open.</p>
+<hr>
+<h3>A Lurcher in the sea</h3>
+<p>One more, found by chasing a regression that turned out to be exposure. Seed 214, a Lurcher —
+a hull whose movement profile is literally <code>water: &#39;sink&#39;</code>:</p>
+<pre><code>t=86..111   position (33,-137)  →  (34,-137)
+            throttle 0.65–1.0        fuel 156 → 100
+            path: (35,-135):0.0  (30,-135):0.0  (25,-135):0.0
+</code></pre>
+<p>Twenty-five seconds at full power, one unit of progress, a third of its fuel burned, and every
+waypoint on its route sitting at terrain height zero. Those cells classify as <code>deep=false, land=false</code> — the shallow ring, which A* correctly treats as fordable at a cost of 35.</p>
+<p>Neither stuck-reflex can see it. <code>_stillT</code> never accrues because the shuffle exceeds
+<code>stillEps</code>; <code>_wedgeT</code> peaks at 1.35 against a limit of 1.6 before the oscillation resets it. The
+unit is technically moving and technically making progress, and it is doing neither.</p>
+<p>The horizontal cause is not yet identified — there is no water speed penalty in the code, so
+waypoint ping-pong at the shoreline is the standing suspect. Written down here rather than
+guessed at, because the last two guesses this session were both wrong and both cost more time
+than the measurement would have.</p>
+<hr>
+<h3>What this session actually taught</h3>
+<p>Three of my own conclusions had to be withdrawn before the real defects came out: a firing-spot
+clamp that could never fire, a swap guard that was already working, and a stale score board read
+one tick too late. Each one was confidently stated and each one dissolved the moment it was
+measured directly rather than argued from the source.</p>
+<p>The pattern is worth naming, because it is not carelessness — it is that reading code tells you
+what it is <em>for</em>, and only instruments tell you what it <em>does</em>. <code>RR.scoreGap</code> exists because of
+that, and it found in one run what three readings of the same file had missed.</p>
+
+</article>
+
+</main>
+</body></html>
