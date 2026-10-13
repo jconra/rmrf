@@ -1948,7 +1948,13 @@ export function missionScore(cmd, key, running = null) {
         if (fg && fg.carrier !== cmd.unit && fg.group && cmd.unit.holder) {
           const up = cmd.unit.holder.position;
           const d = Math.hypot(up.x - fg.group.position.x, up.z - fg.group.position.z);
-          if (d < CAPTURE_COMMIT) add('the flag is right there', Math.round(10 * (0.5 + 0.5 * (1 - d / CAPTURE_COMMIT)) * 10) / 10);
+          // NO CLIFF AT THE RIM. The pull used to start at half strength (+5) the moment a unit crossed CAPTURE_COMMIT, so a
+          // hull sitting on the rim flipped it on and off: seed 16368, a Lurcher at 85u chose to swap for a runner when it
+          // switched on, turned for home, dropped back outside, lost it, went back to its siege, and did it again every
+          // second (siege<->swap x7 in 8s). Inside the rim it is unchanged; past it the half fades out over the next quarter.
+          const fade = CAPTURE_COMMIT * 0.25;
+          const pull = d < CAPTURE_COMMIT ? 10 * (0.5 + 0.5 * (1 - d / CAPTURE_COMMIT)) : 5 * (1 - (d - CAPTURE_COMMIT) / fade);
+          if (pull > 0) add('the flag is right there', Math.round(pull * 10) / 10);
         }
       }
       if (!exposed) add('flag sealed', -10);
@@ -2749,7 +2755,11 @@ class Doctrine {
         // fortDown/gambit/soften/clearPath/scavenge/sap/trap rungs above are gated off when
         // weights are on — the success memory + siege/scavenge terms subsume them, and killing
         // the soften/clearPath loop is the seed-116 fix), and nothing preempts it any more.
-        const runningKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;
+        // A SWAP IS JUDGED AS THE JOB IT SERVES. Swap is never a scored candidate, so as `swap` it took no incumbent bonus
+        // and the job underneath (still in _msnKey) took none either: any re-score dropped the trip for whatever led by a
+        // hair. Seed 16368: a Lurcher swapping for a runner to grab an open flag, re-scored on taking fire every second,
+        // went siege<->swap seven times in eight seconds.
+        const runningKey = (cmd._msnKey && (cmd._msnKey.split('-')[0] === this.step || this.step === 'swap')) ? cmd._msnKey : this.step;
         // RE-SCORE ON A TRIGGER, NOT EVERY TICK. This used to run missionPick on every single
         // tick, with a +1.5 bonus for the incumbent as the only thing holding a plan together —
         // a substitute for a latch. A reflex does not CHOOSE anything now; it says the situation
@@ -2785,7 +2795,7 @@ class Doctrine {
     // Switch on dwell, on an urgent mission, OR (weights) when a fresh event has spiked the
     // pick decisively past the running mission — so an exposed flag / lost unit re-decides now
     // instead of waiting out the dwell.
-    const curKey = (cmd._msnKey && cmd._msnKey.split('-')[0] === this.step) ? cmd._msnKey : this.step;   // the RUNNING plan's full scored key
+    const curKey = (cmd._msnKey && (cmd._msnKey.split('-')[0] === this.step || this.step === 'swap')) ? cmd._msnKey : this.step;   // the RUNNING plan's full scored key (a swap: the job it serves, see runningKey)
     const decisive = next !== this.step && (cmd._missionTop != null) && (cmd._missionTop - (missionScore(cmd, curKey).total) >= 4);
     // Weights re-think on a calmer clock (8s) than the classic cascade's 1.5s — the incumbent
     // bonus + this dwell kill the flapping; a DECISIVE score jump (an event spike: flag opened,
