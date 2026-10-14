@@ -6660,6 +6660,8 @@ const DRY_TRIP_ALARM = 3;     // trips to the enemy base without firing a shot, 
 const DRY_TRIP_R = 110;       // u — inside this of the enemy base counts as "it got there"
 const SWAP_LOOP_ALARM = 8;    // CONSECUTIVE recalls answered by re-fielding the very type we recalled (a run, not a tally — see deploy)
 let dryTripsTotal = 0;        // RR.decisionAlarms() — tournament summary
+const IDLE_FIGHT_MS = 20000;   // a fight with nothing seen or fired for this long is not a fight (see _updateSlot)
+let idleFightsTotal = 0;      // RR.decisionAlarms().idleFights
 // FLAG RUNS. The tournament harness has printed "FLAG RUNS: 0 started · 0 STOPPED FOR FUEL" on
 // every run for weeks, because it reads two keys off decisionAlarms() that were specified when the
 // carrier-fuel alarm was written and never survived its revert. A line that always reads zero is
@@ -9393,6 +9395,22 @@ class AICommander {
     this.strategy.tick(this, dt);   // per-slot doctrine — this card is nobody else's to tick
     const v = this.unit;
     if (!v) return;
+    // IDLE-FIGHT ALARM (Jacob's rule: a loud alarm beats a rare bug). A unit on a fight that has neither seen its
+    // rival nor fired for IDLE_FIGHT_MS is holding a fight that is not happening, and nothing else notices: it is
+    // standing still on purpose, so the nav watchdog reads it as busy. Seed 60501 held one for 290s against a hull
+    // its rival had swapped away. Logs once per fight; counted in RR.decisionAlarms().idleFights.
+    if (this.strategy.step === 'fight' && !v.dead) {
+      const now = performance.now(), m = this.strategy.mission;
+      if (v._fightT0 == null) v._fightT0 = now;
+      const quiet = now - Math.max(v._fightT0, (m && m.foeT) || 0, v._lastFireT || 0);
+      if (!v._fightAlarmed && quiet > IDLE_FIGHT_MS) {
+        v._fightAlarmed = true; idleFightsTotal++;
+        const f = m && m.foeV, fp = f && f.holder && f.holder.position;
+        aiLog(this.team, `[IDLE-FIGHT ALARM] ${this.cname}: ${v.type} on a fight for ${Math.round((now - v._fightT0) / 1000)}s, `
+          + `nothing seen or fired for ${Math.round(quiet / 1000)}s (ammo ${Math.round(v.ammo || 0)}`
+          + `${fp ? `, foe ${f.type}${f.dead ? ' dead' : ''}${f.offField ? ' off the field' : ''} ${Math.round(Math.hypot(fp.x - v.holder.position.x, fp.z - v.holder.position.z))}u off` : ', no foe'}).`);
+      }
+    } else if (v._fightT0 != null) { v._fightT0 = null; v._fightAlarmed = false; }
     const view = this._view(v, dt);
     // TRAP LURE: while baiting a chaser near our own mine cluster, the engage footwork kites
     // for this point (mines between us and them) instead of duel-strafing — strafe is blind
@@ -13884,7 +13902,7 @@ window.RR = {
   setPivotSlack: n => setPivotSlack(n),   // A/B: 0 restores the flat stillLimit that jolted pivoting Jotuns
   navAlarmStats: () => ({ alarms: Driver.alarmsTotal, violations: Driver.violationsTotal, staleRoutes: Driver.staleRoutes || 0, violationsBy: { ...Driver.violationsBy }, violationsForced: Driver.violationsForced || 0, violationsForcedBy: { ...(Driver.violationsForcedBy || {}) }, yields: Driver.yieldSamples, goalSnaps, navBail: { ...navBail }, navBailEp: JSON.parse(JSON.stringify(navBailEp)), navBailWorst: navBailWorst.slice() }),   // match-wide driver counters (goalSnaps = impossible goals rescued, navBail = ticks that got no order at all, navBailEp = the sustained ones)
   navScuttles: () => ({ total: navScuttles.length, byTeam: { ...navScuttlesByTeam }, list: navScuttles.slice(-12) }),   // stuck units the driver destroyed
-  decisionAlarms: () => ({ dryTrips: dryTripsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal,
+  decisionAlarms: () => ({ dryTrips: dryTripsTotal, idleFights: idleFightsTotal, swapLoops: swapLoopsTotal, standFails, standCrossfire, recallAborts: recallAbortsTotal, recallVsFlee: recallVsFleeTotal, flagCarries: flagCarriesTotal, carrierRefuels: carrierRefuelsTotal,
     // How every flag run ENDED. scored + runnerDied + heldAtEnd should account for flagCarries;
     // a shortfall means a run ended some way none of these three describes, which is itself worth
     // knowing. `stalls` overlaps the others on purpose — a stalled run can still be killed later.
