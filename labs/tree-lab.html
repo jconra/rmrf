@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RMRF Tree Lab</title>
+<style>
+  :root { --bg:#0c1118; --card:#131b26; --card2:#17212e; --ink:#dfe8ef; --dim:#8fa3b3; --accent:#d9a441; --blue:#6ab7ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body { background:var(--bg); color:var(--ink); font-family:'Courier New',monospace; overflow:hidden; }
+  #bar { position:fixed; left:0; right:0; top:0; z-index:5; display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+         padding:8px 10px; background:rgba(12,17,24,.85); border-bottom:1px solid #223041; }
+  #bar h1 { font-size:13px; letter-spacing:3px; margin-right:8px; }
+  #bar h1 a { color:inherit; text-decoration:none; }
+  #bar button { background:var(--card2); border:1px solid #2a3a4d; color:var(--ink); font-family:inherit; font-size:11px;
+                padding:6px 9px; border-radius:6px; cursor:pointer; }
+  #bar button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); background:#1d2c3d; }
+  canvas { display:block; position:fixed; left:0; top:0; }
+  .lab { position:fixed; z-index:4; pointer-events:none; font-size:11px; line-height:1.45; padding:6px 8px;
+         background:rgba(12,17,24,.72); border:1px solid #223041; border-radius:6px; max-width:260px; }
+  .lab b { color:var(--accent); font-size:12px; letter-spacing:1px; }
+  .lab .d { color:var(--dim); }
+  .div { position:fixed; z-index:3; background:#0c1118; pointer-events:none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="bar">
+  <h1><a href="index.html">TREE LAB</a></h1>
+  <button data-cam="game" aria-pressed="true">game camera</button>
+  <button data-cam="near">zoomed in</button>
+  <button data-cam="close">close up</button>
+  <button id="wind" aria-pressed="true">wind</button>
+  <button id="spin" aria-pressed="false">spin</button>
+  <button id="kind">show palms</button>
+</div>
+<div id="labs"></div>
+<script type="module">
+// Option 3 and the cut-out palm won and now ship as makeLeafTree / makeFrondPalm in Plants.js.
+// Versions of the inland tree, side by side, all instanced the way Foliage.js does it and lit
+// with the game's sun, sky light and tone mapping. One camera drives all three panels.
+//   PREVIOUS — makeTree() from Plants.js, the tree the game used before option 3 shipped.
+//   OPTION 1 — the very same geometry, textured: bark on the trunk, a leaf pattern projected onto
+//              the canopy from three sides (no UVs needed), and a light-top / dark-underside shade.
+//   OPTION 2 — leaf cards: the lumpy balls replaced by cut-out leaf clusters arranged around the
+//              canopy, with normals bent outward from the canopy centre so it lights as one volume.
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { makeTree, makePalm, setWindTime } from '../js/Plants.js?v=1';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.setScissorTest(true);
+document.body.appendChild(renderer.domElement);
+
+const SKY = new THREE.Color('#bfe4f5');
+const camera = new THREE.PerspectiveCamera(55, 1, 0.5, 1200);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = 1.5;
+
+// ── seeded layout so all three groves stand in the same places ──
+let seed = 7;
+const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+const rr = (a, b) => a + rnd() * (b - a);
+const SPOTS = [], TREE_SPOTS = SPOTS;
+for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) {
+  if (i === 0 && j === 0) { SPOTS.push({ x: 0, z: 0, ry: 0.6, s: 1.7, v: 0 }); continue; }
+  SPOTS.push({ x: i * 6.5 + rr(-2, 2), z: j * 6.5 + rr(-2, 2), ry: rr(0, 6.283), s: 1.7 * rr(0.85, 1.15), v: (SPOTS.length % 3) });
+}
+
+// ── textures, drawn on canvas ──
+function canvasTex(w, h, draw, repeat) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; }
+  t.userData.bytes = Math.round(w * h * 4 * 1.33);
+  return t;
+}
+const hsl = (h, s, l, a = 1) => `hsla(${h},${s}%,${l}%,${a})`;
+// Bark: wavy vertical furrows over a warm brown.
+const BARK_TEX = canvasTex(64, 128, (g, w, h) => {
+  g.fillStyle = '#7d5d39'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 46; i++) {
+    const x0 = rnd() * w, dark = rnd() < 0.6;
+    g.strokeStyle = dark ? hsl(28, 35, rr(14, 24), 0.8) : hsl(32, 30, rr(48, 58), 0.45);
+    g.lineWidth = rr(1, 3); g.beginPath();
+    for (let y = -4; y <= h + 4; y += 8) { const x = x0 + Math.sin(y * 0.09 + i) * 2.5; y < 0 ? g.moveTo(x, y) : g.lineTo(x, y); }
+    g.stroke();
+    // wrap so the trunk has no seam
+    g.save(); g.translate(x0 > w / 2 ? -w : w, 0); g.stroke(); g.restore();
+  }
+}, true);
+// A single leaf, drawn pointed at both ends.
+function leaf(g, x, y, len, wid, ang, col) {
+  g.save(); g.translate(x, y); g.rotate(ang); g.fillStyle = col; g.beginPath();
+  g.moveTo(-len / 2, 0); g.quadraticCurveTo(0, -wid, len / 2, 0); g.quadraticCurveTo(0, wid, -len / 2, 0); g.fill(); g.restore();
+}
+// Option 1 canopy pattern: a tiling field of leaves, darker in the gaps.
+const SPECKLE_TEX = canvasTex(256, 256, (g, w, h) => {
+  g.fillStyle = hsl(95, 45, 26); g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 900; i++) {
+    const x = rnd() * w, y = rnd() * h, L = rr(9, 17), W = L * rr(0.3, 0.42), a = rnd() * 6.283;
+    const col = hsl(rr(82, 112), rr(40, 60), rr(28, 52));
+    for (const dx of [-w, 0, w]) for (const dy of [-h, 0, h]) leaf(g, x + dx, y + dy, L, W, a, col);
+  }
+}, true);
+// Option 2 leaf card: a rounded cluster of leaves on a few twigs, transparent around it. The core
+// is packed densest so the cluster keeps its body in the small mip levels a far camera reads.
+const CARD_TEX = canvasTex(256, 256, (g, w, h) => {
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = '#5a4128'; g.lineWidth = 3;
+  for (let k = 0; k < 4; k++) { g.beginPath(); g.moveTo(w / 2, h * 0.98); g.lineTo(w / 2 + rr(-80, 80), h * rr(0.2, 0.45)); g.stroke(); }
+  for (let i = 0; i < 520; i++) {
+    const r = Math.pow(rnd(), 0.65) * w * 0.44, t = rnd() * 6.283;
+    const x = w / 2 + Math.cos(t) * r, y = h * 0.47 + Math.sin(t) * r * 0.9;
+    const L = rr(16, 28), up = 1 - y / h;              // leaves higher on the card catch more light
+    leaf(g, x, y, L, L * rr(0.3, 0.42), t + rr(-0.6, 0.6), hsl(rr(84, 110), rr(42, 62), rr(20, 30) + up * 18));
+  }
+});
+
+// ── wind for the new materials: the same sway Plants.js gives LEAF (amp .03, freq .13) ──
+const windU = { value: 0 };
+function windShader(shader) {
+  shader.uniforms.uWindTime = windU;
+  shader.vertexShader = 'uniform float uWindTime;\nattribute float aWind;\n' + shader.vertexShader;
+  shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
+    #include <begin_vertex>
+    vec3 wPos = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    float wPh = wPos.x * 0.13 + wPos.z * 0.11 + uWindTime;
+    float wPh2 = wPos.x * 0.055 - wPos.z * 0.07 + uWindTime * 0.6;
+    transformed.x += aWind * 0.03 * (sin(wPh) + 0.5 * sin(wPh2)) * 3.0;
+    transformed.z += aWind * 0.024 * (cos(wPh * 0.9) + 0.5 * cos(wPh2)) * 3.0;`);
+}
+
+// Option 1 canopy: texture projected along object-space axes, blended by the face normal.
+const OPT1_LEAF = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.95, flatShading: true, vertexColors: true });
+OPT1_LEAF.onBeforeCompile = (shader) => {
+  windShader(shader);
+  shader.uniforms.uLeafTex = { value: SPECKLE_TEX };
+  shader.vertexShader = 'varying vec3 vOP;\nvarying vec3 vON;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+    '#include <begin_vertex>\nvOP = position; vON = normal;');
+  shader.fragmentShader = 'uniform sampler2D uLeafTex;\nvarying vec3 vOP;\nvarying vec3 vON;\n' + shader.fragmentShader.replace('#include <map_fragment>', `
+    vec3 tw = pow(abs(normalize(vON)), vec3(4.0)); tw /= (tw.x + tw.y + tw.z);
+    float ts = 0.9;
+    vec4 tcol = texture2D(uLeafTex, vOP.zy * ts) * tw.x + texture2D(uLeafTex, vOP.xz * ts) * tw.y + texture2D(uLeafTex, vOP.xy * ts) * tw.z;
+    diffuseColor.rgb *= tcol.rgb;`);
+};
+OPT1_LEAF.customProgramCacheKey = () => 'treelab_opt1_leaf';
+const OPT_BARK = new THREE.MeshStandardMaterial({ map: BARK_TEX, roughness: 1.0, flatShading: true });
+const OPT2_LEAF = new THREE.MeshStandardMaterial({ map: CARD_TEX, color: '#ffffff', roughness: 0.9, vertexColors: true,
+  alphaTest: 0.45, side: THREE.DoubleSide, alphaToCoverage: true });
+OPT2_LEAF.onBeforeCompile = windShader;
+OPT2_LEAF.customProgramCacheKey = () => 'treelab_opt2_leaf';
+const OPT2_CORE = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1.0, flatShading: true, vertexColors: true });
+OPT2_CORE.onBeforeCompile = windShader;
+OPT2_CORE.customProgramCacheKey = () => 'treelab_opt2_core';
+
+// Light top, darker underside: the cheapest depth cue there is, baked into vertex colours.
+function shadeByHeight(geo, y0, y1, bottom, top) {
+  const p = geo.attributes.position, c = new Float32Array(p.count * 3), a = new THREE.Color(bottom), b = new THREE.Color(top), t = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const k = THREE.MathUtils.clamp((p.getY(i) - y0) / (y1 - y0), 0, 1);
+    t.copy(a).lerp(b, k); c[i * 3] = t.r; c[i * 3 + 1] = t.g; c[i * 3 + 2] = t.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(c, 3));
+}
+
+// Flatten a tree group into one geometry per material, in the group's own space.
+function flatten(group) {
+  group.updateWorldMatrix(true, true);
+  const by = new Map();
+  group.traverse(o => {
+    if (!o.isMesh) return;
+    const g = o.geometry.clone().applyMatrix4(o.matrixWorld);
+    if (!g.attributes.aWind) g.setAttribute('aWind', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count), 1));
+    (by.get(o.material) || by.set(o.material, []).get(o.material)).push(g.index ? g.toNonIndexed() : g);
+  });
+  return [...by].map(([mat, gs]) => ({ mat, geo: mergeGeometries(gs.map(g => { for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv', 'aWind', 'color'].includes(k)) g.deleteAttribute(k); return g; })) }));
+}
+
+// ── the three tree sets ──
+const BASE = [0, 1, 2].map(() => makeTree());                    // three random variants, as Foliage bakes
+
+const CURRENT = BASE.map(flatten);
+
+const OPT1 = BASE.map(gr => flatten(gr).map(({ mat, geo }) => {
+  const isLeaf = !!geo.attributes.aWind.array.some(v => v > 0);
+  if (!isLeaf) return { mat: OPT_BARK, geo };
+  geo.computeBoundingBox(); const bb = geo.boundingBox;
+  shadeByHeight(geo, bb.min.y, bb.max.y, '#7d9a72', '#ffffff');
+  return { mat: OPT1_LEAF, geo };
+}));
+
+function makeCardTree(r) {
+  const parts = { bark: [], card: [], core: [] };
+  const h = rr(1.3, 1.9);
+  const trunk = new THREE.CylinderGeometry(0.11, 0.2, h + 0.5, 6); trunk.translate(0, (h + 0.5) / 2, 0);
+  parts.bark.push(trunk);
+  const blobs = [];
+  const n = 2 + (rnd() * 2 | 0);
+  for (let i = 0; i < n; i++) blobs.push({ x: rr(-0.4, 0.4), y: h + rr(0.1, 0.8), z: rr(-0.4, 0.4), r: rr(0.6, 0.9) });
+  for (const b of blobs) {                                        // a branch from the trunk into each blob
+    const from = new THREE.Vector3(0, h * 0.8, 0), to = new THREE.Vector3(b.x, b.y, b.z), d = to.clone().sub(from);
+    const br = new THREE.CylinderGeometry(0.035, 0.07, d.length(), 4); br.translate(0, d.length() / 2, 0);
+    br.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize())); br.translate(from.x, from.y, from.z);
+    parts.bark.push(br);
+  }
+  const cen = new THREE.Vector3(); blobs.forEach(b => cen.add(new THREE.Vector3(b.x, b.y, b.z))); cen.divideScalar(blobs.length);
+  let ymin = Infinity, ymax = -Infinity;
+  for (const b of blobs) {
+    // a dark core so gaps between cards show shadowed leaves, not sky
+    const core = new THREE.IcosahedronGeometry(b.r * 0.48, 0).toNonIndexed(); core.translate(b.x, b.y, b.z); parts.core.push(core);
+    const K = 12;
+    for (let k = 0; k < K; k++) {
+      const u = rr(-0.55, 1), t = rnd() * 6.283, s = Math.sqrt(1 - u * u);   // biased upward: the top is what the camera sees
+      const dir = new THREE.Vector3(s * Math.cos(t), u, s * Math.sin(t));
+      const size = b.r * rr(1.15, 1.45);
+      const q = new THREE.PlaneGeometry(size, size);
+      const nrm = dir.clone().lerp(new THREE.Vector3(rr(-1, 1), rr(-1, 1), rr(-1, 1)).normalize(), 0.35).normalize();
+      q.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), nrm));
+      const spin = new THREE.Matrix4().makeRotationAxis(nrm, rnd() * 6.283); q.applyMatrix4(spin);
+      const at = dir.clone().multiplyScalar(b.r * 0.62).add(new THREE.Vector3(b.x, b.y, b.z));
+      q.translate(at.x, at.y, at.z);
+      parts.card.push(q.toNonIndexed());
+    }
+    ymin = Math.min(ymin, b.y - b.r); ymax = Math.max(ymax, b.y + b.r);
+  }
+  const card = mergeGeometries(parts.card);
+  // Bent normals: every card vertex lights as if it sat on one round canopy.
+  const p = card.attributes.position, nn = card.attributes.normal, v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) { v.set(p.getX(i), p.getY(i), p.getZ(i)).sub(cen).normalize(); nn.setXYZ(i, v.x, v.y, v.z); }
+  shadeByHeight(card, ymin, ymax, '#6f8a62', '#ffffff');
+  const core = mergeGeometries(parts.core); shadeByHeight(core, ymin, ymax, '#2a4019', '#3d5c22');
+  const wind1 = g => g.setAttribute('aWind', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count).fill(1), 1));
+  wind1(card); wind1(core);
+  const bark = mergeGeometries(parts.bark.map(g => g.toNonIndexed()));
+  bark.setAttribute('aWind', new THREE.BufferAttribute(new Float32Array(bark.attributes.position.count), 1));
+  return [{ mat: OPT_BARK, geo: bark }, { mat: OPT2_CORE, geo: core }, { mat: OPT2_LEAF, geo: card }];
+}
+const OPT2 = [0, 1, 2].map(() => makeCardTree());
+// Option 3: option 2's very trees with the solid core taken out, so only the cut-out leaves remain.
+const OPT3 = OPT2.map(parts => parts.filter(p => p.mat !== OPT2_CORE));
+
+// ── palms ──
+// Ringed trunk: the scars old fronds leave, as horizontal bands.
+const RING_TEX = canvasTex(64, 128, (g, w, h) => {
+  g.fillStyle = '#9a7b4f'; g.fillRect(0, 0, w, h);
+  for (let y = 0; y < h; y += rr(9, 12)) {
+    g.fillStyle = hsl(30, 30, rr(22, 32), 0.85); g.fillRect(0, y, w, rr(2, 3.5));
+    g.fillStyle = hsl(36, 30, rr(62, 70), 0.35); g.fillRect(0, y + 3.5, w, 2);
+  }
+  for (let i = 0; i < 40; i++) { g.fillStyle = hsl(30, 25, rr(30, 60), 0.25); g.fillRect(rnd() * w, rnd() * h, 1, rr(3, 8)); }
+}, true);
+// Frond: a midrib along the length (u) with leaflets swept toward the tip, longest mid-blade.
+const FROND_TEX = canvasTex(512, 128, (g, w, h) => {
+  g.clearRect(0, 0, w, h);
+  for (let x = 14; x < w - 6; x += 5.5) {
+    const e = Math.pow(Math.sin(Math.PI * Math.min(1, x / (w * 0.97))), 0.7), len = 58 * e * rr(0.85, 1.05);
+    for (const side of [-1, 1]) {
+      const ang = side * rr(0.95, 1.15), tipx = x + Math.cos(ang) * len * 0.75 + len * 0.35, tipy = h / 2 + Math.sin(ang) * len;
+      const L = Math.hypot(tipx - x, tipy - h / 2);
+      leaf(g, (x + tipx) / 2, (h / 2 + tipy) / 2, L, rr(4, 6), Math.atan2(tipy - h / 2, tipx - x), hsl(rr(84, 104), rr(40, 55), rr(19, 30) + (x / w) * 5));
+    }
+  }
+  g.strokeStyle = '#8c7a3e'; g.lineWidth = 3.5; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+});
+const PALM_BARK = new THREE.MeshStandardMaterial({ map: RING_TEX, roughness: 1.0, flatShading: true });
+const FROND_MAT = new THREE.MeshStandardMaterial({ map: FROND_TEX, roughness: 0.9, alphaTest: 0.45, side: THREE.DoubleSide, alphaToCoverage: true });
+FROND_MAT.onBeforeCompile = windShader;
+FROND_MAT.customProgramCacheKey = () => 'treelab_frond';
+
+// One frond strip: three vertices across (edge, midrib, edge) so the blade folds into a shallow V.
+function frondStrip(L) {
+  const S = 6, pos = [], uv = [], idx = [];
+  for (let i = 0; i <= S; i++) {
+    const t = i / S, x = t * L, y = 0.15 * t - 0.95 * t * t, hw = 0.12 + 0.45 * Math.sin(Math.PI * Math.min(1, t * 0.9 + 0.08)), fold = 0.14 * (1 - t);
+    pos.push(x, y + fold, -hw, x, y, 0, x, y + fold, hw); uv.push(t, 0, t, 0.5, t, 1);
+  }
+  for (let i = 0; i < S; i++) { const a = i * 3; idx.push(a, a + 1, a + 3, a + 1, a + 4, a + 3, a + 1, a + 2, a + 4, a + 2, a + 5, a + 4); }   // wound to face up, so the lit side is the top
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx);
+  return g.toNonIndexed();
+}
+function makeCutPalm() {
+  const H = 4.2, lean = rr(0.4, 0.65);
+  const trunk = new THREE.CylinderGeometry(0.12, 0.24, H, 6, 6, true); trunk.translate(0, H / 2, 0);
+  const tp = trunk.attributes.position;
+  for (let i = 0; i < tp.count; i++) { const t = tp.getY(i) / H; tp.setX(i, tp.getX(i) + Math.sin(t * 1.3) * lean); tp.setZ(i, tp.getZ(i) + t * 0.12); }
+  trunk.computeVertexNormals();
+  const uvA = trunk.attributes.uv; for (let i = 0; i < uvA.count; i++) uvA.setY(i, uvA.getY(i) * 3);   // three ring repeats up the trunk
+  const tx = Math.sin(1.3) * lean, tz = 0.12;
+  const fr = [], N = 11;
+  for (let i = 0; i < N; i++) {
+    const f = frondStrip(rr(2.3, 2.8));
+    const m = new THREE.Matrix4().makeTranslation(tx, H, tz)
+      .multiply(new THREE.Matrix4().makeRotationY((i / N) * Math.PI * 2 + rr(-0.15, 0.15)))
+      .multiply(new THREE.Matrix4().makeRotationZ(rr(-0.15, 0.35)))
+      .multiply(new THREE.Matrix4().makeRotationX(rr(-0.25, 0.25)));
+    fr.push(f.applyMatrix4(m));
+  }
+  const frond = mergeGeometries(fr);
+  // Normals lean up and outward, so the crown lights like a parasol instead of flat strips.
+  const p = frond.attributes.position, nn = new Float32Array(p.count * 3), w = new Float32Array(p.count);
+  let dmax = 1e-4; for (let i = 0; i < p.count; i++) dmax = Math.max(dmax, Math.hypot(p.getX(i) - tx, p.getZ(i) - tz));
+  for (let i = 0; i < p.count; i++) {
+    const ox = p.getX(i) - tx, oz = p.getZ(i) - tz, d = Math.hypot(ox, oz) || 1, v = new THREE.Vector3(ox / d * 0.6, 1, oz / d * 0.6).normalize();
+    nn.set([v.x, v.y, v.z], i * 3); w[i] = d / dmax;
+  }
+  frond.setAttribute('normal', new THREE.BufferAttribute(nn, 3)); frond.setAttribute('aWind', new THREE.BufferAttribute(w, 1));
+  // No coconuts: they hang under the crown, where a camera looking down never sees them.
+  const zero = g => g.setAttribute('aWind', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count), 1));
+  const tr = trunk.toNonIndexed(); zero(tr);
+  return [{ mat: PALM_BARK, geo: tr }, { mat: FROND_MAT, geo: frond }];
+}
+const PALM_SPOTS = [];
+for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++)
+  PALM_SPOTS.push(i === 0 && j === 0 ? { x: 0, z: 0, ry: 0.4, s: 1, v: 0 } : { x: i * 7.5 + rr(-2, 2), z: j * 7.5 + rr(-2, 2), ry: rr(0, 6.283), s: rr(0.85, 1.15), v: PALM_SPOTS.length % 2 });
+const PALM_NOW = [0, 1].map(() => flatten(makePalm()));
+const PALM_CUT = [0, 1].map(() => makeCutPalm());
+
+// ── one scene per panel, same light and ground ──
+function makeScene(variants, SPOTS = TREE_SPOTS, groundCol = '#86a845') {
+  const s = new THREE.Scene(); s.background = SKY; s.fog = new THREE.Fog(SKY, 220, 460);
+  const sun = new THREE.DirectionalLight('#fff3d6', 2.1); sun.position.set(40, 202, -25); s.add(sun);
+  s.add(new THREE.HemisphereLight('#dff1ff', '#c2a86a', 0.95));
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(600, 64).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: groundCol, roughness: 1 }));
+  s.add(ground);
+  const shadowGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
+  const shadow = new THREE.InstancedMesh(shadowGeo, new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: 0.22, depthWrite: false }), SPOTS.length);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+  SPOTS.forEach((sp, i) => { shadow.setMatrixAt(i, m.compose(new THREE.Vector3(sp.x, 0.02, sp.z), q, new THREE.Vector3(sp.s * 0.85, 1, sp.s * 0.85))); });
+  s.add(shadow);
+  let tris = 0, texBytes = 0; const texSeen = new Set();
+  variants.forEach((parts, vi) => {
+    const mine = SPOTS.filter(sp => sp.v === vi);
+    for (const { mat, geo } of parts) {
+      const im = new THREE.InstancedMesh(geo, mat, mine.length);
+      mine.forEach((sp, i) => im.setMatrixAt(i, m.compose(new THREE.Vector3(sp.x, 0, sp.z), q.setFromAxisAngle(up, sp.ry), new THREE.Vector3(sp.s, sp.s, sp.s))));
+      s.add(im);
+      if (vi === 0) tris += geo.attributes.position.count / 3;
+      for (const t of [mat.map, mat === OPT1_LEAF ? SPECKLE_TEX : null]) if (t && !texSeen.has(t)) { texSeen.add(t); texBytes += t.userData.bytes; }
+    }
+  });
+  return { scene: s, tris: Math.round(tris), texKB: Math.round(texBytes / 1024), n: SPOTS.length };
+}
+const SAND = '#d9c48c';
+const TREE_PANELS = [
+  { name: 'PREVIOUS', note: 'lumpy balls, flat colour', ...makeScene(CURRENT) },
+  { name: 'OPTION 1', note: 'same shapes, textured + shaded', ...makeScene(OPT1) },
+  { name: 'OPTION 2', note: 'leaf cards + branches + solid core', ...makeScene(OPT2) },
+  { name: 'OPTION 3', note: 'leaf cards + branches, nothing solid', ...makeScene(OPT3) },
+];
+const PALM_PANELS = [
+  { name: 'PREVIOUS PALM', note: 'solid fronds, flat colour', unit: 'palm', ...makeScene(PALM_NOW, PALM_SPOTS, SAND) },
+  { name: 'CUT-OUT PALM', note: 'leaflet fronds + ringed trunk, no coconuts', unit: 'palm', ...makeScene(PALM_CUT, PALM_SPOTS, SAND) },
+];
+let PANELS = TREE_PANELS;
+const labsEl = document.getElementById('labs');
+[...TREE_PANELS, ...PALM_PANELS].forEach(p => { p.el = document.createElement('div'); p.el.className = 'lab'; labsEl.appendChild(p.el); });
+let camKey = 'game';
+document.getElementById('kind').onclick = e => {
+  const palms = PANELS === TREE_PANELS; PANELS = palms ? PALM_PANELS : TREE_PANELS;
+  e.target.textContent = palms ? 'show trees' : 'show palms';
+  [...TREE_PANELS, ...PALM_PANELS].forEach(p => p.el.hidden = !PANELS.includes(p));
+  layout(); setCam(camKey);
+};
+PALM_PANELS.forEach(p => p.el.hidden = true);
+
+// ── cameras ──
+const CAMS = {
+  game:  { dist: 150, pitch: 1.2 },          // the game's default orbit (main.js)
+  near:  { dist: 60, pitch: 1.0 },
+  close: { dist: 12, pitch: 0.35 },
+};
+function setCam(k) {
+  camKey = k;
+  const c = CAMS[k], tgt = new THREE.Vector3(0, k === 'close' ? (PANELS === PALM_PANELS ? 3.4 : 2.6) : 0, 0), yaw = 0.5;
+  controls.target.copy(tgt);
+  camera.position.set(tgt.x + c.dist * Math.cos(c.pitch) * Math.sin(yaw), tgt.y + c.dist * Math.sin(c.pitch), tgt.z + c.dist * Math.cos(c.pitch) * Math.cos(yaw));
+  controls.update();
+  document.querySelectorAll('[data-cam]').forEach(b => b.setAttribute('aria-pressed', b.dataset.cam === k));
+}
+document.querySelectorAll('[data-cam]').forEach(b => b.onclick = () => setCam(b.dataset.cam));
+let wind = true, spin = false;
+document.getElementById('wind').onclick = e => { wind = !wind; e.target.setAttribute('aria-pressed', wind); };
+document.getElementById('spin').onclick = e => { spin = !spin; e.target.setAttribute('aria-pressed', spin); controls.autoRotate = spin; };
+setCam('game');
+
+// ── layout: three columns, or three rows on a phone ──
+let rects = [];
+function layout() {
+  const W = window.innerWidth, H = window.innerHeight, top = document.getElementById('bar').offsetHeight;
+  renderer.setSize(W, H);
+  // a 2 x 2 grid; the gaps between panels are left uncleared-to-sky, so they show as dividers
+  // two panels sit side by side, or stacked on a tall phone screen
+  const gap = 2, two = PANELS.length === 2, tall = H > W;
+  const cols = two && tall ? 1 : 2, rowsN = two ? (tall ? 2 : 1) : 2;
+  const cw = W / cols, ch = (H - top) / rowsN;
+  rects = PANELS.map((_, i) => ({ x: (i % cols) * cw, y: top + Math.floor(i / cols) * ch, w: cw - gap, h: ch - gap }));
+  PANELS.forEach((p, i) => { const r = rects[i]; p.el.style.left = (r.x + 8) + 'px'; p.el.style.top = (r.y + 8) + 'px'; });
+}
+window.addEventListener('resize', layout); layout();
+
+const clock = new THREE.Clock();
+let t = 0, fps = 0, acc = 0, frames = 0;
+function frame() {
+  const dt = clock.getDelta(); if (wind) t += dt; acc += dt; frames++;
+  if (acc > 0.5) { fps = Math.round(frames / acc); acc = 0; frames = 0; }
+  windU.value = t; setWindTime(t);
+  controls.update();
+  const H = window.innerHeight;
+  renderer.setScissor(0, 0, window.innerWidth, H); renderer.setClearColor('#0c1118'); renderer.clear();
+  PANELS.forEach((p, i) => {
+    const r = rects[i];
+    camera.aspect = r.w / r.h; camera.updateProjectionMatrix();
+    renderer.setViewport(r.x, H - r.y - r.h, r.w, r.h); renderer.setScissor(r.x, H - r.y - r.h, r.w, r.h);
+    renderer.info.reset(); renderer.info.autoReset = false;
+    renderer.render(p.scene, camera);
+    const u = p.unit || 'tree';
+    p.el.innerHTML = `<b>${p.name}</b> <span class="d">${p.note}</span><br>${p.tris} triangles per ${u} · ` +
+      `${renderer.info.render.calls} draw calls for ${p.n} ${u}s<br>` +
+      `<span class="d">textures ${p.texKB ? p.texKB + ' KB' : 'none'}${i === PANELS.length - 1 ? ' · page ' + fps + ' fps' : ''}</span>`;
+  });
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

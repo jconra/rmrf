@@ -19,8 +19,8 @@ import { makeFlagHQ } from './Buildings.js?v=9';   // decoy HQ buildings on desi
 import { recolorCamo } from './AssetBuilder.js?v=1';   // re-skin designed-map props' baked camo on the colour-lock
 import { CAMPAIGN, isUnlocked, isCompleted, markCompleted } from './campaign.js?v=1';
 import { RoadNetwork } from './Roads.js?v=85';
-import { Foliage } from './Foliage.js?v=5';
-import { setWindTime } from './Plants.js?v=1';   // same specifier as Foliage's import → shared wind clock
+import { Foliage } from './Foliage.js?v=6';
+import { setWindTime, setCutoutSmoothing } from './Plants.js?v=2';   // same specifier as Foliage's import → shared wind clock
 import { makeVehicleShadow, vehicleSilhouette, makeBlobShadow } from './BlobShadow.js?v=1';
 import { Vehicle, VEHICLE_TYPES } from './Vehicles.js?v=70';
 import { Elevator } from './Elevator.js?v=5';
@@ -64,6 +64,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+setCutoutSmoothing(renderer.capabilities.isWebGL2);   // soft cut-out leaf edges where it is safe (see Plants.js)
 // Shadows: enabled globally but only lights/meshes that opt in cast them. Right
 // now that's just the garage selection spotlight (the field sun doesn't cast yet).
 renderer.shadowMap.enabled = true;

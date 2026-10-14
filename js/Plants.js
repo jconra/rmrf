@@ -335,3 +335,197 @@ export function makePalm() {
 
   return group;
 }
+
+// ── Cut-out trees and palms ─────────────────────────────────────────────────
+// Leaves drawn on cut-out cards instead of solid shapes: a tree's canopy is a cloud of leaf-cluster
+// cards around its branches, a palm's crown is a ring of frond strips with leaflets. Chosen in
+// labs/tree-lab.html (option 3 and the cut-out palm). The textures are drawn on a canvas at load,
+// from their own seeded stream, so nothing here draws on the game's Math.random — see Foliage.build
+// for why that matters.
+function seeded(s) { return () => { s |= 0; s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const crand = seeded(0x7aee5);
+const cr = (a, b) => a + crand() * (b - a);
+const chsl = (h, s, l) => `hsl(${h},${s}%,${l}%)`;
+// Run a maker with Math.random pointed at our own stream. The makers never call it themselves, but
+// three.js does: every new geometry, material, texture and mesh takes a UUID drawn from Math.random,
+// and these makers create a different set of objects than the ones they replaced.
+function onOwnStream(fn) { const g = Math.random; Math.random = crand; try { return fn(); } finally { Math.random = g; } }
+
+function canvasTexture(w, h, draw, repeat) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+// One leaf, pointed at both ends.
+function drawLeaf(g, x, y, len, wid, ang, col) {
+  g.save(); g.translate(x, y); g.rotate(ang); g.fillStyle = col; g.beginPath();
+  g.moveTo(-len / 2, 0); g.quadraticCurveTo(0, -wid, len / 2, 0); g.quadraticCurveTo(0, wid, -len / 2, 0); g.fill(); g.restore();
+}
+let _cutMats = null;
+function cutMats() {
+  if (_cutMats) return _cutMats;
+  // Bark: wavy vertical furrows, wrapped so the trunk has no seam.
+  const bark = canvasTexture(64, 128, (g, w, h) => {
+    g.fillStyle = '#7d5d39'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 46; i++) {
+      const x0 = crand() * w, dark = crand() < 0.6;
+      g.strokeStyle = dark ? `hsla(28,35%,${cr(14, 24)}%,0.8)` : `hsla(32,30%,${cr(48, 58)}%,0.45)`;
+      g.lineWidth = cr(1, 3); g.beginPath();
+      for (let y = -4; y <= h + 4; y += 8) { const x = x0 + Math.sin(y * 0.09 + i) * 2.5; y < 0 ? g.moveTo(x, y) : g.lineTo(x, y); }
+      g.stroke(); g.save(); g.translate(x0 > w / 2 ? -w : w, 0); g.stroke(); g.restore();
+    }
+  }, true);
+  // Leaf cluster: densest in the core so it keeps its body in the small mip levels a far camera reads.
+  const card = canvasTexture(256, 256, (g, w, h) => {
+    g.strokeStyle = '#5a4128'; g.lineWidth = 3;
+    for (let k = 0; k < 4; k++) { g.beginPath(); g.moveTo(w / 2, h * 0.98); g.lineTo(w / 2 + cr(-80, 80), h * cr(0.2, 0.45)); g.stroke(); }
+    for (let i = 0; i < 520; i++) {
+      const r = Math.pow(crand(), 0.65) * w * 0.44, t = crand() * 6.283;
+      const x = w / 2 + Math.cos(t) * r, y = h * 0.47 + Math.sin(t) * r * 0.9, L = cr(16, 28);
+      drawLeaf(g, x, y, L, L * cr(0.3, 0.42), t + cr(-0.6, 0.6), chsl(cr(84, 110), cr(42, 62), cr(20, 30) + (1 - y / h) * 18));
+    }
+  });
+  // Palm trunk: the ring scars old fronds leave.
+  const rings = canvasTexture(64, 128, (g, w, h) => {
+    g.fillStyle = '#9a7b4f'; g.fillRect(0, 0, w, h);
+    for (let y = 0; y < h; y += cr(9, 12)) {
+      g.fillStyle = `hsla(30,30%,${cr(22, 32)}%,0.85)`; g.fillRect(0, y, w, cr(2, 3.5));
+      g.fillStyle = `hsla(36,30%,${cr(62, 70)}%,0.35)`; g.fillRect(0, y + 3.5, w, 2);
+    }
+    for (let i = 0; i < 40; i++) { g.fillStyle = `hsla(30,25%,${cr(30, 60)}%,0.25)`; g.fillRect(crand() * w, crand() * h, 1, cr(3, 8)); }
+  }, true);
+  // Frond: a midrib along the length (u) with leaflets swept toward the tip, longest mid-blade.
+  const frond = canvasTexture(512, 128, (g, w, h) => {
+    for (let x = 14; x < w - 6; x += 5.5) {
+      const e = Math.pow(Math.sin(Math.PI * Math.min(1, x / (w * 0.97))), 0.7), len = 58 * e * cr(0.85, 1.05);
+      for (const side of [-1, 1]) {
+        const ang = side * cr(0.95, 1.15), tx = x + Math.cos(ang) * len * 0.75 + len * 0.35, ty = h / 2 + Math.sin(ang) * len;
+        drawLeaf(g, (x + tx) / 2, (h / 2 + ty) / 2, Math.hypot(tx - x, ty - h / 2), cr(4, 6), Math.atan2(ty - h / 2, tx - x),
+          chsl(cr(84, 104), cr(40, 55), cr(19, 30) + (x / w) * 5));
+      }
+    }
+    g.strokeStyle = '#8c7a3e'; g.lineWidth = 3.5; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+  });
+  const cut = (map) => new THREE.MeshStandardMaterial({ map, roughness: 0.9, alphaTest: 0.45, side: THREE.DoubleSide, alphaToCoverage: _a2c });
+  _cutMats = {
+    bark: new THREE.MeshStandardMaterial({ map: bark, roughness: 1.0, flatShading: true }),
+    leaves: cut(card),
+    palmBark: new THREE.MeshStandardMaterial({ map: rings, roughness: 1.0, flatShading: true }),
+    frond: cut(frond),
+  };
+  _cutMats.leaves.vertexColors = true;
+  applyWind(_cutMats.leaves, 0.03, 0.13, 1.0);
+  applyWind(_cutMats.frond, 0.05, 0.13, 1.0);
+  return _cutMats;
+}
+// Alpha-to-coverage softens the cut-out edges, but only where it is safe: it needs multisampling,
+// and on WebGL1 its smoothing uses a derivative the stock material doesn't enable (and this game
+// skips the shader error check), so main.js turns it on for WebGL2 only.
+let _a2c = false;
+export function setCutoutSmoothing(on) {
+  _a2c = !!on;
+  if (_cutMats) for (const k of ['leaves', 'frond']) { _cutMats[k].alphaToCoverage = _a2c; _cutMats[k].needsUpdate = true; }
+}
+
+// Light top, darker underside, baked into vertex colours: the cheapest depth cue there is.
+function shadeByHeight(geo, y0, y1, bottom, top) {
+  const p = geo.attributes.position, c = new Float32Array(p.count * 3), a = new THREE.Color(bottom), b = new THREE.Color(top), t = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    t.copy(a).lerp(b, THREE.MathUtils.clamp((p.getY(i) - y0) / (y1 - y0), 0, 1));
+    c[i * 3] = t.r; c[i * 3 + 1] = t.g; c[i * 3 + 2] = t.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(c, 3));
+}
+
+// Inland tree, same footprint as makeTree: a trunk, a branch into each canopy lobe, and leaf cards
+// around the lobes (biased upward, since the top is what the camera sees). Card normals point out
+// from the canopy centre, so the cloud of cards lights as one round crown.
+export function makeLeafTree() { return onOwnStream(buildLeafTree); }
+function buildLeafTree() {
+  const M = cutMats(), g = new THREE.Group();
+  const h = cr(1.3, 1.9), bark = [], cards = [];
+  const trunk = new THREE.CylinderGeometry(0.11, 0.2, h + 0.5, 6); trunk.translate(0, (h + 0.5) / 2, 0); bark.push(trunk);
+  const lobes = [], n = 2 + (crand() * 2 | 0);
+  for (let i = 0; i < n; i++) lobes.push({ x: cr(-0.4, 0.4), y: h + cr(0.1, 0.8), z: cr(-0.4, 0.4), r: cr(0.6, 0.9) });
+  const Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
+  for (const b of lobes) {
+    const from = new THREE.Vector3(0, h * 0.8, 0), d = new THREE.Vector3(b.x, b.y, b.z).sub(from), len = d.length();
+    const br = new THREE.CylinderGeometry(0.035, 0.07, len, 4); br.translate(0, len / 2, 0);
+    br.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(Y, d.normalize())); br.translate(from.x, from.y, from.z);
+    bark.push(br);
+  }
+  const cen = new THREE.Vector3(); lobes.forEach(b => cen.add(new THREE.Vector3(b.x, b.y, b.z))); cen.divideScalar(lobes.length);
+  let ymin = Infinity, ymax = -Infinity;
+  for (const b of lobes) {
+    for (let k = 0; k < 12; k++) {
+      const u = cr(-0.55, 1), t = crand() * 6.283, s = Math.sqrt(1 - u * u);
+      const dir = new THREE.Vector3(s * Math.cos(t), u, s * Math.sin(t)), size = b.r * cr(1.15, 1.45);
+      const q = new THREE.PlaneGeometry(size, size);
+      const nrm = dir.clone().lerp(new THREE.Vector3(cr(-1, 1), cr(-1, 1), cr(-1, 1)).normalize(), 0.35).normalize();
+      q.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(Z, nrm));
+      q.applyMatrix4(new THREE.Matrix4().makeRotationAxis(nrm, crand() * 6.283));
+      const at = dir.multiplyScalar(b.r * 0.62).add(new THREE.Vector3(b.x, b.y, b.z));
+      q.translate(at.x, at.y, at.z);
+      cards.push(q.toNonIndexed());
+    }
+    ymin = Math.min(ymin, b.y - b.r); ymax = Math.max(ymax, b.y + b.r);
+  }
+  const leaves = mergeGeometries(cards);
+  const p = leaves.attributes.position, nn = leaves.attributes.normal, v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) { v.set(p.getX(i), p.getY(i), p.getZ(i)).sub(cen).normalize(); nn.setXYZ(i, v.x, v.y, v.z); }
+  shadeByHeight(leaves, ymin, ymax, '#6f8a62', '#ffffff');
+  bakeWind(leaves, 1);                       // the whole crown sways as one; the wood stays put
+  g.add(new THREE.Mesh(mergeGeometries(bark.map(b => b.toNonIndexed())), M.bark));
+  g.add(new THREE.Mesh(leaves, M.leaves));
+  return g;
+}
+
+// One frond strip: three vertices across (edge, midrib, edge) so the blade folds into a shallow V,
+// wound to face up so the lit side is the top.
+function frondStrip(L) {
+  const S = 6, pos = [], uv = [], idx = [];
+  for (let i = 0; i <= S; i++) {
+    const t = i / S, x = t * L, y = 0.15 * t - 0.95 * t * t, hw = 0.12 + 0.45 * Math.sin(Math.PI * Math.min(1, t * 0.9 + 0.08)), fold = 0.14 * (1 - t);
+    pos.push(x, y + fold, -hw, x, y, 0, x, y + fold, hw); uv.push(t, 0, t, 0.5, t, 1);
+  }
+  for (let i = 0; i < S; i++) { const a = i * 3; idx.push(a, a + 1, a + 3, a + 1, a + 4, a + 3, a + 1, a + 2, a + 4, a + 2, a + 5, a + 4); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx);
+  return g.toNonIndexed();
+}
+
+// Beach palm with leaflet fronds and a ringed trunk; same height, curve and footprint as makePalm.
+// No coconuts: they hang under the crown, where a camera looking down never sees them.
+export function makeFrondPalm() { return onOwnStream(buildFrondPalm); }
+function buildFrondPalm() {
+  const M = cutMats(), g = new THREE.Group();
+  const H = 4.2, lean = cr(0.4, 0.65);
+  const trunk = new THREE.CylinderGeometry(0.12, 0.24, H, 6, 6, true); trunk.translate(0, H / 2, 0);
+  const tp = trunk.attributes.position;
+  for (let i = 0; i < tp.count; i++) { const t = tp.getY(i) / H; tp.setX(i, tp.getX(i) + Math.sin(t * 1.3) * lean); tp.setZ(i, tp.getZ(i) + t * 0.12); }
+  trunk.computeVertexNormals();
+  const uvA = trunk.attributes.uv; for (let i = 0; i < uvA.count; i++) uvA.setY(i, uvA.getY(i) * 3);   // three ring repeats up the trunk
+  const tx = Math.sin(1.3) * lean, tz = 0.12, fr = [], N = 11;
+  for (let i = 0; i < N; i++) {
+    const m = new THREE.Matrix4().makeTranslation(tx, H, tz)
+      .multiply(new THREE.Matrix4().makeRotationY((i / N) * Math.PI * 2 + cr(-0.15, 0.15)))
+      .multiply(new THREE.Matrix4().makeRotationZ(cr(-0.15, 0.35)))
+      .multiply(new THREE.Matrix4().makeRotationX(cr(-0.25, 0.25)));
+    fr.push(frondStrip(cr(2.3, 2.8)).applyMatrix4(m));
+  }
+  const frond = mergeGeometries(fr);
+  // Normals lean up and outward, so the crown lights like a parasol instead of flat strips.
+  const p = frond.attributes.position, nn = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const ox = p.getX(i) - tx, oz = p.getZ(i) - tz, d = Math.hypot(ox, oz) || 1, v = new THREE.Vector3(ox / d * 0.6, 1, oz / d * 0.6).normalize();
+    nn[i * 3] = v.x; nn[i * 3 + 1] = v.y; nn[i * 3 + 2] = v.z;
+  }
+  frond.setAttribute('normal', new THREE.BufferAttribute(nn, 3));
+  bakeWind(frond, 'radial', tx, tz);         // planted at the crown axis, tips wave
+  g.add(new THREE.Mesh(trunk, M.palmBark));
+  g.add(new THREE.Mesh(frond, M.frond));
+  return g;
+}

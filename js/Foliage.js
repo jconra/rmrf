@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { TILE } from './IslandMap.js';
 import { Noise2D } from './noise.js';
-import { makeTree, makeDeadTree, makeBush, makePlant, makeRock, makePalm } from './Plants.js?v=1';
+import { makeTree, makeDeadTree, makeBush, makePlant, makeRock, makePalm, makeLeafTree, makeFrondPalm } from './Plants.js?v=2';
 import { makeBlobShadowInstanced } from './BlobShadow.js?v=1';
 
 // Procedural prop makers per category, and how many randomized variants to bake.
@@ -13,8 +13,8 @@ import { makeBlobShadowInstanced } from './BlobShadow.js?v=1';
 const MAKERS = {
   plant: { make: makePlant, variants: 2 },              // "grasses"
   bush:  { make: makeBush,  variants: 2 },
-  palm:  { make: makePalm,  variants: 2 },               // beach trees (on sand)
-  tree:  { make: makeTree,  variants: 3, scale: 1.7 },   // inland trees (on grass) — native model is small, so size it up
+  palm:  { make: makeFrondPalm, burn: makePalm, variants: 2 },              // beach trees (on sand): cut-out fronds
+  tree:  { make: makeLeafTree,  burn: makeTree, variants: 3, scale: 1.7 },  // inland trees (on grass): cut-out leaf cards; native model is small, so size it up
   rock:  { make: makeRock,  variants: 3, scale: 1.1 },   // decorative stones (cosmetic, no collision), on grass + sand
 };
 
@@ -41,6 +41,11 @@ export class Foliage {
     for (const [cat, def] of Object.entries(MAKERS)) {
       this.props[cat] = [];
       for (let v = 0; v < def.variants; v++) {
+        // `burn` is the maker this one replaced, run and thrown away. The scatter that follows draws on
+        // Math.random, which ?rngseed pins, so it must find the stream exactly where the old makers left
+        // it — otherwise every seed would place its trees somewhere new. The cut-out makers draw on
+        // their own stream, so with this the scatter (and the collision it builds) is unchanged.
+        if (def.burn) def.burn();
         const prop = this._buildProp(def.make(), 0);  // 0 = native size
         if (prop) this.props[cat].push(prop);
       }
