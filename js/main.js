@@ -29,7 +29,7 @@ import { Garage, GARAGE_COUNTS } from './Garage.js?v=8';
 import { TEAM_COLORS, updateCamo, camoParams } from './CamoTexture.js';
 import { SoundManager } from './SoundManager.js?v=12';
 import { Projectiles } from './Projectiles.js';
-import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=125';
+import { Brain, setPivotSlack, randomPersonality, recStart, recStop, recDump, setBrainConfig, getBrainConfig, setJoust, setAlign, FOF_DEFAULT, setMsnMove, setSiegeCreep } from './AI.js?v=126';
 import { locomote } from './Locomotion.js?v=2';
 import { Driver, UNREACH_SLACK } from './Driver.js?v=4';
 import { installFlagMenu } from './FlagMenu.js?v=1';
@@ -40,7 +40,7 @@ import { installFlagMenu } from './FlagMenu.js?v=1';
 const teamFof = {};
 function fofFor(team) { return teamFof[team] || (teamFof[team] = { ...FOF_DEFAULT }); }
 import { initFire, fireBurst, fireWreck, tickFire, drawFire, fireStatus } from './Fire.js?v=14';
-import { setPadScore, setPadW, padScoreOn, setInterceptFp, interceptFpOn, setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=130';
+import { setPadScore, setPadW, padScoreOn, setInterceptFp, interceptFpOn, setGunOnUs, setShieldNear, setSupplyW, setSupplyWAll, setSeesLevel, setAmmoCount, setDefendW, setMsnLog, setRunnerNoDuel, setGrabW, setAmmoVeto, setFbSiege, setTowerFlee, setAmbush, setFightW, setSwapCost, setSwapMargin, scoreGap, abFlags, makeDoctrine, missionWants, pickArchetype, assignArchetypes, COUNTER, setRunnerMode, setRogueRearSiege, setRearSneakGate, setTurtleGuard, setHunterHarass, setFleeScore, setTrigFix, setScoreClock, setSwapYield, setSwapCommit, setCapCarry, setHomeScore, setHomeW, setStatueFix, setSwapSupply, setDeepLog as setDeepLogStrategies } from './AIStrategies.js?v=131';
 import { ExploreMemory, setSweepMode } from './ExploreMemory.js?v=58';
 import { astarGrid } from './astar.js?v=7';
 import { AstarViz } from './AstarViz.js?v=4';
@@ -1873,6 +1873,7 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
   veh.rankKills = (bank && bank[veh.type]) || 0;
   if (veh.rankKills) { applyRankHp(veh); updateRankStars(veh); if (veh.bar) updateHealthBar(veh); }
   if (NOGLOW) for (const g of new Set([veh.group, veh.holder])) if (g) g.traverse(o => { if (o.isPointLight) o.visible = false; });
+  veh.offField = false;   // back on the field (see removeCombatant)
   combatants.push(veh);
   return veh;
 }
@@ -1880,6 +1881,11 @@ function initCombatant(veh, team, colorIndex, isPlayer) {
 function removeCombatant(veh) {
   const i = combatants.indexOf(veh);
   if (i >= 0) combatants.splice(i, 1);
+  // OFF THE FIELD IS GONE. A swapped-out hull is removed here but never marked dead, and its holder stays
+  // parked where it left, so anything still holding it saw a live rival sitting on the pad. Seed 60501: a
+  // Lurcher's fight locked onto a hull its rival had swapped away 55s earlier, 24u off and "in reach", and
+  // held there with an empty magazine for 290s. Readers check this alongside `dead`.
+  veh.offField = true;
   if (veh.bar) { scene.remove(veh.bar.group); veh.bar = null; }
   if (veh._rankGrp) { scene.remove(veh._rankGrp); veh._rankGrp = null; veh._rankSpr = null; }
   if (veh._engineId != null && sound) { sound.dropSpatialEngine(veh._engineId); veh._engineId = null; }
@@ -7034,7 +7040,7 @@ class AICommander {
   // against a wreck; once a mission has snapshotted it, the mission holds its own reference and
   // watches `.dead` itself. Read for IDENTITY and for that one flag — never for its position,
   // which would be seeing through the fog. Where it is comes from lastEnemySeen() below.
-  lastEnemyVeh() { const u = this._lastEnemyVeh; return u && !u.dead ? u : null; }
+  lastEnemyVeh() { const u = this._lastEnemyVeh; return u && !u.dead && !u.offField ? u : null; }
   // Where we last actually SAW a vehicle (as opposed to heard one, or got shot from somewhere).
   // No staleness window: the caller knows which unit this belongs to and decides what an old fix
   // is worth — a frozen last-known position is exactly what "they got away" is measured against.

@@ -1217,6 +1217,7 @@ class Fight extends Mission {
     // exactly the lock-in that doubled idle-at-goal in v3. The duel ENDS on the kill; the board
     // is re-scored; if somebody still qualifies, the next tick opens a fresh one.
     if (this.foeV && this.foeV.dead) return true;   // KILLING THEM ENDS IT (Jacob's first rule)
+    if (this.foeV && this.foeV.offField) return true;   // so does their hull leaving the field (a swap): it no longer exists
     if (!this._acquire(cmd)) return true;           // nobody to duel — a fight is vehicle vs vehicle
     // …OR THEY OPENED THE RANGE (Jacob's second rule), measured against where the opponent
     // ACTUALLY IS. Reading the live position here is not the wallhack it looks like, and the
@@ -1246,7 +1247,10 @@ class Fight extends Mission {
     const p = v.holder.position;
     const d = Math.hypot(q.x - p.x, q.z - p.z);
     const reach = (cmd.shotReach ? cmd.shotReach(v.type) : 42) * FIGHT_BREAK;
-    if (d <= reach) { this._gapD = null; return false; }   // in range: this is a fight, not a chase
+    // In range: this is a fight, not a chase — unless we have not laid eyes on them for FIGHT_LOST_MS. That is the
+    // backstop described at the bottom of this function, which was written for exactly this case (alive, in reach,
+    // never seen) and could not run in it, because this line returned first.
+    if (d <= reach) { this._gapD = null; return performance.now() - (this.foeT || 0) > FIGHT_LOST_MS; }
     // Out of range. Track the best gap we have managed and how long since it last improved.
     // GAP_EPS keeps jitter from counting as progress — both hulls are moving every tick.
     if (this._gapD == null || d < this._gapD - GAP_EPS) { this._gapD = d; this._gapT = this.t; }
