@@ -5871,7 +5871,12 @@ function planPath(v, dest, opts = {}) {
   const c = grid.cell;
   const start = { i: Math.round(v.holder.position.x / c), j: Math.round(v.holder.position.z / c) };
   let goal = { i: Math.round(dest.x / c), j: Math.round(dest.z / c) };
-  goal = nearestOpenCell(v, goal.i, goal.j, 7) || goal;
+  // SNAP ONLY AN EXACT-CELL GOAL. A ring (goalR > 0, below) is measured from the centre the caller named, and the
+  // search never needs that centre to be standable, which is the whole point of a ring. Snapping it first moved the
+  // ring: a base centre inside the HQ was shifted to the nearest open cell and the 14u ring drawn around THAT, so a
+  // route "reached" a cell 18u from the real centre, outside the 16u pumps. Seed 80172: a Lurcher parked there on
+  // refuel for 100s and on repair for 44s, pedals off, so no alarm ever ran.
+  if (!(opts.goalR > 0)) goal = nearestOpenCell(v, goal.i, goal.j, 7) || goal;
   const iMax = Math.ceil(map.worldW / 2 / c) + 10, jMax = Math.ceil(map.worldH / 2 / c) + 10;
   const inBounds = (i, j) => i >= -iMax && i <= iMax && j >= -jMax && j <= jMax;
   const cost = (i, j) => vehCellCost(v, i, j);
